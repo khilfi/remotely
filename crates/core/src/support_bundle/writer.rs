@@ -108,6 +108,9 @@ struct Manifest<'a> {
     presets: Vec<&'static str>,
     /// What each host was asked for, commands with their secrets redacted.
     items: Vec<BundleItem>,
+    /// BX-13: what each Windows host was asked for, the same way.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    windows_items: Vec<BundleItem>,
     sudo: bool,
     caps: Caps,
     bytes: u64,
@@ -334,7 +337,8 @@ impl OpenBundle {
                 })
             })
             .collect();
-        let items = self.spec.for_journal().0.items;
+        let journal = self.spec.for_journal().0;
+        let (items, windows_items) = (journal.items, journal.windows_items);
         let manifest = Manifest {
             format: MANIFEST_FORMAT,
             created_by: format!("Remotely {}", env!("CARGO_PKG_VERSION")),
@@ -349,6 +353,7 @@ impl OpenBundle {
                 .map(|id: &PresetId| presets::preset(*id).label)
                 .collect(),
             items,
+            windows_items,
             sudo: self.spec.sudo,
             caps: CAPS,
             bytes,

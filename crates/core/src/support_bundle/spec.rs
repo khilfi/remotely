@@ -7,7 +7,8 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use super::presets::{self, PresetId};
+use super::presets::{self, HostKind, PresetId};
+use crate::adapters::remote::ScriptKind;
 use crate::command_bus::Rollout;
 use crate::domain::TargetRef;
 use crate::error::{CoreError, Result};
@@ -70,8 +71,12 @@ pub struct BundleSpec {
     /// The presets the items came from (they are in `items` already), for the summary and the manifest.
     #[serde(default)]
     pub presets: Vec<PresetId>,
-    /// The presets' items, then the custom commands and files, each once.
+    /// The presets' items, then the custom commands and files, each once: what each Linux host (an SSH session) gives.
     pub items: Vec<BundleItem>,
+    /// BX-13: the same for each Windows host (a WinRM session): the Windows presets' PowerShell reads, then custom
+    /// PowerShell commands and files.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub windows_items: Vec<BundleItem>,
     /// BX-07: the commands run under sudo. Files are read over SFTP as the login user all the same.
     #[serde(default)]
     pub sudo: bool,
@@ -95,23 +100,42 @@ pub struct BundleSpec {
 }
 
 impl BundleSpec {
-    /// The commands, one per line: what the policy engine rates, as it rates a Compare hosts run.
+    /// The Linux hosts' commands, one per line: what the policy engine rates, as it rates a Compare hosts run.
     pub fn rated_script(&self) -> String {
         self.commands().collect::<Vec<_>>().join("\n")
     }
 
+    /// BX-13: the commands hosts running `kind` get, one per line, for the policy engine.
+    pub fn rated_script_for(&self, kind: ScriptKind) -> String {
+        match kind {
+            ScriptKind::Posix => self.rated_script(),
+            ScriptKind::PowerShell => commands_of(&self.windows_items).collect::<Vec<_>>().join("\n"),
+        }
+    }
+
+    /// What a host of `kind` gives.
+    pub fn items_for(&self, kind: HostKind) -> &[BundleItem] {
+        match kind {
+            HostKind::Linux => &self.items,
+            HostKind::Windows => &self.windows_items,
+        }
+    }
+
     pub fn commands(&self) -> impl Iterator<Item = &str> {
-        self.items.iter().filter_map(|item| match item {
-            BundleItem::Command { command } => Some(command.as_str()),
-            BundleItem::File { .. } => None,
-        })
+        commands_of(&self.items)
     }
 
     pub fn files(&self) -> impl Iterator<Item = &str> {
-        self.items.iter().filter_map(|item| match item {
-            BundleItem::File { path } => Some(path.as_str()),
-            BundleItem::Command { .. } => None,
-        })
+        files_of(&self.items)
+    }
+
+    /// BX-13: the Windows hosts' commands and files.
+    pub fn windows_commands(&self) -> impl Iterator<Item = &str> {
+        commands_of(&self.windows_items)
+    }
+
+    pub fn windows_files(&self) -> impl Iterator<Item = &str> {
+        files_of(&self.windows_items)
     }
 
     /// What it collects in words: "System, Logs, 2 more commands and 1 file".
@@ -129,6 +153,7 @@ impl BundleSpec {
         let extra = |kind: fn(&BundleItem) -> bool| {
             self.items
                 .iter()
+                .chain(&self.windows_items)
                 .filter(|item| kind(item) && !preset_items.contains(*item))
                 .count()
         };
@@ -162,7 +187,7 @@ impl BundleSpec {
     pub fn for_journal(&self) -> (Self, bool) {
         let mut kept = self.clone();
         let mut changed = false;
-        for item in &mut kept.items {
+        for item in kept.items.iter_mut().chain(kept.windows_items.iter_mut()) {
             if let BundleItem::Command { command } = item {
                 let (clean, was) = redact_secrets(command);
                 if was {
@@ -180,20 +205,24 @@ impl BundleSpec {
         if targets.iter().any(|t| !matches!(t, TargetRef::Session { .. })) {
             return invalid("A support bundle collects from saved sessions.".into());
         }
-        if self.items.is_empty() {
+        if self.items.is_empty() && self.windows_items.is_empty() {
             return invalid("Choose a preset, or add a command or a file to collect.".into());
         }
-        if self.items.len() > MAX_ITEMS {
-            return invalid(format!("A bundle collects at most {MAX_ITEMS} commands and files."));
-        }
-        let mut seen = HashSet::new();
-        for item in &self.items {
-            match item {
-                BundleItem::Command { command } => check_command(command)?,
-                BundleItem::File { path } => check_path(path)?,
+        // BX-13: each kind of host is capped on its own: a host gets one list.
+        for (items, windows) in [(&self.items, false), (&self.windows_items, true)] {
+            if items.len() > MAX_ITEMS {
+                return invalid(format!("A bundle collects at most {MAX_ITEMS} commands and files."));
             }
-            if !seen.insert(item) {
-                return invalid(format!("'{}' is listed twice.", item.text()));
+            let mut seen = HashSet::new();
+            for item in items {
+                match item {
+                    BundleItem::Command { command } => check_command(command)?,
+                    BundleItem::File { path } if windows => check_windows_path(path)?,
+                    BundleItem::File { path } => check_path(path)?,
+                }
+                if !seen.insert(item) {
+                    return invalid(format!("'{}' is listed twice.", item.text()));
+                }
             }
         }
         let output = Path::new(&self.output);
@@ -244,6 +273,47 @@ pub fn check_path(path: &str) -> Result<()> {
         return invalid("A file path can't hold line breaks and is at most 1 KB.".into());
     }
     Ok(())
+}
+
+/// BX-13: a file path on a Windows host: a drive's full path (`C:\Windows\Logs\x.log`), one line, not a folder. Never a
+/// share (`\\server\share`) or a device path (`\\?\`, `\\.\`): the host would reach another computer, or a device,
+/// with the sign-in's rights.
+pub fn check_windows_path(path: &str) -> Result<()> {
+    let invalid = |message: String| Err(CoreError::InvalidInput(message));
+    let mut chars = path.chars();
+    let drive = matches!(
+        (chars.next(), chars.next(), chars.next()),
+        (Some(d), Some(':'), Some('\\' | '/')) if d.is_ascii_alphabetic()
+    );
+    if !drive {
+        return invalid(format!(
+            "'{path}' is not a full path on the Windows host (it must start with a drive, as C:\\)."
+        ));
+    }
+    if path.ends_with(['\\', '/']) {
+        return invalid(format!("'{path}' is a folder: name the files in it."));
+    }
+    if path.len() > MAX_PATH_BYTES || path.chars().any(|c| c.is_control()) {
+        return invalid("A file path can't hold line breaks and is at most 1 KB.".into());
+    }
+    if path.contains(['*', '?', '<', '>', '|', '"']) || path[2..].contains(':') {
+        return invalid(format!("'{path}' holds characters a Windows file name can't."));
+    }
+    Ok(())
+}
+
+fn commands_of(items: &[BundleItem]) -> impl Iterator<Item = &str> {
+    items.iter().filter_map(|item| match item {
+        BundleItem::Command { command } => Some(command.as_str()),
+        BundleItem::File { .. } => None,
+    })
+}
+
+fn files_of(items: &[BundleItem]) -> impl Iterator<Item = &str> {
+    items.iter().filter_map(|item| match item {
+        BundleItem::File { path } => Some(path.as_str()),
+        BundleItem::Command { .. } => None,
+    })
 }
 
 /// A name Windows (and every zip tool) can make a file or folder of: no `<>:"/\|?*`, control or invisible
@@ -308,8 +378,9 @@ pub fn entry_names(items: &[BundleItem]) -> Vec<String> {
             let base = match item {
                 BundleItem::Command { command } => format!("commands/{}", command_slug(command)),
                 BundleItem::File { path } => {
+                    // BX-13: a Windows host's `C:\Windows\x.log` is `files/C_/Windows/x.log`.
                     let parts: Vec<String> = path
-                        .split('/')
+                        .split(['/', '\\'])
                         .filter(|p| !p.is_empty())
                         .map(|p| safe_name(p, "_"))
                         .collect();
@@ -397,6 +468,7 @@ mod tests {
         BundleSpec {
             presets: Vec::new(),
             items,
+            windows_items: Vec::new(),
             sudo: false,
             sudo_password_id: None,
             trust_new_host_keys: false,

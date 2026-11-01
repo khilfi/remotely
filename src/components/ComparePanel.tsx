@@ -52,7 +52,7 @@ import {
   type VaultInfo,
 } from "@/lib/api";
 import { EmptyState } from "@/components/EmptyState";
-import { compareRunReason } from "@/lib/disabled-reasons";
+import { compareRunReason, sudoWindowsReason } from "@/lib/disabled-reasons";
 import { formatWhen, plural } from "@/lib/format";
 import { readOnlyLocked } from "@/lib/presentation-state";
 import { compareOptionsSummary, parseStopAfter } from "@/lib/rollout";
@@ -138,18 +138,22 @@ export function ComparePanel({
   const timeoutOk =
     timeoutSecs === null || (Number.isInteger(timeoutSecs) && timeoutSecs >= 1 && timeoutSecs <= 86_400);
   const stopAfterParsed = parseStopAfter(stopAfter);
+  // BX-13: sudo is a Linux host's; over WinRM, PowerShell runs as the session's sign-in user.
+  const windowsHosts = hosts.filter((h) => h.scriptKind === "powerShell").length;
+  const sudoReason = windowsHosts > 0 ? sudoWindowsReason(windowsHosts) : null;
+  const sudoOn = sudo && sudoReason === null;
   const command: Command = {
     type: "remoteExec",
     targets: hosts.map((h) => ({ kind: "session", sessionId: h.sessionId })),
     script,
-    sudo,
-    sudoPasswordId: sudo && sudoPassword !== LOGIN ? sudoPassword : null,
+    sudo: sudoOn,
+    sudoPasswordId: sudoOn && sudoPassword !== LOGIN ? sudoPassword : null,
     trustNewHostKeys: trustNew,
     timeoutSecs: timeoutOk ? timeoutSecs : null,
     rollout: { canary, stopAfterFailures: stopAfterParsed.value },
   };
   const optionsSummary = compareOptionsSummary({
-    sudo,
+    sudo: sudoOn,
     trustNewKeys: trustNew,
     timeoutSecs: timeoutOk ? timeoutSecs : Number(DEFAULT_TIMEOUT),
     defaultTimeoutSecs: Number(DEFAULT_TIMEOUT),
@@ -190,7 +194,8 @@ export function ComparePanel({
   useEffect(() => {
     let stale = false;
     const [terminals, sessions] = JSON.parse(picksKey) as [string[], string[]];
-    api.bulkTargets({ terminalIds: terminals, sessionIds: sessions }).then(
+    // BX-13: WinRM hosts too: their commands run in PowerShell, rated by the PowerShell rules.
+    api.bulkTargets({ terminalIds: terminals, sessionIds: sessions, winrm: true }).then(
       (r) => {
         if (!stale) setResolved(r);
       },
@@ -404,12 +409,19 @@ export function ComparePanel({
                   </CollapsibleTrigger>
                   <CollapsibleContent className="grid gap-3 border-t p-3">
                     <div className="flex items-center gap-3">
-                      <Switch id="compare-sudo" checked={sudo} onCheckedChange={setSudo} />
+                      <WhyDisabled reason={sudoReason}>
+                        <Switch
+                          id="compare-sudo"
+                          checked={sudoOn}
+                          onCheckedChange={setSudo}
+                          disabled={sudoReason !== null}
+                        />
+                      </WhyDisabled>
                       <Label htmlFor="compare-sudo" className="font-normal">
                         Run with sudo
                       </Label>
                     </div>
-                    {sudo && (
+                    {sudoOn && (
                       <div className="grid min-w-0 gap-1.5 pl-12">
                         <Label htmlFor="compare-sudo-password" className="font-normal text-muted-foreground">
                           Password for sudo, from the vault
@@ -445,7 +457,8 @@ export function ComparePanel({
                           Trust new host keys
                         </Label>
                         <p className="text-xs break-words text-muted-foreground">
-                          Else a host with a key not trusted yet fails. A changed key always blocks.
+                          Else a host with a key not trusted yet fails (a Windows host&apos;s HTTPS certificate counts
+                          as its key). A changed key always blocks.
                         </p>
                       </div>
                     </div>

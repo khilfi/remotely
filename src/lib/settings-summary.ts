@@ -139,6 +139,12 @@ export function rulesChanged(rules: PolicyRules, defaults: PolicyRules): number 
   const pattern = (p: { name: string; pattern: string }) => `${p.name}\u0000${p.pattern}`;
   n += symmetricDifference(rules.dangerousCommands.map(pattern), defaults.dangerousCommands.map(pattern));
   n += symmetricDifference(rules.readOnlyCommands, defaults.readOnlyCommands);
+  // BX-13: the PowerShell rules count the same way.
+  n += symmetricDifference(
+    rules.powershell.dangerousCommands.map(pattern),
+    defaults.powershell.dangerousCommands.map(pattern),
+  );
+  n += symmetricDifference(rules.powershell.readOnlyCommands, defaults.powershell.readOnlyCommands);
   return n;
 }
 

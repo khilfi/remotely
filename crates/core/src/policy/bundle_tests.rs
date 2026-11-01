@@ -28,6 +28,7 @@ fn bundle(items: Vec<BundleItem>, hosts: &[Target]) -> Command {
         spec: Box::new(BundleSpec {
             presets: Vec::new(),
             items,
+            windows_items: Vec::new(),
             sudo: false,
             sudo_password_id: None,
             trust_new_host_keys: false,
@@ -41,7 +42,7 @@ fn bundle(items: Vec<BundleItem>, hosts: &[Target]) -> Command {
 
 fn every_preset() -> Vec<BundleItem> {
     let ids: Vec<PresetId> = PRESETS.iter().map(|p| p.id).collect();
-    presets::expand(&ids, &[], &[])
+    presets::expand(presets::HostKind::Linux, &ids, &[], &[])
 }
 
 #[test]
@@ -51,7 +52,7 @@ fn every_preset_command_is_read_only_under_the_default_rules() {
         for item in preset.items {
             if let BundleItem::Command { command } = item.item() {
                 assert_eq!(
-                    engine.classify_script(&command),
+                    engine.classify_script_as(&command, preset.host_kind.script_kind()),
                     ActionKind::ExecReadOnly,
                     "{}: {command}",
                     preset.label

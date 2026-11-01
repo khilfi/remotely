@@ -380,7 +380,7 @@ export function ApprovalDialog({
           </DialogDescription>
         </DialogHeader>
 
-        {request.exec && (!request.bundle || request.exec.script) && (
+        {request.exec && (!request.bundle || request.exec.script || request.exec.windowsScript) && (
           <ExecSummary exec={request.exec} targets={request.targets.length} />
         )}
         {request.bundle && <BundleSummary bundle={request.bundle} />}
@@ -767,16 +767,44 @@ function ExecSummary({ exec, targets }: { exec: NonNullable<ApprovalRequest["exe
           {exec.runKey ?? "Enter"} in each; cancelling sends Ctrl+C, which clears it.
         </p>
       )}
-      <pre className="max-h-40 overflow-auto rounded-md border bg-muted/40 px-3 py-2 font-mono text-xs whitespace-pre-wrap">
-        {exec.script || <span className="text-muted-foreground italic">(nothing Remotely could follow)</span>}
-      </pre>
+      {(!exec.windowsScript || exec.script) && (
+        <>
+          {/* Review D7: with both languages, label each block so "On the Windows hosts" isn't ambiguous. */}
+          {exec.windowsScript && exec.script && <p className="text-sm text-muted-foreground">On the Linux hosts:</p>}
+          <pre className="max-h-40 overflow-auto rounded-md border bg-muted/40 px-3 py-2 font-mono text-xs whitespace-pre-wrap">
+            {exec.script || <span className="text-muted-foreground italic">(nothing Remotely could follow)</span>}
+          </pre>
+        </>
+      )}
+      {exec.windowsScript && (
+        <>
+          {exec.script && <p className="text-sm text-muted-foreground">On the Windows hosts:</p>}
+          <pre className="max-h-40 overflow-auto rounded-md border bg-muted/40 px-3 py-2 font-mono text-xs whitespace-pre-wrap">
+            {exec.windowsScript}
+          </pre>
+        </>
+      )}
+      {exec.languages.includes("powerShell") && (
+        <p className="text-sm text-muted-foreground">
+          {exec.languages.length > 1 ? (
+            <>
+              Each host is rated by its own rules: the shell&apos;s, or the <Term id="powershellRules" />.
+            </>
+          ) : (
+            <>
+              Rated by the <Term id="powershellRules" />.
+            </>
+          )}
+        </p>
+      )}
       {exec.unreliable && (
         <Alert className="border-tier-medium/40">
           <TriangleAlertIcon className="text-tier-medium" />
           <AlertTitle>The terminals may run something else</AlertTitle>
           <AlertDescription>
-            The line was edited with keys Remotely can&apos;t follow (Tab completion, arrow keys, history search), or a
-            terminal already had text on its line. Look at the terminals before you press Enter.
+            The line was edited with keys Remotely can&apos;t follow (Tab completion, arrow keys, history search), a
+            terminal already had text on its line, or a PowerShell tab wasn&apos;t at its prompt. Look at the terminals
+            before you press Enter.
           </AlertDescription>
         </Alert>
       )}
@@ -873,6 +901,22 @@ function BundleSummary({ bundle }: { bundle: NonNullable<ApprovalRequest["bundle
           </p>
           <ul className="max-h-32 divide-y overflow-auto rounded-md border">
             {bundle.files.map((f) => (
+              <li key={f} className="truncate px-3 py-1 font-mono text-xs" title={f}>
+                {f}
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
+      {bundle.windowsFiles.length > 0 && (
+        <>
+          {/* Review C3: a bundle's Windows files, read by PowerShell as the sign-in user. */}
+          <p className="text-muted-foreground">
+            Reads {plural(bundle.windowsFiles.length, "file")} on the Windows hosts with PowerShell, as each
+            session&apos;s sign-in user:
+          </p>
+          <ul className="max-h-32 divide-y overflow-auto rounded-md border">
+            {bundle.windowsFiles.map((f) => (
               <li key={f} className="truncate px-3 py-1 font-mono text-xs" title={f}>
                 {f}
               </li>

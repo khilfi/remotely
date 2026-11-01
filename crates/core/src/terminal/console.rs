@@ -46,7 +46,7 @@ use crate::sessions::{SessionKind, SessionRecord};
 pub const VNC_VIEWER_PATH_KEY: &str = "consoles.vncViewerPath";
 
 /// What a terminal pane is for.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum PaneKind {
     Ssh,
@@ -69,9 +69,10 @@ impl PaneKind {
         }
     }
 
-    /// Type in all tabs and Compare hosts are for shells: SSH panes only.
+    /// Type in all tabs and Compare hosts are for shells: SSH panes, and (BX-13) PowerShell panes, whose lines the
+    /// PowerShell rules rate. Never both kinds at once in Type in all tabs ([`super::multiexec`]).
     pub fn joins_multiexec(self) -> bool {
-        self == PaneKind::Ssh
+        matches!(self, PaneKind::Ssh | PaneKind::Powershell)
     }
 
     /// The pane's connection is SSH (SFTP, tunnels, exec channels).
@@ -751,15 +752,11 @@ mod tests {
     }
 
     #[test]
-    fn only_ssh_panes_join_type_in_all_tabs() {
+    fn ssh_and_powershell_panes_join_type_in_all_tabs() {
         assert!(PaneKind::Ssh.joins_multiexec());
-        // F8 widens it to PowerShell panes.
-        for kind in [
-            PaneKind::Telnet,
-            PaneKind::Serial,
-            PaneKind::Tunnel,
-            PaneKind::Powershell,
-        ] {
+        // BX-13.
+        assert!(PaneKind::Powershell.joins_multiexec());
+        for kind in [PaneKind::Telnet, PaneKind::Serial, PaneKind::Tunnel] {
             assert!(!kind.joins_multiexec(), "{kind:?}");
         }
         assert_eq!(higher(Environment::Lab, Environment::Prod), Environment::Prod);

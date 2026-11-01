@@ -10,6 +10,7 @@ import {
   kindOf,
   kindSummary,
   joinReason,
+  joinsTyping,
   opensInTab,
   opensWindow,
   paneKindOf,
@@ -18,6 +19,8 @@ import {
   RDP_DEFAULTS,
   serialFrame,
   serialProblem,
+  typingKind,
+  typingKindReason,
   SERIAL_DEFAULTS,
   takesJumpHost,
   logsInWithVault,
@@ -87,10 +90,19 @@ test("rows say where a session connects and what its kind sets", () => {
   assert.equal(kindSummary({ protocol: "ssh" }), null);
 });
 
-test("only SSH tabs join typing in all tabs and Compare hosts", () => {
+test("SSH and PowerShell tabs join typing in all tabs and Compare hosts, one kind at a time", () => {
   assert.equal(joinReason("ssh"), null);
   assert.equal(joinReason(undefined), null);
   for (const kind of ["telnet", "serial", "tunnel"] as const) assert.ok(joinReason(kind), kind);
+  assert.equal(joinReason("powershell"), null);
+  assert.ok(joinsTyping("powershell") && joinsTyping("ssh") && !joinsTyping("telnet"));
+  // The current tab's kind leads; a tab of the other kind is left out and says why.
+  assert.equal(typingKind(["powershell"], ["ssh", "powershell"]), "powershell");
+  assert.equal(typingKind(["telnet"], ["serial", "ssh"]), "ssh");
+  assert.equal(typingKind([], ["tunnel"]), null);
+  assert.match(typingKindReason("ssh", "powershell") ?? "", /PowerShell tabs now/);
+  assert.equal(typingKindReason("ssh", "ssh"), null);
+  assert.equal(typingKindReason("telnet", "ssh"), null);
   assert.equal(paneKindOf(defaultKind("rdp"), true), "tunnel");
   assert.equal(paneKindOf(defaultKind("telnet"), false), "telnet");
 });
@@ -100,7 +112,7 @@ test("WinRM: a PowerShell tab, its sign-in, its port and Basic only over HTTPS",
   assert.deepEqual(winrm, { protocol: "winrm", ...WINRM_DEFAULTS });
   assert.ok(opensInTab(winrm) && !opensWindow(winrm) && !takesJumpHost(winrm));
   assert.equal(paneKindOf(winrm, false), "powershell");
-  assert.ok(joinReason("powershell"));
+  assert.equal(joinReason("powershell"), null);
   assert.ok(logsInWithVault(winrm) && readsGuest(winrm));
   const windows = { protocol: "winrm" as const, ...WINRM_DEFAULTS, signIn: "windows" as const };
   assert.ok(!logsInWithVault(windows));

@@ -61,6 +61,10 @@ const DEFAULTS: PolicyRules = {
   readOnlyCommands: ["uptime", "df -h"],
   countdownSeconds: 10,
   safetySnapshotDefault: true,
+  powershell: {
+    dangerousCommands: [{ name: "Invoke-Expression", pattern: "(?i)iex" }],
+    readOnlyCommands: ["Get-Date"],
+  },
 };
 
 test("the summary counts each rule that differs from the defaults", () => {

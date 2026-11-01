@@ -1492,18 +1492,18 @@ mod tests {
     fn output_that_stops_ends_a_recording_after_the_quiet_spell() {
         let (_recorder, slot, _) = slot(RecordLimits::default());
         let t0 = Instant::now();
-        slot.start("➜  ~ ./build.sh", vec![], Some(Duration::from_secs(5)), t0);
+        slot.start("[dev] ./build.sh", vec![], Some(Duration::from_secs(5)), t0);
         slot.output(
-            "\r\nbuilt\r\n➜  srv ".as_bytes(),
-            "➜  srv ",
+            b"\r\nbuilt\r\n[dev:srv] ",
+            "[dev:srv] ",
             false,
             t0 + Duration::from_secs(1),
         );
         assert!(slot.recording(), "an unknown prompt");
-        assert!(slot.tick(t0 + Duration::from_secs(6), "➜  srv "));
+        assert!(slot.tick(t0 + Duration::from_secs(6), "[dev:srv] "));
         let v = slot.view();
         assert_eq!(v.state, CaptureState::Done { how: CaptureEnd::Quiet });
-        assert_eq!(v.text, "built\n➜  srv ", "the unknown prompt stays in the text");
+        assert_eq!(v.text, "built\n[dev:srv] ", "the unknown prompt stays in the text");
         assert_eq!(millis(v.started, v.ended), Some(1000), "until the last output");
     }
 

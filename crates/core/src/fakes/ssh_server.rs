@@ -924,6 +924,16 @@ impl ServerHandler {
                     b"\x1b[?1049h\x1b[H\x1b[2Jtop - 10:00:00 up 3 days, 1 user\r\nTasks: 99 total\r\n".to_vec(),
                 );
             }
+            // SS-10 (review B7): a command that switches to the alternate screen and exits without switching back, so
+            // the flag is left on while the shell is at its prompt. The prompt is drawn after this (below).
+            Some("altscreen-stay") => {
+                session.data(channel, b"\x1b[?1049h".to_vec())?;
+            }
+            // SS-10 (review B7): background output turns the alternate screen on and leaves the cursor on a non-prompt
+            // line, with no full-screen program running (no prompt is drawn after: this returns early).
+            Some("altscreen-noprompt") => {
+                return session.data(channel, b"\x1b[?1049h\x1b[Hbackground job finished\r\n".to_vec());
+            }
             // For trying the app by hand: a network failure, a moment later so this reply goes out.
             Some("drop-connection") => {
                 session.data(channel, b"dropping every connection in a moment\r\n".to_vec())?;

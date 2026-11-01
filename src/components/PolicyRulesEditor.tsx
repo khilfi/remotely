@@ -19,12 +19,14 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Separator } from "@/components/ui/separator";
 import { Switch } from "@/components/ui/switch";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { TierBadge } from "@/components/Badges";
 import {
   api,
   errorMessage,
   type ActionKind,
+  type DangerousPattern,
   type PolicyCatalog,
   type PolicyRules,
   type PolicySaved,
@@ -108,6 +110,68 @@ function TierSelect({ value, onChange, label }: { value: Tier; onChange: (tier: 
 }
 
 const readOnlyText = (rules: PolicyRules) => rules.readOnlyCommands.join("\n");
+const psReadOnlyText = (rules: PolicyRules) => rules.powershell.readOnlyCommands.join("\n");
+
+/** One command per line, blank lines left out. */
+function entries(text: string): string[] {
+  return text
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter((l) => l !== "");
+}
+
+/** BX-06, BX-13: an editable list of dangerous-command rules (the shell's or PowerShell's). */
+function DangerousList({
+  patterns,
+  onChange,
+}: {
+  patterns: DangerousPattern[];
+  onChange: (patterns: DangerousPattern[]) => void;
+}) {
+  return (
+    <div className="grid gap-2">
+      {patterns.map((p, i) => (
+        <div key={i} className="flex gap-2">
+          <Input
+            aria-label="Name"
+            className="w-48"
+            placeholder="Name"
+            value={p.name}
+            onChange={(e) => {
+              const name = e.currentTarget.value;
+              onChange(patterns.map((d, j) => (j === i ? { ...d, name } : d)));
+            }}
+          />
+          <Input
+            aria-label={`Pattern for ${p.name || "this rule"}`}
+            className="flex-1 font-mono text-xs"
+            placeholder="Regular expression"
+            spellCheck={false}
+            value={p.pattern}
+            onChange={(e) => {
+              const pattern = e.currentTarget.value;
+              onChange(patterns.map((d, j) => (j === i ? { ...d, pattern } : d)));
+            }}
+          />
+          <Button
+            size="icon"
+            variant="ghost"
+            aria-label={`Remove ${p.name || "this rule"}`}
+            onClick={() => onChange(patterns.filter((_, j) => j !== i))}
+          >
+            <XIcon />
+          </Button>
+        </div>
+      ))}
+      <div>
+        <Button variant="outline" size="sm" onClick={() => onChange([...patterns, { name: "", pattern: "" }])}>
+          <PlusIcon data-icon="inline-start" />
+          Add a pattern
+        </Button>
+      </div>
+    </div>
+  );
+}
 
 interface Props {
   catalog: PolicyCatalog;
@@ -120,6 +184,7 @@ export function PolicyRulesEditor({ catalog, saved, onSaved }: Props) {
   const [draft, setDraft] = useState<PolicyRules>(saved);
   // Edited as text, one command per line; split when saving.
   const [readOnly, setReadOnly] = useState(readOnlyText(saved));
+  const [psReadOnly, setPsReadOnly] = useState(psReadOnlyText(saved));
   const [message, setMessage] = useState<Message>(null);
   const [busy, setBusy] = useState(false);
   // The saved rules changed (a save here): the editor starts from them.
@@ -128,15 +193,14 @@ export function PolicyRulesEditor({ catalog, saved, onSaved }: Props) {
     setShown(saved);
     setDraft(saved);
     setReadOnly(readOnlyText(saved));
+    setPsReadOnly(psReadOnlyText(saved));
   }
 
   const labels = new Map(catalog.actions.map((a) => [a.kind, a.label]));
   const withReadOnly = (rules: PolicyRules): PolicyRules => ({
     ...rules,
-    readOnlyCommands: readOnly
-      .split(/\r?\n/)
-      .map((l) => l.trim())
-      .filter((l) => l !== ""),
+    readOnlyCommands: entries(readOnly),
+    powershell: { ...rules.powershell, readOnlyCommands: entries(psReadOnly) },
   });
   const dirty = JSON.stringify(withReadOnly(draft)) !== JSON.stringify(saved);
 
@@ -152,6 +216,7 @@ export function PolicyRulesEditor({ catalog, saved, onSaved }: Props) {
   function load(rules: PolicyRules) {
     setDraft(rules);
     setReadOnly(readOnlyText(rules));
+    setPsReadOnly(psReadOnlyText(rules));
   }
 
   async function save() {
@@ -299,80 +364,77 @@ export function PolicyRulesEditor({ catalog, saved, onSaved }: Props) {
 
       <Separator />
 
-      <div className="grid gap-3">
-        <div className="flex items-center gap-1">
-          <h3 className="text-sm font-medium">Dangerous commands</h3>
-          <HelpTip topic="dangerousCommands" />
-        </div>
-        <p className="text-sm text-muted-foreground">A command that matches one of these patterns is High.</p>
-        <div className="grid gap-2">
-          {draft.dangerousCommands.map((p, i) => (
-            <div key={i} className="flex gap-2">
-              <Input
-                aria-label="Name"
-                className="w-48"
-                placeholder="Name"
-                value={p.name}
-                onChange={(e) => {
-                  const name = e.currentTarget.value;
-                  update({
-                    dangerousCommands: draft.dangerousCommands.map((d, j) => (j === i ? { ...d, name } : d)),
-                  });
-                }}
-              />
-              <Input
-                aria-label={`Pattern for ${p.name || "this rule"}`}
-                className="flex-1 font-mono text-xs"
-                placeholder="Regular expression"
-                spellCheck={false}
-                value={p.pattern}
-                onChange={(e) => {
-                  const pattern = e.currentTarget.value;
-                  update({
-                    dangerousCommands: draft.dangerousCommands.map((d, j) => (j === i ? { ...d, pattern } : d)),
-                  });
-                }}
-              />
-              <Button
-                size="icon"
-                variant="ghost"
-                aria-label={`Remove ${p.name || "this rule"}`}
-                onClick={() => update({ dangerousCommands: draft.dangerousCommands.filter((_, j) => j !== i) })}
-              >
-                <XIcon />
-              </Button>
+      {/* BX-13: the commands on hosts are rated by the shell's rules over SSH and PowerShell's over WinRM. */}
+      <Tabs defaultValue="shell" className="grid gap-4">
+        <TabsList>
+          <TabsTrigger value="shell">Shell</TabsTrigger>
+          <TabsTrigger value="powershell">PowerShell</TabsTrigger>
+        </TabsList>
+        <TabsContent value="shell" className="grid gap-6">
+          <div className="grid gap-3">
+            <div className="flex items-center gap-1">
+              <h3 className="text-sm font-medium">Dangerous commands</h3>
+              <HelpTip topic="dangerousCommands" />
             </div>
-          ))}
-          <div>
-            <Button
-              variant="outline"
-              size="sm"
-              onClick={() => update({ dangerousCommands: [...draft.dangerousCommands, { name: "", pattern: "" }] })}
-            >
-              <PlusIcon data-icon="inline-start" />
-              Add a pattern
-            </Button>
+            <p className="text-sm text-muted-foreground">A command that matches one of these patterns is High.</p>
+            <DangerousList
+              patterns={draft.dangerousCommands}
+              onChange={(dangerousCommands) => update({ dangerousCommands })}
+            />
           </div>
-        </div>
-      </div>
-
-      <div className="grid gap-2">
-        <div className="flex items-center gap-1">
-          <Label htmlFor="read-only">Read-only commands</Label>
-          <HelpTip topic="readOnlyCommands" />
-        </div>
-        <p className="text-sm text-muted-foreground">One per line. A command made only of these is Low.</p>
-        <Textarea
-          id="read-only"
-          className="h-40 font-mono text-xs"
-          spellCheck={false}
-          value={readOnly}
-          onChange={(e) => {
-            setReadOnly(e.currentTarget.value);
-            setMessage(null);
-          }}
-        />
-      </div>
+          <div className="grid gap-2">
+            <div className="flex items-center gap-1">
+              <Label htmlFor="read-only">Read-only commands</Label>
+              <HelpTip topic="readOnlyCommands" />
+            </div>
+            <p className="text-sm text-muted-foreground">One per line. A command made only of these is Low.</p>
+            <Textarea
+              id="read-only"
+              className="h-40 font-mono text-xs"
+              spellCheck={false}
+              value={readOnly}
+              onChange={(e) => {
+                setReadOnly(e.currentTarget.value);
+                setMessage(null);
+              }}
+            />
+          </div>
+        </TabsContent>
+        <TabsContent value="powershell" className="grid gap-6">
+          <div className="grid gap-3">
+            <div className="flex items-center gap-1">
+              <h3 className="text-sm font-medium">Dangerous PowerShell commands</h3>
+              <HelpTip topic="powershellDangerous" />
+            </div>
+            <p className="text-sm text-muted-foreground">
+              A PowerShell command that matches one of these patterns is High.
+            </p>
+            <DangerousList
+              patterns={draft.powershell.dangerousCommands}
+              onChange={(dangerousCommands) => update({ powershell: { ...draft.powershell, dangerousCommands } })}
+            />
+          </div>
+          <div className="grid gap-2">
+            <div className="flex items-center gap-1">
+              <Label htmlFor="ps-read-only">Read-only PowerShell commands</Label>
+              <HelpTip topic="powershellReadOnly" />
+            </div>
+            <p className="text-sm text-muted-foreground">
+              One per line, by full name. A script made only of these is Low.
+            </p>
+            <Textarea
+              id="ps-read-only"
+              className="h-40 font-mono text-xs"
+              spellCheck={false}
+              value={psReadOnly}
+              onChange={(e) => {
+                setPsReadOnly(e.currentTarget.value);
+                setMessage(null);
+              }}
+            />
+          </div>
+        </TabsContent>
+      </Tabs>
 
       {(dirty || message) && (
         <div className="sticky bottom-3 z-10 flex flex-wrap items-center gap-2 rounded-lg border bg-card px-4 py-3 shadow-md">

@@ -325,7 +325,8 @@ export function SessionsPage({
 
   const newSession = () => setDialog({ kind: "editSession" });
   const selectedSessions = all.filter((s) => selected.has(s.id));
-  const selectedSsh = selectedSessions.filter((s) => kindOf(s).protocol === "ssh");
+  // BX-13: support bundles and the Ansible inventory take SSH and WinRM sessions (a WinRM host runs PowerShell).
+  const selectedHosts = selectedSessions.filter((s) => ["ssh", "winrm"].includes(kindOf(s).protocol));
   const allShownSelected = shown.length > 0 && shown.every((s) => selected.has(s.id));
   function toggleSelected(id: string) {
     setSelected((prev) => {
@@ -405,24 +406,28 @@ export function SessionsPage({
               <PencilIcon data-icon="inline-start" />
               Edit…
             </Button>
-            {/* Bundles collect over SSH; the dialog leaves other kinds out with a note. */}
-            <WhyDisabled reason={selectedSsh.length === 0 ? "Support bundles collect from SSH sessions only" : null}>
+            {/* BX-13: bundles collect over SSH and WinRM; the dialog leaves other kinds out with a note. */}
+            <WhyDisabled
+              reason={selectedHosts.length === 0 ? "Support bundles collect from SSH and WinRM sessions only" : null}
+            >
               <Button
                 variant="ghost"
                 size="sm"
-                disabled={selectedSsh.length === 0}
-                onClick={() => onSupportBundle(selectedSsh.map((s) => s.id))}
+                disabled={selectedHosts.length === 0}
+                onClick={() => onSupportBundle(selectedHosts.map((s) => s.id))}
               >
                 <PackageIcon data-icon="inline-start" />
                 Make a support bundle…
               </Button>
             </WhyDisabled>
-            <WhyDisabled reason={selectedSsh.length === 0 ? "An Ansible inventory takes SSH sessions only" : null}>
+            <WhyDisabled
+              reason={selectedHosts.length === 0 ? "An Ansible inventory takes SSH and WinRM sessions only" : null}
+            >
               <Button
                 variant="ghost"
                 size="sm"
-                disabled={selectedSsh.length === 0}
-                onClick={() => onExportAnsible(selectedSsh.map((s) => s.id))}
+                disabled={selectedHosts.length === 0}
+                onClick={() => onExportAnsible(selectedHosts.map((s) => s.id))}
               >
                 <FileCodeIcon data-icon="inline-start" />
                 Export Ansible inventory…

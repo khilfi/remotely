@@ -4,10 +4,10 @@
 // the picked VMs no session reaches: commands reach a VM over SSH, and running them through VMware
 // Tools without SSH (VM-09) comes in a later version. A4, H11: a VM linked only automatically (by the
 // address its guest reports, which a hostile guest can make up) is reached once the user confirms the link.
-// SS-12: only SSH sessions are listed, since both pickers' runs (a key push, a support bundle) go over SSH; the
-// core leaves out any other kind a tag brings in, saying so. F6's Ansible inventory picks with `purpose="export"`:
-// nothing runs, so WinRM sessions are listed too, protected hosts are counted (they go in, in their own group) and
-// nothing picked is every SSH and WinRM session.
+// SS-12: only SSH sessions are listed for a key push, which goes over SSH; BX-13: a support bundle lists WinRM
+// sessions too (`winrm`). The core leaves out any other kind a tag brings in, saying so. F6's Ansible inventory picks
+// with `purpose="export"`: nothing runs, so WinRM sessions are listed too, protected hosts are counted (they go in, in
+// their own group) and nothing picked is every SSH and WinRM session.
 
 import { useEffect, useMemo, useState } from "react";
 import {
@@ -50,6 +50,8 @@ interface Props {
   /** The hosts the picks reach, as the core resolved them. */
   resolved: ResolvedTargets | null;
   onOpenSessions: () => void;
+  /** BX-13: WinRM sessions are hosts too (a support bundle); off for the key push. */
+  winrm?: boolean;
   /**
    * What the hosts are for: commands run on them (the default: protected hosts are skipped), or an export (F6's
    * Ansible inventory: protected hosts go in, in their own group, and nothing picked is every SSH session).
@@ -73,17 +75,26 @@ function sessionAddress(s: SessionRecord) {
   return `${s.username ? `${s.username}@` : ""}${s.host}:${s.port}`;
 }
 
-export function BulkTargetPicker({ active, picks, onPicksChange, resolved, onOpenSessions, purpose = "run" }: Props) {
+export function BulkTargetPicker({
+  active,
+  picks,
+  onPicksChange,
+  resolved,
+  onOpenSessions,
+  winrm = false,
+  purpose = "run",
+}: Props) {
   const exporting = purpose === "export";
   const [allSessions, setSessions] = useState<SessionRecord[]>([]);
-  // An export (the Ansible inventory) also takes WinRM sessions; runs go over SSH.
+  // An export (the Ansible inventory) and a support bundle (BX-13) also take WinRM sessions; the key push goes over SSH.
+  const withWinrm = winrm || exporting;
   const sessions = useMemo(
     () =>
       allSessions.filter((s) => {
         const protocol = kindOf(s).protocol;
-        return protocol === "ssh" || (exporting && protocol === "winrm");
+        return protocol === "ssh" || (withWinrm && protocol === "winrm");
       }),
-    [allSessions, exporting],
+    [allSessions, withWinrm],
   );
   const otherKinds = allSessions.length - sessions.length;
   const [vms, setVms] = useState<VmRecord[]>([]);
@@ -210,7 +221,7 @@ export function BulkTargetPicker({ active, picks, onPicksChange, resolved, onOpe
               sessions.length > 0
                 ? "No session matches."
                 : otherKinds > 0
-                  ? exporting
+                  ? withWinrm
                     ? "No SSH or WinRM sessions yet."
                     : "No SSH sessions yet."
                   : "No saved sessions yet."
@@ -238,7 +249,9 @@ export function BulkTargetPicker({ active, picks, onPicksChange, resolved, onOpe
             <p className="mt-2 text-xs text-muted-foreground">
               {exporting
                 ? `${plural(otherKinds, "remote desktop, VNC, Telnet or serial session")} not listed: the inventory takes SSH and WinRM sessions.`
-                : `${plural(otherKinds, "session")} of other kinds not listed: this works over SSH only.`}
+                : winrm
+                  ? `${plural(otherKinds, "remote desktop, VNC, Telnet or serial session")} not listed: this works over SSH and WinRM only.`
+                  : `${plural(otherKinds, "session")} of other kinds not listed: this works over SSH only.`}
             </p>
           )}
         </TabsContent>

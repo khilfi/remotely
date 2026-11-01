@@ -26,6 +26,7 @@ import { ReasonLine, WhyDisabled } from "@/components/WhyDisabled";
 import type { MultiExecStatus, SessionFolder } from "@/lib/api";
 import { multiExecIdleReason } from "@/lib/disabled-reasons";
 import { flattenFolders, subtree } from "@/lib/folders";
+import { plural } from "@/lib/format";
 import { folderCounts, labelChoices, pickedText, pickTabs, type PickableTab } from "@/lib/multiexec-picks";
 import { ENVIRONMENT_NAMES } from "@/lib/session-environment";
 import { pickedTabsText } from "@/lib/terminal-layout";
@@ -43,6 +44,8 @@ interface Props {
   /** Every open tab. */
   tabs: PickableTab[];
   picked: number;
+  /** BX-13: picked tabs of the other kind (SSH vs PowerShell), which wait until one is the current tab. */
+  waitingOtherKind?: number;
   /** The terminals in the picked tabs (a split tab holds several). */
   terminals: number;
   status: MultiExecStatus | null;
@@ -61,6 +64,7 @@ export function MultiExecBar({
   on,
   tabs,
   picked,
+  waitingOtherKind = 0,
   terminals,
   status,
   note,
@@ -91,6 +95,7 @@ export function MultiExecBar({
         <Typing
           tabs={tabs}
           picked={picked}
+          waitingOtherKind={waitingOtherKind}
           status={status}
           note={note}
           folders={folders}
@@ -132,6 +137,7 @@ export function MultiExecBar({
 function Typing({
   tabs,
   picked,
+  waitingOtherKind = 0,
   status,
   note,
   folders,
@@ -139,7 +145,10 @@ function Typing({
   onTile,
   onPick,
   output,
-}: Pick<Props, "tabs" | "picked" | "status" | "note" | "folders" | "tile" | "onTile" | "onPick" | "output">) {
+}: Pick<
+  Props,
+  "tabs" | "picked" | "waitingOtherKind" | "status" | "note" | "folders" | "tile" | "onTile" | "onPick" | "output"
+>) {
   const subtrees = useMemo(() => new Map(folders.map((f) => [f.id, subtree(folders, f.id)])), [folders]);
   const counts = useMemo(() => folderCounts(tabs, subtrees), [tabs, subtrees]);
   const folderRows = flattenFolders(folders).filter((row) => counts.has(row.folder.id));
@@ -158,6 +167,11 @@ function Typing({
         {status && receiving !== status.targets.length && (
           <span className="text-muted-foreground">
             ({receiving} of {status.targets.length} terminals now)
+          </span>
+        )}
+        {waitingOtherKind > 0 && (
+          <span className="text-muted-foreground">
+            · {plural(waitingOtherKind, "tab")} of the other kind wait: click one to type there
           </span>
         )}
       </span>

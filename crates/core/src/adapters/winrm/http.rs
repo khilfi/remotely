@@ -627,6 +627,18 @@ impl Client {
         *locks::lock(&self.peer)
     }
 
+    /// Review C4: what the journal records as this host's key: the leaf certificate's fingerprint for an HTTPS host
+    /// (set whether Windows or a trusted fingerprint accepted it), or `http` for an HTTP host.
+    pub fn host_key(&self) -> Option<String> {
+        if self.endpoint.https {
+            locks::lock(&self.accepted)
+                .clone()
+                .map(|print| format!("{CERT_KEY_TYPE} {print}"))
+        } else {
+            Some("http".to_owned())
+        }
+    }
+
     /// One message on a free connection (opened and signed in when none is): the answer's text.
     pub async fn post(&self, xml: &str, timeout: Duration) -> Result<Answered> {
         let _permit = self

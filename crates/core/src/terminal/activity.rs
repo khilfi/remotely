@@ -61,11 +61,25 @@ static CODE_PROMPT: LazyLock<Regex> = LazyLock::new(|| {
     ))
     .expect("valid code prompt regex")
 });
-/// A shell prompt: `alice@web01:~$ `, `[root@web01 ~]# `, `PS C:\> `, or just `$ `. `%` only alone, so a
-/// progress counter (`45% `) is not taken for zsh's prompt.
+/// A shell prompt: `alice@web01:~$ `, `[root@web01 ~]# `, `PS C:\> `, `$ `, zsh's `web01% ` and `alice@web01 ~ % `,
+/// oh-my-zsh's `➜  ~ `, a bare `λ ` (review B7). The sigil must be at the line's end, so `a > b` and `alice@web01:~$ ls`
+/// are not prompts. Third review: the trailing space is optional only after `$` and `#` (so `</config>` and `Enter
+/// value>` are not prompts), and the last word before a `%` must hold a non-digit (so `Downloading foo 45%` and a
+/// progress bar are not prompts, while `web01% ` is).
 #[allow(clippy::expect_used)]
-static SHELL_PROMPT: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^(?:\S.{0,160}[$#>❯] |[$#%>❯] ?)$").expect("valid shell prompt regex"));
+static SHELL_PROMPT: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(concat!(
+        r"^(?:",
+        r"\S.{0,160}[$#] ?",                    // text then $ or #, trailing space optional
+        r"|\S.{0,160}[>❯λ] ",                   // text then > ❯ λ, trailing space required
+        r"|[^%]*?[^\s%]*[^\s\d%][^\s%]*\s*% ?", // zsh %: the last word before it holds a non-digit
+        r"|[$#] ?",                             // a bare $ or #
+        r"|[%>❯λ] ",                            // a bare % > ❯ λ with its space
+        r"|➜ .*",                               // an oh-my-zsh arrow prompt
+        r")$"
+    ))
+    .expect("valid shell prompt regex")
+});
 
 /// QL-06: the line asks for a password or passphrase (sudo, su, ssh, a key, a PIN), so a vault password may
 /// be typed there.
@@ -613,10 +627,31 @@ mod tests {
             "# ",
             "% ",
             "❯ ",
+            // Review B7: zsh's own prompts, oh-my-zsh's arrow, a bare lambda, and prompts with no trailing space.
+            "web01% ",
+            "alice@web01 ~ % ",
+            "➜  ~ ",
+            "➜  myrepo git:(main) ✗ ",
+            "λ ",
+            "alice@web01:~$",
+            "[root@web01 ~]#",
         ] {
             assert!(is_shell_prompt(prompt), "{prompt}");
         }
-        for line in ["45% ", "45%", "Downloading 3 MB", "", "alice@web01:~$ ls", "a > b"] {
+        for line in [
+            "45% ",
+            "45%",
+            "100% ",
+            "Downloading 3 MB",
+            "",
+            "alice@web01:~$ ls",
+            "a > b",
+            // Third review: progress with a word before the counter, and output ending in `>` without a space.
+            "Downloading foo 45%",
+            "[===>  ] 45%",
+            "</config>",
+            "Enter value>",
+        ] {
             assert!(!is_shell_prompt(line), "{line}");
         }
     }
@@ -674,12 +709,12 @@ mod tests {
     fn output_that_stops_ends_a_long_run() {
         let t0 = Instant::now();
         let mut w = watch(30, Some(20));
-        w.output("➜  ~ cd /srv && ./build.sh".as_bytes(), t0);
+        w.output(b"[dev] cd /srv && ./build.sh", t0);
         w.input(b"\r", t0);
         assert_eq!(w.deadline(), None, "nothing printed yet");
         w.output(b"\r\nstep 1\r\n", t0 + 10 * SECOND);
-        // The prompt changed with the folder, and has no `$`: not recognised.
-        w.output("step 2\r\n➜  srv ".as_bytes(), t0 + 45 * SECOND);
+        // The prompt changed with the folder to a custom one with no shell sigil: not recognised.
+        w.output(b"step 2\r\n[dev:srv] ", t0 + 45 * SECOND);
         assert!(w.is_running(), "an unknown prompt");
         assert_eq!(w.deadline(), Some(t0 + 65 * SECOND));
         assert_eq!(w.tick(t0 + 60 * SECOND), None, "not quiet long enough");

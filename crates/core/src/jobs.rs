@@ -59,10 +59,11 @@ use crate::adapters::exec_output::{CollectedOutput, OutputCollector, MAX_OUTPUT_
 use crate::adapters::hypervisor::{Hypervisor, Hypervisors};
 use crate::adapters::remote::{
     AgentSource, AuthMethod, ConnectOptions, ConnectRequest, Credentials, ExecRequest, HostKeyVerifier, RemoteAdapter,
-    SessionSpec,
+    ScriptKind, SessionSpec,
 };
 use crate::adapters::updater::UpdaterAdapter;
 use crate::adapters::vmware::{path_key, ToolsState};
+use crate::adapters::winrm::{NoWinrm, WinrmAdapter, WinrmConnect, WinrmSession, WinrmTuning};
 use crate::command_bus::{ApprovalRecord, Command, PowerOp, Rollout, SnapshotOp, StopMode};
 use crate::containers::ContainerActions;
 use crate::domain::{Context, PowerState, Target, TargetRef, WorkspaceId};
@@ -497,6 +498,47 @@ struct RemoteRun<'a> {
     timeout_secs: Option<u64>,
 }
 
+/// BX-13: a WinRM connection being made, signed in and checked to run PowerShell.
+type WinrmConnecting = std::pin::Pin<Box<dyn std::future::Future<Output = Result<Arc<dyn WinrmSession>>> + Send>>;
+
+/// BX-13: a Windows host's connection, about to be made: its address and sign-in password (for the bundle's
+/// manifest and scrubbing) and the connection itself (whose own certificate becomes the journal's host key, C4).
+struct WinrmLogin {
+    address: String,
+    secrets: Vec<SecretString>,
+    connect: WinrmConnecting,
+}
+
+/// FD-04: a host's bundle report as its job target's outcome: its lines as output, failed when nothing was collected.
+fn bundle_outcome(
+    (report, peer_ip): (crate::support_bundle::HostReport, Option<std::net::IpAddr>),
+) -> Result<TargetOutcome> {
+    let ok = report.saved > 0;
+    let lines = report.lines.join("\n");
+    Ok(TargetOutcome {
+        ok,
+        exit_code: None,
+        output: Some(OutputCollector::collect(
+            lines.as_bytes(),
+            b"",
+            &[],
+            MAX_OUTPUT_PER_STREAM,
+        )),
+        failure: (!ok).then(|| "nothing was collected: every command and file failed".to_owned()),
+        note: None,
+        peer_ip: peer_ip.map(|ip| ip.to_string()),
+    })
+}
+
+/// BX-13: the language a target's script was rated in (the shell's unless the policy engine said PowerShell).
+fn rated_kind(spec: &JobSpec, target: &Target) -> ScriptKind {
+    spec.decision
+        .script_kinds
+        .get(&target.target.key())
+        .copied()
+        .unwrap_or_default()
+}
+
 /// What connecting to one host needs (BX-02, BX-07, SS-05), read just before it connects.
 struct HostLogin {
     session: SessionSpec,
@@ -623,6 +665,11 @@ pub struct JobRunner {
     network_tools: RwLock<Option<Arc<dyn crate::adapters::net_tools::NetworkTools>>>,
     /// FD-09: what runs the quick file server (set once the core is put together).
     file_servers: RwLock<Option<Arc<dyn crate::toolbox::file_server::FileServerActions>>>,
+    /// BX-13: the WinRM client Compare hosts runs and support bundles reach Windows hosts with.
+    winrm: RwLock<Arc<dyn WinrmAdapter>>,
+    /// Review C2: the shared login guard, so a refused WinRM sign-in parks the session (and the hosts that share its
+    /// login) instead of being tried again and again, which could lock a domain account.
+    login_guard: RwLock<crate::login_guard::LoginGuard>,
     exec_tuning: RwLock<ExecTuning>,
     /// Read when a job starts, so a changed setting applies to the next job.
     limits: RwLock<JobLimits>,
@@ -672,6 +719,8 @@ impl JobRunner {
             bundles: RwLock::new(None),
             network_tools: RwLock::new(None),
             file_servers: RwLock::new(None),
+            winrm: RwLock::new(Arc::new(NoWinrm)),
+            login_guard: RwLock::new(crate::login_guard::LoginGuard::default()),
             exec_tuning: RwLock::new(ExecTuning::default()),
             limits: RwLock::new(limits),
             events,
@@ -747,6 +796,16 @@ impl JobRunner {
     /// FD-09: what runs the quick file server.
     pub fn set_file_servers(&self, servers: Arc<dyn crate::toolbox::file_server::FileServerActions>) {
         *locks::write(&self.file_servers) = Some(servers);
+    }
+
+    /// BX-13: the WinRM client for Windows hosts (Core sets the real one; tests use the fake server).
+    pub fn set_winrm(&self, adapter: Arc<dyn WinrmAdapter>) {
+        *locks::write(&self.winrm) = adapter;
+    }
+
+    /// Review C2: the shared login guard, so WinRM runs park refused sign-ins (Core sets it).
+    pub fn set_login_guard(&self, guard: crate::login_guard::LoginGuard) {
+        *locks::write(&self.login_guard) = guard;
     }
 
     /// BX-02: connect timeout, agent and output cap of bulk runs (tests shorten them).
@@ -1728,6 +1787,10 @@ impl JobRunner {
                     trust_new_host_keys: *trust_new_host_keys,
                     timeout_secs: *timeout_secs,
                 };
+                // BX-13: a host rated by the PowerShell rules runs the script in PowerShell over WinRM.
+                if rated_kind(spec, target) == ScriptKind::PowerShell {
+                    return self.run_winrm(spec, target, *session_id, run, token, accepted).await;
+                }
                 self.run_remote(spec, target, *session_id, run, token, accepted).await
             }
             (
@@ -2159,6 +2222,219 @@ impl JobRunner {
         })
     }
 
+    /// BX-13: one saved WinRM session's connection for a bulk run or a support bundle: the vault password read just
+    /// before it connects (or the Windows sign-in), its HTTPS certificate checked like an SSH host key (SS-05: a new
+    /// one trusted only when the run says so), and a check that it runs PowerShell, the language it was rated in.
+    async fn winrm_connect(
+        &self,
+        spec: &JobSpec,
+        target: &Target,
+        session_id: Uuid,
+        trust_new_host_keys: bool,
+        token: &CancellationToken,
+    ) -> Result<WinrmLogin> {
+        use crate::login_guard::{self, GateRole, ParkReason, ParkScope, Parked};
+        let winrm = self
+            .store
+            .winrm_spec(&spec.ctx, session_id)
+            .await?
+            .ok_or_else(|| CoreError::UnknownTarget("the session was deleted".into()))?;
+        if token.is_cancelled() {
+            return Err(CoreError::Cancelled);
+        }
+        // SS-04: a run the user started counts as activity, as for SSH hosts.
+        self.vault.note_activity();
+        // Review C2: the login guard, as background checks use it (`checks::WindowsServices::connection`), so a run
+        // never keeps signing in to a host that refused: a parked session is refused up front, a refusal parks it, and
+        // the hourly cap is counted. This stops one run (or Retry after it) from locking a domain account.
+        let guard = locks::read(&self.login_guard).clone();
+        let key = winrm.login_key();
+        let park = |reason: ParkReason, message: String| {
+            let parked = Parked {
+                reason,
+                message: login_guard::parked_message(&message),
+            };
+            guard.park(winrm.id, ParkScope::Login, &key, parked.clone());
+            parked.error()
+        };
+        if let Some(parked) = guard.parked(winrm.id, ParkScope::Login, &key) {
+            return Err(parked.error());
+        }
+        if winrm.missing_password() {
+            return Err(park(
+                ParkReason::SecretMissing,
+                format!(
+                    "no password is saved for '{}'. Save it in the vault and choose it in the session, so runs can sign in",
+                    winrm.name
+                ),
+            ));
+        }
+        let password = match winrm.password_id {
+            Some(id) => Some(self.vault.get(&spec.ctx, id).await?),
+            None => None,
+        };
+        if let Err(wait) = guard.admit(winrm.id, &[winrm.login_host()]) {
+            return Err(CoreError::LoginsCapped {
+                message: login_guard::capped_message(&winrm.login_host(), guard.per_hour(), wait),
+                wait_secs: wait.as_secs(),
+            });
+        }
+        // Review C2: the per-account gate, so many hosts sharing one domain password don't sign in at once and lock the
+        // account. The first host with an account signs in alone; the others wait for its result (then go in parallel if
+        // it was accepted, or are skipped if it was refused). Password auth only; the Windows sign-in can't be locked.
+        let leader = if winrm.password_id.is_some() {
+            let account = format!(
+                "{}|{:?}",
+                winrm.username.as_deref().unwrap_or("").to_lowercase(),
+                winrm.password_id
+            );
+            match guard.winrm_gate_role(winrm.id, winrm.password_id, &account).await {
+                GateRole::Skip => {
+                    return Err(CoreError::AuthFailed(format!(
+                        "skipped: a host with the same login ('{}') had its sign-in refused, so it wasn't tried again \
+                         (this could lock the account)",
+                        winrm.username.as_deref().unwrap_or("")
+                    )));
+                }
+                GateRole::Leader(leader) => Some(leader),
+                GateRole::Proceed => None,
+            }
+        } else {
+            None
+        };
+        let verifier = Arc::new(BulkVerifier {
+            known_hosts: Arc::clone(&self.known_hosts),
+            ctx: spec.ctx,
+            target: target.clone(),
+            trust_new: trust_new_host_keys,
+            accepted: Mutex::new(None),
+        });
+        let connect_timeout = locks::read(&self.exec_tuning).connect_timeout;
+        let adapter = Arc::clone(&*locks::read(&self.winrm));
+        Ok(WinrmLogin {
+            address: winrm.address(),
+            secrets: password.iter().cloned().collect(),
+            connect: Box::pin({
+                let verifier = Arc::clone(&verifier) as Arc<dyn HostKeyVerifier>;
+                let guard = guard.clone();
+                let session_uuid = winrm.id;
+                async move {
+                    let connected = adapter
+                        .connect(WinrmConnect {
+                            spec: &winrm,
+                            password,
+                            verifier,
+                            tuning: WinrmTuning {
+                                connect_timeout,
+                                ..WinrmTuning::default()
+                            },
+                        })
+                        .await;
+                    // Review C2: only an accepted sign-in opens the gate; a refused one closes it (the others sharing
+                    // the login are skipped); anything else — unreachable, a timeout, a changed certificate, a cancel —
+                    // leaves the account unverified and hands the lead to the next waiter, since the password was never
+                    // checked. A `Leader` dropped here (a cancel) hands off the same way.
+                    if let Some(leader) = leader {
+                        let outcome = match &connected {
+                            Ok(_) => Some(true),
+                            Err(CoreError::AuthFailed(_)) => Some(false),
+                            Err(_) => None,
+                        };
+                        leader.finish(outcome);
+                    }
+                    let session = match connected {
+                        Ok(session) => session,
+                        // Review C2: a refused sign-in or a changed certificate parks the session, so a later host (or
+                        // Retry) does not try it again; Retry and credential changes clear the park.
+                        Err(err) => {
+                            if let Some(reason) = ParkReason::of(&err) {
+                                let parked = Parked {
+                                    reason,
+                                    message: login_guard::parked_message(&err.to_string()),
+                                };
+                                guard.park(session_uuid, ParkScope::Login, &key, parked);
+                            }
+                            return Err(err);
+                        }
+                    };
+                    if session.script_kind() != ScriptKind::PowerShell {
+                        session.close().await;
+                        return Err(CoreError::InvalidInput(
+                            "the connection doesn't run PowerShell, the language the run was rated in".into(),
+                        ));
+                    }
+                    Ok(session)
+                }
+            }),
+        })
+    }
+
+    /// BX-13: runs a script on one saved session's Windows host, in a PowerShell of its own over WinRM (the output
+    /// scrubbed of the sign-in password and capped, as for SSH hosts). sudo never gets here: the bus refuses it for
+    /// Windows hosts.
+    async fn run_winrm(
+        &self,
+        spec: &JobSpec,
+        target: &Target,
+        session_id: Uuid,
+        run: RemoteRun<'_>,
+        token: &CancellationToken,
+        accepted: &Arc<Mutex<Option<String>>>,
+    ) -> Result<TargetOutcome> {
+        if run.sudo {
+            return Err(CoreError::InvalidInput(
+                "sudo is for Linux hosts: over WinRM, PowerShell runs as the session's sign-in user".into(),
+            ));
+        }
+        let login = self
+            .winrm_connect(spec, target, session_id, run.trust_new_host_keys, token)
+            .await?;
+        let max_output = locks::read(&self.exec_tuning).max_output;
+        let WinrmLogin { connect, .. } = login;
+        // Review C4: the host key the journal keeps, from the connection itself (set for every HTTPS host, whether
+        // Windows or a trusted fingerprint accepted its certificate, and `http` for an HTTP host).
+        let host_key = Arc::new(Mutex::new(None));
+        let work = async {
+            let session = connect.await?;
+            *locks::lock(&host_key) = session.host_key();
+            let exec = Arc::clone(&session).exec();
+            // Dropped half way (cancel, the time limit), the run deletes its shell on the host.
+            let result = exec.run(run.script, max_output).await;
+            exec.close().await;
+            result
+        };
+        let limited = async {
+            match run.timeout_secs {
+                // H9: the command may have started, so its outcome is unknown.
+                Some(secs) => tokio::time::timeout(Duration::from_secs(secs), work)
+                    .await
+                    .map_err(|_| CoreError::CommandTimedOut { seconds: secs })?,
+                None => work.await,
+            }
+        };
+        let result = tokio::select! {
+            biased;
+            _ = token.cancelled() => Err(CoreError::CancelledRemote),
+            result = limited => result,
+        };
+        *locks::lock(accepted) = locks::lock(&host_key).take();
+        let result = result?;
+        let ok = result.exit_code == Some(0);
+        let failure = match result.exit_code {
+            Some(0) => None,
+            Some(code) => Some(format!("exit code {code}")),
+            None => Some("the host sent no exit code".to_owned()),
+        };
+        Ok(TargetOutcome {
+            ok,
+            exit_code: result.exit_code.map(i64::from),
+            output: Some(result.output),
+            failure,
+            note: None,
+            peer_ip: result.peer_ip.map(|ip| ip.to_string()),
+        })
+    }
+
     /// FD-04: one host of a support bundle: a kept connection checked like a bulk run's (SS-05, BX-07), the bundle's
     /// commands and files on it, within the per-host time limit. Cancel and the limit close the connection; what the
     /// host gave until then stays in the bundle. A host where no item gave anything fails.
@@ -2174,6 +2450,32 @@ impl JobRunner {
         accepted: &Arc<Mutex<Option<String>>>,
     ) -> Result<TargetOutcome> {
         let bundles = self.bundles()?;
+        // BX-13: a Windows host gives the bundle's Windows items over WinRM.
+        if rated_kind(spec, target) == ScriptKind::PowerShell {
+            let login = self
+                .winrm_connect(spec, target, session_id, bundle.trust_new_host_keys, token)
+                .await?;
+            let WinrmLogin {
+                address,
+                secrets,
+                connect,
+                ..
+            } = login;
+            // Review C4: the host key the journal keeps, from the connection itself.
+            let host_key = Arc::new(Mutex::new(None));
+            let work = async {
+                let session = connect.await?;
+                *locks::lock(&host_key) = session.host_key();
+                let host = crate::support_bundle::WinrmHost::new(session.exec(), address, secrets);
+                let peer_ip = crate::support_bundle::BundleHost::peer_ip(&host);
+                let report = bundles.collect(job_id, target, &host).await;
+                host.close().await;
+                report.map(|report| (report, peer_ip))
+            };
+            let result = self.bundle_limits(bundle, token, work).await;
+            *locks::lock(accepted) = locks::lock(&host_key).take();
+            return bundle_outcome(result?);
+        }
         let HostLogin {
             session,
             credentials,
@@ -2219,6 +2521,18 @@ impl JobRunner {
             host.close().await;
             report.map(|report| (report, peer_ip))
         };
+        let result = self.bundle_limits(bundle, token, work).await;
+        *locks::lock(accepted) = locks::lock(&verifier.accepted).take();
+        bundle_outcome(result?)
+    }
+
+    /// FD-04: a host's part of a bundle within its time limit; cancel closes its connection.
+    async fn bundle_limits<T>(
+        &self,
+        bundle: &crate::support_bundle::BundleSpec,
+        token: &CancellationToken,
+        work: impl std::future::Future<Output = Result<T>>,
+    ) -> Result<T> {
         let limited = async {
             match bundle.timeout_secs {
                 Some(secs) => tokio::time::timeout(Duration::from_secs(secs), work)
@@ -2227,28 +2541,11 @@ impl JobRunner {
                 None => work.await,
             }
         };
-        let result = tokio::select! {
+        tokio::select! {
             biased;
             _ = token.cancelled() => Err(CoreError::CancelledRemote),
             result = limited => result,
-        };
-        *locks::lock(accepted) = locks::lock(&verifier.accepted).take();
-        let (report, peer_ip) = result?;
-        let ok = report.saved > 0;
-        let lines = report.lines.join("\n");
-        Ok(TargetOutcome {
-            ok,
-            exit_code: None,
-            output: Some(OutputCollector::collect(
-                lines.as_bytes(),
-                b"",
-                &[],
-                MAX_OUTPUT_PER_STREAM,
-            )),
-            failure: (!ok).then(|| "nothing was collected: every command and file failed".to_owned()),
-            note: None,
-            peer_ip: peer_ip.map(|ip| ip.to_string()),
-        })
+        }
     }
 
     /// BX-07: the password sudo gets on this host: the one chosen for the run, or the session's own

@@ -594,7 +594,8 @@ async fn telnet_and_serial_tabs_never_join_type_in_all_tabs_or_compare_hosts() {
     pane.connected().await;
     let err = core.multiexec.set_targets(vec![pane.id]).await.unwrap_err();
     assert!(
-        err.to_string().contains("typing in all tabs is for SSH shells only"),
+        err.to_string()
+            .contains("typing in all tabs is for SSH and PowerShell tabs only"),
         "{err}"
     );
     let resolved = core
@@ -614,7 +615,7 @@ async fn telnet_and_serial_tabs_never_join_type_in_all_tabs_or_compare_hosts() {
         resolved
             .notes
             .iter()
-            .any(|n| n.contains("Compare hosts runs over SSH only")),
+            .any(|n| n.contains("serial tab, so it was left out: this works over SSH only")),
         "{:?}",
         resolved.notes
     );

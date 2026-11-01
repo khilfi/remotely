@@ -57,7 +57,11 @@ use uuid::Uuid;
 
 use super::activity::{is_secret_prompt, FinishedHow};
 use super::record::{RecordLimits, RecordedResults, Recorder, Recordings};
-use super::Terminals;
+use super::{PaneKind, Terminals};
+use crate::adapters::winrm::console::{self, ConsoleView};
+use powershell::PsLine;
+
+mod powershell;
 use crate::bulk::{GroupOptions, HostOutput, OutputDiff, RecordedRun};
 use crate::command_bus::{ApprovalAnswers, ApprovalRequest, Command, CommandBus, SubmitOutcome};
 use crate::domain::TargetRef;
@@ -863,6 +867,28 @@ struct Current {
     mode: LineMode,
     to: Vec<Uuid>,
     left_out: Vec<LeftOut>,
+    /// BX-13: the tabs are PowerShell tabs.
+    powershell: bool,
+}
+
+/// BX-13: Ctrl+C went to the tabs: a PowerShell console drops the statement it held open and the input to a running one.
+fn forget_open(state: &mut State) {
+    state.ps_open.clear();
+    state.ps_open_unreliable = false;
+    state.ps_running.clear();
+    state.ps.clear();
+}
+
+/// A line about to be held: where it goes, what is rated, and the keys that run it.
+struct HeldLine {
+    from: Uuid,
+    to: Vec<Uuid>,
+    script: String,
+    unreliable: bool,
+    keys: Vec<u8>,
+    after: Vec<u8>,
+    leaves_text: bool,
+    run: RunKey,
 }
 
 /// A line whose Enter waits.
@@ -890,6 +916,20 @@ struct State {
     current: Option<Current>,
     held: Option<Held>,
     queued: Vec<u8>,
+    /// BX-13: the line on PowerShell tabs, as their console follows it.
+    ps: PsLine,
+    /// BX-13: the lines of a statement the PowerShell tabs hold open (`>> `), sent with the line that closes it.
+    ps_open: Vec<String>,
+    /// BX-13: one of those lines was unreliable.
+    ps_open_unreliable: bool,
+    /// Review M1: the raw lines sent to a running statement's stdin since it started. While a console runs, a typed line
+    /// is its input, which PowerShell may run as the next statement, so each is rated with the ones before it and held.
+    ps_running: Vec<String>,
+    /// Review B7: the SSH targets where MultiExec itself released a line that started a full-screen program
+    /// ([`crate::policy::commands::interactive_program`]: an editor or pager). xterm's alternate-screen flag is trusted
+    /// for a target (keys pass straight through) only while it is in here, so a flag left stale by background output or a
+    /// program that did not restore the screen (a cursor on an empty line, say) does not let a line run unrated.
+    fullscreen: HashSet<Uuid>,
 }
 
 struct Shared {
@@ -920,6 +960,9 @@ struct Seen {
     password: bool,
     alternate: bool,
     dirty: bool,
+    /// BX-13: what the tab is, and a PowerShell tab's console (at its prompt or running).
+    kind: PaneKind,
+    console: Option<ConsoleView>,
 }
 
 impl MultiExec {
@@ -989,19 +1032,35 @@ impl MultiExec {
         self.shared.bus.read_only().check(Change::MultiExec)?;
         let mut seen = HashSet::new();
         let targets: Vec<Uuid> = targets.into_iter().filter(|id| seen.insert(*id)).collect();
-        // SS-12: Type in all tabs is for shells: a Telnet or serial pane (network gear) never joins.
+        // SS-12: Type in all tabs is for shells: a Telnet or serial pane (network gear) never joins. BX-13: PowerShell
+        // tabs do, but never with SSH tabs: a shell and the PowerShell console read the same keys differently (a
+        // bracketed paste's line breaks, Ctrl+V, Ctrl+W, Esc then Enter), so one line can't be rated for both.
+        let mut kinds = HashSet::new();
         for id in &targets {
             if let Some(info) = self.shared.terminals.pane_info(*id) {
                 if !info.kind.joins_multiexec() {
                     return Err(CoreError::InvalidInput(format!(
-                        "{} is a {} tab, and typing in all tabs is for SSH shells only.",
+                        "{} is a {} tab, and typing in all tabs is for SSH and PowerShell tabs only.",
                         info.name,
                         info.kind.label()
                     )));
                 }
+                kinds.insert(info.kind);
             }
         }
+        if kinds.len() > 1 {
+            return Err(CoreError::InvalidInput(
+                "Type in all tabs goes to SSH tabs or to PowerShell tabs, not both at once: a shell and PowerShell read \
+                 the same keys differently."
+                    .into(),
+            ));
+        }
         let mut state = self.shared.state.lock().await;
+        // A change of kind starts afresh: an open statement belongs to the PowerShell tabs it was typed into.
+        if !kinds.contains(&PaneKind::Powershell) {
+            state.ps_open.clear();
+            state.ps_open_unreliable = false;
+        }
         state.on = true;
         if let Some(current) = &mut state.current {
             let dropped: Vec<Uuid> = current.to.iter().filter(|id| !targets.contains(id)).copied().collect();
@@ -1077,6 +1136,13 @@ impl MultiExec {
                 Some(s) if reason.is_none() && s.password => {
                     Some("at a password prompt: keys pass straight through, never logged".to_owned())
                 }
+                // BX-13: a PowerShell tab running a statement takes a typed line as its input (`Read-Host`), and may run
+                // it as the next statement.
+                Some(s) if reason.is_none() && s.console.as_ref().is_some_and(|c| !c.at_prompt) => Some(
+                    "a statement is running: a line typed goes to it as input, rated first (type a password it asks \
+                     for in this tab on its own)"
+                        .to_owned(),
+                ),
                 _ => None,
             };
             targets.push(TargetState {
@@ -1098,7 +1164,13 @@ impl MultiExec {
     pub async fn input(&self, from: Uuid, data: Vec<u8>) -> Result<InputOutcome> {
         let mut state = self.shared.state.lock().await;
         if let Some(held) = &state.held {
-            if state.targets.contains(&from) || held.from == from {
+            // Review R5: queue by `held.to`, not just the current targets. A target of the held line that the user
+            // un-picks while it waits is no longer in `state.targets`, so without this its keys would fall through to
+            // `process` and be written straight to that tab's console (the "alone" branch). On a PowerShell tab that
+            // changes the line the console holds, and the held Enter — sent to every `held.to` on approval — would then
+            // run the changed line under the wrong approval. Queuing keeps every held target's console on the rated
+            // line until the Enter; the queued keys are replayed as a fresh, rated line afterwards.
+            if held.to.contains(&from) || state.targets.contains(&from) || held.from == from {
                 let line_id = held.id;
                 let room = MAX_QUEUED_BYTES.saturating_sub(state.queued.len());
                 let dropped = data.len() > room;
@@ -1149,6 +1221,7 @@ impl MultiExec {
         if let Some(held) = state.held.take() {
             state.queued.clear();
             self.interrupt(&held.to).await;
+            forget_open(&mut state);
             self.shared.recorder.discard(held.id);
             self.done(&held, false, None);
         }
@@ -1202,6 +1275,7 @@ impl MultiExec {
             });
         if status == JobStatus::Cancelled {
             self.interrupt(&held.to).await;
+            forget_open(&mut state);
             self.done(&held, false, Some(status));
             return Ok(());
         }
@@ -1229,20 +1303,37 @@ impl MultiExec {
             .target(&self.shared.workspace.get(), id)
             .await
             .ok();
+        // BX-13: a PowerShell tab is connected once its console is up. Keys pass straight through only at a password
+        // or code prompt it shows, as for SSH: while a statement runs, a line typed goes to it as input, and PowerShell
+        // runs it as the next statement if nothing reads it, so it is rated like any line.
+        let powershell = info.kind == PaneKind::Powershell;
+        // At its own prompt a PowerShell console runs whatever line it gets as a statement, whatever the screen shows
+        // (output printed after the prompt could look like a password prompt, or switch xterm to its alternate
+        // screen, which no PowerShell tab has a full-screen program behind): never straight through there.
+        let running = !powershell || info.console.as_ref().is_some_and(|c| !c.at_prompt);
         Some(Seen {
             id,
             name: target.as_ref().map_or_else(|| info.name.clone(), |t| t.name.clone()),
-            connected: info.screen.connected,
+            connected: info.screen.connected && (!powershell || info.console.is_some()),
             protected: target.is_some_and(|t| t.protected),
-            password: info.screen.at_secret_prompt(),
-            alternate: info.screen.alternate,
+            password: info.screen.at_secret_prompt() && running,
+            // No program in a PowerShell tab has a screen of its own (it has no terminal on the host). SS-10 (review
+            // B7): a command can switch xterm to the alternate screen and exit without switching back, leaving the flag
+            // set while the shell is at its prompt; keys would then pass straight through, unrated. So a pane whose
+            // cursor line looks like a shell prompt is not treated as full-screen (a real full-screen program's line
+            // does not look like a prompt), and its lines are rated as usual.
+            alternate: info.screen.alternate && !powershell && !super::shell_user::looks_like_prompt(&info.screen.line),
             dirty: info.dirty,
+            kind: info.kind,
+            console: info.console,
         })
     }
 
     /// A line starts in `from`: how its keys are handled, and which targets get them.
     async fn start_line(&self, state: &mut State, from: &Seen) -> Current {
-        let mode = if from.alternate {
+        // Review B7: a full-screen program is only believed where MultiExec started one, so a stale alternate-screen flag
+        // does not open the straight-through path on its own.
+        let mode = if from.alternate && state.fullscreen.contains(&from.id) {
             LineMode::FullScreen
         } else if from.password {
             LineMode::Password
@@ -1266,10 +1357,12 @@ impl MultiExec {
             } else if !seen.connected {
                 Some("not connected")
             } else {
+                // Review B7: a target's alternate-screen flag counts only where MultiExec started a full-screen program.
+                let full_screen = seen.alternate && state.fullscreen.contains(&id);
                 match mode {
-                    LineMode::FullScreen if !seen.alternate => Some("no full-screen program is open"),
-                    LineMode::Password if seen.alternate || !seen.password => Some("not at a password prompt"),
-                    LineMode::Command if seen.alternate => Some("a full-screen program is open"),
+                    LineMode::FullScreen if !full_screen => Some("no full-screen program is open"),
+                    LineMode::Password if full_screen || !seen.password => Some("not at a password prompt"),
+                    LineMode::Command if full_screen => Some("a full-screen program is open"),
                     LineMode::Command if seen.password => Some("at a password prompt"),
                     _ => None,
                 }
@@ -1285,12 +1378,20 @@ impl MultiExec {
                 }
             }
         }
+        let powershell = from.kind == PaneKind::Powershell;
         state.buffer.clear();
+        state.ps.clear();
         if mode == LineMode::Command && dirty {
             // Text was typed on some line outside MultiExec: what the shells hold is not known.
             state.buffer.mark_unreliable();
+            state.ps.mark_unreliable();
         }
-        Current { mode, to, left_out }
+        Current {
+            mode,
+            to,
+            left_out,
+            powershell,
+        }
     }
 
     async fn send(&self, to: &[Uuid], bytes: &[u8], left_out: &mut Vec<LeftOut>) -> Vec<Uuid> {
@@ -1364,6 +1465,15 @@ impl MultiExec {
                     });
                 }
                 LineMode::Password => {
+                    // Review B5: a PowerShell tab's password prompt can end mid-line (the statement that asked finishes),
+                    // and the console goes back to its prompt, where straight-through keys would run as a statement
+                    // unrated. Review M3: before forwarding, re-check every target's console, not just the one typed into:
+                    // if any is back at its prompt, drop password mode for all of them and let the rest start a fresh,
+                    // rated line, so a password line can't run as a statement in a tab whose prompt returned.
+                    if current.powershell && self.any_console_at_prompt(&current.to).await {
+                        state.current = None;
+                        continue;
+                    }
                     // Straight through up to and with Enter (or Ctrl+C), never kept.
                     let end = data[at..]
                         .iter()
@@ -1389,7 +1499,12 @@ impl MultiExec {
                     while at < data.len() {
                         let byte = data[at];
                         at += 1;
-                        end = state.buffer.feed(byte, &mut out);
+                        // BX-13: PowerShell tabs' console edits the line its own way.
+                        end = if current.powershell {
+                            state.ps.feed(byte, &mut out)
+                        } else {
+                            state.buffer.feed(byte, &mut out)
+                        };
                         if end != Step::Key {
                             break;
                         }
@@ -1399,9 +1514,15 @@ impl MultiExec {
                     match end {
                         Step::Key => {}
                         Step::Interrupt => {
-                            // The shells drop the line; the next keys start a new one.
+                            // The shells drop the line; the next keys start a new one. The PowerShell console drops a
+                            // statement left open and the input to a running one (M1, M2).
                             state.current = None;
                             state.buffer.clear();
+                            if current.powershell {
+                                forget_open(state);
+                            } else {
+                                state.ps.clear();
+                            }
                             for id in &current.to {
                                 self.shared.terminals.set_dirty(*id, false);
                             }
@@ -1413,6 +1534,11 @@ impl MultiExec {
                                 reached,
                                 left_out,
                             });
+                        }
+                        Step::Run(run) if current.powershell => {
+                            return self
+                                .enter_powershell(state, from, &current, run, &data[at..], reached, left_out)
+                                .await;
                         }
                         Step::Run(run) => {
                             return self
@@ -1489,7 +1615,11 @@ impl MultiExec {
             });
         }
         if script.trim().is_empty() && !unreliable && keys.iter().all(|b| matches!(*b, b'\r' | b'\n')) {
-            // Enter on an empty line runs nothing: no rating, no audit.
+            // Enter on an empty line runs nothing: no rating, no audit. Review B7: the tabs are at a prompt, not behind a
+            // full-screen program, so stop trusting any stale alternate-screen flag there.
+            for id in &to {
+                state.fullscreen.remove(id);
+            }
             let mut left_out = left_out;
             let reached = self.send(&to, &keys, &mut left_out).await;
             if after.is_empty() {
@@ -1501,7 +1631,209 @@ impl MultiExec {
             }
             return Box::pin(self.process(state, from, after)).await;
         }
+        // Review B7: a line that starts a full-screen program (an editor, pager, monitor or multiplexer) means its
+        // targets are now behind one, so their alternate-screen flag may be trusted; any other command means they are
+        // back at a prompt.
+        let starts_program = crate::policy::commands::full_screen_program(&script).is_some();
+        for id in &to {
+            if starts_program {
+                state.fullscreen.insert(*id);
+            } else {
+                state.fullscreen.remove(id);
+            }
+        }
+        let line = HeldLine {
+            from,
+            to,
+            script,
+            unreliable,
+            keys,
+            after,
+            leaves_text,
+            run,
+        };
+        self.hold(state, line, reached, left_out).await
+    }
 
+    /// BX-13: Enter on a PowerShell tabs' line (see `powershell`'s module comment). The pasted lines that follow at
+    /// once go with it; what their console sends is worked out with its own function. A line that only adds to a
+    /// statement left open (or an empty one) runs nothing: it goes at once, unrated. Otherwise the line held and
+    /// rated is every line from the statement's first: the policy engine rates each statement the console sends.
+    #[allow(clippy::too_many_arguments)]
+    async fn enter_powershell(
+        &self,
+        state: &mut State,
+        from: Uuid,
+        current: &Current,
+        run: RunKey,
+        rest: &[u8],
+        reached: Vec<Uuid>,
+        left_out: Vec<LeftOut>,
+    ) -> Result<InputOutcome> {
+        let line_text = state.ps.text().to_owned();
+        let mut lines = vec![line_text.clone()];
+        let mut unreliable = state.ps.unreliable();
+        state.ps.clear();
+        state.current = None;
+        let to = current.to.clone();
+        if to.is_empty() {
+            return Ok(InputOutcome::Typed {
+                mode: LineMode::Command,
+                reached,
+                left_out,
+            });
+        }
+        // The LF of a CR LF is part of this Enter, as the console reads it.
+        let skip = usize::from(run == RunKey::Enter(b'\r') && rest.first() == Some(&b'\n'));
+        let paste = powershell::paste_lines(&rest[skip..]);
+        let after = rest[skip + paste.len..].to_vec();
+        lines.extend(paste.lines.iter().cloned());
+        let mut keys = run.keys();
+        for pasted in &paste.lines {
+            keys.extend_from_slice(pasted.as_bytes());
+            keys.push(b'\r');
+        }
+        // Review B1 to B4: before a line is rated as a statement, every tab's console must be at its prompt holding
+        // exactly the open statement and the line MultiExec followed. Reading the keys is not enough — a console may
+        // have recalled a different history line (Up), dropped keys typed while it was busy, been cleared by Ctrl+C, or
+        // desynced on a stray byte. When a console is at its prompt but holding something else, what it would run is
+        // unknown, so nothing is sent unrated: every console is cleared (Ctrl+C) and the line refused. When the consoles
+        // are instead running a statement, the line is its input (`Read-Host`), which PowerShell may run as the next
+        // statement — it is rated as an unreliable line, not refused.
+        //
+        // `unreliable` here means MultiExec couldn't follow the line (Up/Down recalled history, or a terminal had text
+        // typed outside MultiExec). The console then holds something the keys didn't carry, and may not even have
+        // processed the recall yet, so a matching `consoles_hold` can't be trusted: treat it as a mismatch.
+        if unreliable || !self.consoles_hold(&to, &state.ps_open, &line_text).await {
+            if self.any_console_at_prompt(&to).await {
+                self.interrupt(&to).await;
+                forget_open(state);
+                return Ok(InputOutcome::Refused {
+                    reason: "The PowerShell tabs aren't all holding the same line (one recalled history, dropped keys \
+                             typed while it was busy, or was interrupted), so this line wasn't run anywhere. The tabs \
+                             were cleared — type it again at the prompt."
+                        .into(),
+                    reached,
+                    left_out,
+                });
+            }
+            // Review M1: every console is running a statement, so this line is its input. PowerShell runs the next raw
+            // line it buffered as a statement once the running one stops reading, so it is never passed through: it is
+            // rated with the raw lines sent since the statement started (`ps_open` does not apply while running) and
+            // held. A statement left open by it still can't be read yet, so it stays unreliable.
+            state.ps_running.extend(lines.iter().cloned());
+            let script = state.ps_running.join("\n").trim_end().to_owned();
+            let line = HeldLine {
+                from,
+                to,
+                script,
+                unreliable: true,
+                keys,
+                after,
+                leaves_text: false,
+                run,
+            };
+            return self.hold(state, line, reached, left_out).await;
+        }
+        // At the prompt holding what we followed: the running statement (if any) finished, so its input is done with.
+        state.ps_running.clear();
+        let (sent, held) = console::statements(&state.ps_open, &lines);
+        let open_before = std::mem::replace(&mut state.ps_open, held);
+        unreliable |= state.ps_open_unreliable;
+        if sent.is_empty() {
+            // The console holds the lines (`>> `), or an empty line asks for a fresh prompt: nothing runs yet. The
+            // statement is rated whole once a line closes it.
+            state.ps_open_unreliable = unreliable && !state.ps_open.is_empty();
+            let mut left_out = left_out;
+            let reached = self.send(&to, &keys, &mut left_out).await;
+            if after.is_empty() {
+                return Ok(InputOutcome::Typed {
+                    mode: LineMode::Command,
+                    reached,
+                    left_out,
+                });
+            }
+            return Box::pin(self.process(state, from, after)).await;
+        }
+        // Lines still open after this Enter are rated now too (they can't be read yet: at least "other"), and again
+        // with the line that closes them.
+        state.ps_open_unreliable = unreliable && !state.ps_open.is_empty();
+        let script = open_before
+            .into_iter()
+            .chain(lines)
+            .collect::<Vec<_>>()
+            .join("\n")
+            .trim_end()
+            .to_owned();
+        let line = HeldLine {
+            from,
+            to,
+            script,
+            unreliable,
+            keys,
+            after,
+            leaves_text: false,
+            run,
+        };
+        self.hold(state, line, reached, left_out).await
+    }
+
+    /// BX-13: whether every PowerShell tab's console is at its prompt holding exactly the open statement `open` and the
+    /// line `line` MultiExec followed, so what it will run is known. A console takes the keys sent to it a moment later,
+    /// so it is asked again for a little while; if any console ends up holding something else (history, dropped keys, a
+    /// desync), they never all match and this returns false.
+    async fn consoles_hold(&self, to: &[Uuid], open: &[String], line: &str) -> bool {
+        const TRIES: u32 = 50;
+        for attempt in 0..TRIES {
+            let all = to.iter().all(|id| {
+                self.shared
+                    .terminals
+                    .pane_info(*id)
+                    .and_then(|info| info.console)
+                    .is_some_and(|c| c.at_prompt && c.open == open && c.line == line)
+            });
+            if all {
+                return true;
+            }
+            if attempt + 1 < TRIES {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        }
+        false
+    }
+
+    /// BX-13: whether any target console is at its prompt. After [`Self::consoles_hold`] fails, this tells a console
+    /// holding the wrong line (at its prompt: a desync, refuse) apart from one running a statement (the line is its
+    /// input).
+    async fn any_console_at_prompt(&self, to: &[Uuid]) -> bool {
+        to.iter().any(|id| {
+            self.shared
+                .terminals
+                .pane_info(*id)
+                .and_then(|info| info.console)
+                .is_some_and(|c| c.at_prompt)
+        })
+    }
+
+    /// A line whose run key waits: recorded in each terminal (QL-12), sent to the bus as a
+    /// [`Command::TerminalLine`], and held until its job sends the keys (or its approval).
+    async fn hold(
+        &self,
+        state: &mut State,
+        line: HeldLine,
+        reached: Vec<Uuid>,
+        left_out: Vec<LeftOut>,
+    ) -> Result<InputOutcome> {
+        let HeldLine {
+            from,
+            to,
+            script,
+            unreliable,
+            keys,
+            after,
+            leaves_text,
+            run,
+        } = line;
         let line_id = Uuid::new_v4();
         // QL-12: each terminal gets its recording before anything can send the Enter (a Low line's
         // job may run before `submit` returns), through its input, so it comes first.
@@ -1531,9 +1863,11 @@ impl MultiExec {
         let outcome = match self.shared.bus.submit(&self.shared.workspace.get(), command).await {
             Ok(outcome) => outcome,
             Err(err) => {
-                // Nothing will press Enter: clear the line the terminals hold, so it can't run later.
+                // Nothing will press Enter: clear the line the terminals hold, so it can't run later (a PowerShell
+                // console drops a statement left open with it).
                 self.shared.recorder.discard(line_id);
                 self.interrupt(&to).await;
+                forget_open(state);
                 return Err(err);
             }
         };

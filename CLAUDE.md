@@ -93,7 +93,25 @@ crates/core/          remotely-core: all app logic
                       (set_other_users, from HostCounters::other_users_signed_in: WTSEnumerateSessionsW);
                       standing.rs VM-14, VM-27 evaluate_standing (a schedule rated as the highest of its commands, no
                       countdown) and PolicyRules::fingerprint (the tiers, thresholds, Prod rule, countdown and safety
-                      default that rate given actions)
+                      default that rate given actions);
+                      powershell.rs BX-13 the PowerShell rules (PolicyRules.powershell, serde default for rules saved
+                      before; validated, loosened and changes like the shell's): default read-only commands by full
+                      name (entry_problem: no alias, path, operator or RUNS_ANYTHING runner such as powershell, cmd,
+                      Invoke-Expression, Start-Process, Invoke-Command, Set-Alias, python*, scripts), default dangerous
+                      patterns ((?i), tested against the script as typed and each command's line), `writes` (forms of
+                      listed commands that write or wait for typed lines: ipconfig /release, ForEach-Object Kill or a
+                      block from a variable, nslookup with no name, netsh/sc.exe/reg/schtasks verbs; any argument known
+                      only at run time), and `parts`: a script is rated whole and as each statement PowerShell runs it
+                      as (console::statement_ranges: `-Command -` reads a line at a time, an empty line ends an open
+                      statement); powershell/parse.rs the parser (commands in pipelines, chains, blocks, parentheses,
+                      subexpressions and expandable strings; aliases resolved by ALIASES and command_key, programs
+                      without folder or .exe; `&` and `.`; nested powershell -Command/-EncodedCommand (decoded), cmd /c,
+                      Invoke-Expression and Start-Process followed 3 deep; en dashes and smart quotes read as PowerShell
+                      reads them); it fails closed: PsScript::unreadable (method calls but a few pure ones, & $x,
+                      dot-sourcing a script, file redirections, assignments to anything but a plain variable, splatting,
+                      --%, function definitions, class/using/param, anything left open, nesting past 64);
+                      PolicyEngine::evaluate_on rates each target's script in its own language (ScriptKind; the
+                      highest counts; Decision.script_kinds for the job runner) and classify_script_as
     presentation.rs   FD-03 presentation mode (saved, fail closed, audited) and ReadOnlyLock, which the store shares
                       with the bus and every service that edits the app's data (Change)
     workspaces.rs     FD-02 (migration 0029): Workspaces (create, rename, colour, archive, restore; audited in the
@@ -160,6 +178,9 @@ crates/core/          remotely-core: all app logic
                       timed; console.rs the PowerShell console: line editing, history, the prompt drawn from an OSC 7790
                       marker with a nonce, each statement one line (statement_line: the typed text single-quoted with
                       PowerShell's quotes doubled, [scriptblock]::Create, dot-sourced, then the marker), Syntax for `>>`;
+                      BX-13 statement_ends, statements and statement_ranges (what the console sends for typed lines,
+                      shared by the Editor, MultiExec and the PowerShell rules) and ConsoleStatus (at the prompt or
+                      running, lines held open; published by the Editor, read through PaneInfo.console);
                       MAX_SHELLS 4 a connection),
                       exec_output.rs (BX-02/BX-07 output cap, hashes,
                       secret scrubbing), host_counters.rs (MO-01 VM processes: vmware-vmx.exe, VirtualBoxVM.exe,
@@ -482,7 +503,15 @@ crates/core/          remotely-core: all app logic
                       the line rated on the bus (Command::TerminalLine; the bus and the job runner send only the held
                       keys of the rated line, check_keys), edit-and-execute keys refused (Ctrl+X Ctrl+E, v after Esc),
                       password prompts and full-screen programs passed straight through, QL-07 one LineFinished per
-                      line (never one notification per terminal); record.rs QL-12 MultiExec recording: each sent line's
+                      line (never one notification per terminal); BX-13 PowerShell tabs too, never with SSH tabs
+                      (set_targets refuses the mix, as the bus does a TerminalLine to both): multiexec/powershell.rs
+                      PsLine follows F4's console key for key (only CR or LF runs, also in a bracketed paste; Esc takes
+                      the next key; Up and Down make the line unreliable) and paste_lines; enter_powershell sends a line
+                      that only adds to an open statement at once, unrated, and holds the line that closes one, rated
+                      as every line from the statement's first (ps_open); consoles_hold: every tab's console at its
+                      prompt holding what MultiExec followed, else the line is unreliable and never sent unrated (a tab
+                      running a statement takes a typed line as input and may run it next: rated, passed straight
+                      through only at a password prompt); record.rs QL-12 MultiExec recording: each sent line's
                       output per terminal from Enter until the prompt is back (TextRenderer drops escapes and replays line
                       redraws; RecordSlot handed to the pane through its input before the Enter; Recorder keeps the
                       session's lines in memory with caps, grouped and diffed through bulk.rs); folder.rs SS-08 the
@@ -592,7 +621,9 @@ crates/core/          remotely-core: all app logic
                       Containers page, host details); SS-07 the first jump host's for a session behind one, never the
                       session itself
     bulk.rs           BX-01 targets (picked tabs, tree sessions, VMs, tags, filters; A4, H11 a VM only through a
-                      chosen or confirmed link, else ResolvedTargets::vms_unconfirmed), BX-03 grouped results and diff,
+                      chosen or confirmed link, else ResolvedTargets::vms_unconfirmed; BX-13 TargetPicks.winrm: WinRM
+                      sessions and PowerShell tabs are hosts for Compare hosts and support bundles, never the SS-09 key
+                      push; BulkHost.script_kind), BX-03 grouped results and diff,
                       BX-05 exports: the Terminal page's Compare output (running is RemoteExec on the bus); QL-12
                       recorded MultiExec lines group (group_with_output), diff and export (export_recorded, audited
                       multiexec_exported) through the same code; Reach: runs keep SSH sessions, F6's Ansible export
@@ -600,11 +631,14 @@ crates/core/          remotely-core: all app logic
     support_bundle/   FD-04 support bundles (no migration): spec.rs BundleSpec (Command::SupportBundle; presets expanded
                       into its items before the bus rates them; refused from the UI: the zip's place comes from the
                       shell's save dialog; never retried), its checks, entry names safe for Windows and the file name
-                      `remotely-bundle-<workspace>-<UTC time>.zip`; presets.rs PRESETS (System, Logs, Containers,
-                      Network) by HostKind, every command read-only by the default rules (policy/bundle_tests.rs);
+                      `remotely-bundle-<workspace>-<UTC time>.zip`; presets.rs PRESETS by HostKind (Linux: System, Logs,
+                      Containers, Network; BX-13 Windows: WindowsSystem, WindowsLogs, WindowsNetwork), every command
+                      read-only by that kind's default rules (policy/bundle_tests.rs); mod.rs keeps only the presets
+                      whose kind has a picked host, so the summary and audit never name a kind nobody picked;
                       collect.rs the BundleHost trait (SshHost: commands on a kept connection's exec channels, sudo
-                      through BX-07; files over SFTP on the same connection as the login user, ExecSession::files; F8
-                      adds Windows) and collect_host (caps 10 MB a file, 100 MB a host, 1 GB a bundle; ItemLimits: a
+                      through BX-07; files over SFTP on the same connection as the login user, ExecSession::files;
+                      BX-13 WinrmHost: commands in a PowerShell each, files by windows_read_script, one line after
+                      READ_FILE_MARKER, at most the cap plus a byte in base64) and collect_host (caps 10 MB a file, 100 MB a host, 1 GB a bundle; ItemLimits: a
                       command 60 s, a file read 180 s, then the item is noted as timed out and the host goes on;
                       exec_output's scrubber, redact_secrets and private keys: PEM and PGP blocks, a key whose BEGIN was
                       cut away, PuTTY's private lines, kubeconfig's client-key-data; a file with a NUL byte left out);
@@ -736,7 +770,8 @@ crates/core/          remotely-core: all app logic
     fakes/winrm_server.rs  F4 WinrmTestServer on 127.0.0.1: HTTPS (an rcgen certificate) with Basic, or HTTP with
                       NTLM and every message sealed (winrm_server/ntlm.rs: the server side of NTLMv2 with a MIC, MD4, RC4
                       and HMAC-MD5 written out, checked against MS-NLMP 4.2.4), and a toy PowerShell that answers the
-                      console, the metrics, facts and service reads; stats, rotated passwords, dropped connections
+                      console, the metrics, facts and service reads; stats, rotated passwords, dropped connections;
+                      BX-13 the Windows presets' reads and set_file for a bundle's file read
     fakes/github_server.rs  FD-14 fake GitHub API, github.com download links and release storage on 127.0.0.1
                       (private or public, rate limits), throwaway update-signing key
     fakes/net_tools.rs  FD-09 FakeNetworkTools: echoes along routes the test sets, DNS answers from a table, ports that
@@ -765,7 +800,9 @@ crates/core/          remotely-core: all app logic
                       rcgen certificate made at run time, jump hosts through the test SSH server, Wake-on-LAN to
                       127.0.0.1; consoles.rs: SS-12 RDP, VNC, Telnet, serial and tunnel tabs; winrm.rs: F4 the real client
                       (Windows' SSPI NTLM) against WinrmTestServer: the console, sealing, certificates, metrics, facts,
-                      service checks, parks, and F6's inventory and Ansible export of a Windows host; checks.rs: MO-08 on a
+                      service checks, parks, and F6's inventory and Ansible export of a Windows host; bulk_winrm.rs:
+                      BX-13 Compare hosts on WinRM hosts and with SSH hosts, retry and certificates, groups, Type in all
+                      tabs on PowerShell tabs, Windows support bundles; checks.rs: MO-08 on a
                       FakeClock with FakeNetworkTools, HTTP and TLS servers on 127.0.0.1 (rcgen), the test SSH server's
                       `systemctl is-active` and a jump host held to one login; file_server.rs: FD-09 TFTP and HTTP on
                       127.0.0.1 with port 0 and the test's own clients, folders made in the temp folder: every
@@ -874,7 +911,8 @@ src/                  React + TypeScript UI
                       SaveStatus (useSaveStatus, SaveStatus: "Saved" with Undo in a card's header; NumberSetting saves
                       on Enter or blur), ToolPathsCard (every tool path in one table, Change opens a dialog; qemu-img
                       too), ApprovalRulesCard (the summary, the change ID rule, PolicyRulesEditor under Advanced with
-                      its sticky Save bar); the Vault page's Unlocking card holds the Windows-login switch and warning;
+                      its sticky Save bar, Shell and BX-13 PowerShell tabs sharing a DangerousList); the Vault page's
+                      Unlocking card holds the Windows-login switch and warning;
                       UX-01 to UX-13 (0.6.0), the shared pieces every page uses ("UI rules" under Conventions):
                       PageHeader, HelpTip, Term, SelectionBar, RowMenu, EmptyState, Tip and ShowTipsAgainButton,
                       RefreshButton; FD-09 toolbox/: the Toolbox's tabs (ProbeTools: Ping, Trace route, DNS lookup,
@@ -925,7 +963,8 @@ src/                  React + TypeScript UI
                       multi-line confirm's preview; TerminalSettings.confirm_multiline_paste, on by default),
                       terminal-input.ts (SS-10 input told from xterm.js's replies to the host, which skip MultiExec:
                       xterm's internal onUserInput, checked by a test), session-kinds.ts (SS-12 each kind's defaults,
-                      ports, checks, one-line summaries and why a tab can't join), console-open.ts (SS-12 an RDP or VNC
+                      ports, checks, one-line summaries; BX-13 joinsTyping and typingKind: SSH or PowerShell panes join
+                      Type in all tabs, one kind at a time, and why a tab can't), console-open.ts (SS-12 an RDP or VNC
                       window from the Terminal or Sessions page; the presenting notice), multiexec.ts,
                       multiexec-groups.ts (QL-19 which
                       tabs a group picks or opens, saving picked tabs, editor checks), scrollback-search.ts (QL-18
@@ -974,7 +1013,8 @@ src/                  React + TypeScript UI
                       addresses as `mac-N`; FD-02 workspace names, `data-mask="workspace"`, learnWorkspace),
                       workspaces.ts and workspaces-api.ts (FD-02 checks and texts; wrappers that teach the masker every
                       workspace name), rollout.ts (H9 canary, stop after failures, retry choices),
-                      support-bundle.ts (FD-04 the dialog's typed lines, item count, QL-08 reasons and caps),
+                      support-bundle.ts (FD-04 the dialog's typed lines, item count, QL-08 reasons and caps; BX-13
+                      windowsPathProblem, per-kind item counts and shownPresets for the picked host kinds),
                       reports.ts and reports-api.ts (0.7.0 F6: local days as the core's range, the Activity filter as
                       days, the dialogs' QL-08 reasons and toasts; the exports' types and wrappers),
                       key-options.ts (SS-09 expiry-time and from for a pushed key),
@@ -1326,7 +1366,8 @@ ovftool 5.0, VirtualBox 7.2.22 and qemu-img 10.1 on images of a few MB.
 - WinRM (F4): never reach a real Windows host in a test. `tests/winrm.rs` runs the real client (Windows' SSPI NTLM on
   this PC, which sends nothing beyond 127.0.0.1) against `fakes::WinrmTestServer`, whose certificate rcgen makes at run
   time; its trust comes from `FakeNetworkTools::with_verdict`. Kerberos (my Windows sign-in) can only be tried by hand
-  against a domain host.
+  against a domain host. BX-13's bulk runs, PowerShell tabs in Type in all tabs and Windows bundles run against it too
+  (`tests/bulk_winrm.rs`); its toy PowerShell answers a few commands and reads, never a real cmdlet.
 - Don't connect to real SSH hosts in tests. Use a local test server or a fake: `fakes::ssh_server::TestSshServer`
   (russh on 127.0.0.1, keys made at run time; it can drop or freeze its connections, or refuse new ones for a while
   (`set_refusing`, R9 reconnect tests), and runs exec requests in a toy shell with sudo modes, /proc files, a `grep`

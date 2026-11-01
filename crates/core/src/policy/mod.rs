@@ -14,7 +14,7 @@
 
 #[cfg(test)]
 mod bundle_tests;
-mod commands;
+pub(crate) mod commands;
 #[cfg(test)]
 mod convert_tests;
 #[cfg(test)]
@@ -23,6 +23,9 @@ mod deploy_tests;
 mod file_server_tests;
 #[cfg(test)]
 mod host_networks_tests;
+pub(crate) mod powershell;
+#[cfg(test)]
+mod powershell_engine_tests;
 #[cfg(test)]
 mod stack_tests;
 mod standing;
@@ -33,13 +36,14 @@ mod vm_settings_tests;
 #[cfg(test)]
 mod wake_tests;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 
 use crate::adapters::containers::PruneWhat;
 use crate::adapters::remote::forward::ForwardKind;
+use crate::adapters::remote::ScriptKind;
 use crate::command_bus::{Command, ContainerOp, PowerOp, SnapshotOp, StopMode};
 use crate::domain::{Environment, Target, TargetRef};
 use crate::error::{CoreError, Result};
@@ -49,6 +53,7 @@ use crate::stacks::StackOp;
 use crate::vm_settings::{VmConfigEdit, VmDeviceOp, VmDiskOp, VmLifecycleOp};
 
 pub use commands::{default_dangerous_patterns, default_read_only_commands, DangerousPattern};
+pub use powershell::PowerShellRules;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -398,6 +403,9 @@ pub struct PolicyRules {
     pub read_only_commands: Vec<String>,
     pub countdown_seconds: u32,
     pub safety_snapshot_default: bool,
+    /// BX-13: the rules for PowerShell on WinRM hosts and PowerShell tabs. Rules saved before them get the defaults.
+    #[serde(default)]
+    pub powershell: PowerShellRules,
 }
 
 /// SS-08: replacing a file on a host always asks at least for a confirm.
@@ -556,6 +564,13 @@ impl PolicyRules {
         for entry in &mut self.read_only_commands {
             *entry = entry.split_whitespace().collect::<Vec<_>>().join(" ");
         }
+        for p in &mut self.powershell.dangerous_commands {
+            p.name = p.name.trim().to_owned();
+            p.pattern = p.pattern.trim().to_owned();
+        }
+        for entry in &mut self.powershell.read_only_commands {
+            *entry = powershell::squeeze(entry);
+        }
         self
     }
 
@@ -620,29 +635,23 @@ impl PolicyRules {
         if self.countdown_seconds > MAX_COUNTDOWN_SECONDS {
             return invalid("Countdown", format!("must be 0 to {MAX_COUNTDOWN_SECONDS} seconds"));
         }
-        let mut names = std::collections::HashSet::new();
-        for p in &self.dangerous_commands {
-            let label = if p.name.trim().is_empty() {
-                "Dangerous command"
-            } else {
-                p.name.as_str()
-            };
-            if p.name.trim().is_empty() {
-                return invalid(label, "give the pattern a name".into());
+        validate_patterns(&self.dangerous_commands, "Dangerous command", "")?;
+        // BX-13: the PowerShell rules, checked the same way; their messages say which list.
+        validate_patterns(
+            &self.powershell.dangerous_commands,
+            "Dangerous PowerShell command",
+            "another dangerous PowerShell rule has this name",
+        )?;
+        let mut ps_entries = std::collections::HashSet::new();
+        for entry in &self.powershell.read_only_commands {
+            if let Some(why) = powershell::entry_problem(entry) {
+                return invalid("Read-only PowerShell commands", why);
             }
-            if !names.insert(p.name.trim().to_lowercase()) {
-                return invalid(label, "another dangerous-command rule has this name".into());
-            }
-            if p.pattern.trim().is_empty() {
-                return invalid(label, "the pattern is empty".into());
-            }
-            match Regex::new(&p.pattern) {
-                Err(err) => return invalid(label, format!("not a valid regular expression: {err}")),
-                // A pattern that matches the empty string matches every command.
-                Ok(re) if re.is_match("") => {
-                    return invalid(label, "the pattern matches every command".into());
-                }
-                Ok(_) => {}
+            if !ps_entries.insert(powershell::squeeze(entry).to_lowercase()) {
+                return invalid(
+                    "Read-only PowerShell commands",
+                    format!("'{}' is listed twice", entry.trim()),
+                );
             }
         }
         let mut entries = std::collections::HashSet::new();
@@ -696,6 +705,27 @@ impl PolicyRules {
         for entry in &new.read_only_commands {
             if !known.contains(&squeeze(entry)) {
                 out.push(format!("'{}' counts as read-only", entry.trim()));
+            }
+        }
+        // BX-13: the PowerShell lists loosen the same ways.
+        for p in &self.powershell.dangerous_commands {
+            match new.powershell.dangerous_commands.iter().find(|n| n.name == p.name) {
+                None => out.push(format!("dangerous PowerShell command '{}' removed", p.name)),
+                Some(n) if n.pattern != p.pattern => {
+                    out.push(format!("dangerous PowerShell command '{}' changed", p.name))
+                }
+                Some(_) => {}
+            }
+        }
+        let known_ps: std::collections::HashSet<String> = self
+            .powershell
+            .read_only_commands
+            .iter()
+            .map(|e| powershell::squeeze(e).to_lowercase())
+            .collect();
+        for entry in &new.powershell.read_only_commands {
+            if !known_ps.contains(&powershell::squeeze(entry).to_lowercase()) {
+                out.push(format!("'{}' counts as read-only in PowerShell", entry.trim()));
             }
         }
         if new.bulk_threshold > self.bulk_threshold {
@@ -795,6 +825,35 @@ impl PolicyRules {
                 out.push(format!("Read-only command removed: {entry}"));
             }
         }
+        let (old_ps, new_ps) = (&self.powershell, &new.powershell);
+        for p in &new_ps.dangerous_commands {
+            match old_ps.dangerous_commands.iter().find(|old| old.name == p.name) {
+                None => out.push(format!(
+                    "Dangerous PowerShell command added: {} = {}",
+                    p.name, p.pattern
+                )),
+                Some(old) if old.pattern != p.pattern => out.push(format!(
+                    "Dangerous PowerShell command changed: {} = {} -> {}",
+                    p.name, old.pattern, p.pattern
+                )),
+                Some(_) => {}
+            }
+        }
+        for p in &old_ps.dangerous_commands {
+            if !new_ps.dangerous_commands.iter().any(|n| n.name == p.name) {
+                out.push(format!("Dangerous PowerShell command removed: {}", p.name));
+            }
+        }
+        for entry in &new_ps.read_only_commands {
+            if !old_ps.read_only_commands.contains(entry) {
+                out.push(format!("Read-only PowerShell command added: {entry}"));
+            }
+        }
+        for entry in &old_ps.read_only_commands {
+            if !new_ps.read_only_commands.contains(entry) {
+                out.push(format!("Read-only PowerShell command removed: {entry}"));
+            }
+        }
         out
     }
 
@@ -804,6 +863,67 @@ impl PolicyRules {
         for (kind, rule) in PolicyRules::default().tiers {
             self.tiers.entry(kind).or_insert(rule);
         }
+    }
+}
+
+/// AP-01, BX-06, BX-13: a list of dangerous-command rules: each named once, with a pattern that compiles and doesn't
+/// match every command. `label` names an unnamed rule; `taken` says a name is used twice (the shell list's words when
+/// empty).
+fn validate_patterns(patterns: &[DangerousPattern], label: &str, taken: &str) -> Result<()> {
+    let invalid = |name: &str, message: String| {
+        Err(CoreError::InvalidRule {
+            name: name.to_owned(),
+            message,
+        })
+    };
+    let mut names = std::collections::HashSet::new();
+    for p in patterns {
+        let shown = if p.name.trim().is_empty() {
+            label
+        } else {
+            p.name.as_str()
+        };
+        if p.name.trim().is_empty() {
+            return invalid(shown, "give the pattern a name".into());
+        }
+        if !names.insert(p.name.trim().to_lowercase()) {
+            let message = if taken.is_empty() {
+                "another dangerous-command rule has this name"
+            } else {
+                taken
+            };
+            return invalid(shown, message.into());
+        }
+        if p.pattern.trim().is_empty() {
+            return invalid(shown, "the pattern is empty".into());
+        }
+        match Regex::new(&p.pattern) {
+            Err(err) => return invalid(shown, format!("not a valid regular expression: {err}")),
+            // A pattern that matches the empty string matches every command.
+            Ok(re) if re.is_match("") => {
+                return invalid(shown, "the pattern matches every command".into());
+            }
+            Ok(_) => {}
+        }
+    }
+    Ok(())
+}
+
+/// The severity order of the three exec actions (BX-06): dangerous, then other, then read-only.
+fn exec_rank(kind: ActionKind) -> u8 {
+    match kind {
+        ActionKind::ExecDangerous => 2,
+        ActionKind::ExecOther => 1,
+        _ => 0,
+    }
+}
+
+/// An exec action in one word, for reasons.
+fn exec_word(kind: ActionKind) -> &'static str {
+    match kind {
+        ActionKind::ExecDangerous => "dangerous",
+        ActionKind::ExecReadOnly => "read-only",
+        _ => "other",
     }
 }
 
@@ -969,6 +1089,7 @@ impl Default for PolicyRules {
             read_only_commands: default_read_only_commands(),
             countdown_seconds: 10,
             safety_snapshot_default: true,
+            powershell: PowerShellRules::default(),
         }
     }
 }
@@ -1000,6 +1121,10 @@ pub struct Decision {
     pub reasons: Vec<String>,
     /// Problems found before the action, e.g. not enough host RAM (VM-07). The user must see them.
     pub warnings: Vec<String>,
+    /// BX-13: the language each target's script was rated in, by target key (`targets` only; none for actions without
+    /// a script). The job runner checks the connection runs that language before it runs anything.
+    #[serde(skip)]
+    pub script_kinds: BTreeMap<String, ScriptKind>,
 }
 
 impl Decision {
@@ -1020,29 +1145,46 @@ impl Decision {
 pub struct PolicyEngine {
     rules: PolicyRules,
     dangerous: Vec<(String, Regex)>,
+    /// BX-13: the PowerShell rules' dangerous commands, compiled.
+    ps_dangerous: Vec<(String, Regex)>,
     /// SS-07: other users signed in to this PC, as last read ([`PolicyEngine::set_other_users`]).
     other_users: usize,
+}
+
+fn compile_patterns(patterns: &[DangerousPattern]) -> Result<Vec<(String, Regex)>> {
+    patterns
+        .iter()
+        .map(|p| {
+            Regex::new(&p.pattern)
+                .map(|re| (p.name.clone(), re))
+                .map_err(|e| CoreError::InvalidRule {
+                    name: p.name.clone(),
+                    message: e.to_string(),
+                })
+        })
+        .collect()
+}
+
+/// BX-13: the languages a command's scripts are rated in, each once: POSIX when nothing says otherwise.
+fn languages(kinds: &[ScriptKind]) -> Vec<ScriptKind> {
+    let set: BTreeSet<ScriptKind> = kinds.iter().copied().collect();
+    if set.is_empty() {
+        vec![ScriptKind::Posix]
+    } else {
+        set.into_iter().collect()
+    }
 }
 
 impl PolicyEngine {
     /// Fails with the first problem [`PolicyRules::validate`] finds.
     pub fn new(rules: PolicyRules) -> Result<Self> {
         rules.validate()?;
-        let dangerous = rules
-            .dangerous_commands
-            .iter()
-            .map(|p| {
-                Regex::new(&p.pattern)
-                    .map(|re| (p.name.clone(), re))
-                    .map_err(|e| CoreError::InvalidRule {
-                        name: p.name.clone(),
-                        message: e.to_string(),
-                    })
-            })
-            .collect::<Result<Vec<_>>>()?;
+        let dangerous = compile_patterns(&rules.dangerous_commands)?;
+        let ps_dangerous = compile_patterns(&rules.powershell.dangerous_commands)?;
         Ok(Self {
             rules,
             dangerous,
+            ps_dangerous,
             other_users: 0,
         })
     }
@@ -1092,14 +1234,49 @@ impl PolicyEngine {
         typed.into_iter().chain(read).min()
     }
 
+    /// BX-13: each PowerShell command of the script on one line, as the parser reads it, with where its statement starts.
+    fn ps_command_lines(script: &str) -> Vec<(usize, String)> {
+        powershell::commands(script)
+            .into_iter()
+            .map(|c| (c.at, c.line()))
+            .collect()
+    }
+
+    /// BX-13: the dangerous-command rules of the language `kind` the script matches.
+    pub fn dangerous_matches_as(&self, script: &str, kind: ScriptKind) -> Vec<String> {
+        match kind {
+            ScriptKind::Posix => self.dangerous_matches(script),
+            ScriptKind::PowerShell => {
+                let lines = Self::ps_command_lines(script);
+                self.ps_dangerous
+                    .iter()
+                    .filter(|(_, re)| Self::first_match(re, script, &lines).is_some())
+                    .map(|(name, _)| name.clone())
+                    .collect()
+            }
+        }
+    }
+
     /// BX-06: each rule the script matches, with the line of its first match, so the editor and the
     /// approval dialog can show why the command needs approval.
     pub fn dangerous_details(&self, script: &str) -> Vec<DangerousMatch> {
         let lines = Self::command_lines(script);
-        self.dangerous
+        Self::details(&self.dangerous, script, &lines)
+    }
+
+    /// BX-13: the same for the rules of the language `kind`.
+    pub fn dangerous_details_as(&self, script: &str, kind: ScriptKind) -> Vec<DangerousMatch> {
+        match kind {
+            ScriptKind::Posix => self.dangerous_details(script),
+            ScriptKind::PowerShell => Self::details(&self.ps_dangerous, script, &Self::ps_command_lines(script)),
+        }
+    }
+
+    fn details(rules: &[(String, Regex)], script: &str, lines: &[(usize, String)]) -> Vec<DangerousMatch> {
+        rules
             .iter()
             .filter_map(|(name, re)| {
-                let start = Self::first_match(re, script, &lines)?;
+                let start = Self::first_match(re, script, lines)?;
                 let line_start = script[..start].rfind('\n').map_or(0, |i| i + 1);
                 let line_end = script[start..].find('\n').map_or(script.len(), |i| start + i);
                 let text: String = script[line_start..line_end].trim().chars().take(200).collect();
@@ -1113,6 +1290,52 @@ impl PolicyEngine {
     }
 
     pub fn classify(&self, command: &Command) -> ActionKind {
+        self.classify_on(command, &[])
+    }
+
+    /// BX-13: as [`Self::classify`], with a command's script rated in each language among `kinds` (its targets': shell
+    /// for SSH hosts and tabs, PowerShell for WinRM hosts and PowerShell tabs), the highest result counting. Empty:
+    /// the shell's.
+    pub fn classify_on(&self, command: &Command, kinds: &[ScriptKind]) -> ActionKind {
+        if command.rated_script().is_some() {
+            return languages(kinds)
+                .into_iter()
+                .map(|kind| self.classify_script_command(command, kind))
+                .max_by_key(|kind| exec_rank(*kind))
+                .unwrap_or(ActionKind::ExecOther);
+        }
+        self.classify_action(command)
+    }
+
+    /// A command with a script (a Compare hosts run, a Type in all tabs line, a support bundle), rated in one language.
+    fn classify_script_command(&self, command: &Command, kind: ScriptKind) -> ActionKind {
+        match command {
+            Command::RemoteExec { script, .. } => self.classify_script_as(script, kind),
+            // SS-10: a MultiExec line is rated like a bulk run's command. When Remotely could not follow what was typed,
+            // the shells may run something else, so it is never read-only; nor is a pager or editor in a shell, which
+            // stays open in every terminal and runs `!command` typed into it.
+            Command::TerminalLine { line, unreliable, .. } => match self.classify_script_as(line, kind) {
+                ActionKind::ExecReadOnly
+                    if *unreliable || (kind == ScriptKind::Posix && commands::interactive_program(line).is_some()) =>
+                {
+                    ActionKind::ExecOther
+                }
+                rated => rated,
+            },
+            // FD-04: its commands; its files are read as the login user, which only reads, so a bundle of files alone is
+            // read-only. BX-13: a Windows host's commands are its own. Review C1: each item runs on its own on the host,
+            // so each is rated on its own and the highest counts (joined, one could hide another).
+            Command::SupportBundle { .. } => command
+                .rated_scripts_for(kind)
+                .iter()
+                .map(|script| self.classify_script_as(script, kind))
+                .max_by_key(|action| exec_rank(*action))
+                .unwrap_or(ActionKind::ExecReadOnly),
+            _ => self.classify_action(command),
+        }
+    }
+
+    fn classify_action(&self, command: &Command) -> ActionKind {
         match command {
             Command::VmPower { op, .. } => power_kind(op),
             // VM-08: an instance's deploy is a deploy of all its VMs, its start or stop the power action on them.
@@ -1128,19 +1351,12 @@ impl PolicyEngine {
             },
             Command::VmProtect { protected: true, .. } => ActionKind::VmProtect,
             Command::VmProtect { protected: false, .. } => ActionKind::VmUnprotect,
-            Command::RemoteExec { script, .. } => self.classify_script(script),
+            Command::RemoteExec { .. } | Command::TerminalLine { .. } | Command::SupportBundle { .. } => {
+                self.classify_script_command(command, ScriptKind::Posix)
+            }
             Command::AppUpdate { .. } => ActionKind::AppUpdate,
             Command::PushSshKey { .. } => ActionKind::SshKeyPush,
             Command::RemoveSshKey { .. } => ActionKind::SshKeyRemove,
-            // SS-10: a MultiExec line is rated like a bulk run's command. When Remotely could not follow
-            // what was typed, the shells may run something else, so it is never read-only; nor is a
-            // pager or editor, which stays open in every terminal and runs `!command` typed into it.
-            Command::TerminalLine { line, unreliable, .. } => match self.classify_script(line) {
-                ActionKind::ExecReadOnly if *unreliable || commands::interactive_program(line).is_some() => {
-                    ActionKind::ExecOther
-                }
-                kind => kind,
-            },
             // SS-08: replacing a file loses what was there; adding one does not.
             Command::FileUpload { files, .. } if files.iter().any(|f| f.replace) => ActionKind::FileReplace,
             Command::FileUpload { .. } => ActionKind::FileUpload,
@@ -1193,16 +1409,6 @@ impl PolicyEngine {
             Command::Deploy { .. } => ActionKind::VmDeploy,
             Command::ImageConvert { .. } => ActionKind::ImageConvert,
             Command::VmExport { .. } => ActionKind::VmExport,
-            // FD-04: its commands, rated together as a Compare hosts run's script; its files are read over SFTP as
-            // the login user, which only reads, so a bundle of files alone is read-only.
-            Command::SupportBundle { spec, .. } => {
-                let script = spec.rated_script();
-                if script.trim().is_empty() {
-                    ActionKind::ExecReadOnly
-                } else {
-                    self.classify_script(&script)
-                }
-            }
             Command::WakeOnLan { .. } => ActionKind::WakeOnLan,
             // FD-09: accepting uploads lets other computers write files onto this PC.
             Command::FileServer { spec, .. } if spec.uploads.is_some() => ActionKind::FileServerUploads,
@@ -1227,13 +1433,64 @@ impl PolicyEngine {
         }
     }
 
+    /// BX-13: a script on its own in the language `kind` runs in: the shell's rules for POSIX, the PowerShell rules for
+    /// PowerShell (dangerous, read-only, or other; anything the parser can't read is other).
+    pub fn classify_script_as(&self, script: &str, kind: ScriptKind) -> ActionKind {
+        match kind {
+            ScriptKind::Posix => self.classify_script(script),
+            ScriptKind::PowerShell => {
+                if !self.dangerous_matches_as(script, kind).is_empty() {
+                    ActionKind::ExecDangerous
+                } else if powershell::is_read_only(script, &self.rules.powershell.read_only_commands) {
+                    ActionKind::ExecReadOnly
+                } else {
+                    ActionKind::ExecOther
+                }
+            }
+        }
+    }
+
     /// `targets` are the command's targets after lookup, in the same order.
     pub fn evaluate(&self, command: &Command, targets: &[Target]) -> Decision {
-        let action = self.classify(command);
+        self.evaluate_on(command, targets, &[])
+    }
+
+    /// BX-13: as [`Self::evaluate`], with `kinds[i]` the language `targets[i]` runs scripts in (a WinRM host or a
+    /// PowerShell tab: PowerShell). Each target's script is rated by its own language's rules and the highest counts.
+    /// Empty: every target's is the shell's.
+    pub fn evaluate_on(&self, command: &Command, targets: &[Target], kinds: &[ScriptKind]) -> Decision {
+        let kind_of = |i: usize| kinds.get(i).copied().unwrap_or_default();
+        let action = self.classify_on(command, kinds);
         // AP-04: actions skip protected targets, except the one that changes protection.
         let skips_protected = !matches!(action, ActionKind::VmProtect | ActionKind::VmUnprotect);
-        let (skipped, active): (Vec<Target>, Vec<Target>) =
-            targets.iter().cloned().partition(|t| skips_protected && t.protected);
+        let mut skipped = Vec::new();
+        let mut active = Vec::new();
+        let mut active_kinds = Vec::new();
+        for (i, target) in targets.iter().enumerate() {
+            if skips_protected && target.protected {
+                skipped.push(target.clone());
+            } else {
+                active.push(target.clone());
+                active_kinds.push(kind_of(i));
+            }
+        }
+        let scripted = command.rated_script().is_some();
+        // The protected targets left out may have been the only ones of a language: rate what runs.
+        let action = if scripted && !kinds.is_empty() {
+            self.classify_on(command, &active_kinds)
+        } else {
+            action
+        };
+        let script_kinds: BTreeMap<String, ScriptKind> = if scripted {
+            active
+                .iter()
+                .zip(&active_kinds)
+                .map(|(t, k)| (t.target.key(), *k))
+                .collect()
+        } else {
+            BTreeMap::new()
+        };
+        let langs = languages(if scripted { &active_kinds } else { &[] });
         let mut reasons = Vec::new();
 
         let mut tier = self.rules.tier_for(action, active.len());
@@ -1272,7 +1529,8 @@ impl PolicyEngine {
             if commands > 0 {
                 what.push(match commands {
                     1 => "its 1 command is rated as a Compare hosts run".to_owned(),
-                    n => format!("its {n} commands are rated together as a Compare hosts run"),
+                    // Review C1: each item runs on its own, so each is rated on its own and the highest counts.
+                    n => format!("its {n} commands are each rated as a Compare hosts run"),
                 });
             }
             if files > 0 {
@@ -1281,18 +1539,90 @@ impl PolicyEngine {
                     n => format!("its {n} files are read over SFTP as the login user, never with sudo"),
                 });
             }
+            // BX-13: a Windows host's own items.
+            let windows_commands = spec.windows_commands().count();
+            let windows_files = spec.windows_files().count();
+            if windows_commands > 0 {
+                what.push(match windows_commands {
+                    1 => "its 1 Windows command is rated by the PowerShell rules".to_owned(),
+                    n => format!("its {n} Windows commands are each rated by the PowerShell rules"),
+                });
+            }
+            if windows_files > 0 {
+                what.push(match windows_files {
+                    1 => "its 1 Windows file is read by PowerShell as the sign-in user".to_owned(),
+                    n => format!("its {n} Windows files are read by PowerShell as the sign-in user"),
+                });
+            }
             reasons.push(format!("support bundle: {}", what.join("; ")));
         }
 
-        if let Some(script) = command.rated_script() {
-            let script = script.as_ref();
-            let hits = self.dangerous_matches(script);
-            if !hits.is_empty() {
-                reasons.push(format!("flagged dangerous: {}", hits.join(", ")));
+        // BX-13: which rules rated the script, when PowerShell's did.
+        if scripted && langs.contains(&ScriptKind::PowerShell) {
+            let count = |kind: ScriptKind| active_kinds.iter().filter(|k| **k == kind).count();
+            let noun = |n: usize| {
+                if n == 1 {
+                    "1 target".to_owned()
+                } else {
+                    format!("{n} targets")
+                }
+            };
+            let rated = |kind: ScriptKind| exec_word(self.classify_script_command(command, kind));
+            if langs.len() == 1 {
+                reasons.push("rated by the PowerShell rules".into());
+            } else {
+                reasons.push(format!(
+                    "each target is rated by its own rules, the highest counting: the shell's for {} ({}), PowerShell's \
+                     for {} ({})",
+                    noun(count(ScriptKind::Posix)),
+                    rated(ScriptKind::Posix),
+                    noun(count(ScriptKind::PowerShell)),
+                    rated(ScriptKind::PowerShell)
+                ));
             }
+        }
+
+        let mut hits: Vec<String> = Vec::new();
+        let mut found_actions = Vec::new();
+        for lang in if scripted { langs.clone() } else { Vec::new() } {
+            // Review C1: a support bundle's items each run on their own, so each is rated on its own here too.
+            for script in command.rated_scripts_for(lang) {
+                let script = script.as_ref();
+                for hit in self.dangerous_matches_as(script, lang) {
+                    if !hits.contains(&hit) {
+                        hits.push(hit);
+                    }
+                }
+                let shell_commands = match lang {
+                    ScriptKind::Posix => commands::shell_commands(script),
+                    // BX-13: a PowerShell command as words, so `docker volume prune` on a Windows host is found too.
+                    ScriptKind::PowerShell => powershell::commands(script)
+                        .into_iter()
+                        .map(|c| commands::ShellCommand {
+                            at: c.at,
+                            words: std::iter::once(c.name)
+                                .chain(c.args.into_iter().map(|a| a.text))
+                                .collect(),
+                        })
+                        .collect(),
+                };
+                for found in commands::container_actions(&shell_commands) {
+                    if !found_actions
+                        .iter()
+                        .any(|f: &commands::ContainerAction| f.what == found.what)
+                    {
+                        found_actions.push(found);
+                    }
+                }
+            }
+        }
+        if !hits.is_empty() {
+            reasons.push(format!("flagged dangerous: {}", hits.join(", ")));
+        }
+        {
             // CT-01, BX-06: a prune or a volume removal is rated at least like the same action on the
             // Containers page, so editing that rule changes both.
-            for found in commands::container_actions(&commands::shell_commands(script)) {
+            for found in found_actions {
                 let Some((kind, floor)) = found
                     .kinds
                     .iter()
@@ -1479,6 +1809,7 @@ impl PolicyEngine {
             skipped,
             reasons,
             warnings: Vec::new(),
+            script_kinds,
         }
     }
 

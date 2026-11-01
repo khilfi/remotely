@@ -48,7 +48,16 @@ import {
 import { plural } from "@/lib/format";
 import { readOnlyLocked } from "@/lib/presentation-state";
 import { compareOptionsSummary, parseStopAfter } from "@/lib/rollout";
-import { collectReason, itemCount, lines, pathProblem, presetItemsText, stepsText } from "@/lib/support-bundle";
+import {
+  collectReason,
+  itemCount,
+  lines,
+  pathProblem,
+  presetItemsText,
+  shownPresets,
+  stepsText,
+  windowsPathProblem,
+} from "@/lib/support-bundle";
 import { cn } from "@/lib/utils";
 
 interface Props {
@@ -65,7 +74,8 @@ interface Props {
 /** sudo gets each session's own login password. */
 const LOGIN = "login";
 const DEFAULT_TIMEOUT = "600";
-const DEFAULT_PRESETS: BundlePresetId[] = ["system", "logs"];
+// BX-13: the Windows ones too; each kind of host gets its own.
+const DEFAULT_PRESETS: BundlePresetId[] = ["system", "logs", "windowsSystem", "windowsLogs"];
 /** The job ended with a zip saved (some hosts may have failed). */
 const SAVED: JobStatus[] = ["succeeded", "partially_failed"];
 
@@ -77,7 +87,10 @@ export function SupportBundleDialog({ sessionIds, vault, onSubmit, onOpenSession
   const [chosen, setChosen] = useState<BundlePresetId[]>(DEFAULT_PRESETS);
   const [commandsText, setCommandsText] = useState("");
   const [filesText, setFilesText] = useState("");
-  const [picks, setPicks] = useState<TargetPicks>({ sessionIds });
+  const [windowsCommandsText, setWindowsCommandsText] = useState("");
+  const [windowsFilesText, setWindowsFilesText] = useState("");
+  // BX-13: WinRM sessions are hosts too.
+  const [picks, setPicks] = useState<TargetPicks>({ sessionIds, winrm: true });
   const [resolved, setResolved] = useState<ResolvedTargets | null>(null);
   const [secrets, setSecrets] = useState<SecretMeta[]>([]);
   const [sudo, setSudo] = useState(false);
@@ -95,36 +108,49 @@ export function SupportBundleDialog({ sessionIds, vault, onSubmit, onOpenSession
 
   const hosts = resolved?.hosts ?? [];
   const reach = hosts.filter((h) => !h.protected).length;
-  const commands = lines(commandsText);
-  const files = lines(filesText);
+  const windowsHosts = hosts.filter((h) => h.scriptKind === "powerShell").length;
+  const linuxHosts = hosts.length - windowsHosts;
+  // Review D2: a kind's commands and files count only while a host of that kind is picked, so a hidden box's text (or
+  // a bad path in it) never affects the bundle.
+  const commands = linuxHosts > 0 ? lines(commandsText) : [];
+  const files = linuxHosts > 0 ? lines(filesText) : [];
+  const windowsCommands = windowsHosts > 0 ? lines(windowsCommandsText) : [];
+  const windowsFiles = windowsHosts > 0 ? lines(windowsFilesText) : [];
   const timeoutSecs = timeout.trim() === "" ? null : Number(timeout);
   const timeoutOk =
     timeoutSecs === null || (Number.isInteger(timeoutSecs) && timeoutSecs >= 1 && timeoutSecs <= 86_400);
   const stopAfterParsed = parseStopAfter(stopAfter);
+  // Review D1: only the presets for a picked host kind are sent, so the summary, audit and manifest never name a
+  // preset of a kind nobody picked.
+  const shownChosen = new Set(shownPresets(presets, linuxHosts, windowsHosts).map((p) => p.id));
   const request: BundleRequest = {
     sessionIds: hosts.map((h) => h.sessionId),
-    presets: chosen,
+    presets: chosen.filter((id) => shownChosen.has(id)),
     commands,
     files,
-    sudo,
-    sudoPasswordId: sudo && sudoPassword !== LOGIN ? sudoPassword : null,
+    windowsCommands,
+    windowsFiles,
+    sudo: sudo && linuxHosts > 0,
+    sudoPasswordId: sudo && linuxHosts > 0 && sudoPassword !== LOGIN ? sudoPassword : null,
     trustNewHostKeys: trustNew,
     timeoutSecs: timeoutOk ? timeoutSecs : null,
     rollout: { canary, stopAfterFailures: stopAfterParsed.value },
   };
   const requestKey = JSON.stringify(request);
-  const items = itemCount(presets, chosen, commands, files);
+  const items = itemCount(presets, request.presets, commands, files, "linux");
+  const windowsItems = itemCount(presets, request.presets, windowsCommands, windowsFiles, "windows");
   const notReady = collectReason({
     readOnly: readOnlyLocked(presentation),
     hosts,
     items,
+    windowsItems,
     maxItems: limits?.maxItems ?? 100,
-    pathProblem: pathProblem(files),
+    pathProblem: pathProblem(files) ?? windowsPathProblem(windowsFiles),
     timeoutOk,
     stopAfterOk: stopAfterParsed.ok,
     submitting: busy,
   });
-  const shownPreview = reach > 0 && items > 0 && preview?.key === requestKey ? preview.preview : null;
+  const shownPreview = reach > 0 && items + windowsItems > 0 && preview?.key === requestKey ? preview.preview : null;
   const optionsSummary = compareOptionsSummary({
     sudo,
     trustNewKeys: trustNew,
@@ -252,14 +278,15 @@ export function SupportBundleDialog({ sessionIds, vault, onSubmit, onOpenSession
             <BulkTargetPicker
               active
               picks={picks}
-              onPicksChange={setPicks}
+              onPicksChange={(next) => setPicks({ ...next, winrm: true })}
               resolved={resolved}
               onOpenSessions={onOpenSessions}
+              winrm
             />
 
             <fieldset className="grid gap-2">
               <legend className="mb-1 text-sm font-medium">What to collect</legend>
-              {presets.map((p) => (
+              {shownPresets(presets, linuxHosts, windowsHosts).map((p) => (
                 <div key={p.id} className="flex items-start gap-3">
                   <Checkbox
                     id={`bundle-preset-${p.id}`}
@@ -270,6 +297,11 @@ export function SupportBundleDialog({ sessionIds, vault, onSubmit, onOpenSession
                   <div className="grid min-w-0 gap-0.5">
                     <Label htmlFor={`bundle-preset-${p.id}`} className="font-normal">
                       {p.label}
+                      {linuxHosts > 0 && windowsHosts > 0 && (
+                        <span className="text-muted-foreground">
+                          {p.hostKind === "windows" ? " (Windows hosts)" : " (Linux hosts)"}
+                        </span>
+                      )}
                     </Label>
                     <p className="text-xs break-words text-muted-foreground" title={presetItemsText(p)}>
                       {p.description}
@@ -279,33 +311,70 @@ export function SupportBundleDialog({ sessionIds, vault, onSubmit, onOpenSession
               ))}
             </fieldset>
 
-            <div className="grid gap-4 sm:grid-cols-2">
-              <div className="grid gap-1.5">
-                <Label htmlFor="bundle-commands">More commands, one per line</Label>
-                <Textarea
-                  id="bundle-commands"
-                  rows={3}
-                  spellCheck={false}
-                  className="font-mono text-xs"
-                  placeholder="journalctl -u nginx -n 200"
-                  value={commandsText}
-                  onChange={(e) => setCommandsText(e.currentTarget.value)}
-                />
+            {/* Review D2: the Linux boxes show only while a Linux host is picked. */}
+            {linuxHosts > 0 && (
+              <div className="grid gap-4 sm:grid-cols-2">
+                <div className="grid gap-1.5">
+                  <Label htmlFor="bundle-commands">
+                    {windowsHosts > 0 ? "More commands for Linux hosts, one per line" : "More commands, one per line"}
+                  </Label>
+                  <Textarea
+                    id="bundle-commands"
+                    rows={3}
+                    spellCheck={false}
+                    className="font-mono text-xs"
+                    placeholder="journalctl -u nginx -n 200"
+                    value={commandsText}
+                    onChange={(e) => setCommandsText(e.currentTarget.value)}
+                  />
+                </div>
+                <div className="grid gap-1.5">
+                  <Label htmlFor="bundle-files">
+                    {windowsHosts > 0 ? "Linux files, one full path per line" : "Files, one full path per line"}
+                  </Label>
+                  <Textarea
+                    id="bundle-files"
+                    rows={3}
+                    spellCheck={false}
+                    className="font-mono text-xs"
+                    placeholder="/etc/nginx/nginx.conf"
+                    value={filesText}
+                    onChange={(e) => setFilesText(e.currentTarget.value)}
+                    aria-invalid={pathProblem(files) ? true : undefined}
+                  />
+                </div>
               </div>
-              <div className="grid gap-1.5">
-                <Label htmlFor="bundle-files">Files, one full path per line</Label>
-                <Textarea
-                  id="bundle-files"
-                  rows={3}
-                  spellCheck={false}
-                  className="font-mono text-xs"
-                  placeholder="/etc/nginx/nginx.conf"
-                  value={filesText}
-                  onChange={(e) => setFilesText(e.currentTarget.value)}
-                  aria-invalid={pathProblem(files) ? true : undefined}
-                />
+            )}
+
+            {windowsHosts > 0 && (
+              <div className="grid gap-4 sm:grid-cols-2">
+                <div className="grid gap-1.5">
+                  <Label htmlFor="bundle-windows-commands">More PowerShell commands for Windows hosts</Label>
+                  <Textarea
+                    id="bundle-windows-commands"
+                    rows={3}
+                    spellCheck={false}
+                    className="font-mono text-xs"
+                    placeholder="Get-EventLog -LogName Application -Newest 100"
+                    value={windowsCommandsText}
+                    onChange={(e) => setWindowsCommandsText(e.currentTarget.value)}
+                  />
+                </div>
+                <div className="grid gap-1.5">
+                  <Label htmlFor="bundle-windows-files">Windows files, one full path per line</Label>
+                  <Textarea
+                    id="bundle-windows-files"
+                    rows={3}
+                    spellCheck={false}
+                    className="font-mono text-xs"
+                    placeholder="C:\ProgramData\App\app.log"
+                    value={windowsFilesText}
+                    onChange={(e) => setWindowsFilesText(e.currentTarget.value)}
+                    aria-invalid={windowsPathProblem(windowsFiles) ? true : undefined}
+                  />
+                </div>
               </div>
-            </div>
+            )}
 
             <Collapsible open={optionsOpen} onOpenChange={setOptionsOpen} className="min-w-0 rounded-md border">
               <CollapsibleTrigger asChild>
@@ -322,12 +391,24 @@ export function SupportBundleDialog({ sessionIds, vault, onSubmit, onOpenSession
                 </button>
               </CollapsibleTrigger>
               <CollapsibleContent className="grid gap-3 border-t p-3">
-                <div className="flex items-center gap-3">
-                  <Switch id="bundle-sudo" checked={sudo} onCheckedChange={setSudo} />
-                  <Label htmlFor="bundle-sudo" className="font-normal">
-                    Run the commands with sudo
-                  </Label>
-                </div>
+                {/* Review D8: sudo is for Linux hosts; with only Windows hosts picked it does nothing, so it is off. */}
+                <WhyDisabled
+                  reason={
+                    linuxHosts === 0 ? "sudo is for Linux hosts; the Windows hosts run as the sign-in user" : null
+                  }
+                >
+                  <div className="flex items-center gap-3">
+                    <Switch
+                      id="bundle-sudo"
+                      checked={sudo && linuxHosts > 0}
+                      disabled={linuxHosts === 0}
+                      onCheckedChange={setSudo}
+                    />
+                    <Label htmlFor="bundle-sudo" className="font-normal">
+                      {windowsHosts > 0 ? "Run the Linux hosts' commands with sudo" : "Run the commands with sudo"}
+                    </Label>
+                  </div>
+                </WhyDisabled>
                 {sudo && (
                   <div className="grid min-w-0 gap-1.5 pl-12">
                     <Label htmlFor="bundle-sudo-password" className="font-normal text-muted-foreground">

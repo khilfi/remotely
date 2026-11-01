@@ -140,6 +140,10 @@ pub trait WinrmSession: ExecSession {
     async fn read(&self, script: &str, max_output: usize, deadline: Duration) -> Result<String>;
     /// This connection as an [`ExecSession`], for code that takes one.
     fn exec(self: Arc<Self>) -> Arc<dyn ExecSession>;
+    /// Review C4: what the journal records as this connection's host key: `tls-certificate SHA256:…` for the leaf
+    /// certificate of an HTTPS host (whether Windows or a trusted fingerprint accepted it), or `http` for an HTTP
+    /// host. `None` when no certificate was seen.
+    fn host_key(&self) -> Option<String>;
 }
 
 /// The adapter until Core gives the real one: every connection is refused.
@@ -321,6 +325,10 @@ impl WinrmSession for HttpSession {
             RemoteShell::create(Arc::clone(&self.client), self.tuning.idle, self.tuning.request_timeout).await?,
         );
         console::start(shell, secret_prompt, permit).await
+    }
+
+    fn host_key(&self) -> Option<String> {
+        self.client.host_key()
     }
 
     async fn read(&self, script: &str, max_output: usize, deadline: Duration) -> Result<String> {

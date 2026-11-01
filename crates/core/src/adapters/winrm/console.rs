@@ -46,6 +46,101 @@ const MARKER: &[u8] = b"\x1b]7790;";
 pub struct ConsoleShell {
     pub input: mpsc::Sender<ShellInput>,
     pub output: mpsc::Receiver<ShellOutput>,
+    /// BX-13: where the console is now, for Type in all tabs.
+    pub status: Arc<ConsoleStatus>,
+}
+
+/// BX-13: what Type in all tabs needs to know of a console: whether it is at its prompt (a line typed is a statement)
+/// or a statement runs (a line typed is that statement's input, `Read-Host`), the lines of a statement left open it
+/// holds (`>> `), and the line being typed now. Published by the [`Editor`] after every key and every output, so Type
+/// in all tabs reads what the console really holds, not a guess from the keys or the screen: before it lets a line run,
+/// it checks each console holds exactly the line and open statement it followed, and refuses otherwise (a recalled
+/// history line, keys dropped while a statement ran, a desync).
+#[derive(Debug, Default)]
+pub struct ConsoleStatus {
+    inner: std::sync::Mutex<ConsoleView>,
+}
+
+/// BX-13: a console's status at one moment.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ConsoleView {
+    /// At the prompt (or the `>> ` of a statement left open): a line typed is a statement.
+    pub at_prompt: bool,
+    /// Lines of a statement left open, sent together once it closes.
+    pub open: Vec<String>,
+    /// The line being typed now (at the prompt): empty once it is sent.
+    pub line: String,
+}
+
+impl ConsoleView {
+    pub fn open_lines(&self) -> usize {
+        self.open.len()
+    }
+}
+
+impl ConsoleStatus {
+    pub fn view(&self) -> ConsoleView {
+        self.inner.lock().map(|v| v.clone()).unwrap_or_default()
+    }
+
+    fn publish(&self, state: State, open: &[String], line: &str) {
+        if let Ok(mut inner) = self.inner.lock() {
+            inner.at_prompt = state == State::Idle;
+            inner.open = open.to_vec();
+            inner.line.clear();
+            inner.line.push_str(line);
+        }
+    }
+}
+
+/// BX-13: whether the console sends a statement once its last line is in: an empty line at the prompt (a fresh
+/// prompt, nothing runs), a statement that closes, or an empty line ending one left open. The console's [`Editor`]
+/// and Type in all tabs ([`statements`]) decide it here, so they never differ.
+pub fn statement_ends(open: &[String], syntax: &Syntax, empty_alone: bool) -> bool {
+    empty_alone || syntax.complete() || open.last().is_some_and(|l| l.trim().is_empty())
+}
+
+/// BX-13: what the console does with `lines` typed at its prompt, one Enter each, with `open` the lines of a statement
+/// it holds already: the statements it sends, in order, each its lines, and the lines it still holds after them. An
+/// empty line at the prompt sends no statement.
+pub fn statements(open: &[String], lines: &[String]) -> (Vec<Vec<String>>, Vec<String>) {
+    let all: Vec<&str> = open.iter().chain(lines).map(String::as_str).collect();
+    let (sent, held_from) = statement_ranges(open.len(), &all);
+    let take = |range: std::ops::Range<usize>| all[range].iter().map(|l| (*l).to_owned()).collect::<Vec<_>>();
+    let sent = sent.into_iter().map(take).collect();
+    (sent, take(held_from..all.len()))
+}
+
+/// BX-13: the same as line numbers: of `all` (a statement's first `open` lines held already, then the lines typed),
+/// the ranges the console sends as statements, and where the lines it still holds start. `-Command -` reads a
+/// script's lines the same way, which the PowerShell rules rate it by.
+pub fn statement_ranges(open: usize, all: &[&str]) -> (Vec<std::ops::Range<usize>>, usize) {
+    let mut held: Vec<String> = Vec::new();
+    let mut start = 0;
+    let mut syntax = Syntax::default();
+    let mut sent = Vec::new();
+    for (i, line) in all.iter().enumerate() {
+        if held.is_empty() {
+            start = i;
+        }
+        syntax.feed(line);
+        held.push((*line).to_owned());
+        if i < open {
+            // The lines held already: still open.
+            continue;
+        }
+        let empty_alone = line.trim().is_empty() && held.len() == 1;
+        if !statement_ends(&held, &syntax, empty_alone) {
+            continue;
+        }
+        held.clear();
+        syntax = Syntax::default();
+        if !empty_alone {
+            sent.push(start..i + 1);
+        }
+    }
+    let held_from = if held.is_empty() { all.len() } else { start };
+    (sent, held_from)
 }
 
 /// The expression that prints the prompt marker: a string written through PowerShell's own output, so it comes after
@@ -109,10 +204,12 @@ pub async fn start(
     let (output_tx, output_rx) = mpsc::channel(256);
     let (received_tx, received_rx) = mpsc::channel(16);
     tokio::spawn(receive_loop(Arc::clone(&shell), command.clone(), received_tx));
+    let editor = Editor::new(nonce);
+    let status = Arc::clone(&editor.status);
     let console = Console {
         shell,
         command,
-        editor: Editor::new(nonce),
+        editor,
         output: output_tx,
         secret_prompt,
         _permit: permit,
@@ -121,6 +218,7 @@ pub async fn start(
     Ok(ConsoleShell {
         input: input_tx,
         output: output_rx,
+        status,
     })
 }
 
@@ -290,6 +388,8 @@ pub struct Editor {
     at_line_start: bool,
     last_output_cr: bool,
     folder: String,
+    /// BX-13: where it is, for Type in all tabs.
+    status: Arc<ConsoleStatus>,
 }
 
 impl Editor {
@@ -314,7 +414,24 @@ impl Editor {
             at_line_start: true,
             last_output_cr: false,
             folder: String::new(),
+            status: Arc::new(ConsoleStatus::default()),
         }
+    }
+
+    /// BX-13: the status Type in all tabs reads.
+    pub fn status(&self) -> Arc<ConsoleStatus> {
+        Arc::clone(&self.status)
+    }
+
+    fn publish(&self) {
+        // BX-13: a line typed while a statement runs is its input (masked), not a statement, so Type in all tabs must
+        // not read it as the prompt line; only publish the line at the prompt.
+        let line = if self.state == State::Idle && !self.masked {
+            self.line.as_str()
+        } else {
+            ""
+        };
+        self.status.publish(self.state, &self.open, line);
     }
 
     fn prompt(&self) -> String {
@@ -336,6 +453,7 @@ impl Editor {
             out.push(Action::Send(format!("{text}\r\n")));
             self.line.clear();
         }
+        self.publish();
         out
     }
 
@@ -413,8 +531,16 @@ impl Editor {
                 b'\t' => {}
                 b if b < 0x20 => {}
                 _ => {
-                    // A whole UTF-8 character, or wait for the rest of it.
+                    // A whole UTF-8 character, or wait for the rest of it. Review B4/R2: the bytes after the lead must
+                    // be continuation bytes; if one isn't (a stray byte from a mouse report, a control key), the lead
+                    // is invalid, so consume only it — otherwise a control byte (Ctrl+C, Ctrl+U) inside the run would be
+                    // swallowed.
                     let len = utf8_len(byte);
+                    let have = (data.len() - at).min(len);
+                    if data[at + 1..at + have].iter().any(|b| !(0x80..=0xbf).contains(b)) {
+                        at += 1;
+                        continue;
+                    }
                     if at + len > data.len() {
                         self.partial = data[at..].to_vec();
                         break;
@@ -445,6 +571,7 @@ impl Editor {
         if !shown.is_empty() {
             out.push(Action::Show(shown));
         }
+        self.publish();
         merge_shows(out)
     }
 
@@ -466,6 +593,14 @@ impl Editor {
 
     fn interrupt(&mut self, shown: &mut Vec<u8>, out: &mut Vec<Action>) {
         shown.extend_from_slice(b"^C");
+        // Review M2: Ctrl+C drops whatever was typed, running or not — the line, what was typed ahead while a statement
+        // ran, and any half-read character or escape — so a later LF can't run a line the user cancelled.
+        self.line.clear();
+        self.partial.clear();
+        self.escape = Escape::None;
+        self.escape_bytes.clear();
+        self.masked = false;
+        self.browsing = None;
         // Pasted lines still waiting go too: Ctrl+C stops the paste with the statement.
         self.queued.clear();
         if self.state == State::Running {
@@ -475,11 +610,8 @@ impl Editor {
             out.push(Action::Send(marker_line(&self.nonce)));
             return;
         }
-        self.line.clear();
         self.open.clear();
         self.syntax = Syntax::default();
-        self.browsing = None;
-        self.masked = false;
         shown.extend_from_slice(format!("\r\n{}", self.prompt()).as_bytes());
     }
 
@@ -515,7 +647,7 @@ impl Editor {
                 let empty_alone = line.trim().is_empty() && self.open.is_empty();
                 self.syntax.feed(&line);
                 self.open.push(line);
-                if !empty_alone && !self.syntax.complete() && !self.open.last().is_some_and(|l| l.trim().is_empty()) {
+                if !statement_ends(&self.open, &self.syntax, empty_alone) {
                     shown.extend_from_slice(b">> ");
                     return;
                 }
@@ -593,6 +725,7 @@ impl Editor {
             self.at_line_start = byte == b'\n';
             at += 1;
         }
+        self.publish();
         out
     }
 
@@ -659,6 +792,7 @@ impl Editor {
             shown.extend_from_slice(self.line.as_bytes());
         }
         out.push(Action::Show(shown));
+        self.publish();
         merge_shows(out)
     }
 }
@@ -914,6 +1048,21 @@ mod tests {
     }
 
     #[test]
+    fn an_invalid_utf8_lead_byte_does_not_swallow_the_next_key() {
+        // Review B4/R2: a stray high byte — an X10 mouse report a host turned on, which xterm delivers as binary — is a
+        // UTF-8 lead not followed by continuation bytes. The console must consume only that byte, never keep it pending
+        // and swallow the key after it: a swallowed Ctrl+C would leave the statement running while the line's keys
+        // desync from what MultiExec followed.
+        let mut editor = Editor::new("n1".into());
+        ready(&mut editor);
+        editor.keys(b"Read-Host 'Name'\r", false);
+        editor.keys(b"typed-ahead", false);
+        // 0xe0 is a 3-byte UTF-8 lead; the Ctrl+C (0x03) right after it is not a continuation byte.
+        let out = editor.keys(b"\xe0\x03", false);
+        assert!(out.contains(&Action::Interrupt), "the Ctrl+C still interrupts: {out:?}");
+    }
+
+    #[test]
     fn a_pasted_block_goes_one_statement_per_prompt() {
         let mut editor = Editor::new("n1".into());
         ready(&mut editor);
@@ -989,6 +1138,40 @@ mod tests {
         assert_eq!(single_quoted("$x `n \"y\""), "'$x `n \"y\"'");
         let line = statement_line(&["'); Stop-Computer; ('".to_owned()], "n1");
         assert!(line.contains("Create('''); Stop-Computer; (''')"), "{line}");
+    }
+
+    #[test]
+    fn statements_say_what_the_console_sends_for_typed_lines() {
+        let lines = |l: &[&str]| l.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+        // One line that closes: one statement.
+        assert_eq!(
+            statements(&[], &lines(&["Get-Date"])),
+            (vec![lines(&["Get-Date"])], vec![])
+        );
+        // An open one is held, then sent whole with the line that closes it.
+        let (none, held) = statements(&[], &lines(&["foreach ($i in 1..3) {"]));
+        assert!(none.is_empty());
+        assert_eq!(held, lines(&["foreach ($i in 1..3) {"]));
+        let (sent_all, held) = statements(&held, &lines(&["  $i", "}", "hostname"]));
+        assert_eq!(
+            sent_all,
+            vec![lines(&["foreach ($i in 1..3) {", "  $i", "}"]), lines(&["hostname"])]
+        );
+        assert!(held.is_empty());
+        // An empty line at the prompt sends nothing; one inside an open statement ends it.
+        assert_eq!(statements(&[], &lines(&[""])), (vec![], vec![]));
+        let (split, _) = statements(&[], &lines(&["\"x", "", "Stop-Service a", "\""]));
+        assert_eq!(split, vec![lines(&["\"x", ""]), lines(&["Stop-Service a"])]);
+        // The Editor decides the same: the open function goes with its next line, as one statement.
+        let mut editor = Editor::new("n1".into());
+        editor.output(b"\x1b]7790;n1;C:\\\x07\r\n");
+        assert!(editor.status().view().at_prompt);
+        editor.keys(b"function f {\r", false);
+        assert_eq!(editor.status().view().open_lines(), 1);
+        assert_eq!(editor.status().view().open, ["function f {"]);
+        let sent_now = editor.keys(b"1 }\r", false);
+        assert!(sent(&sent_now)[0].contains("Create('function f {' + \"`n\" + '1 }')"));
+        assert!(!editor.status().view().at_prompt, "a statement runs");
     }
 
     #[test]
