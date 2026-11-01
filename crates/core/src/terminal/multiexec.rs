@@ -1301,8 +1301,12 @@ impl MultiExec {
             connected: info.screen.connected && (!powershell || info.console.is_some()),
             protected: target.is_some_and(|t| t.protected),
             password: info.screen.at_secret_prompt() && running,
-            // No program in a PowerShell tab has a screen of its own (it has no terminal on the host).
-            alternate: info.screen.alternate && !powershell,
+            // No program in a PowerShell tab has a screen of its own (it has no terminal on the host). SS-10 (review
+            // B7): a command can switch xterm to the alternate screen and exit without switching back, leaving the flag
+            // set while the shell is at its prompt; keys would then pass straight through, unrated. So a pane whose
+            // cursor line looks like a shell prompt is not treated as full-screen (a real full-screen program's line
+            // does not look like a prompt), and its lines are rated as usual.
+            alternate: info.screen.alternate && !powershell && !super::shell_user::looks_like_prompt(&info.screen.line),
             dirty: info.dirty,
             kind: info.kind,
             console: info.console,
