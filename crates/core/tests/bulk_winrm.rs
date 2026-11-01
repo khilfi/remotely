@@ -476,6 +476,94 @@ async fn hosts_that_share_one_wrong_login_make_a_single_refused_sign_in() {
     assert_eq!(skipped, 2, "{targets:?}");
 }
 
+/// A session with the shared login to a port nothing listens on: its sign-in fails as a network error, not a refusal.
+async fn unreachable(core: &Core, shared: remotely_core::vault::SecretId) -> Uuid {
+    let port = {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.local_addr().unwrap().port()
+    };
+    core.sessions
+        .create_with(
+            &core.ctx(),
+            input("down01", port, shared, winrm(WinrmCertificate::Windows)),
+            Some(&SecretString::new(VAULT_PASSWORD)),
+        )
+        .await
+        .unwrap()
+        .id
+}
+
+/// `n` hosts that all take the shared login, each with its own real password (so the shared one is always refused).
+async fn wrong_hosts(
+    core: &Core,
+    shared: remotely_core::vault::SecretId,
+    n: usize,
+) -> (Vec<WinrmTestServer>, Vec<Uuid>) {
+    let mut servers = Vec::new();
+    let mut sessions = Vec::new();
+    for i in 0..n {
+        let server = WinrmTestServer::start(FakeWinrm::HttpsBasic, "alice", &new_password())
+            .await
+            .unwrap();
+        let id = core
+            .sessions
+            .create_with(
+                &core.ctx(),
+                input(
+                    &format!("win{i:02}"),
+                    server.port(),
+                    shared,
+                    winrm(WinrmCertificate::Windows),
+                ),
+                Some(&SecretString::new(VAULT_PASSWORD)),
+            )
+            .await
+            .unwrap()
+            .id;
+        servers.push(server);
+        sessions.push(id);
+    }
+    (servers, sessions)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_unreachable_leader_does_not_open_the_gate_for_the_rest() {
+    // Review C2: if the host that leads the shared login can't be reached (or times out, or its certificate changed),
+    // its password was never checked, so the gate must not open — the lead passes to the next host, and still exactly
+    // one refused sign-in reaches the hosts, however the leader is chosen.
+    let core = core().await;
+    let shared = password_item(&core, "shared domain login", &new_password()).await;
+    let down = unreachable(&core, shared).await;
+    let (servers, wrong) = wrong_hosts(&core, shared, 3).await;
+    let mut targets = vec![down];
+    targets.extend(wrong);
+
+    let job = run(&core, exec("Get-Service", &targets)).await;
+    assert_eq!(finished(&core, job).await, JobStatus::Failed);
+
+    let refused: usize = servers.iter().map(|s| s.stats().refused_sign_ins).sum();
+    assert_eq!(refused, 1, "exactly one refusal reaches the hosts, whoever led");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn runs_at_the_same_time_share_one_account_gate() {
+    // Review C2b: the gate lives in the login guard, shared by every job, so several runs at once over hosts that share
+    // a wrong login still make exactly one refused sign-in — not one per run.
+    let core = core().await;
+    let shared = password_item(&core, "shared domain login", &new_password()).await;
+    let (servers, sessions) = wrong_hosts(&core, shared, 3).await;
+
+    let a = run(&core, exec("Get-Service", &sessions)).await;
+    let b = run(&core, exec("Get-Process", &sessions)).await;
+    let c = run(&core, exec("Get-Date", &sessions)).await;
+    for job in [a, b, c] {
+        assert_eq!(finished(&core, job).await, JobStatus::Failed);
+    }
+
+    let refused: usize = servers.iter().map(|s| s.stats().refused_sign_ins).sum();
+    assert_eq!(refused, 1, "the shared gate stops the account being tried once per run");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn preview_refuses_a_script_over_the_size_cap_before_parsing_it() {
     // Review A5/A8: preview applies the 64 KB script cap before anything parses, so a huge paste can't be rated in a
@@ -637,9 +725,14 @@ impl Fleet {
     }
 
     async fn type_in(&self, i: usize, keys: &str) -> InputOutcome {
+        self.type_bytes(i, keys.as_bytes()).await
+    }
+
+    /// Raw bytes (an escape sequence or a non-UTF-8 mouse report xterm would send).
+    async fn type_bytes(&self, i: usize, keys: &[u8]) -> InputOutcome {
         self.core
             .multiexec
-            .input(self.panes[i].id, keys.as_bytes().to_vec())
+            .input(self.panes[i].id, keys.to_vec())
             .await
             .unwrap()
     }
@@ -653,6 +746,25 @@ impl Fleet {
             .filter(|l| l.starts_with("try { . ([scriptblock]::Create("))
             .cloned()
             .collect()
+    }
+
+    /// Everything the host at `i` was sent on stdin, statement wrappers and raw lines alike.
+    fn stdin(&self, i: usize) -> Vec<String> {
+        self.servers[i].stats().stdin
+    }
+
+    /// True once a line containing `needle` reaches the host at `i`'s stdin; false if none does within a short wait.
+    async fn wait_stdin(&self, i: usize, needle: &str) -> bool {
+        timeout(Duration::from_secs(3), async {
+            loop {
+                if self.stdin(i).iter().any(|l| l.contains(needle)) {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .is_ok()
     }
 }
 
@@ -1045,6 +1157,91 @@ async fn a_held_line_is_not_diverted_by_typing_into_an_unpicked_tab() {
             "tab {i} never ran the diverted line under the wrong approval: {sent:?}"
         );
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn text_typed_ahead_while_running_is_rated_with_the_rest_not_dropped_to_a_bare_line() {
+    // Review B2 (PROBE2): text typed while a statement runs is dropped by the console when its prompt returns, but
+    // MultiExec keeps it. So what it rates (`Write-Output '` + the rest) is not what a bare console would run
+    // (`Restart-Computer -Force`). The consoles no longer hold the followed line, so the Enter is refused — the host
+    // never runs the bare line unrated.
+    let mut fleet = Fleet::new(1).await;
+    let _events = fleet.core.multiexec.subscribe();
+
+    // A statement that finishes on its own, so the prompt returns while the typed-ahead text waits.
+    fleet.type_in(0, "Start-Sleep 1").await;
+    let (line, _, request) = held(fleet.type_in(0, "\r").await);
+    if let Some(request) = request {
+        fleet.core.multiexec.approve(line, answers(&request)).await.unwrap();
+    }
+    fleet.type_in(0, "Write-Output '").await;
+    fleet.panes[0].expect("PS C:\\Users\\alice> ").await;
+    fleet.type_in(0, "Restart-Computer -Force #'").await;
+    let outcome = fleet.type_in(0, "\r").await;
+    assert!(
+        matches!(outcome, InputOutcome::Refused { .. }),
+        "the consoles don't hold the followed line, so it is refused: {outcome:?}"
+    );
+    assert!(
+        !fleet.wait_stdin(0, "Restart-Computer").await,
+        "the host never ran the bare line: {:?}",
+        fleet.stdin(0)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_cancelled_line_is_not_sent_by_a_following_ctrl_j() {
+    // Review B3 (PROBE3): a line held while a statement runs, then cancelled, must not be sent to the host by a
+    // following Ctrl+J (LF). The cancel interrupts every console (dropping the line), so the LF runs nothing.
+    let mut fleet = Fleet::new(1).await;
+    let mut events = fleet.core.multiexec.subscribe();
+
+    // A statement that keeps reading, so the console is not at its prompt.
+    fleet.type_in(0, "Read-Host 'Name'").await;
+    let (line, _, request) = held(fleet.type_in(0, "\r").await);
+    fleet
+        .core
+        .multiexec
+        .approve(line, answers(&request.unwrap()))
+        .await
+        .unwrap();
+    assert!(line_done(&mut events, line).await);
+    fleet.panes[0].expect("Name: ").await;
+
+    // A dangerous line typed while it runs is held and rated; cancel it, then press Ctrl+J.
+    fleet.type_in(0, "Stop-Computer -Force").await;
+    let (held_line, _, _) = held(fleet.type_in(0, "\r").await);
+    fleet.core.multiexec.cancel(held_line).await.unwrap();
+    fleet.type_in(0, "\n").await;
+
+    assert!(
+        !fleet.wait_stdin(0, "Stop-Computer").await,
+        "the cancelled line never reached the host: {:?}",
+        fleet.stdin(0)
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_mouse_report_while_typing_does_not_run_a_bare_line() {
+    // Review B4 (PROBE4): an X10 mouse report (ESC [ M then three bytes, the last two above 0x7f/control) a host turned
+    // on arrives mid-line as xterm binary. The console reads its stray bytes differently from MultiExec's line, so the
+    // consoles no longer hold the followed line: the Enter is refused and the host runs nothing, never a bare line.
+    let fleet = Fleet::new(1).await;
+    let _events = fleet.core.multiexec.subscribe();
+
+    fleet.type_in(0, "Stop-Computer -Force").await;
+    // A left-button press at column 197, row 16: ESC [ M, 32, 32+197 (0xE5), 32+16 (0x30).
+    fleet.type_bytes(0, b"\x1b[M\x20\xe5\x30").await;
+    let outcome = fleet.type_in(0, "\r").await;
+    assert!(
+        matches!(outcome, InputOutcome::Refused { .. }),
+        "the desync is caught and the line refused, not run as a bare statement: {outcome:?}"
+    );
+    assert!(
+        !fleet.wait_stdin(0, "Stop-Computer").await,
+        "the host ran nothing: {:?}",
+        fleet.stdin(0)
+    );
 }
 
 // ---- Support bundles from Windows hosts -------------------------------------------------------------------

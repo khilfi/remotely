@@ -610,7 +610,7 @@ fn command_reads(command: &PsCommand, entries: &[(String, Vec<String>)]) -> bool
                     .is_some_and(|a| a.literal && a.kind != ArgKind::Block && a.text.to_lowercase() == *word)
             })
     });
-    listed && !writes(command)
+    listed && !writes(command) && !delay_binds(command)
 }
 
 /// The command's literal arguments in lower case, or `None` when one is known only when it runs.
@@ -642,10 +642,10 @@ pub(crate) fn writes(command: &PsCommand) -> bool {
         // (`Sort-Object Status, Name`) is literal; only a dynamic value (`$…`, `(…)`, `@…`), positional or attached to a
         // parameter (`-FilterScript:$sb`), could be an invoked block, so that is what makes it write.
         "sort-object" | "group-object" | "select-object" | "measure-command" | "format-table" | "format-list"
-        | "format-wide" | "format-custom" | "compare-object" | "convertto-html" => invoker_writes(command),
+        | "format-wide" | "format-custom" | "compare-object" | "convertto-html" => has_dynamic_value(command),
         // A bare `Where-Object` (no filter) runs whatever `$PSDefaultParameterValues` sets for its `-FilterScript`, like
         // a bare `ForEach-Object`, so it needs a filter written in the script.
-        "where-object" => command.args.is_empty() || invoker_writes(command),
+        "where-object" => command.args.is_empty() || has_dynamic_value(command),
         // `-Online` opens the help's address with the host's shell, whatever a function's HelpUri says.
         "get-help" => command
             .args
@@ -755,10 +755,10 @@ fn args_match(command: &PsCommand, test: impl Fn(&[String]) -> bool) -> bool {
     }
 }
 
-/// A4, P5: whether a block-invoking cmdlet (`Where-Object`, `Sort-Object`, `Measure-Command`, `Format-*`...) is given a
-/// script block only it could invoke: a dynamic value (`$…`, `(…)`, `@…`), positional or attached to a parameter
-/// (`-FilterScript:$sb`). A literal block or a property name is read like any other.
-fn invoker_writes(command: &PsCommand) -> bool {
+/// A4, P5: whether any argument is a dynamic value (`$…`, `(…)`, `@…`), positional or attached to a parameter
+/// (`-FilterScript:$sb`): a value known only when it runs, which could be a script block. A literal block or a property
+/// name is read like any other.
+fn has_dynamic_value(command: &PsCommand) -> bool {
     command.args.iter().any(|a| match a.kind {
         ArgKind::Expression => a.text.trim_start().starts_with(['$', '(', '@']),
         ArgKind::Parameter if a.attached() => a
@@ -767,6 +767,14 @@ fn invoker_writes(command: &PsCommand) -> bool {
             .is_some_and(|(_, value)| value.trim_start().starts_with(['$', '(', '@'])),
         _ => false,
     })
+}
+
+/// Third review (P5): a command after the first in a pipeline takes pipeline input, so a dynamic value given to one of
+/// its parameters — positional or attached — may be a script block that delay-binds and runs once per input object
+/// (`Get-ChildItem | Get-Item -Path $sb`). In a PowerShell tab `$sb` can come from an earlier statement MultiExec never
+/// saw, so fail closed: such a command is not read-only.
+fn delay_binds(command: &PsCommand) -> bool {
+    !command.first_in_pipeline && has_dynamic_value(command)
 }
 
 /// `ForEach-Object` reads when it only runs script blocks written in the script (read like any other): a member's

@@ -974,3 +974,45 @@ fn p7_only_long_decimal_and_size_suffixes_are_numbers() {
     assert!(read_only("1l + 1d"));
     assert!(read_only("1kb"));
 }
+
+#[test]
+fn p5_a_dynamic_value_to_a_pipeline_command_delay_binds_and_is_not_read_only() {
+    // Third review: a command after the first in a pipeline takes pipeline input, so a dynamic value (`$sb`) for one
+    // of its parameters may be a script block that runs once per object. Fail closed.
+    for trick in [
+        "Get-ChildItem | Get-Item -Path $sb",
+        "Get-ChildItem C:\\data | Get-Item -LiteralPath $sb",
+        "Get-ChildItem | Get-Item -Path:$sb",
+        "Get-ChildItem | Get-Item ($sb)",
+    ] {
+        assert!(!read_only(trick), "{trick} should not be read-only");
+    }
+    // The first command in a pipeline takes no pipeline input, and literal filters still read.
+    assert!(read_only("Get-Item -Path $sb | Select-Object Name"));
+    assert!(read_only("Get-Service | Where-Object Status -eq Running"));
+    assert!(read_only("Get-Service | Where-Object { $_.Status -eq \"Running\" }"));
+    assert!(read_only(
+        "Get-Service | Where-Object -Property Status -EQ -Value Running"
+    ));
+    assert!(read_only(
+        "Get-Process | Sort-Object CPU -Descending | Select-Object -First 5"
+    ));
+}
+
+#[test]
+fn common_side_effect_free_type_casts_are_read_only() {
+    // Third review: everyday read-only one-liners build report rows, lookup tables and patterns with these casts.
+    for script in [
+        "[pscustomobject]@{a=1}",
+        "[psobject]@{a=1}",
+        "[ordered]@{a=1}",
+        "[hashtable]@{a=1}",
+        "[array](1,2,3)",
+        "[regex]'b'",
+    ] {
+        assert!(read_only(script), "{script} should be read-only");
+    }
+    // A script block cast still runs code, and an XML cast can resolve entities: both stay out.
+    assert!(!read_only("[scriptblock]::Create('Stop-Computer')"));
+    assert!(!read_only("[xml](Get-Content C:\\data\\f.xml)"));
+}

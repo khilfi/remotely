@@ -78,6 +78,9 @@ pub(crate) struct PsCommand {
     /// it runs (`& $x`).
     pub key: Option<String>,
     pub args: Vec<Arg>,
+    /// Third review (P5): whether this is the first command in its pipeline. A command after the first takes pipeline
+    /// input, so a dynamic value given to one of its parameters may delay-bind a script block (run once per object).
+    pub first_in_pipeline: bool,
 }
 
 impl PsCommand {
@@ -695,19 +698,19 @@ impl Parser {
             return;
         }
         match c {
-            '&' if self.peek_at(1) != Some('&') => self.command(Invocation::Call),
+            '&' if self.peek_at(1) != Some('&') => self.command(Invocation::Call, first),
             '.' if self
                 .peek_at(1)
                 .is_some_and(|n| n.is_whitespace() || matches!(n, '{' | '$' | '(') || is_squote(n) || is_dquote(n)) =>
             {
-                self.command(Invocation::Dot)
+                self.command(Invocation::Dot, first)
             }
             c if self.starts_expression(c) => {
                 // A9: a token beginning with a digit (or `.digit`) is an expression only when it is a real number
                 // literal (`1`, `0x1F`, `1kb`, `1.5e3`); otherwise PowerShell runs it as a program (`7z.exe`, `1z`),
                 // which runs anything, so it is a command here.
                 if (c.is_ascii_digit() || c == '.') && !self.number_literal_ahead() {
-                    self.command(Invocation::Plain);
+                    self.command(Invocation::Plain, first);
                 } else {
                     if !first {
                         self.unreadable("an expression after a pipe");
@@ -715,7 +718,7 @@ impl Parser {
                     self.expression_statement();
                 }
             }
-            _ => self.command(Invocation::Plain),
+            _ => self.command(Invocation::Plain, first),
         }
     }
 
@@ -1699,7 +1702,7 @@ impl Parser {
 
     // ---- Commands ----------------------------------------------------------------------------------------------------
 
-    fn command(&mut self, invocation: Invocation) {
+    fn command(&mut self, invocation: Invocation, first: bool) {
         let at = self.at.unwrap_or_else(|| self.offset());
         if invocation != Invocation::Plain {
             self.bump();
@@ -1746,6 +1749,7 @@ impl Parser {
             name: display,
             key,
             args,
+            first_in_pipeline: first,
         };
         self.add(command);
     }
@@ -2172,6 +2176,7 @@ fn cmd_script(text: &str, at: usize, nested: usize) -> PsScript {
             name: plain_dashes(stem),
             key: None,
             args,
+            first_in_pipeline: true,
         };
         let mut parser = Parser::new("", Some(at), nested);
         parser.add(command);
@@ -2295,6 +2300,15 @@ fn is_value_type(text: &str) -> bool {
         "biginteger",
         "void",
         "switch",
+        // Third review: common, side-effect-free constructors and casts used in everyday read-only one-liners
+        // (building a report row, a lookup table, a pattern). `scriptblock` and `xml` stay out — a script block runs
+        // code, and an XML cast can resolve external entities.
+        "pscustomobject",
+        "psobject",
+        "ordered",
+        "hashtable",
+        "array",
+        "regex",
     ];
     VALUE_TYPES.contains(&t)
 }
