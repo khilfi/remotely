@@ -240,15 +240,15 @@ export const HELP = {
   "reports.readAgain": {
     title: "Read reachable hosts again",
     body: [
-      "Each SSH host's facts and listening ports are read now on an open terminal's connection, the dashboard's, or a login of Remotely's own with the saved login. A login that is refused stops further tries to that host until something changes, and each host takes at most 10 such logins an hour.",
-      "Pending updates can take a minute a host while dnf refreshes its lists. Installed packages come from dpkg or rpm, and only read.",
+      "Each SSH or WinRM host's facts and listening ports are read now on an open terminal's connection, the dashboard's, or a sign-in of Remotely's own with the saved login. A sign-in that is refused stops further tries to that host until something changes, and each host takes at most 10 an hour.",
+      "Pending updates can take a minute a host while dnf refreshes its lists. Installed packages come from dpkg or rpm, and only read. Both are Linux reads: a Windows host has neither in the file.",
     ],
   },
   "reports.ansible": {
     title: "Ansible inventory",
     body: [
-      "Each SSH session becomes a host with its address, port and user; a jump host goes in as ProxyJump. Groups follow the folders (nested), tags, environments and this workspace. Protected sessions, and sessions of a protected VM, are also in a protected group, so a playbook can leave them out.",
-      "No password, key or vault item goes in the file: give them to Ansible yourself. Names are made valid for Ansible and every value is quoted, so nothing in a name becomes part of the inventory's syntax. Remote desktop, VNC, Telnet and serial sessions are left out.",
+      "Each SSH or WinRM session becomes a host with its address, port and user: an SSH jump host as ProxyJump, a WinRM host with its scheme and transport. Groups follow the folders, tags, environments and this workspace; protected sessions and those of a protected VM are also in a protected group.",
+      "No password, key or vault item goes in the file, and certificate checks are never turned off: give Ansible the passwords and any CA yourself. Names are made valid for Ansible and every value is quoted. Remote desktop, VNC, Telnet and serial sessions are left out.",
     ],
   },
   "reports.handover": {

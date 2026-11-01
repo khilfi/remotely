@@ -79,8 +79,8 @@ export function HandoverPackDialog({ from: initialFrom, to: initialTo, onClose }
     };
   }, []);
 
-  const noSsh = overview?.sshSessions === 0;
-  const reading = readAgain && !noSsh;
+  const noHosts = overview !== null && overview.sshSessions + overview.winrmSessions === 0;
+  const reading = readAgain && !noHosts;
   const range = dayRange(from, to);
   const request: HandoverRequest | null =
     "problem" in range
@@ -238,7 +238,7 @@ export function HandoverPackDialog({ from: initialFrom, to: initialTo, onClose }
                   id="handover-read-again"
                   className="mt-0.5"
                   checked={reading}
-                  disabled={noSsh}
+                  disabled={noHosts}
                   onCheckedChange={(v) => setReadAgain(v === true)}
                 />
                 <div className="grid min-w-0 gap-0.5">
@@ -246,7 +246,7 @@ export function HandoverPackDialog({ from: initialFrom, to: initialTo, onClose }
                     Read reachable hosts again first
                     <HelpTip topic="reports.readAgain" />
                   </Label>
-                  {noSsh && <p className="text-xs text-muted-foreground">No SSH sessions to read.</p>}
+                  {noHosts && <p className="text-xs text-muted-foreground">No SSH or WinRM sessions to read.</p>}
                 </div>
               </div>
               <div className="flex items-center gap-3 pl-7">
@@ -258,6 +258,7 @@ export function HandoverPackDialog({ from: initialFrom, to: initialTo, onClose }
                 />
                 <Label htmlFor="handover-packages" className="font-normal">
                   Add each host&apos;s installed packages
+                  {(overview?.winrmSessions ?? 0) > 0 && <span className="text-muted-foreground">(Linux hosts)</span>}
                 </Label>
               </div>
             </div>

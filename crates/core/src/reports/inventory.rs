@@ -1,6 +1,6 @@
-//! FD-05: the workspace's inventory as sheets: VMs (MO-13's hardware), hosts (every saved session, with an SSH host's
+//! FD-05: the workspace's inventory as sheets: VMs (MO-13's hardware), hosts (every saved session, with an SSH or WinRM host's
 //! MO-13 facts and MO-14's listening ports and pending updates), networks (VM-11), health checks (MO-08), and on request
-//! each host's installed packages. Built from what is stored; "Read again first" reads the SSH hosts now, a few at a
+//! each host's installed packages. Built from what is stored; "Read again first" reads the SSH and WinRM hosts now, a few at a
 //! time, through [`HostDetails::inventory_read`] (the login guard's parks and caps), and keeps what was stored for a host
 //! that can't be read. Reads only: nothing here changes a host or a VM.
 
@@ -25,6 +25,7 @@ use crate::error::{CoreError, Result};
 use crate::host_details::admin::{ListeningPort, UpdatesReport};
 use crate::host_details::linux::HostSpecs;
 use crate::host_details::packages::PackagesReport;
+use crate::host_details::windows::ListeningPort as WindowsPort;
 use crate::host_details::{HostDetails, InventoryReads};
 use crate::host_networks::{HostNetworks, NetworkVm};
 use crate::sessions::{SessionFolder, SessionKind, SessionRecord};
@@ -35,7 +36,7 @@ use crate::toolbox::ProbeTarget;
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct InventoryOptions {
-    /// Read the SSH hosts again first: their facts (stored, like a Refresh) and listening ports.
+    /// Read the SSH and WinRM hosts again first: their facts (stored, like a Refresh) and listening ports.
     pub read_again: bool,
     /// Also each host's pending updates (dnf may take a minute a host).
     pub updates: bool,
@@ -101,7 +102,7 @@ impl ReadControl {
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReadSummary {
-    /// SSH hosts asked.
+    /// SSH and WinRM hosts asked.
     pub asked: usize,
     /// Read now (facts or ports).
     pub read: usize,
@@ -159,7 +160,7 @@ pub const VM_COLUMNS: [Column; 18] = [
     col("Hardware read", 17.0),
 ];
 
-pub const HOST_COLUMNS: [Column; 29] = [
+pub const HOST_COLUMNS: [Column; 33] = [
     col("Name", 22.0),
     col("Kind", 10.0),
     col("Host", 22.0),
@@ -173,6 +174,9 @@ pub const HOST_COLUMNS: [Column; 29] = [
     col("VM", 16.0),
     col("Last address", 16.0),
     col("Host name", 18.0),
+    // F4: a Windows host's adapters (Linux facts have none).
+    col("Addresses", 24.0),
+    col("MAC addresses", 20.0),
     col("OS", 24.0),
     col("Kernel or build", 22.0),
     col("Architecture", 12.0),
@@ -182,6 +186,9 @@ pub const HOST_COLUMNS: [Column; 29] = [
     col("Disks", 28.0),
     col("File systems", 34.0),
     col("Virtualization", 13.0),
+    // F4: a Windows host's domain (or workgroup) and its manufacturer and model.
+    col("Domain or workgroup", 18.0),
+    col("Hardware", 24.0),
     col("Booted", 17.0),
     col("Listening ports", 34.0),
     col("Pending updates", 10.0),
@@ -314,6 +321,24 @@ fn ports_text(ports: &[ListeningPort]) -> String {
     parts.join("; ")
 }
 
+/// F4: a Windows host's listening TCP ports in one cell: `tcp 3389 (svchost); tcp 5986 (System)`, each port once.
+fn windows_ports_text(ports: &[WindowsPort]) -> String {
+    let mut seen = BTreeSet::new();
+    let mut parts = Vec::new();
+    for p in ports {
+        if !seen.insert(p.port) {
+            continue;
+        }
+        let who = p.process.as_deref().map(|w| format!(" ({w})")).unwrap_or_default();
+        parts.push(format!("tcp {}{who}", p.port));
+        if parts.len() >= 60 {
+            parts.push("…".into());
+            break;
+        }
+    }
+    parts.join("; ")
+}
+
 /// One host's sheet row.
 struct HostFacts<'a> {
     specs: Option<(HostSpecs, String)>,
@@ -353,9 +378,48 @@ fn host_row(
     });
     let booted = specs.and_then(|sp| {
         let (_, at) = facts.specs.as_ref()?;
-        let up = sp.uptime_secs?;
-        clock.before(at, up)
+        match sp.uptime_secs {
+            Some(up) => clock.before(at, up),
+            // F4: Windows says when it booted.
+            None => sp.windows.as_ref()?.last_boot.as_deref().map(|b| clock.at(b)),
+        }
     });
+    // F4: a Windows host's adapters, domain and hardware.
+    let addresses = specs.map(|sp| {
+        let mut all: Vec<&str> = Vec::new();
+        for a in sp.adapters.iter().flat_map(|a| &a.addresses) {
+            if !all.contains(&a.as_str()) {
+                all.push(a);
+            }
+        }
+        all.join(", ")
+    });
+    let macs = specs.map(|sp| {
+        sp.adapters
+            .iter()
+            .filter_map(|a| a.mac.as_deref().map(|m| format!("{} {m}", a.name)))
+            .collect::<Vec<_>>()
+            .join("; ")
+    });
+    let windows = specs.and_then(|sp| sp.windows.as_ref());
+    let domain = windows.and_then(|w| match (w.part_of_domain, &w.domain, &w.workgroup) {
+        (Some(true), Some(domain), _) => Some(domain.clone()),
+        (_, _, Some(group)) => Some(format!("{group} (workgroup)")),
+        (_, Some(domain), None) => Some(domain.clone()),
+        _ => None,
+    });
+    let hardware = windows.and_then(|w| match (&w.manufacturer, &w.model) {
+        (Some(m), Some(model)) => Some(format!("{m} {model}")),
+        (Some(one), None) | (None, Some(one)) => Some(one.clone()),
+        (None, None) => None,
+    });
+    // MO-14's ports for a Linux host read now; a Windows host's are in its facts.
+    let ports = match facts.ports {
+        Some(ports) => Some(ports_text(ports)),
+        None => specs
+            .filter(|sp| !sp.listening.is_empty())
+            .map(|sp| windows_ports_text(&sp.listening)),
+    };
     vec![
         Cell::text(&s.name),
         Cell::text(kind(&s.kind)),
@@ -374,6 +438,8 @@ fn host_row(
                 .and_then(|sp| sp.hostname.clone())
                 .or_else(|| s.last_hostname.clone()),
         ),
+        Cell::opt_text(addresses),
+        Cell::opt_text(macs),
         Cell::opt_text(specs.and_then(HostSpecs::os_name)),
         Cell::opt_text(specs.and_then(|sp| sp.kernel.clone())),
         Cell::opt_text(specs.and_then(|sp| sp.architecture.clone())),
@@ -383,8 +449,10 @@ fn host_row(
         Cell::opt_text(disks),
         Cell::opt_text(filesystems),
         Cell::opt_text(specs.and_then(|sp| sp.virtualization.clone())),
+        Cell::opt_text(domain),
+        Cell::opt_text(hardware),
         Cell::opt_text(booted),
-        Cell::opt_text(facts.ports.map(ports_text)),
+        Cell::opt_text(ports),
         Cell::opt_int(facts.updates.filter(|u| u.manager.is_some()).map(|u| u.packages.len())),
         Cell::opt_int(facts.updates.filter(|u| u.manager.is_some()).map(|u| u.security_count)),
         Cell::opt_int(facts.packages.filter(|p| p.database.is_some()).map(|p| p.count)),
@@ -758,6 +826,11 @@ async fn check_sheet(
     Ok(sheet)
 }
 
+/// The sessions "Read again first" reads: SSH hosts, and F4's Windows hosts over WinRM (their facts only).
+fn read_again(kind: &SessionKind) -> bool {
+    kind.is_ssh() || kind.is_winrm()
+}
+
 /// What a host read gave, kept until its row is made.
 #[derive(Default)]
 struct Fresh {
@@ -766,9 +839,11 @@ struct Fresh {
     updates: Option<UpdatesReport>,
     packages: Option<PackagesReport>,
     read_now: String,
+    /// F4: a Windows host (its updates and packages are not read).
+    windows: bool,
 }
 
-/// Reads the SSH hosts now, [`READS_AT_ONCE`] at a time, until `control` is cancelled (then `Cancelled`).
+/// Reads the SSH and WinRM hosts now, [`READS_AT_ONCE`] at a time, until `control` is cancelled (then `Cancelled`).
 async fn read_hosts(
     details: &HostDetails,
     ctx: &Context,
@@ -783,7 +858,7 @@ async fn read_hosts(
     let at_once = Arc::new(Semaphore::new(READS_AT_ONCE));
     let mut jobs = JoinSet::new();
     let mut summary = ReadSummary::default();
-    for s in sessions.iter().filter(|s| matches!(s.kind, SessionKind::Ssh)) {
+    for s in sessions.iter().filter(|s| read_again(&s.kind)) {
         summary.asked += 1;
         let (details, ctx, at_once, id, name) = (details.clone(), *ctx, Arc::clone(&at_once), s.id, s.name.clone());
         let cancel = control.cancel.clone();
@@ -839,6 +914,7 @@ async fn read_hosts(
                 fresh.ports = read.ports;
                 fresh.updates = read.updates;
                 fresh.packages = read.packages;
+                fresh.windows = read.windows;
             }
         }
         out.insert(id, fresh);
@@ -888,6 +964,23 @@ pub async fn collect(
     } else {
         (HashMap::new(), None)
     };
+    // F4: updates and packages are Linux reads; the Windows hosts read now are said to be left out of them.
+    let windows_read = fresh.values().filter(|f| f.windows).count();
+    if windows_read > 0 && (options.updates || options.packages) {
+        let what = match (options.updates, options.packages) {
+            (true, true) => "Pending updates and installed packages are",
+            (true, false) => "Pending updates are",
+            _ => "Installed packages are",
+        };
+        let hosts = if windows_read == 1 {
+            "1 Windows host".to_owned()
+        } else {
+            format!("{windows_read} Windows hosts")
+        };
+        notes.push(format!(
+            "{what} read from Linux hosts only, so {hosts} has none in the file."
+        ));
+    }
 
     // VMs, with their stored hardware. A VM never read is read now from its files (QL-21's read, stored as the
     // details panel stores it); "Read again first" reads every VM's again.
@@ -923,7 +1016,7 @@ pub async fn collect(
         vm_sheet.push(vm_row(vm, hw.as_ref(), &linked, clock));
     }
 
-    // Hosts: every session; an SSH host's facts as read now, else as stored.
+    // Hosts: every session; an SSH or WinRM host's facts as read now, else as stored.
     let mut stored_specs = store.all_session_specs(ctx).await?;
     let mut host_sheet = Sheet::new("hosts", "Hosts", &HOST_COLUMNS);
     let mut package_sheet = options
@@ -934,7 +1027,7 @@ pub async fn collect(
         let stored = stored_specs
             .remove(&s.id)
             .and_then(|st| Some((serde_json::from_str::<HostSpecs>(&st.specs).ok()?, st.collected_at)));
-        let read_now = if !matches!(s.kind, SessionKind::Ssh) {
+        let read_now = if !read_again(&s.kind) {
             String::new()
         } else if options.reads_hosts() {
             fresh.read_now.clone()

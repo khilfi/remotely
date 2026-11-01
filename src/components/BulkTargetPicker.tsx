@@ -6,7 +6,8 @@
 // address its guest reports, which a hostile guest can make up) is reached once the user confirms the link.
 // SS-12: only SSH sessions are listed, since both pickers' runs (a key push, a support bundle) go over SSH; the
 // core leaves out any other kind a tag brings in, saying so. F6's Ansible inventory picks with `purpose="export"`:
-// nothing runs, so protected hosts are counted (they go in, in their own group) and nothing picked is every session.
+// nothing runs, so WinRM sessions are listed too, protected hosts are counted (they go in, in their own group) and
+// nothing picked is every SSH and WinRM session.
 
 import { useEffect, useMemo, useState } from "react";
 import {
@@ -75,7 +76,15 @@ function sessionAddress(s: SessionRecord) {
 export function BulkTargetPicker({ active, picks, onPicksChange, resolved, onOpenSessions, purpose = "run" }: Props) {
   const exporting = purpose === "export";
   const [allSessions, setSessions] = useState<SessionRecord[]>([]);
-  const sessions = useMemo(() => allSessions.filter((s) => kindOf(s).protocol === "ssh"), [allSessions]);
+  // An export (the Ansible inventory) also takes WinRM sessions; runs go over SSH.
+  const sessions = useMemo(
+    () =>
+      allSessions.filter((s) => {
+        const protocol = kindOf(s).protocol;
+        return protocol === "ssh" || (exporting && protocol === "winrm");
+      }),
+    [allSessions, exporting],
+  );
   const otherKinds = allSessions.length - sessions.length;
   const [vms, setVms] = useState<VmRecord[]>([]);
   const [tags, setTags] = useState<Tag[]>([]);
@@ -201,7 +210,9 @@ export function BulkTargetPicker({ active, picks, onPicksChange, resolved, onOpe
               sessions.length > 0
                 ? "No session matches."
                 : otherKinds > 0
-                  ? "No SSH sessions yet."
+                  ? exporting
+                    ? "No SSH or WinRM sessions yet."
+                    : "No SSH sessions yet."
                   : "No saved sessions yet."
             }
           >
@@ -225,8 +236,9 @@ export function BulkTargetPicker({ active, picks, onPicksChange, resolved, onOpe
           </PickList>
           {otherKinds > 0 && (
             <p className="mt-2 text-xs text-muted-foreground">
-              {plural(otherKinds, "remote desktop, VNC, Telnet or serial session")} not listed: this works over SSH
-              only.
+              {exporting
+                ? `${plural(otherKinds, "remote desktop, VNC, Telnet or serial session")} not listed: the inventory takes SSH and WinRM sessions.`
+                : `${plural(otherKinds, "session")} of other kinds not listed: this works over SSH only.`}
             </p>
           )}
         </TabsContent>
@@ -308,7 +320,7 @@ export function BulkTargetPicker({ active, picks, onPicksChange, resolved, onOpe
 
       <div className="flex flex-wrap items-center gap-2 text-sm">
         {exporting && !anyPicked ? (
-          <span className="text-muted-foreground">Nothing picked, so every SSH session goes in</span>
+          <span className="text-muted-foreground">Nothing picked, so every SSH and WinRM session goes in</span>
         ) : (
           <span className="font-medium">
             {plural(exporting ? hosts.length : hosts.length - skipped.length, "host")}

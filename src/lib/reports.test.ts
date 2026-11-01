@@ -100,9 +100,9 @@ test("what the toasts say", () => {
   );
   assert.equal(
     readText({ asked: 3, read: 2, problems: ["x"] }),
-    "2 of 3 SSH hosts read again; 1 kept what was read before.",
+    "2 of 3 hosts read again; 1 kept what was read before.",
   );
-  assert.equal(readText({ asked: 1, read: 1, problems: [] }), "1 of 1 SSH host read again.");
+  assert.equal(readText({ asked: 1, read: 1, problems: [] }), "1 of 1 host read again.");
   assert.equal(readText(null), null);
   assert.equal(handoverCountText(1, 0, 2), "1 job, 0 other changes and 2 marked notes");
 });

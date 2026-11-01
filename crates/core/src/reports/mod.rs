@@ -2,7 +2,7 @@
 //! read takes the `ctx` the shell passes, the shown workspace's at the time of the call):
 //!
 //! * **FD-05 inventory to Excel** ([`inventory`], [`xlsx`]): VMs, hosts, networks, health checks and, on request,
-//!   installed packages, from what is stored; "Read again first" reads the SSH hosts now.
+//!   installed packages, from what is stored; "Read again first" reads the SSH and WinRM hosts now.
 //! * **BX-12 Ansible inventory** ([`ansible`]): YAML or INI from BX-01's targets, grouped by folder, tag, environment
 //!   and workspace, never a secret.
 //! * **FD-08 handover pack** ([`pack`]): a zip with one self-contained `index.html` (cover, inventory, the topology
@@ -31,14 +31,14 @@ use serde::{Deserialize, Serialize};
 use time::{OffsetDateTime, UtcOffset};
 use uuid::Uuid;
 
-use crate::bulk::{BulkRuns, TargetPicks};
+use crate::bulk::{BulkRuns, Reach, ResolvedTargets, TargetPicks};
 use crate::domain::{Context, Environment};
 use crate::error::{CoreError, Result};
 use crate::host_details::HostDetails;
 use crate::host_networks::HostNetworks;
 use crate::notes::Notes;
 use crate::save_guard::{self, Saved};
-use crate::sessions::{SessionKind, SessionRecord};
+use crate::sessions::SessionRecord;
 use crate::store::{self, NewAuditEntry, Store};
 
 pub use ansible::{AnsibleFormat, GroupBy};
@@ -219,6 +219,8 @@ pub struct ReportsOverview {
     pub vms: usize,
     pub sessions: usize,
     pub ssh_sessions: usize,
+    /// F4's Windows hosts: "Read again first" reads them too, but not their updates or packages.
+    pub winrm_sessions: usize,
     pub checks: usize,
     /// FD-06: notes marked for the handover pack.
     pub handover_notes: usize,
@@ -249,7 +251,7 @@ pub struct InventoryExport {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct AnsibleRequest {
-    /// BX-01's picks; none picked is every SSH session of the workspace.
+    /// BX-01's picks; none picked is every SSH and WinRM session of the workspace.
     pub picks: TargetPicks,
     pub format: AnsibleFormat,
     pub group_by: GroupBy,
@@ -354,7 +356,8 @@ impl Reports {
             workspace: self.store.workspace_name(ctx).await?,
             prepared_by: self.store.user_display_name(ctx).await?,
             vms: self.store.list_vms(ctx).await?.len(),
-            ssh_sessions: sessions.iter().filter(|s| matches!(s.kind, SessionKind::Ssh)).count(),
+            ssh_sessions: sessions.iter().filter(|s| s.kind.is_ssh()).count(),
+            winrm_sessions: sessions.iter().filter(|s| s.kind.is_winrm()).count(),
             sessions: sessions.len(),
             checks: self.store.count_checks(ctx).await?,
             handover_notes: self.notes.for_handover(ctx).await?.len(),
@@ -456,7 +459,7 @@ impl Reports {
             plural(report.checks, "health check")
         );
         if let Some(read) = &report.read {
-            detail.push_str(&format!(", {} of {} SSH hosts read again", read.read, read.asked));
+            detail.push_str(&format!(", {} of {} hosts read again", read.read, read.asked));
         }
         if let Some(p) = report.packages {
             detail.push_str(&format!(", {}", plural(p, "package")));
@@ -466,30 +469,30 @@ impl Reports {
         Ok(report)
     }
 
-    /// BX-12: the inventory of the picked sessions (every SSH session when none is picked).
+    /// BX-12: the hosts the picks reach, for the dialog's picker: BX-01's resolve keeping SSH and WinRM sessions.
+    pub async fn ansible_targets(&self, ctx: &Context, picks: &TargetPicks) -> Result<ResolvedTargets> {
+        self.bulk.resolve_reaching(ctx, picks, Reach::SshAndWinrm).await
+    }
+
+    /// BX-12: the inventory of the picked sessions (every SSH and WinRM session when none is picked).
     async fn ansible_inventory(&self, ctx: &Context, request: &AnsibleRequest) -> Result<ansible::Inventory> {
         let all = self.store.list_sessions(ctx).await?;
         let folders = self.store.list_session_folders(ctx).await?;
         let workspace = self.store.workspace_name(ctx).await?;
         let picks_empty = request.picks == TargetPicks::default();
+        let takes = |s: &&SessionRecord| s.kind.is_ssh() || s.kind.is_winrm();
         let (ids, mut notes): (Vec<Uuid>, Vec<String>) = if picks_empty {
-            let others = all.iter().filter(|s| !matches!(s.kind, SessionKind::Ssh)).count();
+            let others = all.iter().filter(|s| !takes(s)).count();
             let mut notes = Vec::new();
             if others > 0 {
                 notes.push(format!(
-                    "{} of other kinds (remote desktop, VNC, Telnet, serial) left out: the inventory takes SSH sessions.",
+                    "{} of other kinds (remote desktop, VNC, Telnet, serial) left out: the inventory takes SSH and WinRM sessions.",
                     plural(others, "session")
                 ));
             }
-            (
-                all.iter()
-                    .filter(|s| matches!(s.kind, SessionKind::Ssh))
-                    .map(|s| s.id)
-                    .collect(),
-                notes,
-            )
+            (all.iter().filter(takes).map(|s| s.id).collect(), notes)
         } else {
-            let resolved = self.bulk.resolve(ctx, &request.picks).await?;
+            let resolved = self.ansible_targets(ctx, &request.picks).await?;
             let mut notes = resolved.notes;
             for vm in &resolved.vms_without_session {
                 notes.push(format!("{}: no session reaches this VM, so it was left out.", vm.name));
@@ -555,7 +558,7 @@ impl Reports {
         let inventory = self.ansible_inventory(ctx, request).await?;
         if inventory.hosts.is_empty() {
             return Err(CoreError::InvalidInput(
-                "No SSH session can go in the inventory: pick sessions, or VMs linked to one.".into(),
+                "No SSH or WinRM session can go in the inventory: pick sessions, or VMs linked to one.".into(),
             ));
         }
         let (text, notes) = ansible::render(&inventory, request.format);

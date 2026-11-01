@@ -138,7 +138,7 @@ fn list(items: &[String]) -> String {
 
 fn read_text(read: &ReadSummary) -> String {
     format!(
-        "Read again before this was made: {} of {} SSH hosts.",
+        "Read again before this was made: {} of {} hosts.",
         read.read, read.asked
     )
 }

@@ -20,8 +20,9 @@
 //!
 //! * FD-05 ([`HostDetails::inventory_read`]): the inventory's "Read again first", for many hosts at once: the facts
 //!   (stored, like a Refresh), the listening ports, and on request pending updates and the installed packages
-//!   ([`packages`], never stored). Its own logins go through the [`LoginGuard`], like the dashboard's: a refused login
-//!   parks the host and every login counts against the hourly cap.
+//!   ([`packages`], never stored); a Windows host (F4, WinRM) only its facts, which hold its ports. Its own logins, SSH
+//!   or WinRM, go through the [`LoginGuard`], like the dashboard's: a refused login parks the host and every login
+//!   counts against the hourly cap.
 //!
 //! Which connection a Refresh or an admin read uses: an open terminal's to the session, then the
 //! dashboard's kept one, then a connection of its own, made only because the user asked and kept for
@@ -201,6 +202,9 @@ pub struct InventoryRead {
     pub ports: Option<Vec<ListeningPort>>,
     pub updates: Option<UpdatesReport>,
     pub packages: Option<PackagesReport>,
+    /// F4: a Windows host over WinRM: only its facts are read (they hold its listening ports); updates and packages
+    /// are Linux reads.
+    pub windows: bool,
     /// One line per part that could not be read: the login, a time limit, a host that isn't Linux.
     pub problems: Vec<String>,
 }
@@ -645,7 +649,7 @@ impl HostDetails {
 
     /// FD-05: the inventory's "Read again first" for one SSH host: its facts (stored), listening ports and, as asked,
     /// pending updates and installed packages, on the connection a Refresh would use, its own logins through the
-    /// login guard. Reads only. A part that fails is noted and the others are still read; `Err` only when no
+    /// login guard. F4: a WinRM host gives its facts only (`windows`). Reads only. A part that fails is noted and the others are still read; `Err` only when no
     /// connection could be made (the error says why: parked, capped, the vault locked...).
     pub async fn inventory_read(
         &self,
@@ -664,6 +668,11 @@ impl HostDetails {
         {
             Ok(specs) => read.specs = Some(specs),
             Err(err) => read.problems.push(format!("facts: {err}")),
+        }
+        // F4: a Windows host's facts (F4's CIM read) hold its listening ports; its updates and packages aren't read.
+        if exec.script_kind() == ScriptKind::PowerShell {
+            read.windows = true;
+            return Ok(read);
         }
         match run_with_timeout(
             exec.as_ref(),

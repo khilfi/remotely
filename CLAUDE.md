@@ -595,7 +595,8 @@ crates/core/          remotely-core: all app logic
                       chosen or confirmed link, else ResolvedTargets::vms_unconfirmed), BX-03 grouped results and diff,
                       BX-05 exports: the Terminal page's Compare output (running is RemoteExec on the bus); QL-12
                       recorded MultiExec lines group (group_with_output), diff and export (export_recorded, audited
-                      multiexec_exported) through the same code
+                      multiexec_exported) through the same code; Reach: runs keep SSH sessions, F6's Ansible export
+                      SSH and WinRM (resolve_reaching)
     support_bundle/   FD-04 support bundles (no migration): spec.rs BundleSpec (Command::SupportBundle; presets expanded
                       into its items before the bus rates them; refused from the UI: the zip's place comes from the
                       shell's save dialog; never retried), its checks, entry names safe for Windows and the file name
@@ -629,12 +630,17 @@ crates/core/          remotely-core: all app logic
                       first" through HostDetails::inventory_read, READS_AT_ONCE (4), HOST_READ_LIMIT, ReadControl (the
                       window's cancel, waiting reads included, then Cancelled and no file; ReadProgress per host done);
                       xlsx.rs rust_xlsxwriter, text always `write_string`, never a formula; ansible.rs
-                      BX-12 YAML and INI from BX-01's targets (none picked: every SSH session), groups by folder
+                      BX-12 YAML and INI from BX-01's targets (none picked: every SSH and WinRM session; picks through
+                      bulk::Reach::SshAndWinrm), groups by folder
                       (nested), tag, environment, workspace, and `protected` (LinkedVm: Compare hosts' rule, a session
                       whose VM is protected or Prod is too); names made valid, YAML keys and strings
                       double-quoted, Jinja markers `!unsafe` (INI leaves such a value out), hosts and users ssh could
-                      read as options refused, ProxyJump in ansible_ssh_common_args; F4's WinRM hook is
-                      `connection_vars`; activity.rs FD-08 the Activity page's grouping (jobs with their approvals and
+                      read as options refused, ProxyJump in ansible_ssh_common_args; `connection_vars` matches every
+                      session kind: SSH, and F4's WinRM (winrm_vars: connection winrm, port, scheme, transport kerberos
+                      for "my Windows sign-in", ntlm or basic over HTTPS only, the user if any; never a password or
+                      `cert_validation: ignore`: a fingerprint-trusted certificate is named in the header; none behind
+                      an SSH jump host); inventory.rs's hosts sheet takes Windows facts (adapters' addresses and MACs,
+                      domain or workgroup, hardware, listening ports) and reads WinRM hosts again too; activity.rs FD-08 the Activity page's grouping (jobs with their approvals and
                       entries; other changes, this PC's own events left out); topology.rs QL-21's graph and layered
                       layout ported, drawn as plain SVG (rect, path, text); html.rs escape, the page with its CSP (only
                       the style's hash and data: images); pack.rs index.html (cover, inventory, the diagram as an
@@ -759,7 +765,7 @@ crates/core/          remotely-core: all app logic
                       rcgen certificate made at run time, jump hosts through the test SSH server, Wake-on-LAN to
                       127.0.0.1; consoles.rs: SS-12 RDP, VNC, Telnet, serial and tunnel tabs; winrm.rs: F4 the real client
                       (Windows' SSPI NTLM) against WinrmTestServer: the console, sealing, certificates, metrics, facts,
-                      service checks, parks; checks.rs: MO-08 on a
+                      service checks, parks, and F6's inventory and Ansible export of a Windows host; checks.rs: MO-08 on a
                       FakeClock with FakeNetworkTools, HTTP and TLS servers on 127.0.0.1 (rcgen), the test SSH server's
                       `systemctl is-active` and a jump host held to one login; file_server.rs: FD-09 TFTP and HTTP on
                       127.0.0.1 with port 0 and the test's own clients, folders made in the temp folder: every

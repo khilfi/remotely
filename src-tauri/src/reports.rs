@@ -6,7 +6,7 @@
 //! core refuses a Git working tree. Each export reads the shown workspace (`core.ctx()` per call). Show in folder opens
 //! Explorer at a file saved here, by the id its export returned, never at a path the window names.
 //!
-//! The inventory and the handover pack may read every SSH host first, which takes minutes: each runs under an id the
+//! The inventory and the handover pack may read every SSH and WinRM host first, which takes minutes: each runs under an id the
 //! window chose, in the toolbox's [`ToolRuns`] (so a reload of the window stops it, `lib.rs`), `reports_cancel` stops
 //! it with nothing written, and `reports://progress` says how many hosts are done.
 
@@ -14,6 +14,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
+use remotely_core::bulk::{ResolvedTargets, TargetPicks};
 use remotely_core::reports::{
     chosen_path, AnsibleExport, AnsibleFormat, AnsiblePreview, AnsibleRequest, HandoverExport, HandoverPreview,
     HandoverRequest, InventoryExport, InventoryRequest, ReadControl, ReadProgress, ReportKind, ReportsOverview,
@@ -169,6 +170,13 @@ pub async fn inventory_export(
     }))
 }
 
+/// BX-12: the hosts the picks reach, SSH and WinRM sessions both, for the dialog's picker.
+#[tauri::command]
+pub async fn ansible_targets(state: State<'_, AppState>, picks: TargetPicks) -> IpcResult<ResolvedTargets> {
+    let core = &state.core;
+    Ok(core.reports.ansible_targets(&core.ctx(), &picks).await?)
+}
+
 /// BX-12: the file as it would be written, for the dialog's preview.
 #[tauri::command]
 pub async fn ansible_preview(state: State<'_, AppState>, request: AnsibleRequest) -> IpcResult<AnsiblePreview> {
@@ -191,7 +199,7 @@ pub async fn ansible_export(
     let preview = core.reports.ansible_preview(&ctx, &request).await?;
     if preview.hosts == 0 {
         return Err(CoreError::InvalidInput(
-            "No SSH session can go in the inventory: pick sessions, or VMs linked to one.".into(),
+            "No SSH or WinRM session can go in the inventory: pick sessions, or VMs linked to one.".into(),
         )
         .into());
     }

@@ -2,7 +2,7 @@
 // core sends and the IPC wrappers. Each export opens its save dialog in the shell (never a path from here), reads the
 // shown workspace only, and is audited by the core; the read-only lock allows them, as it allows other exports.
 
-import { invoke, listen, type TargetPicks } from "@/lib/api";
+import { invoke, listen, type ResolvedTargets, type TargetPicks } from "@/lib/api";
 
 export interface ReportsOverview {
   workspace: string;
@@ -11,6 +11,8 @@ export interface ReportsOverview {
   vms: number;
   sessions: number;
   sshSessions: number;
+  /** Windows hosts: read again too, but not for updates or packages. */
+  winrmSessions: number;
   checks: number;
   /** Notes marked for the handover pack. */
   handoverNotes: number;
@@ -116,6 +118,8 @@ export const reportsApi = {
    */
   exportInventory: (run: string, options: InventoryOptions, utcOffsetMinutes: number) =>
     invoke<InventoryExport | null>("inventory_export", { run, request: { ...options, utcOffsetMinutes } }),
+  /** The hosts the picks reach, SSH and WinRM sessions both (the picker's list). */
+  ansibleTargets: (picks: TargetPicks) => invoke<ResolvedTargets>("ansible_targets", { picks }),
   ansiblePreview: (request: AnsibleRequest) => invoke<AnsiblePreview>("ansible_preview", { request }),
   exportAnsible: (request: AnsibleRequest, utcOffsetMinutes: number) =>
     invoke<AnsibleExport | null>("ansible_export", { request, utcOffsetMinutes }),

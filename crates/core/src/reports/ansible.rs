@@ -1,9 +1,10 @@
 //! BX-12: an Ansible inventory, YAML or INI, from BX-01's targets. Remotely only writes the file: it never runs a
 //! playbook (CLAUDE.md, locked decisions).
 //!
-//! * **Hosts**: each saved SSH session, named after the session (made valid for Ansible), with `ansible_host`,
-//!   `ansible_port`, `ansible_user`, and its SS-07 jump hosts as `-o ProxyJump=...` in `ansible_ssh_common_args`.
-//!   Never a password, key, passphrase or vault item: the header says to give those to Ansible yourself.
+//! * **Hosts**: each saved SSH or WinRM session, named after the session (made valid for Ansible), with
+//!   `ansible_host`, `ansible_port`, `ansible_user`, and an SSH session's SS-07 jump hosts as `-o ProxyJump=...` in
+//!   `ansible_ssh_common_args`. Never a password, key, passphrase or vault item: the header says to give those to
+//!   Ansible yourself.
 //! * **Groups**: by folder (nested, `folder_customer_web` a child of `folder_customer`), tag, environment and
 //!   workspace, as chosen; `protected` holds the protected sessions and those whose linked VM is protected, so
 //!   `--limit '!protected'` keeps a playbook off them as Compare hosts is ([`LinkedVm`]: a Prod VM's session is in
@@ -16,9 +17,10 @@
 //!   ssh could read as an option (`-oProxyCommand=...`) or that holds anything ProxyJump can't carry is refused: that
 //!   would run commands on the machine that runs the playbook.
 //!
-//! Only SSH sessions go in. **F4 hook**: WinRM sessions (`SessionKind::Winrm`) belong here too, with
-//! `ansible_connection: winrm`, `ansible_port` and `ansible_winrm_transport`: add them in [`connection_vars`] (and let
-//! BX-01's resolve keep WinRM sessions for this export), whichever of F4 and F6 merges second.
+//! SSH and F4's WinRM sessions go in ([`connection_vars`]; BX-01's resolve with `bulk::Reach::SshAndWinrm`). A WinRM
+//! host gets `ansible_connection: winrm`, its port, `ansible_winrm_scheme` and `ansible_winrm_transport` ([`winrm_vars`]):
+//! never a password, and never `ansible_winrm_server_cert_validation: ignore`; a certificate Remotely trusts by its
+//! fingerprint is named in the header, which says to give Ansible the CA or the certificate.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
@@ -27,6 +29,7 @@ use uuid::Uuid;
 
 use super::table::clean;
 use crate::domain::Environment;
+use crate::sessions::kinds::{WinrmCertificate, WinrmOptions, WinrmSignIn, WinrmTransport};
 use crate::sessions::{SessionFolder, SessionKind, SessionRecord};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -190,19 +193,102 @@ fn hop(session: &SessionRecord) -> Option<String> {
 /// A host's variables, in the order they are written.
 type Vars = Vec<(&'static str, Value)>;
 
-/// The variables a host connects with, or why it is left out. BX-12 takes SSH sessions. **F4**: a WinRM session
-/// (`SessionKind::Winrm`) gets `ansible_connection: winrm`, `ansible_port` and `ansible_winrm_transport` here.
-fn connection_vars(
-    session: &SessionRecord,
-    by_id: &HashMap<Uuid, &SessionRecord>,
-) -> Result<(Vars, Option<String>), String> {
-    if !matches!(session.kind, SessionKind::Ssh) {
-        return Err(format!(
-            "{} is a {} session, so it was left out: the inventory takes SSH sessions.",
+/// What a host's connection adds besides its variables.
+#[derive(Debug, Default)]
+struct Connection {
+    vars: Vars,
+    /// Why part of it was left out, for the notes.
+    note: Option<String>,
+    /// A WinRM host whose certificate Remotely trusts by its fingerprint, not through Windows.
+    fingerprint: bool,
+}
+
+/// The variables a host connects with, or why it is left out: SSH sessions ([`ssh_vars`]) and F4's WinRM sessions
+/// ([`winrm_vars`]). The match is exhaustive, so a new session kind has to say here whether it goes in.
+fn connection_vars(session: &SessionRecord, by_id: &HashMap<Uuid, &SessionRecord>) -> Result<Connection, String> {
+    match &session.kind {
+        SessionKind::Ssh => ssh_vars(session, by_id),
+        SessionKind::Winrm(options) => winrm_vars(session, options),
+        SessionKind::Rdp(_) | SessionKind::Vnc(_) | SessionKind::Telnet(_) | SessionKind::Serial(_) => Err(format!(
+            "{} is a {} session, so it was left out: the inventory takes SSH and WinRM sessions.",
             clean(&session.name),
             session.kind.label()
+        )),
+    }
+}
+
+/// A user name WinRM takes as one (`alice`, `CORP\alice`, `alice@corp.example.com`): no quote, nothing a line could
+/// break at, nothing Ansible would template (those are quoted or `!unsafe` anyway).
+fn safe_winrm_user(user: &str) -> bool {
+    !user.is_empty()
+        && user
+            .chars()
+            .all(|c| c.is_alphanumeric() || matches!(c, '.' | '-' | '_' | '$' | '\\' | '@' | ' '))
+}
+
+/// F4, BX-12: a WinRM session as Ansible's `winrm` connection: its address, port, scheme and transport (`kerberos`
+/// for "my Windows sign-in", which is Kerberos only; `ntlm`; `basic`, which Remotely allows over HTTPS only), and its
+/// user when it has one. Never a password, and never `ansible_winrm_server_cert_validation: ignore`: a certificate
+/// Remotely trusts by its fingerprint is noted (the header says to give Ansible the CA or the certificate), so
+/// validation is never weakened on the user's behalf. A WinRM session can't use an SSH jump host: one that has one is
+/// left out.
+fn winrm_vars(session: &SessionRecord, options: &WinrmOptions) -> Result<Connection, String> {
+    let name = clean(&session.name);
+    if session.jump_session_id.is_some() {
+        return Err(format!(
+            "{name} was left out: it is reached through an SSH jump host, which a WinRM session can't use."
         ));
     }
+    let host = clean(&session.host);
+    if !safe_host(&host) {
+        return Err(format!("{name} was left out: its host can't be written safely."));
+    }
+    let scheme = match options.transport {
+        WinrmTransport::Https => "https",
+        WinrmTransport::Http => "http",
+    };
+    let transport = match options.sign_in {
+        WinrmSignIn::Windows => "kerberos",
+        WinrmSignIn::Ntlm => "ntlm",
+        // Remotely saves Basic over HTTPS only: an older row that says HTTP would send the password in the clear.
+        WinrmSignIn::Basic if !options.https() => {
+            return Err(format!(
+                "{name} was left out: it signs in with Basic over HTTP, which would send its password in the clear."
+            ))
+        }
+        WinrmSignIn::Basic => "basic",
+    };
+    let mut vars = vec![
+        ("ansible_host", Value::Text(host)),
+        ("ansible_port", Value::Int(i64::from(session.port))),
+        ("ansible_connection", Value::Text("winrm".into())),
+        ("ansible_winrm_scheme", Value::Text(scheme.into())),
+        ("ansible_winrm_transport", Value::Text(transport.into())),
+    ];
+    // "My Windows sign-in" has no user: Kerberos signs in as whoever runs the playbook.
+    if options.uses_password() {
+        if let Some(user) = session.username.as_deref().map(clean).filter(|u| !u.is_empty()) {
+            if !safe_winrm_user(&user) {
+                return Err(format!("{name} was left out: its user name can't be written safely."));
+            }
+            vars.push(("ansible_user", Value::Text(user)));
+        }
+    }
+    let fingerprint = options.https() && options.certificate == WinrmCertificate::Fingerprint;
+    let note = fingerprint.then(|| {
+        format!(
+            "{name}: Remotely trusts its certificate by its fingerprint, not through Windows. Give Ansible the CA or the certificate itself (ansible_winrm_ca_trust_path); the inventory never turns validation off."
+        )
+    });
+    Ok(Connection {
+        vars,
+        note,
+        fingerprint,
+    })
+}
+
+/// An SSH session's variables: address, port, user, and its SS-07 jump hosts as ProxyJump.
+fn ssh_vars(session: &SessionRecord, by_id: &HashMap<Uuid, &SessionRecord>) -> Result<Connection, String> {
     let host = clean(&session.host);
     if !safe_host(&host) {
         return Err(format!(
@@ -258,7 +344,11 @@ fn connection_vars(
             }
         }
     }
-    Ok((vars, note))
+    Ok(Connection {
+        vars,
+        note,
+        fingerprint: false,
+    })
 }
 
 /// Each folder's path from the top, by id.
@@ -327,8 +417,13 @@ pub fn build(
         )
     });
 
+    let mut fingerprinted: Vec<String> = Vec::new();
     for session in hosts {
-        let (vars, note) = match connection_vars(session, &by_id) {
+        let Connection {
+            vars,
+            note,
+            fingerprint,
+        } = match connection_vars(session, &by_id) {
             Ok(found) => found,
             Err(why) => {
                 inventory.notes.push(why);
@@ -337,6 +432,9 @@ pub fn build(
         };
         inventory.notes.extend(note);
         let name = unique(host_name(&session.name), &mut taken_hosts);
+        if fingerprint {
+            fingerprinted.push(name.clone());
+        }
         let member = |group: String, inventory: &mut Inventory| {
             inventory.groups.entry(group).or_default().hosts.insert(name.clone());
         };
@@ -401,6 +499,18 @@ pub fn build(
             session_id: session.id,
             vars,
         });
+    }
+    // F4: Ansible checks a WinRM host's certificate itself; Remotely never writes validation off for it.
+    if !fingerprinted.is_empty() {
+        let shown: Vec<&str> = fingerprinted.iter().take(5).map(String::as_str).collect();
+        let more = match fingerprinted.len().saturating_sub(shown.len()) {
+            0 => String::new(),
+            n => format!(" and {n} more"),
+        };
+        inventory.header.push(format!(
+            "The WinRM certificates of {}{more} are trusted in Remotely by fingerprint, not through Windows: give Ansible the CA or the certificates (ansible_winrm_ca_trust_path). Validation is never turned off here.",
+            shown.join(", ")
+        ));
     }
     inventory
 }
@@ -948,7 +1058,186 @@ mod tests {
         let inv = inventory_of(&[rdp], &[], GroupBy::default());
         assert!(inv.hosts.is_empty());
         assert_eq!(inv.notes.len(), 1);
-        assert!(inv.notes[0].contains("SSH sessions"), "{}", inv.notes[0]);
+        assert!(inv.notes[0].contains("SSH and WinRM sessions"), "{}", inv.notes[0]);
         assert!(yaml(&inv).contains("  hosts: {}\n"));
+    }
+
+    fn winrm(name: &str, port: u16, user: Option<&str>, options: WinrmOptions) -> SessionRecord {
+        let mut s = session(name, &format!("{name}.example.com"), user);
+        s.port = port;
+        s.protocol = "winrm".into();
+        s.kind = SessionKind::Winrm(options);
+        s
+    }
+
+    fn options(transport: WinrmTransport, sign_in: WinrmSignIn, certificate: WinrmCertificate) -> WinrmOptions {
+        WinrmOptions {
+            transport,
+            sign_in,
+            certificate,
+        }
+    }
+
+    #[test]
+    fn winrm_hosts_get_their_connection_scheme_and_transport_and_never_a_secret() {
+        let kerberos = winrm(
+            "dc01",
+            5986,
+            None,
+            options(WinrmTransport::Https, WinrmSignIn::Windows, WinrmCertificate::Windows),
+        );
+        let ntlm = winrm(
+            "file01",
+            5985,
+            Some("CORP\\alice"),
+            options(WinrmTransport::Http, WinrmSignIn::Ntlm, WinrmCertificate::Windows),
+        );
+        let basic = winrm(
+            "web02",
+            5986,
+            Some("alice@corp.example.com"),
+            options(WinrmTransport::Https, WinrmSignIn::Basic, WinrmCertificate::Windows),
+        );
+        let pinned = winrm(
+            "lab01",
+            5986,
+            Some("bob"),
+            options(WinrmTransport::Https, WinrmSignIn::Ntlm, WinrmCertificate::Fingerprint),
+        );
+        let all = vec![kerberos, ntlm, basic, pinned];
+        let inv = inventory_of(&all, &[], GroupBy::default());
+        let vars = |name: &str| {
+            inv.hosts
+                .iter()
+                .find(|h| h.name == name)
+                .map(|h| h.vars.clone())
+                .unwrap()
+        };
+        assert_eq!(
+            vars("dc01"),
+            vec![
+                ("ansible_host", Value::Text("dc01.example.com".into())),
+                ("ansible_port", Value::Int(5986)),
+                ("ansible_connection", Value::Text("winrm".into())),
+                ("ansible_winrm_scheme", Value::Text("https".into())),
+                ("ansible_winrm_transport", Value::Text("kerberos".into())),
+            ],
+            "my Windows sign-in is Kerberos and has no user"
+        );
+        assert!(vars("file01").contains(&("ansible_winrm_scheme", Value::Text("http".into()))));
+        assert!(vars("file01").contains(&("ansible_winrm_transport", Value::Text("ntlm".into()))));
+        assert!(vars("file01").contains(&("ansible_user", Value::Text("CORP\\alice".into()))));
+        assert!(vars("web02").contains(&("ansible_winrm_transport", Value::Text("basic".into()))));
+        assert!(vars("web02").contains(&("ansible_user", Value::Text("alice@corp.example.com".into()))));
+
+        // Ansible checks the certificate itself: a fingerprint-trusted host is named, never "ignore".
+        assert!(inv
+            .notes
+            .iter()
+            .any(|n| n.starts_with("lab01: ") && n.contains("ansible_winrm_ca_trust_path")));
+        let (ini_text, ini_notes) = ini(&inv);
+        let yaml_text = yaml(&inv);
+        for text in [&yaml_text, &ini_text] {
+            assert!(!text.to_lowercase().contains("ignore"), "{text}");
+            assert!(!text.contains("cert_validation"), "{text}");
+            assert!(!text.contains("ansible_password"), "{text}");
+            assert!(
+                text.contains("# The WinRM certificates of lab01 are trusted in Remotely by fingerprint"),
+                "{text}"
+            );
+        }
+        assert!(ini_notes.is_empty(), "{ini_notes:?}");
+        assert!(
+            yaml_text.contains("      ansible_connection: \"winrm\"\n      ansible_winrm_scheme: \"https\"\n"),
+            "{yaml_text}"
+        );
+        assert!(
+            yaml_text.contains("      ansible_user: \"CORP\\\\alice\"\n"),
+            "a backslash escaped in YAML: {yaml_text}"
+        );
+        assert!(
+            ini_text.contains(
+                "file01 ansible_host=\"file01.example.com\" ansible_port=5985 ansible_connection=\"winrm\" ansible_winrm_scheme=\"http\" ansible_winrm_transport=\"ntlm\" ansible_user=\"CORP\\\\alice\"\n"
+            ),
+            "{ini_text}"
+        );
+    }
+
+    #[test]
+    fn a_winrm_host_behind_a_jump_host_or_on_basic_over_http_is_left_out() {
+        let bastion = session("bastion", "bastion.test", Some("bob"));
+        let mut behind = winrm(
+            "app02",
+            5986,
+            Some("alice"),
+            options(WinrmTransport::Https, WinrmSignIn::Ntlm, WinrmCertificate::Windows),
+        );
+        behind.jump_session_id = Some(bastion.id);
+        let clear = winrm(
+            "old01",
+            5985,
+            Some("alice"),
+            options(WinrmTransport::Http, WinrmSignIn::Basic, WinrmCertificate::Windows),
+        );
+        let mut hostile = winrm(
+            "evil",
+            5986,
+            Some("alice\"\n[all:vars]"),
+            options(WinrmTransport::Https, WinrmSignIn::Ntlm, WinrmCertificate::Windows),
+        );
+        hostile.tags = vec!["{{ lookup('pipe','id') }}".into()];
+        let all = vec![bastion, behind.clone(), clear.clone(), hostile];
+        let inv = build(
+            &[&behind, &clear, &all[3]],
+            &all,
+            &[],
+            &HashMap::new(),
+            "W",
+            GroupBy::default(),
+            "now",
+        );
+        assert!(inv
+            .hosts
+            .iter()
+            .all(|h| h.name != "app02" && h.name != "old01" && h.name != "evil"));
+        assert!(
+            inv.notes.iter().any(|n| n.contains("app02") && n.contains("jump host")),
+            "{:?}",
+            inv.notes
+        );
+        assert!(
+            inv.notes
+                .iter()
+                .any(|n| n.contains("old01") && n.contains("in the clear")),
+            "{:?}",
+            inv.notes
+        );
+        assert!(
+            inv.notes.iter().any(|n| n.contains("evil") && n.contains("user name")),
+            "{:?}",
+            inv.notes
+        );
+    }
+
+    #[test]
+    fn a_winrm_session_of_a_protected_or_prod_vm_is_grouped_like_an_ssh_one() {
+        let mut win = winrm(
+            "sql01",
+            5986,
+            Some("alice"),
+            options(WinrmTransport::Https, WinrmSignIn::Ntlm, WinrmCertificate::Windows),
+        );
+        win.vm_id = Some("vm-9".into());
+        let all = vec![win];
+        let vms = HashMap::from([(
+            "vm-9".to_owned(),
+            LinkedVm {
+                protected: true,
+                prod: true,
+            },
+        )]);
+        let inv = build(&[&all[0]], &all, &[], &vms, "W", GroupBy::default(), "now");
+        assert!(inv.groups["protected"].hosts.contains("sql01"));
+        assert!(inv.groups["env_prod"].hosts.contains("sql01"));
     }
 }

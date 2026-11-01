@@ -1,5 +1,5 @@
-// BX-12: an Ansible inventory. Hosts are picked like Compare hosts' (saved SSH sessions; a VM through its linked
-// session; tags and saved filters); none picked is every SSH session of the workspace. The file is YAML or INI,
+// BX-12: an Ansible inventory. Hosts are picked like Compare hosts' (saved SSH and WinRM sessions; a VM through its linked
+// session; tags and saved filters); none picked is every SSH and WinRM session of the workspace. The file is YAML or INI,
 // grouped by folder, tag, environment and workspace, and the preview shows it exactly as it will be written. Save
 // opens the shell's save dialog; the core writes the file and audits it. No secret ever goes in.
 
@@ -21,7 +21,7 @@ import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { BulkTargetPicker } from "@/components/BulkTargetPicker";
 import { HelpTip } from "@/components/HelpTip";
 import { WhyDisabled } from "@/components/WhyDisabled";
-import { api, errorMessage, type ResolvedTargets, type TargetPicks } from "@/lib/api";
+import { errorMessage, type ResolvedTargets, type TargetPicks } from "@/lib/api";
 import { plural } from "@/lib/format";
 import {
   reportsApi,
@@ -81,7 +81,7 @@ export function AnsibleExportDialog({ sessionIds, onOpenSessions, onClose }: Pro
     const parsed = JSON.parse(picksKey) as TargetPicks;
     if (nothingPicked(parsed)) return;
     let stale = false;
-    api.bulkTargets(parsed).then(
+    reportsApi.ansibleTargets(parsed).then(
       (r) => !stale && setResolved({ key: picksKey, targets: r }),
       (err) => !stale && setReadError({ key: `picks:${picksKey}`, message: errorMessage(err) }),
     );

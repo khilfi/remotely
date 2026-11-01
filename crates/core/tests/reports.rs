@@ -388,7 +388,7 @@ async fn the_inventory_goes_to_excel_with_every_text_as_text() {
     assert_eq!(entry.action, "Exported the inventory to Excel");
     assert_eq!(entry.tier, None);
     assert!(
-        entry.detail.as_deref().unwrap().contains("2 of 3 SSH hosts read again"),
+        entry.detail.as_deref().unwrap().contains("2 of 3 hosts read again"),
         "{:?}",
         entry.detail
     );

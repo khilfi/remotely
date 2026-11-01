@@ -83,7 +83,9 @@ export function InventoryExportDialog({ onClose }: Props) {
     }
   }
 
-  const noSsh = overview !== null && overview.sshSessions === 0;
+  const noHosts = overview !== null && overview.sshSessions + overview.winrmSessions === 0;
+  // Windows hosts are read again for their facts only: updates and packages are Linux reads.
+  const linuxOnly = (overview?.winrmSessions ?? 0) > 0;
   const reason = busy ? busyText({ reading: readAgain, progress: exporting.progress, saving: "Saving…" }) : null;
   const problems = [...(done?.read?.problems ?? []), ...(done?.notes ?? [])];
 
@@ -128,7 +130,7 @@ export function InventoryExportDialog({ onClose }: Props) {
                 id="inventory-read-again"
                 className="mt-0.5"
                 checked={readAgain}
-                disabled={noSsh}
+                disabled={noHosts}
                 onCheckedChange={(v) => setReadAgain(v === true)}
               />
               <div className="grid min-w-0 gap-0.5">
@@ -137,7 +139,9 @@ export function InventoryExportDialog({ onClose }: Props) {
                   <HelpTip topic="reports.readAgain" />
                 </Label>
                 <p className="text-xs break-words text-muted-foreground">
-                  {noSsh ? "No SSH sessions to read." : "With each session's saved login, a few hosts at a time."}
+                  {noHosts
+                    ? "No SSH or WinRM sessions to read."
+                    : "With each session's saved login, a few hosts at a time."}
                 </p>
               </div>
             </div>
@@ -151,6 +155,7 @@ export function InventoryExportDialog({ onClose }: Props) {
                 />
                 <Label htmlFor="inventory-updates" className="font-normal">
                   Add pending updates
+                  {linuxOnly && <span className="text-muted-foreground">(Linux hosts)</span>}
                 </Label>
               </div>
               <div className="flex items-center gap-3">
@@ -162,6 +167,7 @@ export function InventoryExportDialog({ onClose }: Props) {
                 />
                 <Label htmlFor="inventory-packages" className="font-normal">
                   Add each host&apos;s installed packages
+                  {linuxOnly && <span className="text-muted-foreground">(Linux hosts)</span>}
                 </Label>
               </div>
             </div>

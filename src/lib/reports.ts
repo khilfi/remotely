@@ -103,11 +103,11 @@ export function busyText(input: { reading: boolean; progress: ReadProgress | nul
   return `Reading hosts: ${p.done} of ${p.total}…`;
 }
 
-/** "2 of 3 SSH hosts read again; 1 could not be." */
+/** "2 of 3 hosts read again; 1 kept what was read before." (SSH and WinRM hosts) */
 export function readText(read: ReadSummary | null): string | null {
   if (!read) return null;
   const failed = read.asked - read.read;
-  const first = `${read.read} of ${plural(read.asked, "SSH host")} read again`;
+  const first = `${read.read} of ${plural(read.asked, "host")} read again`;
   return failed > 0 ? `${first}; ${failed} kept what was read before.` : `${first}.`;
 }
 

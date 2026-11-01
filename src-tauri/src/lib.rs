@@ -798,6 +798,7 @@ fn commands() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         // FD-05, BX-12, FD-08 exports.
         reports::reports_overview,
         reports::inventory_export,
+        reports::ansible_targets,
         reports::ansible_preview,
         reports::ansible_export,
         reports::handover_preview,
