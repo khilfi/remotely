@@ -2695,11 +2695,13 @@ impl RemoteAdapter for FakeRemote {
             generation: std::sync::Arc::clone(&self.generation),
             opened_in: self.generation.load(Ordering::SeqCst),
             closed: std::sync::atomic::AtomicBool::new(false),
+            files: self.files.clone(),
         }))
     }
 }
 
-/// A connection [`FakeRemote::connect`] kept open: answers every command like `exec` would.
+/// A connection [`FakeRemote::connect`] kept open: answers every command like `exec` would. FD-04: its files are
+/// the fake's ([`FakeRemote::with_files`]).
 struct FakeSession {
     host: String,
     stdout: String,
@@ -2708,6 +2710,7 @@ struct FakeSession {
     generation: std::sync::Arc<AtomicUsize>,
     opened_in: usize,
     closed: std::sync::atomic::AtomicBool,
+    files: FakeFiles,
 }
 
 #[async_trait]
@@ -2746,6 +2749,10 @@ impl ExecSession for FakeSession {
 
     async fn close(&self) {
         self.closed.store(true, Ordering::SeqCst);
+    }
+
+    fn files(&self) -> Option<std::sync::Arc<dyn RemoteFiles>> {
+        Some(std::sync::Arc::new(self.files.clone()))
     }
 }
 

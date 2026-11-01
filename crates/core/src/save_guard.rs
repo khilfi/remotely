@@ -5,7 +5,7 @@
 //! folder.
 
 use std::future::Future;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::error::{CoreError, Result};
 
@@ -28,6 +28,8 @@ pub enum Saved {
     Image,
     /// VM-17, CV-02: an exported VM (its disks, descriptors and README).
     Export,
+    /// FD-04: a support bundle (what hosts printed, their logs and files).
+    Bundle,
 }
 
 impl Saved {
@@ -41,6 +43,7 @@ impl Saved {
             Saved::Download => "A downloaded file holds the host's data,",
             Saved::Image => "A disk image holds everything on the disk it came from,",
             Saved::Export => "An exported VM holds its disks and everything on them,",
+            Saved::Bundle => "A support bundle holds your hosts' logs, settings and what they printed,",
         }
     }
 }
@@ -72,6 +75,14 @@ pub fn refuse_repository_folder(folder: &Path, saved: Saved) -> Result<()> {
     Ok(())
 }
 
+/// The file a save writes before it takes `path`'s name: `<name>.part` beside it.
+fn part_path(path: &Path) -> Result<PathBuf> {
+    let name = path
+        .file_name()
+        .ok_or_else(|| CoreError::InvalidInput("Choose a file name.".into()))?;
+    Ok(path.with_file_name(format!("{}.part", name.to_string_lossy())))
+}
+
 /// Writes `path` through a file next to it (`<name>.part`) that takes its name once `write` has succeeded. A
 /// failed write removes it, so no half file is left behind.
 pub async fn write_atomically<T, F, Fut>(path: &Path, write: F) -> Result<T>
@@ -79,10 +90,7 @@ where
     F: FnOnce(tokio::fs::File) -> Fut,
     Fut: Future<Output = Result<T>>,
 {
-    let name = path
-        .file_name()
-        .ok_or_else(|| CoreError::InvalidInput("Choose a file name.".into()))?;
-    let temp = path.with_file_name(format!("{}.part", name.to_string_lossy()));
+    let temp = part_path(path)?;
     let file = tokio::fs::File::create(&temp).await?;
     let written = match write(file).await {
         Ok(value) => tokio::fs::rename(&temp, path).await.map(|()| value).map_err(Into::into),
@@ -92,6 +100,68 @@ where
         let _ = tokio::fs::remove_file(&temp).await;
     }
     written
+}
+
+/// [`write_atomically`] for a file written bit by bit over a long time (FD-04: a support bundle's zip, as each host
+/// gives its files): the same `<name>.part` beside `path`, which takes its name on [`AtomicFile::commit`] and is
+/// removed when dropped without it (a failed or cancelled job), so no half file is left behind. Blocking I/O: use
+/// it on a blocking thread.
+pub struct AtomicFile {
+    path: PathBuf,
+    temp: PathBuf,
+    file: Option<std::fs::File>,
+}
+
+impl AtomicFile {
+    pub fn create(path: &Path) -> Result<Self> {
+        let temp = part_path(path)?;
+        let file = std::fs::File::create(&temp)?;
+        Ok(Self {
+            path: path.to_owned(),
+            temp,
+            file: Some(file),
+        })
+    }
+
+    fn file(&mut self) -> std::io::Result<&mut std::fs::File> {
+        self.file
+            .as_mut()
+            .ok_or_else(|| std::io::Error::other("the file was closed"))
+    }
+
+    /// Writes what is buffered to the disk and gives the file its name.
+    pub fn commit(mut self) -> Result<()> {
+        if let Some(file) = self.file.take() {
+            file.sync_all()?;
+        }
+        std::fs::rename(&self.temp, &self.path)?;
+        Ok(())
+    }
+}
+
+impl std::io::Write for AtomicFile {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.file()?.write(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.file()?.flush()
+    }
+}
+
+impl std::io::Seek for AtomicFile {
+    fn seek(&mut self, pos: std::io::SeekFrom) -> std::io::Result<u64> {
+        self.file()?.seek(pos)
+    }
+}
+
+impl Drop for AtomicFile {
+    fn drop(&mut self) {
+        // Not committed: the half file goes (closed first, so Windows lets it go).
+        if self.file.take().is_some() {
+            let _ = std::fs::remove_file(&self.temp);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -118,6 +188,7 @@ mod tests {
             Saved::Output,
             Saved::SessionLog,
             Saved::Download,
+            Saved::Bundle,
         ] {
             let err = refuse_repository(&root.join("docs").join("logs").join("x.txt"), saved).unwrap_err();
             assert!(err.to_string().contains("inside a Git repository"), "{err}");
@@ -132,5 +203,30 @@ mod tests {
         for dir in [root, worktree, outside] {
             let _ = std::fs::remove_dir_all(dir);
         }
+    }
+
+    #[test]
+    fn a_file_written_bit_by_bit_takes_its_name_only_when_committed() {
+        use std::io::Write;
+        let dir = std::env::temp_dir().join(format!("remotely-atomic-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("bundle.zip");
+        let part = dir.join("bundle.zip.part");
+
+        let mut file = AtomicFile::create(&path).unwrap();
+        file.write_all(b"half").unwrap();
+        assert!(part.exists() && !path.exists());
+        drop(file);
+        assert!(
+            !part.exists() && !path.exists(),
+            "dropped without a commit: nothing is left"
+        );
+
+        let mut file = AtomicFile::create(&path).unwrap();
+        file.write_all(b"whole").unwrap();
+        file.commit().unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"whole");
+        assert!(!part.exists());
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

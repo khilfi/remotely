@@ -524,6 +524,14 @@ impl ExecSession for Tracked {
     async fn close(&self) {
         self.0.close().await;
     }
+
+    fn files(&self) -> Option<Arc<dyn crate::adapters::remote::RemoteFiles>> {
+        self.0.files()
+    }
+
+    fn peer_ip(&self) -> Option<std::net::IpAddr> {
+        self.0.peer_ip()
+    }
 }
 
 #[cfg(test)]

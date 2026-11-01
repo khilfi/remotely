@@ -188,6 +188,13 @@ export const HELP = {
       "Its second view compares the lines you typed in all tabs, with what each terminal answered, so you don't type them again.",
     ],
   },
+  supportBundle: {
+    title: "Support bundle",
+    body: [
+      "Runs the same commands on each host and reads the chosen files over SFTP as the session's user (never with sudo), into one zip with a folder per host and a manifest of what ran, sizes and checksums. The presets only read.",
+      "Passwords, tokens and private keys are redacted in every file. Each file keeps up to 10 MB, each host 100 MB and the bundle 1 GB; what is cut or left out is listed in the manifest.",
+    ],
+  },
   recordedLines: {
     title: "Recorded lines",
     body: [

@@ -29,7 +29,17 @@ const BODY_FIELDS: [(&str, &[&str]); 2] = [("remoteExec", &["script"]), ("termin
 /// The same, as the purge's SQL: for each type, how many non-empty bodies a batch (a JSON list of job ids)
 /// holds and their bytes, then emptying them. JSON that can't be read, of any type, keeps only its type, so
 /// none of its text is left either.
-const PURGE_BODIES: [(&str, &str); 3] = [
+const PURGE_BODIES: [(&str, &str); 4] = [
+    // FD-04: a support bundle's commands and files.
+    (
+        "SELECT COUNT(*) AS commands,
+                COALESCE(SUM(LENGTH(CAST(IFNULL(json_extract(command_json, '$.spec.items'), '') AS BLOB))), 0) AS bytes
+         FROM jobs
+         WHERE id IN (SELECT value FROM json_each(?)) AND command_type = 'supportBundle' AND json_valid(command_json)
+           AND IFNULL(json_array_length(command_json, '$.spec.items'), 0) > 0",
+        "UPDATE jobs SET command_json = json_set(command_json, '$.spec.items', json('[]'))
+         WHERE id IN (SELECT value FROM json_each(?)) AND command_type = 'supportBundle' AND json_valid(command_json)",
+    ),
     (
         "SELECT COUNT(*) AS commands,
                 COALESCE(SUM(LENGTH(CAST(IFNULL(json_extract(command_json, '$.script'), '') AS BLOB))), 0) AS bytes

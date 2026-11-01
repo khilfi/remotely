@@ -58,7 +58,8 @@ use uuid::Uuid;
 use crate::adapters::exec_output::{CollectedOutput, OutputCollector, MAX_OUTPUT_PER_STREAM};
 use crate::adapters::hypervisor::{Hypervisor, Hypervisors};
 use crate::adapters::remote::{
-    AgentSource, AuthMethod, ConnectOptions, ExecRequest, HostKeyVerifier, RemoteAdapter, SessionSpec,
+    AgentSource, AuthMethod, ConnectOptions, ConnectRequest, Credentials, ExecRequest, HostKeyVerifier, RemoteAdapter,
+    SessionSpec,
 };
 use crate::adapters::updater::UpdaterAdapter;
 use crate::adapters::vmware::{path_key, ToolsState};
@@ -494,6 +495,17 @@ struct RemoteRun<'a> {
     timeout_secs: Option<u64>,
 }
 
+/// What connecting to one host needs (BX-02, BX-07, SS-05), read just before it connects.
+struct HostLogin {
+    session: SessionSpec,
+    credentials: Credentials,
+    jump_credentials: Vec<Credentials>,
+    sudo_password: Option<SecretString>,
+    options: ConnectOptions,
+    verifier: Arc<BulkVerifier>,
+    max_output: usize,
+}
+
 /// SS-05 for bulk runs: a trusted key passes; a changed key blocks, and that is audited; a key never
 /// seen before is trusted (and audited) only when the run says so, since nobody can be asked. A key of
 /// a new type for a host that has a trusted key of another type blocks like a changed key, ticked or
@@ -603,6 +615,8 @@ pub struct JobRunner {
     stacks: RwLock<Option<Arc<dyn crate::stacks::StackActions>>>,
     /// CV-03, VM-17: what converts images and exports VMs (set once the core is put together).
     converter: RwLock<Option<Arc<dyn crate::convert::runner::ConvertActions>>>,
+    /// FD-04: what writes a support bundle's zip (set once the core is put together).
+    bundles: RwLock<Option<Arc<dyn crate::support_bundle::BundleActions>>>,
     exec_tuning: RwLock<ExecTuning>,
     /// Read when a job starts, so a changed setting applies to the next job.
     limits: RwLock<JobLimits>,
@@ -649,6 +663,7 @@ impl JobRunner {
             deployer: RwLock::new(None),
             stacks: RwLock::new(None),
             converter: RwLock::new(None),
+            bundles: RwLock::new(None),
             exec_tuning: RwLock::new(ExecTuning::default()),
             limits: RwLock::new(limits),
             events,
@@ -703,6 +718,17 @@ impl JobRunner {
     /// CV-03, VM-17: what converts images and exports VMs.
     pub fn set_converter(&self, converter: Arc<dyn crate::convert::runner::ConvertActions>) {
         *locks::write(&self.converter) = Some(converter);
+    }
+
+    /// FD-04: what writes support bundles.
+    pub fn set_bundles(&self, bundles: Arc<dyn crate::support_bundle::BundleActions>) {
+        *locks::write(&self.bundles) = Some(bundles);
+    }
+
+    fn bundles(&self) -> Result<Arc<dyn crate::support_bundle::BundleActions>> {
+        locks::read(&self.bundles)
+            .clone()
+            .ok_or(CoreError::NotImplemented("support bundles"))
     }
 
     /// BX-02: connect timeout, agent and output cap of bulk runs (tests shorten them).
@@ -956,10 +982,7 @@ impl JobRunner {
 
         self.store.set_job_status(id, JobStatus::Running).await?;
         // H9: how the run spreads is in the record from the start.
-        let rollout = match &spec.command {
-            Command::RemoteExec { rollout, .. } => rollout.describe(),
-            _ => None,
-        };
+        let rollout = rollout_of(&spec.command).describe();
         let started: Vec<String> = spec
             .retry_of
             .map(|of| format!("retries the failed targets of job {of}"))
@@ -975,14 +998,15 @@ impl JobRunner {
         if let Command::Stack { op, .. } = &spec.command {
             self.stacks()?.begin(&ctx, id, op).await?;
         }
+        // FD-04: the bundle's zip opens before any host runs; a job that can't open it touches no host.
+        if let Command::SupportBundle { spec: bundle, .. } = &spec.command {
+            self.bundles()?.begin(id, bundle, &spec.decision.targets).await?;
+        }
         let semaphore = Arc::new(Semaphore::new(self.parallelism(&spec.command)));
         // VM-05: named once, when the job starts, so every VM's safety snapshot has the same name.
         let safety_name: Option<Arc<str>> = (spec.safety_snapshot && safety_snapshot_applies(&spec.command))
             .then(|| safety_snapshot_name(safety_verb(&spec.command), time::OffsetDateTime::now_utc(), id).into());
-        let rollout = match &spec.command {
-            Command::RemoteExec { rollout, .. } => *rollout,
-            _ => Rollout::default(),
-        };
+        let rollout = rollout_of(&spec.command);
         // H9: no more targets start once this is cancelled; those running finish.
         let halt = CancellationToken::new();
         let mut tally = Tally::default();
@@ -1022,6 +1046,15 @@ impl JobRunner {
         // VM-08: what became of the instance (forgotten when it has no VM left).
         if let (Command::Stack { op, .. }, Ok(stacks)) = (&spec.command, self.stacks()) {
             if let Some(note) = stacks.end(&ctx, op).await {
+                tally.notes.push(note);
+            }
+        }
+        // FD-04: the manifest goes in and the zip takes its name (audited `data_exported`), unless cancelled.
+        if let (Command::SupportBundle { .. }, Ok(bundles)) = (&spec.command, self.bundles()) {
+            if let Some(note) = bundles
+                .end(&ctx, id, &spec.decision.targets, token.is_cancelled())
+                .await
+            {
                 tally.notes.push(note);
             }
         }
@@ -1087,6 +1120,7 @@ impl JobRunner {
                     | Command::PushSshKey { .. }
                     | Command::RemoveSshKey { .. }
                     | Command::Container { .. }
+                    | Command::SupportBundle { .. }
             ) {
                 "cancelled while the command was running, so the host may still finish it"
             } else if virtualbox && vmware {
@@ -1398,6 +1432,10 @@ impl JobRunner {
         let event_note = note.clone();
         if let Some(note) = note {
             tally.notes.push(note);
+        }
+        // FD-04: the manifest says how each host ended.
+        if let (Command::SupportBundle { .. }, Ok(bundles)) = (&run.spec.command, self.bundles()) {
+            bundles.host_finished(id, &target.target.key(), done.status, done.error.as_deref());
         }
         match done.status {
             TargetStatus::Succeeded => tally.succeeded += 1,
@@ -1871,6 +1909,11 @@ impl JobRunner {
                     ..TargetOutcome::done()
                 })
             }
+            // FD-04: one host's commands and files into the job's bundle.
+            (Command::SupportBundle { spec: bundle, .. }, TargetRef::Session { session_id }) => {
+                self.collect_bundle(job_id, spec, target, *session_id, bundle, token, accepted)
+                    .await
+            }
             (command, other) => Err(CoreError::WrongTargetKind {
                 action: command.summary(1),
                 target: format!("a {} target", other.kind()),
@@ -1913,16 +1956,19 @@ impl JobRunner {
         }
     }
 
-    /// BX-02, SS-09: runs a script on one saved session's host over SSH.
-    async fn run_remote(
+    /// BX-02, BX-07, SS-05: what connecting to one saved session's host needs, read from the vault just before it
+    /// connects.
+    #[allow(clippy::too_many_arguments)]
+    async fn host_login(
         &self,
         spec: &JobSpec,
         target: &Target,
         session_id: Uuid,
-        run: RemoteRun<'_>,
+        sudo: bool,
+        sudo_password_id: Option<SecretId>,
+        trust_new_host_keys: bool,
         token: &CancellationToken,
-        accepted: &Arc<Mutex<Option<String>>>,
-    ) -> Result<TargetOutcome> {
+    ) -> Result<HostLogin> {
         let session = self
             .store
             .session_spec(&spec.ctx, session_id)
@@ -1938,8 +1984,8 @@ impl JobRunner {
         // SS-07: each jump host on the way logs in with its own session's credentials.
         let jump_credentials =
             crate::sessions::jump_credentials(&*self.vault, &spec.ctx, &session, &Default::default()).await?;
-        let sudo_password = match run.sudo {
-            true => Some(self.sudo_password(&spec.ctx, &session, run.sudo_password_id).await?),
+        let sudo_password = match sudo {
+            true => Some(self.sudo_password(&spec.ctx, &session, sudo_password_id).await?),
             false => None,
         };
         let tuning = locks::read(&self.exec_tuning).clone();
@@ -1953,9 +1999,49 @@ impl JobRunner {
             known_hosts: Arc::clone(&self.known_hosts),
             ctx: spec.ctx,
             target: target.clone(),
-            trust_new: run.trust_new_host_keys,
+            trust_new: trust_new_host_keys,
             accepted: Mutex::new(None),
         });
+        Ok(HostLogin {
+            session,
+            credentials,
+            jump_credentials,
+            sudo_password,
+            options,
+            verifier,
+            max_output: tuning.max_output,
+        })
+    }
+
+    /// BX-02, SS-09: runs a script on one saved session's host over SSH.
+    async fn run_remote(
+        &self,
+        spec: &JobSpec,
+        target: &Target,
+        session_id: Uuid,
+        run: RemoteRun<'_>,
+        token: &CancellationToken,
+        accepted: &Arc<Mutex<Option<String>>>,
+    ) -> Result<TargetOutcome> {
+        let HostLogin {
+            session,
+            credentials,
+            jump_credentials,
+            sudo_password,
+            options,
+            verifier,
+            max_output,
+        } = self
+            .host_login(
+                spec,
+                target,
+                session_id,
+                run.sudo,
+                run.sudo_password_id,
+                run.trust_new_host_keys,
+                token,
+            )
+            .await?;
         let exec = self.remote.exec(ExecRequest {
             session: &session,
             credentials,
@@ -1964,7 +2050,7 @@ impl JobRunner {
             sudo_password,
             options: &options,
             verifier: Arc::clone(&verifier) as Arc<dyn HostKeyVerifier>,
-            max_output: tuning.max_output,
+            max_output,
         });
         let limited = async {
             match run.timeout_secs {
@@ -1998,6 +2084,98 @@ impl JobRunner {
             failure,
             note: None,
             peer_ip: result.peer_ip.map(|ip| ip.to_string()),
+        })
+    }
+
+    /// FD-04: one host of a support bundle: a kept connection checked like a bulk run's (SS-05, BX-07), the bundle's
+    /// commands and files on it, within the per-host time limit. Cancel and the limit close the connection; what the
+    /// host gave until then stays in the bundle. A host where no item gave anything fails.
+    #[allow(clippy::too_many_arguments)]
+    async fn collect_bundle(
+        &self,
+        job_id: Uuid,
+        spec: &JobSpec,
+        target: &Target,
+        session_id: Uuid,
+        bundle: &crate::support_bundle::BundleSpec,
+        token: &CancellationToken,
+        accepted: &Arc<Mutex<Option<String>>>,
+    ) -> Result<TargetOutcome> {
+        let bundles = self.bundles()?;
+        let HostLogin {
+            session,
+            credentials,
+            jump_credentials,
+            sudo_password,
+            options,
+            verifier,
+            ..
+        } = self
+            .host_login(
+                spec,
+                target,
+                session_id,
+                bundle.sudo,
+                bundle.sudo_password_id,
+                bundle.trust_new_host_keys,
+                token,
+            )
+            .await?;
+        let mut secrets = Vec::new();
+        if let Credentials::Password(Some(password)) = &credentials {
+            secrets.push(password.clone());
+        }
+        let address = match session.route() {
+            Some(route) => format!("{} via {route}", session.address()),
+            None => session.address(),
+        };
+        let work = async {
+            let connection = self
+                .remote
+                .connect(ConnectRequest {
+                    session: &session,
+                    credentials,
+                    jump_credentials,
+                    options: &options,
+                    verifier: Arc::clone(&verifier) as Arc<dyn HostKeyVerifier>,
+                    who: "a support bundle",
+                })
+                .await?;
+            let host = crate::support_bundle::SshHost::new(connection, address, sudo_password, secrets);
+            let peer_ip = crate::support_bundle::BundleHost::peer_ip(&host);
+            let report = bundles.collect(job_id, target, &host).await;
+            host.close().await;
+            report.map(|report| (report, peer_ip))
+        };
+        let limited = async {
+            match bundle.timeout_secs {
+                Some(secs) => tokio::time::timeout(Duration::from_secs(secs), work)
+                    .await
+                    .map_err(|_| CoreError::CommandTimedOut { seconds: secs })?,
+                None => work.await,
+            }
+        };
+        let result = tokio::select! {
+            biased;
+            _ = token.cancelled() => Err(CoreError::CancelledRemote),
+            result = limited => result,
+        };
+        *locks::lock(accepted) = locks::lock(&verifier.accepted).take();
+        let (report, peer_ip) = result?;
+        let ok = report.saved > 0;
+        let lines = report.lines.join("\n");
+        Ok(TargetOutcome {
+            ok,
+            exit_code: None,
+            output: Some(OutputCollector::collect(
+                lines.as_bytes(),
+                b"",
+                &[],
+                MAX_OUTPUT_PER_STREAM,
+            )),
+            failure: (!ok).then(|| "nothing was collected: every command and file failed".to_owned()),
+            note: None,
+            peer_ip: peer_ip.map(|ip| ip.to_string()),
         })
     }
 
@@ -2218,7 +2396,8 @@ impl JobRunner {
             Command::RemoteExec { .. }
             | Command::PushSshKey { .. }
             | Command::RemoveSshKey { .. }
-            | Command::Container { .. } => limits.remote,
+            | Command::Container { .. }
+            | Command::SupportBundle { .. } => limits.remote,
             Command::AppUpdate { .. } => 1,
             // SS-10: pressing Enter is instant; every terminal at once, so they start together.
             Command::TerminalLine { targets, .. } => targets.len(),
@@ -2395,6 +2574,16 @@ fn safety_verb(command: &Command) -> &'static str {
         Command::HostNetwork { .. } => "port forward",
         Command::ImageConvert { .. } => "conversion",
         Command::VmExport { .. } => "export",
+        Command::SupportBundle { .. } => "support bundle",
+    }
+}
+
+/// H9: a bulk run's rollout (a Compare hosts run's or a support bundle's); none for the rest.
+fn rollout_of(command: &Command) -> Rollout {
+    match command {
+        Command::RemoteExec { rollout, .. } => *rollout,
+        Command::SupportBundle { spec, .. } => spec.rollout,
+        _ => Rollout::default(),
     }
 }
 

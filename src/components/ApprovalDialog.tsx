@@ -380,7 +380,10 @@ export function ApprovalDialog({
           </DialogDescription>
         </DialogHeader>
 
-        {request.exec && <ExecSummary exec={request.exec} targets={request.targets.length} />}
+        {request.exec && (!request.bundle || request.exec.script) && (
+          <ExecSummary exec={request.exec} targets={request.targets.length} />
+        )}
+        {request.bundle && <BundleSummary bundle={request.bundle} />}
         {request.upload && <UploadSummary upload={request.upload} />}
         {request.tunnel && <TunnelSummary tunnel={request.tunnel} />}
         {/* VM-21: the VMs a deploy makes, where, and the disk they may take; its warnings are listed below. */}
@@ -855,6 +858,31 @@ function VmChangeSummary({ change }: { change: NonNullable<ApprovalRequest["vmCh
           </li>
         ))}
       </ul>
+    </div>
+  );
+}
+
+/** FD-04: a support bundle's files (its commands are in ExecSummary) and where the zip goes. */
+function BundleSummary({ bundle }: { bundle: NonNullable<ApprovalRequest["bundle"]> }) {
+  return (
+    <div className="grid gap-2 text-sm">
+      {bundle.files.length > 0 && (
+        <>
+          <p className="text-muted-foreground">
+            Reads {plural(bundle.files.length, "file")} over SFTP as each session&apos;s user, never with sudo:
+          </p>
+          <ul className="max-h-32 divide-y overflow-auto rounded-md border">
+            {bundle.files.map((f) => (
+              <li key={f} className="truncate px-3 py-1 font-mono text-xs" title={f}>
+                {f}
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
+      <p className="text-muted-foreground">
+        Saves the zip as <code className="font-mono text-xs break-all">{bundle.output}</code>, with secrets redacted.
+      </p>
     </div>
   );
 }

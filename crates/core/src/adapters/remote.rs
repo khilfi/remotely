@@ -268,6 +268,9 @@ pub struct ConnectRequest<'a> {
     pub jump_credentials: Vec<Credentials>,
     pub options: &'a ConnectOptions,
     pub verifier: Arc<dyn HostKeyVerifier>,
+    /// Who connects ("the dashboard", "a support bundle"), for a login that needs something typed: it fails, saying
+    /// who can't ask.
+    pub who: &'static str,
 }
 
 /// An open, logged-in connection. Each command runs on a channel of its own.
@@ -282,6 +285,15 @@ pub trait ExecSession: Send + Sync {
     /// The connection dropped (or was closed); connect again for the next command.
     fn is_closed(&self) -> bool;
     async fn close(&self);
+    /// FD-04: files on the host over SFTP channels of this same connection, as the logged-in user (never sudo).
+    /// `None` where the connection offers none (a terminal's exec channels: the terminal has its own).
+    fn files(&self) -> Option<Arc<dyn RemoteFiles>> {
+        None
+    }
+    /// The address this PC reached; `None` behind jump hosts and where a fake has no connection.
+    fn peer_ip(&self) -> Option<IpAddr> {
+        None
+    }
 }
 
 /// How a command ended (BX-02). The output has had the run's secrets scrubbed.
@@ -586,13 +598,14 @@ impl RemoteAdapter for RusshAdapter {
             jump_credentials,
             options,
             verifier,
+            who,
         } = request;
-        need_user_names(session, "the dashboard")?;
+        need_user_names(session, who)?;
         let mut secrets = Vec::new();
         if let Credentials::Password(Some(password)) = &credentials {
             secrets.push(password.clone());
         }
-        let mut prompter = NoPrompter::new(session, "the dashboard");
+        let mut prompter = NoPrompter::new(session, who);
         let chain = Chain {
             session,
             credentials,
@@ -601,7 +614,7 @@ impl RemoteAdapter for RusshAdapter {
             verifier,
         };
         let connected = connect_chain(chain, &mut prompter, false).await?;
-        Ok(Box::new(RusshSession { connected, secrets }))
+        Ok(Box::new(RusshSession::new(connected, secrets)))
     }
 
     async fn open_shell(&self, request: ShellRequest<'_>, prompter: &mut dyn Prompter) -> Result<ShellHandle> {
@@ -644,30 +657,55 @@ fn need_user_names(session: &SessionSpec, who: &str) -> Result<()> {
     Ok(())
 }
 
-/// MO-02: a logged-in russh connection kept for more commands.
+/// MO-02: a logged-in russh connection kept for more commands. FD-04: with SFTP on the same connection.
 struct RusshSession {
-    connected: Connected,
+    handle: Arc<client::Handle<Handler>>,
+    shared: Arc<Mutex<Shared>>,
+    peer_ip: Option<IpAddr>,
+    jumps: Jumps,
+    /// FD-04: opened when first used.
+    files: sftp::SftpFiles,
     /// The login password, scrubbed from what the host prints.
     secrets: Vec<SecretString>,
+}
+
+impl RusshSession {
+    fn new(connected: Connected, secrets: Vec<SecretString>) -> Self {
+        let Connected {
+            handle,
+            shared,
+            peer_ip,
+            user,
+            jumps,
+        } = connected;
+        let handle = Arc::new(handle);
+        let files = sftp::SftpFiles::new(Arc::clone(&handle), Arc::clone(&shared), user);
+        Self {
+            handle,
+            shared,
+            peer_ip,
+            jumps,
+            files,
+            secrets,
+        }
+    }
+
+    async fn check_open(&self) -> Result<()> {
+        if self.handle.is_closed() {
+            let reason = chain_lost_reason(&self.jumps, &self.shared).await;
+            return Err(CoreError::Ssh(format!("the connection was lost: {reason}")));
+        }
+        Ok(())
+    }
 }
 
 #[async_trait]
 impl ExecSession for RusshSession {
     async fn run(&self, script: &str, max_output: usize) -> Result<ExecResult> {
-        if self.connected.handle.is_closed() {
-            let reason = self.connected.lost_reason().await;
-            return Err(CoreError::Ssh(format!("the connection was lost: {reason}")));
-        }
+        self.check_open().await?;
         let started = std::time::Instant::now();
-        let (exit_code, signal, output) = run_command(
-            &self.connected.handle,
-            &self.connected.shared,
-            script,
-            None,
-            &self.secrets,
-            max_output,
-        )
-        .await?;
+        let (exit_code, signal, output) =
+            run_command(&self.handle, &self.shared, script, None, &self.secrets, max_output).await?;
         Ok(ExecResult {
             exit_code,
             signal,
@@ -678,22 +716,12 @@ impl ExecSession for RusshSession {
     }
 
     async fn run_sudo(&self, script: &str, password: &SecretString, max_output: usize) -> Result<ExecResult> {
-        if self.connected.handle.is_closed() {
-            let reason = self.connected.lost_reason().await;
-            return Err(CoreError::Ssh(format!("the connection was lost: {reason}")));
-        }
+        self.check_open().await?;
         let started = std::time::Instant::now();
         let mut secrets = self.secrets.clone();
         secrets.push(password.clone());
-        let (exit_code, signal, output) = run_command(
-            &self.connected.handle,
-            &self.connected.shared,
-            script,
-            Some(password),
-            &secrets,
-            max_output,
-        )
-        .await?;
+        let (exit_code, signal, output) =
+            run_command(&self.handle, &self.shared, script, Some(password), &secrets, max_output).await?;
         Ok(ExecResult {
             exit_code,
             signal,
@@ -704,11 +732,20 @@ impl ExecSession for RusshSession {
     }
 
     fn is_closed(&self) -> bool {
-        self.connected.handle.is_closed()
+        self.handle.is_closed()
     }
 
     async fn close(&self) {
-        self.connected.close().await;
+        let _ = self.handle.disconnect(Disconnect::ByApplication, "", "en").await;
+        self.jumps.close().await;
+    }
+
+    fn files(&self) -> Option<Arc<dyn RemoteFiles>> {
+        Some(Arc::new(self.files.clone()))
+    }
+
+    fn peer_ip(&self) -> Option<IpAddr> {
+        self.peer_ip
     }
 }
 
@@ -954,11 +991,6 @@ impl Connected {
     async fn close(&self) {
         let _ = self.handle.disconnect(Disconnect::ByApplication, "", "en").await;
         self.jumps.close().await;
-    }
-
-    /// Why the connection ended: a jump host on the way, or the session's own host.
-    async fn lost_reason(&self) -> String {
-        chain_lost_reason(&self.jumps, &self.shared).await
     }
 }
 

@@ -64,6 +64,9 @@ blake2 = { version = "0.11", optional = true }
 # FD-14 (C3): checks an update signature's trusted comment against the app's public key before the
 # version it names is believed; the fakes sign with it. The version russh already pulls in.
 ed25519-dalek = "3"
+# FD-04: the support bundle's zip (written only; Remotely never extracts one). Deflate through flate2's zlib-rs, which
+# the dependencies already pull in; `time` gives each entry the time it was collected.
+zip = { version = "9.2", default-features = false, features = ["deflate-flate2-zlib-rs", "time"] }
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.56"

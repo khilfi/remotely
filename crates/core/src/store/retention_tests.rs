@@ -329,6 +329,46 @@ async fn the_purge_empties_old_bodies_and_keeps_everything_else() {
 }
 
 #[tokio::test]
+async fn the_purge_empties_a_support_bundles_commands_and_files() {
+    use crate::support_bundle::{BundleItem, BundleSpec};
+    let (store, ctx) = store_with_identity().await;
+    let bundle = Command::SupportBundle {
+        targets: vec![],
+        spec: Box::new(BundleSpec {
+            presets: vec![],
+            items: vec![
+                BundleItem::command("journalctl -u app"),
+                BundleItem::file("/etc/app.conf"),
+            ],
+            sudo: false,
+            sudo_password_id: None,
+            trust_new_host_keys: false,
+            timeout_secs: None,
+            rollout: Default::default(),
+            output: r"C:\Users\alice\Downloads\bundle.zip".into(),
+            workspace: "Lab".into(),
+        }),
+    };
+    let old = journal(&store, &ctx, &bundle, &[session("web01")], 120).await;
+    let items_bytes =
+        r#"[{"kind":"command","command":"journalctl -u app"},{"kind":"file","path":"/etc/app.conf"}]"#.len();
+    let purged = store.purge_job_bodies(&ctx, &days_ago(90)).await.unwrap();
+    assert_eq!((purged.jobs, purged.outputs, purged.commands), (1, 1, 1));
+    assert!(purged.bytes >= items_bytes as u64, "{purged:?}");
+    let (summary, command) = store.job_detail(&ctx, old).await.unwrap().unwrap();
+    assert!(summary.bodies_removed);
+    let Command::SupportBundle { spec, .. } = command else {
+        panic!("{command:?}")
+    };
+    assert!(spec.items.is_empty());
+    assert_eq!(
+        spec.output, r"C:\Users\alice\Downloads\bundle.zip",
+        "Show folder still finds it"
+    );
+    assert!(!command_json(&store, old).await.contains("journalctl"));
+}
+
+#[tokio::test]
 async fn the_purge_works_in_batches_and_frees_the_space() {
     let (store, ctx) = store_with_identity().await;
     let target = [session("web01")];
