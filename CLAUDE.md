@@ -146,7 +146,8 @@ crates/core/          remotely-core: all app logic
                       locate_vnc_viewer, `consoles.vncViewerPath`; NoLauncher under `fakes`),
                       winrm/ (F4, SS-12, MO-05, MO-13: Remotely's own WinRM client behind WinrmAdapter and WinrmSession, which
                       is an ExecSession whose script_kind() is PowerShell; HttpWinrm, NoWinrm until Core sets it:
-                      http.rs one hyper HTTP/1.1 connection per sign-in, a Client keeping up to 4; HTTPS checked before
+                      http.rs one hyper HTTP/1.1 connection per sign-in, a Client keeping up to 4 (none reused after
+                      MAX_IDLE, 50 s: HTTP.sys drops idle ones); HTTPS checked before
                       anything is sent: Windows' trust and the name, else (the session's rule) the leaf's SHA-256 in
                       known_hosts as key type `tls-certificate`, asked like a host key; Basic over HTTPS only; NTLM and
                       Negotiate through sspi.rs, Windows' SSPI (AcquireCredentialsHandleW, the vault password zeroized once

@@ -14,8 +14,9 @@
 //!   and a statement that doesn't parse or stops with an error still brings the prompt back (checked by hand against
 //!   Windows PowerShell 5.1). A statement left open (`{`, a string, a here-string, a trailing backtick or pipe) gets
 //!   `>> ` and goes once it closes.
-//! * **While a statement runs**, a line typed goes to its stdin as it is (`Read-Host`); Ctrl+C sends WinRM's ctrl_c
-//!   signal, then a marker. Enter on an empty line asks for a fresh prompt.
+//! * **While a statement runs**, a line typed goes to its stdin as it is (`Read-Host`), shown as `*`: PowerShell shows
+//!   no `Read-Host` prompt while its stdin is a pipe, so a password it asks for can't be told apart. Ctrl+C sends
+//!   WinRM's ctrl_c signal, then a marker. Enter on an empty line asks for a fresh prompt.
 //! * The statement's state lives in that one PowerShell: a new connection starts a new one (the pane says so).
 
 use std::collections::VecDeque;
@@ -267,6 +268,8 @@ pub struct Editor {
     partial: Vec<u8>,
     /// The last key was CR (an LF after it is the same Enter).
     after_cr: bool,
+    /// The line being typed was typed while a statement ran, so it shows as `*` and isn't shown again at the prompt.
+    masked: bool,
     /// Output held while it may be an incomplete prompt marker.
     held: Vec<u8>,
     /// The CR LF after a marker that PowerShell writes, still to hide.
@@ -290,6 +293,7 @@ impl Editor {
             escape_bytes: Vec::new(),
             partial: Vec::new(),
             after_cr: false,
+            masked: false,
             held: Vec::new(),
             swallow: 0,
             at_line_start: true,
@@ -308,6 +312,7 @@ impl Editor {
 
     /// A vault secret typed at a prompt (QL-06): taken as typed, never shown, then Enter.
     pub fn secret(&mut self, bytes: &[u8]) -> Vec<Action> {
+        self.masked = false;
         let text = String::from_utf8_lossy(bytes);
         let text = text.trim_end_matches(['\r', '\n']);
         let mut out = Vec::new();
@@ -319,7 +324,9 @@ impl Editor {
         out
     }
 
-    /// Keys from the pane. `secret`: the screen shows a password prompt, so nothing typed is shown.
+    /// Keys from the pane. `secret`: the screen shows a password prompt, so nothing typed is shown. While a statement
+    /// runs, what is typed (for it) shows as `*`: Windows PowerShell shows no `Read-Host` prompt while its stdin is a
+    /// pipe, so a password it asks for can't be told apart.
     pub fn keys(&mut self, bytes: &[u8], secret: bool) -> Vec<Action> {
         let mut out = Vec::new();
         let mut shown = Vec::new();
@@ -371,6 +378,9 @@ impl Editor {
                     if self.line.pop().is_some() && !secret {
                         shown.extend_from_slice(b"\x08 \x08");
                     }
+                    if self.line.is_empty() {
+                        self.masked = false;
+                    }
                 }
                 0x03 => self.interrupt(&mut shown, &mut out),
                 0x15 => {
@@ -380,6 +390,7 @@ impl Editor {
                         }
                     }
                     self.line.clear();
+                    self.masked = false;
                 }
                 b'\t' => {}
                 b if b < 0x20 => {}
@@ -394,7 +405,14 @@ impl Editor {
                         if self.line.len() + text.len() <= MAX_LINE {
                             self.line.push_str(text);
                             self.browsing = None;
-                            if !secret {
+                            if self.state != State::Idle {
+                                self.masked = true;
+                            }
+                            if secret {
+                                // Nothing at a password prompt.
+                            } else if self.masked {
+                                shown.extend(std::iter::repeat_n(b'*', text.chars().count()));
+                            } else {
                                 shown.extend_from_slice(text.as_bytes());
                             }
                         }
@@ -440,6 +458,7 @@ impl Editor {
         self.open.clear();
         self.syntax = Syntax::default();
         self.browsing = None;
+        self.masked = false;
         shown.extend_from_slice(format!("\r\n{}", self.prompt()).as_bytes());
     }
 
@@ -447,6 +466,7 @@ impl Editor {
         shown.extend_from_slice(b"\r\n");
         let line = std::mem::take(&mut self.line);
         self.browsing = None;
+        self.masked = false;
         match self.state {
             State::Running | State::Starting => {
                 // To the running statement (Read-Host), as typed.
@@ -551,7 +571,11 @@ impl Editor {
         }
         self.state = State::Idle;
         out.extend_from_slice(self.prompt().as_bytes());
-        // What was typed while the statement ran, ready to edit.
+        // What was typed while the statement ran isn't shown again (it may be a password): it starts afresh.
+        if self.masked {
+            self.line.clear();
+            self.masked = false;
+        }
         out.extend_from_slice(self.line.as_bytes());
         self.at_line_start = false;
         self.last_output_cr = false;
@@ -769,6 +793,16 @@ mod tests {
         editor.keys(b"Read-Host 'Name'\r", false);
         let answer = editor.keys(b"bob\r", false);
         assert_eq!(sent(&answer), vec!["bob\r\n".to_owned()]);
+        assert_eq!(
+            shown(&answer),
+            "***\r\n",
+            "typed for a running statement: masked, it may be a password"
+        );
+        // Typed ahead, then the prompt comes: it isn't shown again.
+        editor.keys(b"pw", false);
+        let prompt = String::from_utf8_lossy(&editor.output(b"\x1b]7790;n1;C:\\\x07\r\n")).into_owned();
+        assert!(prompt.ends_with("PS C:\\> ") && !prompt.contains("pw"), "{prompt:?}");
+        editor.keys(b"Read-Host 'Name'\r", false);
         let typed_secretly = editor.keys(b"hunter2", true);
         assert!(shown(&typed_secretly).is_empty(), "nothing shown at a password prompt");
         let ctrl_c = editor.keys(b"\x03", false);

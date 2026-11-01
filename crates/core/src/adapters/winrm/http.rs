@@ -41,6 +41,9 @@ pub const MAX_ANSWER: usize = 1024 * 1024;
 pub const MAX_TOKEN: usize = 64 * 1024;
 /// Connections one client keeps at most.
 pub const MAX_CONNECTIONS: usize = 4;
+/// A connection left idle longer than this is not used again: Windows' HTTP.sys drops idle keep-alive connections after
+/// two minutes (its default), and a message on one it dropped would be lost.
+pub const MAX_IDLE: Duration = Duration::from_secs(50);
 /// Rounds of the sign-in before Remotely gives up on a host that keeps asking.
 const MAX_SIGN_IN_ROUNDS: usize = 4;
 
@@ -506,7 +509,8 @@ async fn check_certificate(endpoint: &Endpoint, chain: &[Vec<u8>], accepted: &Mu
 pub struct Client {
     pub endpoint: Endpoint,
     sign_in: SignIn,
-    idle: Mutex<Vec<Connection>>,
+    /// Signed-in connections not in use, with when each was last used.
+    idle: Mutex<Vec<(Connection, std::time::Instant)>>,
     permits: Semaphore,
     accepted: Mutex<Option<String>>,
     peer: Mutex<Option<IpAddr>>,
@@ -535,7 +539,7 @@ impl Client {
             .map_err(|_| CoreError::Winrm("the connection is closed".into()))?;
         let (connection, peer) = Connection::open(&self.endpoint, &self.sign_in, &self.accepted).await?;
         *locks::lock(&self.peer) = peer;
-        locks::lock(&self.idle).push(connection);
+        locks::lock(&self.idle).push((connection, std::time::Instant::now()));
         Ok(())
     }
 
@@ -553,8 +557,8 @@ impl Client {
             .map_err(|_| CoreError::Winrm("the connection is closed".into()))?;
         let reused = {
             let mut idle = locks::lock(&self.idle);
-            idle.retain(|c| !c.closed());
-            idle.pop()
+            idle.retain(|(c, since)| !c.closed() && since.elapsed() < MAX_IDLE);
+            idle.pop().map(|(c, _)| c)
         };
         let mut connection = match reused {
             Some(connection) => connection,
@@ -569,7 +573,7 @@ impl Client {
         let answered = connection.post(&self.endpoint, xml, timeout).await?;
         // A connection that failed is dropped with its error; a good one goes back for the next message.
         if !connection.closed() {
-            locks::lock(&self.idle).push(connection);
+            locks::lock(&self.idle).push((connection, std::time::Instant::now()));
         }
         Ok(answered)
     }
