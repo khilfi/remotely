@@ -101,7 +101,7 @@ export function NewTerminalDialog({ open, onOpenChange, onConnect, onOpenSession
 
   useEffect(() => {
     if (!open) return;
-    Promise.all([api.secrets(), api.sessionFolders(), api.recentSessions(8), api.quickConnectHistory()]).then(
+    Promise.all([api.secrets(), api.sessionFolders(), api.recentSessions(20), api.quickConnectHistory()]).then(
       ([s, f, r, h]) => {
         setSecrets(s);
         setFolders(f);
@@ -414,7 +414,7 @@ export function NewTerminalDialog({ open, onOpenChange, onConnect, onOpenSession
           </form>
 
           <aside className="grid content-start gap-4 text-sm">
-            <section className="grid gap-1">
+            <section className="grid max-h-80 gap-1 overflow-y-auto">
               <h3 className="flex items-center gap-1.5 text-xs font-medium text-muted-foreground">
                 <ClockIcon className="size-3.5" /> Recent sessions
               </h3>

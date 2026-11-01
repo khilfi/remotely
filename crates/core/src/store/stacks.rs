@@ -182,16 +182,6 @@ impl Store {
         Ok(done.rows_affected() > 0)
     }
 
-    /// Its instances stay: they are VMs on this PC. False when it was not there.
-    pub(crate) async fn delete_stack(&self, ctx: &Context, id: Uuid) -> Result<bool> {
-        let done = sqlx::query("DELETE FROM stacks WHERE workspace_id = ? AND id = ?")
-            .bind(ctx.workspace_id.to_string())
-            .bind(id.to_string())
-            .execute(&self.pool)
-            .await?;
-        Ok(done.rows_affected() > 0)
-    }
-
     // ---- Instances ---------------------------------------------------------------------------------------------
 
     /// Every instance with its VMs, newest first.

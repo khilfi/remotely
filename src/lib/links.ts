@@ -41,6 +41,8 @@ export type AppLink =
   | { kind: "schedule"; scheduleId: string }
   /** VM-11: the Virtual machines page's host networks. */
   | { kind: "hostNetworks" }
+  /** FD-06: the note of a session, VM or folder, in its sheet. */
+  | { kind: "note"; noteKind: "session" | "vm" | "folder"; key: string; title?: string }
   /** FD-09: a tool of the Toolbox, with a session, VM or host filled in. */
   | { kind: "toolbox"; tool: ToolboxTool; target?: ToolTarget }
   /** MO-08: the Dashboard's Checks tab: a check's history, or a new check on a session, VM or host. */
@@ -64,6 +66,7 @@ const KINDS: Record<AppLinkKind, readonly string[]> = {
   map: [],
   schedule: ["scheduleId"],
   hostNetworks: [],
+  note: ["noteKind", "key"],
   toolbox: ["tool"],
   checks: [],
 };
@@ -80,6 +83,7 @@ export function isAppLink(value: unknown): value is AppLink {
     if (!host || (host.kind !== "thisPc" && !(host.kind === "session" && typeof host.sessionId === "string")))
       return false;
   }
+  if (kind === "note" && !["session", "vm", "folder"].includes(link.noteKind as string)) return false;
   if (kind === "catalog" && !["sizes", "images", "templates"].includes(link.tab as string)) return false;
   if (kind === "toolbox" && !isToolboxTool(link.tool)) return false;
   return true;
@@ -142,6 +146,8 @@ export function linkLabel(link: AppLink): string {
       return "Show its runs";
     case "hostNetworks":
       return "Show the host networks";
+    case "note":
+      return "Show the note";
     case "toolbox":
       return "Open the toolbox";
     case "checks":

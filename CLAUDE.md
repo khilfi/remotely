@@ -338,8 +338,40 @@ crates/core/          remotely-core: all app logic
                       adds entries, titles and bodies through export::redact_secrets and without control or Cf
                       characters, MAX_NOTIFICATIONS 500, per workspace, read, unread, clear, `once` keys; links are the
                       UI's AppLink JSON, kept as given; not audited, not locked
-    sessions.rs       SS-01 session library, SS-06 labels (audited, no approval tier); rate_startup rates a startup
-                      command like a run on the session (editor, SS-02 and FD-07 previews, audit); startup_on_reconnect
+    notes/            FD-06 (0.7.0, migration 0033): mod.rs Notes (Core.notes): one markdown note per session, VM (by
+                      its key) and folder; save, set_handover, list (QL-20), import (FD-07), audited note_changed
+                      without the text, Change::Notes; for_handover (F6) renders the marked ones with LinkMode::Static,
+                      which redacts secrets first (rule 7: the pack is an unencrypted file), and redacts their body too;
+                      a session's note goes to the trash with it, a folder's is deleted with it; render.rs
+                      pulldown-cmark (tables, task lists, strikethrough): raw HTML and images become text, only http(s)
+                      and app links (session:, vm:, vault: by label, command:, runbook:) are links, each
+                      `data-note-link="N"` with no address (RenderedNote.links), code blocks `data-note-code="N"`
+                      (codeBlocks, for Send to terminal), looks_secret from export::redact_secrets
+    stars.rs          QL-26 (migration 0033): Stars (Core.stars): stars on sessions, VMs (by key) and commands
+                      (`favourite:<id>`, `library:<id>`), and the MAX_RECENTS (20) sessions, VMs and pages opened last
+                      (a terminal's session notes itself in Store::record_session_opened); per workspace, not audited,
+                      not locked, kept by key so a restored session keeps its star
+    trash/            QL-27 (migration 0033): mod.rs Trash (Core.trash): move_to_trash, in the delete's transaction, for
+                      a session (its whole row, SS-12's protocol and kind_options too, with its port forwards, container
+                      marks, saved group places, secret grants, its own QL-17 highlight rules (reloaded on restore),
+                      its MO-08 health checks (without their results; Checks reloaded on delete and restore, under
+                      MAX_CHECKS), tags, note, where it went and what it sent, SentThen, and the sessions and folders
+                      whose jump host it was, named on restore), a favourite command, size, image, launch template or
+                      stack
+                      (SessionLibrary, Snippets, Catalog and Stacks call it); restore under the item's own id (a new one
+                      if taken), " (restored)" for a taken name, gone folders, jump hosts (or one that is no longer an
+                      SSH session), VMs, vault items and groups left out with notes, AP-06 confirm when a restored
+                      session would send a vault password somewhere new; undo (a delete's toast), delete_now, empty,
+                      purge (KEEP_DAYS 30, daily, every workspace; run); audited trash_restored, trash_deleted,
+                      trash_emptied, trash_purged; Change::Trash; never in FD-07; rows.rs rows as JSON column by column
+                      (TABLES only; a restore writes the columns the table has now, names quoted)
+    sessions.rs       SS-01 session library, SS-06 labels (audited, no approval tier); QL-28 bulk_preview and
+                      bulk_edit (BulkEdit: folder, port, user, login, jump host, environment, tags added or removed;
+                      each checked like an edit, so the preview shows what `tidy` keeps for each kind and
+                      BulkEditRow.skipped names the fields a kind doesn't take; Store::update_sessions in one
+                      transaction, one audit entry naming every session, confirm_folder_change once for AP-06);
+                      rate_startup rates a startup command like a run on the session (editor, SS-02 and FD-07
+                      previews, audit); startup_on_reconnect
                       and prompt_hook per session (migration 0015); sessions/tree.rs the QL-04 tree (by folder, tag
                       or label) for the Terminal page; sessions/defaults.rs QL-16 folder defaults (user, login, jump
                       host, label, tags; migration 0021) and Folders::resolve, the one resolver: a session's own
@@ -586,7 +618,9 @@ crates/core/          remotely-core: all app logic
                       sessions imported or matched here, the rest left out with a note); stacks.rs VM-08 stacks with
                       the catalogue, each step's template mapped to what it became here (instances stay out);
                       checks.rs MO-08 check definitions by name (a session target mapped to the session it became, a VM
-                      only when it is here; results never travel), saved through Checks
+                      only when it is here; results never travel), saved through Checks; FD-06 notes ride with their
+                      session and folder (`note`) and VMs' in `vmNotes` (optional fields, so older files read as before
+                      and 0.6.x ignores them); the trash never travels
     import/           SS-02 parsers (PuTTY, MobaXterm, OpenSSH config, CSV), preview and commit; guide.rs QL-10 a
                       format guide and a sample file per format (the CSV guide is made from csv.rs's COLUMNS,
                       ENVIRONMENTS and AUTH_METHODS tables; tests/import.rs imports every sample); A3 a key path or
@@ -701,8 +735,11 @@ src-tauri/            Tauri 2 shell: window, IPC commands (ipc.rs), terminal bri
                       job id); FD-09 toolbox.rs (each tool's run under an id the UI chose, `toolbox://progress` events,
                       toolbox_cancel, the certificate file dialog, Wake up's adapters and MACs), file_server.rs (the File
                       server tab's options, file and folder dialogs, start, Stop and status, `fileserver://event`);
-                      MO-08 checks.rs (the runner, `checks://event`, the Checks tab's commands); lib.rs and
-                      schedules.rs pass job and schedule events to the window only for the shown workspace
+                      MO-08 checks.rs (the runner, `checks://event`, the Checks tab's commands); 0.7.0 F5 comfort.rs
+                      (FD-06 notes, render, a note's web link through ShellExecute after the window's confirm, http(s)
+                      only; QL-26 stars and recents; QL-27 the trash, its Undo, and its daily purge started in lib.rs;
+                      QL-28 bulk edit preview and save); lib.rs and schedules.rs pass job and schedule events to the
+                      window only for the shown workspace
 src/                  React + TypeScript UI
   components/ui/      shadcn/ui components (generated)
   components/         app components (approval dialog, badges, Compare panel with its one-shot and MultiExec views
@@ -762,7 +799,10 @@ src/                  React + TypeScript UI
                       details panel's header; no recent inputs are offered while presenting, since a native dropdown
                       is out of the masker's reach); MO-08 checks/: ChecksTab (the Dashboard's Checks tab), CheckDialog,
                       CheckHistorySheet, ChecksWidget (MO-16) and CheckBits (status badge, sparkline); the row menus'
-                      "Add a check" opens a `checks` link
+                      "Add a check" opens a `checks` link; 0.7.0 F5: NoteSheet (FD-06, hosted once by App and opened by
+                      a `note` AppLink; the core's HTML, the web link confirm, Send to terminal), StarButton (QL-26),
+                      TrashCard (QL-27, Settings › Privacy and data), BulkEditDialog (QL-28, the Sessions page's selection
+                      bar, which also has FD-04's Support bundle for the SSH sessions picked)
   pages/              one file per page (bulk execution is in TerminalPage: Type in all tabs (MultiExec) and Compare
                       hosts; QL-14 VmsPage
                       is VMs and snapshots, with the selection's bulk snapshot actions and the details panel;
@@ -875,7 +915,13 @@ src/                  React + TypeScript UI
                       and types), subnet.ts (the subnet calculator, IPv4 and IPv6 with BigInt), file-server.ts and
                       file-server-api.ts (the File server tab's form, checks and wording; wrappers and types) and
                       hooks/use-probe-run.ts (a run's id, progress and Stop); MO-08 checks.ts (kinds, defaults, the
-                      editor's checks, wording, the sparkline's path) and checks-api.ts; pure helpers with
+                      editor's checks, wording, the sparkline's path) and checks-api.ts; 0.7.0 F5: comfort-api.ts
+                      (notes, stars, recents, trash, bulk edit: types and wrappers), notes.ts (FD-06 link actions and
+                      titles, excerpts, the note link), note-send.ts (a code block to the Terminal page's current pane, its
+                      last line break taken off, and asked about whatever the paste setting when it has more lines:
+                      PaneSession.paste's alwaysAsk), stars.ts and stars-store.ts (QL-26 sets, starred first, the search
+                      boost; one shared store), trash.ts and undo-delete.ts (QL-27 names, messages, the delete toast's
+                      Undo), bulk-edit.ts (QL-28 the form as a BulkEdit); pure helpers with
                       *.test.ts
                       next to them (Node's test runner: `npm test`)
 ```

@@ -173,7 +173,7 @@ fn row_to_folder(row: &sqlx::sqlite::SqliteRow) -> Result<SessionFolder> {
 
 /// Makes the session's tags exactly `names` (already checked), creating tags on first use and
 /// deleting tags left on nothing.
-async fn set_session_tags(
+pub(crate) async fn set_session_tags(
     tx: &mut Transaction<'_, Sqlite>,
     ctx: &Context,
     session: Uuid,
@@ -215,7 +215,7 @@ async fn set_session_tags(
     delete_unused_tags(tx, ctx).await
 }
 
-async fn delete_unused_tags(tx: &mut Transaction<'_, Sqlite>, ctx: &Context) -> Result<()> {
+pub(crate) async fn delete_unused_tags(tx: &mut Transaction<'_, Sqlite>, ctx: &Context) -> Result<()> {
     sqlx::query(
         "DELETE FROM tags WHERE workspace_id = ? AND NOT EXISTS (SELECT 1 FROM target_tags WHERE tag_id = tags.id)",
     )
@@ -340,6 +340,34 @@ impl Store {
     /// `input` must already be checked. False when there is no such session.
     pub(crate) async fn update_session(&self, ctx: &Context, id: Uuid, input: &SessionInput) -> Result<bool> {
         let mut tx = self.pool.begin().await?;
+        if !update_session_in(&mut tx, ctx, id, input).await? {
+            return Ok(false);
+        }
+        tx.commit().await?;
+        Ok(true)
+    }
+
+    /// QL-28: several checked edits in one transaction; none is saved unless all are. Returns how many.
+    pub(crate) async fn update_sessions(&self, ctx: &Context, edits: &[(Uuid, SessionInput)]) -> Result<usize> {
+        let mut tx = self.pool.begin().await?;
+        for (id, input) in edits {
+            if !update_session_in(&mut tx, ctx, *id, input).await? {
+                return Err(CoreError::UnknownTarget(format!("session {id}")));
+            }
+        }
+        tx.commit().await?;
+        Ok(edits.len())
+    }
+}
+
+/// One checked edit, inside `tx`. False when there is no such session.
+async fn update_session_in(
+    tx: &mut Transaction<'_, Sqlite>,
+    ctx: &Context,
+    id: Uuid,
+    input: &SessionInput,
+) -> Result<bool> {
+    {
         let done = sqlx::query(
             "UPDATE sessions SET folder_id = ?, name = ?, host = ?, port = ?, username = ?, auth_method = ?,
                  credential_id = ?, key_passphrase_id = ?, jump_session_id = ?, startup_command = ?,
@@ -370,33 +398,17 @@ impl Store {
         .bind(input.kind.options_json())
         .bind(ctx.workspace_id.to_string())
         .bind(id.to_string())
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
         if done.rows_affected() == 0 {
             return Ok(false);
         }
-        set_session_tags(&mut tx, ctx, id, &input.tags).await?;
-        tx.commit().await?;
+        set_session_tags(tx, ctx, id, &input.tags).await?;
         Ok(true)
     }
+}
 
-    /// Sessions that jumped through it lose their jump host (the foreign key sets NULL).
-    pub(crate) async fn delete_session(&self, ctx: &Context, id: Uuid) -> Result<bool> {
-        let mut tx = self.pool.begin().await?;
-        sqlx::query("DELETE FROM target_tags WHERE target_kind = 'session' AND target_id = ?")
-            .bind(id.to_string())
-            .execute(&mut *tx)
-            .await?;
-        let done = sqlx::query("DELETE FROM sessions WHERE workspace_id = ? AND id = ?")
-            .bind(ctx.workspace_id.to_string())
-            .bind(id.to_string())
-            .execute(&mut *tx)
-            .await?;
-        delete_unused_tags(&mut tx, ctx).await?;
-        tx.commit().await?;
-        Ok(done.rows_affected() > 0)
-    }
-
+impl Store {
     /// Moves sessions into a folder (`None`: the top level). Returns how many moved.
     pub(crate) async fn move_sessions(&self, ctx: &Context, ids: &[Uuid], folder: Option<Uuid>) -> Result<u64> {
         let mut tx = self.pool.begin().await?;
@@ -618,14 +630,18 @@ impl Store {
     }
 
     /// QL-02: a terminal to the session was opened now (Recent sessions). Not an edit: `updated_at`
-    /// stays.
+    /// stays. QL-26: it goes to the top of the recently opened items too.
     pub(crate) async fn record_session_opened(&self, ctx: &Context, id: Uuid) -> Result<()> {
-        sqlx::query("UPDATE sessions SET last_opened_at = ? WHERE workspace_id = ? AND id = ?")
+        let done = sqlx::query("UPDATE sessions SET last_opened_at = ? WHERE workspace_id = ? AND id = ?")
             .bind(now_rfc3339())
             .bind(ctx.workspace_id.to_string())
             .bind(id.to_string())
             .execute(&self.pool)
             .await?;
+        if done.rows_affected() > 0 {
+            self.note_recent(ctx, crate::stars::RecentKind::Session, &id.to_string())
+                .await?;
+        }
         Ok(())
     }
 

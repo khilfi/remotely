@@ -509,6 +509,28 @@ export const HELP = {
     ],
     link: { label: "Open Activity", to: { kind: "page", page: "activity" } },
   },
+  notes: {
+    title: "Notes",
+    body: [
+      "One note per session, VM and folder, written in markdown. Link a web page, or the app's own items by name: [db](<vault:DB admin>), <session:web01>, <vm:web-01>, <command:Disk usage> or <runbook:Disk full>.",
+      "A vault link names the item and never shows its secret. A code block can be sent to the open terminal without pressing Enter; one with several lines asks first. The handover pack hides what looks like a secret.",
+    ],
+  },
+  trash: {
+    title: "Trash",
+    body: [
+      "A deleted session, favourite command, size, image, launch template or stack waits here for 30 days, with what came with it, such as a session's port forwards, health checks and note. Then it is deleted for good.",
+      "Restore puts it back. A name taken since gets (restored); a folder or jump host that is gone is left out.",
+    ],
+    link: { label: "Open the trash", to: { kind: "setting", section: "trash" } },
+  },
+  bulkEdit: {
+    title: "Edit several sessions",
+    body: [
+      "Set the folder, port, user, login, jump host or environment of every selected session at once, and add or remove tags. Fields left as they are stay as each session has them.",
+      "You see each session before and after first. If a login would send a vault password somewhere new, the vault password is asked once. Only SSH sessions take a login, and Telnet and serial take no jump host, so they keep theirs.",
+    ],
+  },
   checks: {
     title: "Health checks",
     body: [

@@ -22,9 +22,11 @@ use remotely_core::fakes::{FakeContainers, FakeVmware};
 use remotely_core::jobs::JobStatus;
 use remotely_core::known_hosts::HostKey;
 use remotely_core::multiexec_groups::GroupInput;
+use remotely_core::notes::{NoteInput, NoteTarget};
 use remotely_core::notifications::{NotificationInput, NotificationLevel, NotificationSource};
 use remotely_core::presentation::Presentation;
 use remotely_core::sessions::{SessionAuth, SessionFilter, SessionInput};
+use remotely_core::stars::{RecentKind, StarKind};
 use remotely_core::store::AuditEntry;
 use remotely_core::terminal::rules::{RuleScope, RuleStyle, TerminalRuleInput};
 use remotely_core::terminal::{TerminalEvent, TerminalStatus, TerminalTuning};
@@ -411,6 +413,96 @@ async fn the_catalogue_rules_groups_container_marks_and_notifications_are_per_wo
     assert_eq!(custom_alerts(&core), 1, "Acme's rule is back with Acme");
     assert_eq!(own_rules(core.terminal_rules.list(&acme).await.unwrap()), 1);
     assert_eq!(core.notifications.list(&acme).entries.len(), 1);
+}
+
+#[tokio::test]
+async fn notes_stars_recents_and_the_trash_are_per_workspace() {
+    let core = Setup::new(FakeVmware::default()).build().await;
+    let acme = core.ctx();
+    let web = core
+        .sessions
+        .create(&acme, session_input("web01", "web01.example.com", 22, None))
+        .await
+        .unwrap();
+    let doomed = core
+        .sessions
+        .create(&acme, session_input("old01", "old01.example.com", 22, None))
+        .await
+        .unwrap();
+    core.notes
+        .save(
+            &acme,
+            &NoteTarget::session(web.id),
+            NoteInput {
+                body: "Acme's runbook".into(),
+                handover: true,
+            },
+        )
+        .await
+        .unwrap();
+    core.stars
+        .set(&acme, StarKind::Session, &web.id.to_string(), true)
+        .await
+        .unwrap();
+    core.stars.opened(&acme, RecentKind::Page, "dashboard").await.unwrap();
+    core.sessions.delete(&acme, doomed.id).await.unwrap();
+    let acme_trash = core.trash.list(&acme).await.unwrap();
+    assert_eq!(acme_trash.len(), 1);
+
+    let globex = create(&core, "Globex").await;
+    switch(&core, &globex).await;
+    let b = core.ctx();
+    assert!(core.notes.list(&b).await.unwrap().is_empty());
+    assert!(core
+        .notes
+        .get(&b, &NoteTarget::session(web.id))
+        .await
+        .unwrap()
+        .is_none());
+    assert!(
+        core.notes
+            .save(
+                &b,
+                &NoteTarget::session(web.id),
+                NoteInput {
+                    body: "x".into(),
+                    handover: false
+                }
+            )
+            .await
+            .is_err(),
+        "Acme's session takes no note from Globex"
+    );
+    assert!(core.notes.for_handover(&b).await.unwrap().is_empty());
+    assert!(core.stars.list(&b).await.unwrap().is_empty());
+    assert!(core.stars.recents(&b).await.unwrap().is_empty());
+    assert!(core.trash.list(&b).await.unwrap().is_empty());
+    assert!(
+        core.trash.restore(&b, acme_trash[0].id, None).await.is_err(),
+        "Acme's trash can't be restored from Globex"
+    );
+    assert!(core.trash.delete_now(&b, acme_trash[0].id).await.is_err());
+    assert_eq!(core.trash.empty(&b).await.unwrap(), 0);
+
+    let home = core
+        .workspaces
+        .list()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|w| !w.current)
+        .unwrap();
+    switch(&core, &home).await;
+    assert_eq!(core.notes.list(&acme).await.unwrap().len(), 1);
+    assert_eq!(core.stars.list(&acme).await.unwrap().len(), 1);
+    assert_eq!(core.stars.recents(&acme).await.unwrap().len(), 1);
+    assert_eq!(
+        core.trash.list(&acme).await.unwrap().len(),
+        1,
+        "emptying Globex's trash left Acme's alone"
+    );
+    core.trash.restore(&acme, acme_trash[0].id, None).await.unwrap();
+    assert_eq!(core.sessions.get(&acme, doomed.id).await.unwrap().name, "old01");
 }
 
 // ---- VMs -------------------------------------------------------------------------------------------------------------

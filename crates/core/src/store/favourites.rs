@@ -122,15 +122,6 @@ impl Store {
         Ok(())
     }
 
-    pub(crate) async fn delete_favourite(&self, ctx: &Context, id: Uuid) -> Result<bool> {
-        let done = sqlx::query("DELETE FROM command_favourites WHERE workspace_id = ? AND id = ?")
-            .bind(ctx.workspace_id.to_string())
-            .bind(id.to_string())
-            .execute(&self.pool)
-            .await?;
-        Ok(done.rows_affected() > 0)
-    }
-
     /// Numbers the favourites 0, 1, 2… in the order given (one folder's, checked by the caller).
     pub(crate) async fn order_favourites(&self, ctx: &Context, ids: &[Uuid]) -> Result<()> {
         let mut tx = self.pool.begin().await?;

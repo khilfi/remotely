@@ -13,12 +13,14 @@ import {
   LayersIcon,
   MonitorIcon,
   NetworkIcon,
+  NotebookPenIcon,
   ServerIcon,
   SettingsIcon,
   SquareChevronRightIcon,
   type LucideIcon,
 } from "lucide-react";
 import { api, type LibraryEntry, type SessionRecord, type VmRecord } from "@/lib/api";
+import { comfortApi } from "@/lib/comfort-api";
 import { cachedContainers } from "@/lib/container-cache";
 import { cachedHostNetworks } from "@/lib/host-networks-cache";
 import type { SearchItem } from "@/lib/search";
@@ -28,6 +30,7 @@ import {
   glossaryItems,
   hostNetworkItems,
   imageItems,
+  noteItems,
   scheduleItems,
   sessionItems,
   settingItems,
@@ -101,6 +104,8 @@ export const SEARCH_PROVIDERS: readonly SearchProvider[] = [
       return snippetItems(favourites, built);
     },
   },
+  // FD-06: notes, by what they are about and their text.
+  { id: "notes", heading: "Notes", icon: NotebookPenIcon, load: async () => noteItems(await comfortApi.notes()) },
   { id: "settings", heading: "Settings", icon: SettingsIcon, load: async () => settingItems(SETTINGS_SECTIONS) },
   // UX-05: last, so a term shows after the things it names on a tie.
   { id: "glossary", heading: "Terms", icon: BookOpenIcon, load: async () => glossaryItems(glossaryTerms()) },

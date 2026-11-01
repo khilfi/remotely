@@ -31,6 +31,7 @@ import { Switch } from "@/components/ui/switch";
 import { ApprovalRulesCard } from "@/components/ApprovalRulesCard";
 import { DashboardHistoryCard } from "@/components/DashboardHistoryCard";
 import { DataRetentionCard } from "@/components/DataRetentionCard";
+import { TrashCard } from "@/components/TrashCard";
 import { EmptyState } from "@/components/EmptyState";
 import { HelpTip } from "@/components/HelpTip";
 import { PageHeader } from "@/components/PageHeader";
@@ -157,6 +158,8 @@ export function SettingsPage({ onChanged, vault, onVaultChanged, onOpenVault, fo
         return <VaultSettingsCard vault={vault} onOpenVault={onOpenVault} />;
       case "retention":
         return <DataRetentionCard />;
+      case "trash":
+        return <TrashCard />;
       case "dashboard":
         return <DashboardPollingCard settings={settings} onSettings={setSettings} />;
       case "history":

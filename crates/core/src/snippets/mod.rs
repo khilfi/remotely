@@ -328,15 +328,33 @@ impl Snippets {
         self.get(ctx, id).await
     }
 
-    /// Audited.
+    /// Audited. QL-27: it goes to the trash, and can be restored for 30 days.
     pub async fn delete(&self, ctx: &Context, id: Uuid) -> Result<()> {
         self.store.read_only().check(Change::Favourites)?;
         let row = self.row(ctx, id).await?;
-        self.store.delete_favourite(ctx, id).await?;
+        let item = crate::trash::TrashItem {
+            kind: crate::trash::TrashKind::Command,
+            item_id: &id.to_string(),
+            name: &row.name,
+            place: if row.folder.is_empty() {
+                "Favourite commands".to_owned()
+            } else {
+                format!("Favourite commands › {}", row.folder)
+            },
+            sent: None,
+            jump_users: Vec::new(),
+        };
+        if crate::trash::move_to_trash(&self.store, ctx, item).await?.is_none() {
+            return Err(CoreError::UnknownTarget(format!("favourite {id}")));
+        }
         self.audit(
             ctx,
             &format!("Deleted the favourite command '{}'", row.name),
-            &format!("from {}", place(&row.folder)),
+            &format!(
+                "from {}; moved to the trash for {} days",
+                place(&row.folder),
+                crate::trash::KEEP_DAYS
+            ),
         )
         .await
     }

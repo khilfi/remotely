@@ -90,6 +90,7 @@ pub mod locks;
 pub mod login_guard;
 pub mod metrics;
 pub mod multiexec_groups;
+pub mod notes;
 pub mod notifications;
 pub mod policy;
 pub mod presentation;
@@ -103,11 +104,13 @@ pub mod snapshots;
 pub mod snippets;
 pub mod ssh_keys;
 pub mod stacks;
+pub mod stars;
 pub mod store;
 pub mod support_bundle;
 pub mod terminal;
 pub mod toolbox;
 pub mod transfer;
+pub mod trash;
 pub mod untrusted;
 pub mod updates;
 pub mod vault;
@@ -338,6 +341,13 @@ pub struct Core {
     schedules: schedules::Schedules,
     /// QL-25: the notification centre's history, in memory (the module says why not on disk).
     pub notifications: Notifications,
+    /// FD-06: one markdown note per session, VM and folder; edits audited without their text.
+    pub notes: notes::Notes,
+    /// QL-26: starred sessions, VMs and commands, and the items opened last. Not audited, not locked.
+    pub stars: stars::Stars,
+    /// QL-27: deleted sessions, saved commands, sizes, images, templates and stacks, kept 30 days. The shell starts its
+    /// daily purge with [`trash::Trash::run`].
+    pub trash: trash::Trash,
     /// MO-13, MO-14: OS and specs of VMs and SSH hosts, and an SSH host's admin details. Reads only.
     pub host_details: HostDetails,
     /// FD-09: ping, trace route, DNS, port checks and the certificate viewer (reads), and Wake-on-LAN's options;
@@ -755,7 +765,8 @@ impl Core {
                 .with_bindings(bindings.clone()),
             sessions: SessionLibrary::new(store.clone(), Arc::clone(&links))
                 .with_policy(bus.policy())
-                .with_bindings(bindings.clone()),
+                .with_bindings(bindings.clone())
+                .with_checks(checks.clone()),
             forwards: Forwards::new(store.clone()),
             links,
             import: Importer::new(store.clone()).with_policy(bus.policy()),
@@ -773,13 +784,19 @@ impl Core {
             groups: MultiExecGroups::new(store.clone()),
             files,
             snippets,
-            terminal_rules,
+            terminal_rules: terminal_rules.clone(),
             reachability,
             metrics,
             history,
             alerts,
-            layouts: Layouts::new(store.clone(), current),
+            layouts: Layouts::new(store.clone(), current.clone()),
             notifications: Notifications::new(),
+            notes: notes::Notes::new(store.clone()),
+            stars: stars::Stars::new(store.clone()),
+            trash: trash::Trash::new(store.clone(), current.clone())
+                .with_bindings(bindings.clone())
+                .with_terminal_rules(terminal_rules.clone())
+                .with_checks(checks.clone()),
             host_details,
             toolbox,
             file_server,

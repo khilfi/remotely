@@ -2,6 +2,8 @@
 // (search.ts ranks them; search-providers.ts loads the data). Tested in search.test.ts.
 
 import type { Favourite, Image, LaunchTemplate, LibraryEntry, SessionRecord, Size, VmRecord } from "./api.ts";
+import type { Note } from "./comfort-api.ts";
+import { noteExcerpt } from "./notes.ts";
 import type { CachedContainers } from "./container-cache.ts";
 import type { GlossaryEntry } from "./glossary.ts";
 import type { SearchField, SearchItem } from "./search.ts";
@@ -279,5 +281,20 @@ export function hostNetworkItems(networks: readonly HostNetwork[]): SearchItem[]
     detail: n.detail,
     fields: [...field(n.label, "name"), ...field(n.detail, "detail")],
     target: { open: n.link ?? { kind: "hostNetworks" } },
+  }));
+}
+
+const NOTE_KINDS: Record<Note["kind"], string> = { session: "session", vm: "VM", folder: "folder" };
+
+/** FD-06: notes by what they are about and by their text; choosing one opens it. */
+export function noteItems(notes: readonly Note[]): SearchItem[] {
+  return notes.map((n) => ({
+    id: `note:${n.kind}:${n.key}`,
+    provider: "notes",
+    title: n.title,
+    detail: noteExcerpt(n.body),
+    badge: NOTE_KINDS[n.kind],
+    fields: [...field(n.title, "name"), ...field(n.body, "detail")],
+    target: { open: { kind: "note", noteKind: n.kind, key: n.key, title: n.title } },
   }));
 }
