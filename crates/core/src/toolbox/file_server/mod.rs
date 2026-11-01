@@ -566,16 +566,21 @@ impl Runner {
     }
 
     /// Never serves `folder`, anything in it or anything holding it, nor writes uploads there: Remotely's data folder
-    /// (the core protects its database's folder; the shell adds the logs folder).
+    /// (the core protects its database's folder; the shell adds the logs folder). Kept as its final path, like every
+    /// path it is compared with, so an 8.3 short form (`C:\Users\RUNNER~1\...`) and the long one are the same folder.
     pub fn protect(&self, folder: &std::path::Path) {
-        let real = std::fs::canonicalize(folder).unwrap_or_else(|_| std::path::absolute(folder).unwrap_or_default());
-        if real.as_os_str().is_empty() {
+        let Some(real) = final_place(folder) else {
             return;
-        }
+        };
         let mut protected = locks::write(&self.protected);
         if !protected.contains(&real) {
             protected.push(real);
         }
+    }
+
+    /// The folders [`Runner::protect`] keeps, as final paths.
+    pub fn protected_folders(&self) -> Vec<PathBuf> {
+        self.protected()
     }
 
     fn protected(&self) -> Vec<PathBuf> {
@@ -726,6 +731,24 @@ fn open_upload_folder(spec: &UploadSpec, limits: UploadLimits, protected: &[Path
         spec.max_total_mb * MB,
         limits,
     ))
+}
+
+/// A folder's final path (`canonicalize`: 8.3 short names made long, links followed), also when it isn't there yet:
+/// the nearest folder above it that is there is resolved, and the rest joined on.
+fn final_place(folder: &std::path::Path) -> Option<PathBuf> {
+    let absolute = std::path::absolute(folder).ok()?;
+    let mut missing = Vec::new();
+    let mut current = absolute.as_path();
+    loop {
+        if let Ok(mut real) = std::fs::canonicalize(current) {
+            for part in missing.iter().rev() {
+                real.push(part);
+            }
+            return Some(real);
+        }
+        missing.push(current.file_name()?.to_owned());
+        current = current.parent()?;
+    }
 }
 
 /// Opens what a server serves, refusing what is never served ([`check_place`]).

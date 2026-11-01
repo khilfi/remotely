@@ -18,6 +18,7 @@ use remotely_core::fakes::FakeVmware;
 use remotely_core::jobs::JobStatus;
 use remotely_core::policy::Tier;
 use remotely_core::presentation::Presentation;
+use remotely_core::toolbox::file_server::served::display_path;
 use remotely_core::toolbox::file_server::{
     FileServerEvent, FileServerRequest, FileServerSpec, FileServerTuning, Outcome, PathChoice, PickFor, ServerStatus,
     UploadLimits, UploadRequest, UploadSpec,
@@ -984,6 +985,111 @@ async fn paths_come_only_from_the_dialogs_or_the_last_choices_and_never_from_the
     assert!(gone.to_string().contains("can't be served"), "{gone}");
 }
 
+/// A path's 8.3 short form, as Windows has it (`None` when the volume makes none).
+#[cfg(windows)]
+fn short_path(path: &Path) -> Option<PathBuf> {
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+    use windows::core::PCWSTR;
+    use windows::Win32::Storage::FileSystem::GetShortPathNameW;
+    let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    let mut buf = vec![0u16; 2048];
+    // SAFETY: `wide` is NUL-terminated and lives across the call; the buffer is ours and its length goes with it.
+    let len = unsafe { GetShortPathNameW(PCWSTR(wide.as_ptr()), Some(&mut buf)) } as usize;
+    (len > 0 && len < buf.len()).then(|| PathBuf::from(std::ffi::OsString::from_wide(&buf[..len])))
+}
+
+/// CI's temp folder is an 8.3 short path (`C:\Users\RUNNER~1\...`): a short form and its long one are one folder, for
+/// the data folder's protection, a pick, the last choice and the upload folder alike.
+#[cfg(windows)]
+#[tokio::test]
+async fn an_8_3_short_path_and_its_long_form_are_the_same_folder() {
+    let tree = Tree::new();
+    let data = tree.parent.join("Remotely data folder with a long name");
+    std::fs::create_dir_all(data.join("logs")).unwrap();
+    let served = tree.parent.join("A served folder with a long name");
+    std::fs::create_dir_all(&served).unwrap();
+    std::fs::write(served.join("fw.bin"), pattern(100)).unwrap();
+    let uploads = tree.parent.join("An upload folder with a long name");
+    std::fs::create_dir_all(&uploads).unwrap();
+    let (Some(data_short), Some(served_short), Some(uploads_short)) = (
+        short_path(&data).filter(|s| s.to_string_lossy().contains('~')),
+        short_path(&served).filter(|s| s.to_string_lossy().contains('~')),
+        short_path(&uploads).filter(|s| s.to_string_lossy().contains('~')),
+    ) else {
+        eprintln!("this volume makes no 8.3 short names; the test has nothing to check");
+        return;
+    };
+    let long = |p: &Path| std::fs::canonicalize(p).unwrap();
+
+    // Protected by its short form: a pick by the long form, inside it or holding it is refused...
+    let core = core().await;
+    let ctx = core.ctx();
+    core.file_server.runner().protect(&data_short);
+    assert!(core.file_server.runner().protected_folders().contains(&long(&data)));
+    for path in [data.clone(), data.join("logs")] {
+        let err = core
+            .file_server
+            .remember_pick(&ctx, PickFor::Folder, path.clone())
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("Remotely's own data"),
+            "{}: {err}",
+            path.display()
+        );
+    }
+    // ...and protected by its long form, a pick by the short one is refused too.
+    let other = crate::core().await;
+    other.file_server.runner().protect(&data);
+    for path in [data_short.clone(), data_short.join("logs")] {
+        let err = other
+            .file_server
+            .remember_pick(&other.ctx(), PickFor::Uploads, path.clone())
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("Remotely's own data"),
+            "{}: {err}",
+            path.display()
+        );
+    }
+    // A folder not made yet, named through a short form, is kept by its long final path.
+    core.file_server.runner().protect(&data_short.join("not made yet"));
+    assert!(core
+        .file_server
+        .runner()
+        .protected_folders()
+        .contains(&long(&data).join("not made yet")));
+
+    // Served and uploaded into through short forms: kept and shown by the long ones, the same folders again later.
+    let server = start(&core, with_uploads(spec(&served_short), &uploads_short, 1, 1)).await;
+    let status_now = status(&core);
+    assert_eq!(status_now.served, display_path(&long(&served)));
+    assert_eq!(status_now.uploads.unwrap().folder, display_path(&long(&uploads)));
+    assert_eq!(get(server.http, "/fw.bin").await.body, pattern(100));
+    assert_eq!(put(server.http, "/sw1-confg", b"hostname sw1\n").await.status, 201);
+    assert!(uploads.join("sw1-confg").exists());
+    stop(&core, &server).await;
+    let last = core.file_server.options(&ctx).await.unwrap().last.unwrap();
+    assert_eq!(last.root, display_path(&long(&served)));
+    assert_eq!(last.uploads.unwrap().folder, display_path(&long(&uploads)));
+    // The last choice, used again, is the same folder (the upload folder isn't empty now, so serving only).
+    let again = start_request(
+        &core,
+        FileServerRequest {
+            root: PathChoice::Last,
+            address: "127.0.0.1".parse().unwrap(),
+            tftp_port: None,
+            http_port: Some(0),
+            minutes: 30,
+            uploads: None,
+        },
+    )
+    .await;
+    assert_eq!(status(&core).served, display_path(&long(&served)));
+    stop(&core, &again).await;
+}
+
 #[tokio::test]
 async fn remotelys_data_a_drive_root_and_the_profile_folder_are_never_served() {
     let tree = Tree::new();
@@ -1413,7 +1519,12 @@ async fn one_at_a_time_never_while_presenting_and_the_last_choices_are_kept_per_
     let err = submit(&core, spec(&tree.root)).await.unwrap_err();
     assert!(err.to_string().contains("running already"), "{err}");
     let options = core.file_server.options(&ctx).await.unwrap();
-    assert_eq!(options.last, Some(chosen));
+    // Kept as its final path: the temp folder may be an 8.3 short path (CI's is `RUNNER~1`).
+    let kept = FileServerSpec {
+        root: display_path(&std::fs::canonicalize(&tree.root).unwrap()),
+        ..chosen
+    };
+    assert_eq!(options.last, Some(kept));
     assert!(options.addresses.iter().any(|a| a.address == "127.0.0.1" && a.loopback));
     assert!(options.status.unwrap().running);
     // Another workspace sees neither the server nor the choices.
