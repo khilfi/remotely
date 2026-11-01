@@ -4,7 +4,7 @@
 // limit, on Stop, when another workspace opens, the vault locks, the window reloads or Remotely closes. While it runs
 // (and after it stopped) the tab lists the requests, newest first.
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { CopyIcon, FileIcon, FolderIcon, PlayIcon, SquareIcon } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
@@ -82,8 +82,15 @@ export function FileServerTool({
   }, [shown]);
 
   // Started, requests came in, stopped: read the status again (the core sends these a few times a second at most).
+  // P6: only while the tab shows; showing it again reads the status above.
+  const shownRef = useRef(shown);
   useEffect(() => {
-    const unlisten = fileServerApi.onEvent(() => refresh());
+    shownRef.current = shown;
+  }, [shown]);
+  useEffect(() => {
+    const unlisten = fileServerApi.onEvent(() => {
+      if (shownRef.current) refresh();
+    });
     return () => {
       void unlisten.then((stop) => stop());
     };
