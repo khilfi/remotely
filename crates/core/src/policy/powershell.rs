@@ -628,6 +628,11 @@ pub(crate) fn writes(command: &PsCommand) -> bool {
     };
     match key {
         "foreach-object" => foreach_writes(command),
+        // `-Online` opens the help's address with the host's shell, whatever a function's HelpUri says.
+        "get-help" => command
+            .args
+            .iter()
+            .any(|a| a.parameter().is_some_and(|p| !p.is_empty() && "online".starts_with(&p)) || !a.literal),
         "ipconfig.exe" => args_match(command, |args| {
             args.iter().any(|a| {
                 option(a).is_some_and(|o| {

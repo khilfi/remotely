@@ -110,6 +110,14 @@ pub(crate) struct PsScript {
 /// Reads a PowerShell script.
 pub(crate) fn parse(script: &str) -> PsScript {
     let mut parser = Parser::new(script, None, 0);
+    // Control characters other than tab and the line breaks, and Unicode's other line breaks, aren't read the way
+    // PowerShell may read them (a statement's end?): such a script is never read-only.
+    if script
+        .chars()
+        .any(|c| (c.is_control() && !matches!(c, '\t' | '\n' | '\r')) || matches!(c, '\u{2028}' | '\u{2029}'))
+    {
+        parser.unreadable("a control character or an unusual line break");
+    }
     parser.statements(End::Eof);
     parser.out
 }

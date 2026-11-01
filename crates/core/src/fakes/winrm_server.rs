@@ -1105,6 +1105,8 @@ impl Proc {
             "exit" => self.end(rest.parse().unwrap_or(0)),
             "hostname" => self.print("WIN01\r\n"),
             "whoami" => self.print("win01\\alice\r\n"),
+            // BX-13 tests: output that switches xterm to its alternate screen, as a statement could print.
+            "enter-altscreen" => self.print("\x1b[?1049h"),
             // BX-13: the Windows support bundle presets' reads (their first word), with sample answers.
             "get-computerinfo" => self.print(
                 "\r\nWindowsProductName : Windows Server 2022 Datacenter\r\nOsVersion          : 10.0.20348\r\n\

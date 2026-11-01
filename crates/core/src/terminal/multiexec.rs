@@ -1291,13 +1291,18 @@ impl MultiExec {
         // or code prompt it shows, as for SSH: while a statement runs, a line typed goes to it as input, and PowerShell
         // runs it as the next statement if nothing reads it, so it is rated like any line.
         let powershell = info.kind == PaneKind::Powershell;
+        // At its own prompt a PowerShell console runs whatever line it gets as a statement, whatever the screen shows
+        // (output printed after the prompt could look like a password prompt, or switch xterm to its alternate
+        // screen, which no PowerShell tab has a full-screen program behind): never straight through there.
+        let running = !powershell || info.console.is_some_and(|c| !c.at_prompt);
         Some(Seen {
             id,
             name: target.as_ref().map_or_else(|| info.name.clone(), |t| t.name.clone()),
             connected: info.screen.connected && (!powershell || info.console.is_some()),
             protected: target.is_some_and(|t| t.protected),
-            password: info.screen.at_secret_prompt(),
-            alternate: info.screen.alternate,
+            password: info.screen.at_secret_prompt() && running,
+            // No program in a PowerShell tab has a screen of its own (it has no terminal on the host).
+            alternate: info.screen.alternate && !powershell,
             dirty: info.dirty,
             kind: info.kind,
             console: info.console,

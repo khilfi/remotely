@@ -754,6 +754,35 @@ async fn a_running_statements_input_is_rated_unless_at_a_password_prompt_and_mix
         jobs
     );
 
+    // Output that switches xterm to its alternate screen makes no PowerShell tab a full-screen program: at its prompt,
+    // a typed line is still held and rated, never sent straight to a console that would run it.
+    fleet.type_in(0, "Enter-AltScreen").await;
+    let (line, _, request) = held(fleet.type_in(0, "\r").await);
+    fleet
+        .core
+        .multiexec
+        .approve(line, answers(&request.unwrap()))
+        .await
+        .unwrap();
+    assert!(line_done(&mut events, line).await);
+    for pane in &mut fleet.panes {
+        pane.expect("PS C:\\Users\\alice> ").await;
+    }
+    let outcome = fleet.type_in(0, "Restart-Service Spooler").await;
+    assert!(
+        matches!(
+            outcome,
+            InputOutcome::Typed {
+                mode: LineMode::Command,
+                ..
+            }
+        ),
+        "{outcome:?}"
+    );
+    let (line, tier, _) = held(fleet.type_in(0, "\r").await);
+    assert_eq!(tier, Tier::Medium);
+    fleet.core.multiexec.cancel(line).await.unwrap();
+
     // An SSH tab and a PowerShell tab can't be typed into at once.
     let (_server, web01) = linux(&fleet.core, "web01").await;
     let mut ssh = Pane::new(fleet.core.terminals.open(&fleet.core.ctx(), web01, SIZE).await.unwrap());

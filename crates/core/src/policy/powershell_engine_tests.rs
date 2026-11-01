@@ -318,6 +318,26 @@ fn loosening_the_powershell_rules_is_named_and_audited() {
 }
 
 #[test]
+fn control_characters_unusual_line_breaks_and_help_online_are_never_read() {
+    let engine = engine();
+    let rate = |script: &str| engine.classify_script_as(script, PowerShell);
+    assert_eq!(rate("Get-Date"), ActionKind::ExecReadOnly);
+    for script in [
+        "Get-Date\u{2028}Stop-Service Spooler",
+        "Get-Date\u{2029}hostname",
+        "Get-Date\u{0b}hostname",
+        "Get-Date\u{0}",
+        "Get-Help Get-Process -Online",
+        "Get-Help about_Remote -o",
+        "Get-Help Get-Process -Online:$true",
+    ] {
+        assert_eq!(rate(script), ActionKind::ExecOther, "{script:?}");
+    }
+    assert_eq!(rate("Get-Help Get-Process -Full"), ActionKind::ExecReadOnly);
+    assert_eq!(rate("Get-Date\thostname"), ActionKind::ExecReadOnly, "a tab is a space");
+}
+
+#[test]
 fn rules_saved_before_the_powershell_rules_get_the_defaults() {
     let mut saved = serde_json::to_value(PolicyRules::default()).unwrap();
     saved.as_object_mut().unwrap().remove("powershell");
