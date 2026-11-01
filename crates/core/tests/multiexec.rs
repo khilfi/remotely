@@ -913,6 +913,44 @@ async fn an_alternate_screen_left_on_still_rates_lines_at_a_shell_prompt() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_stale_alternate_flag_with_no_program_launched_still_rates_lines() {
+    // Review B7: background output can turn the alternate screen on and leave the cursor on a non-prompt line without a
+    // full-screen program running — so a prompt check alone cannot clear the flag. MultiExec trusts the flag only where
+    // it launched a full-screen program, so a line typed here is still held and rated, not passed through unrated.
+    let mut fleet = Fleet::new(1).await;
+    fleet.pick(&[0]).await;
+    let mut events = fleet.core.multiexec.subscribe();
+
+    // Output turns the alternate screen on and stops on a non-prompt line; MultiExec started no full-screen program.
+    let (line, _, request, _) = held(fleet.type_in(0, "altscreen-noprompt\r").await);
+    if let Some(request) = request {
+        fleet.core.multiexec.approve(line, answers(&request)).await.unwrap();
+    }
+    assert!(line_done(&mut events, line).await);
+    fleet.panes[0].expect("background job finished").await;
+
+    // The pane's alternate flag is set and the cursor line is not a prompt, but no program was launched: the next line
+    // is held and rated, never passed straight through.
+    let outcome = fleet.type_in(0, "rm -rf /tmp/old").await;
+    assert!(
+        matches!(
+            outcome,
+            InputOutcome::Typed {
+                mode: LineMode::Command,
+                ..
+            }
+        ),
+        "{outcome:?}"
+    );
+    let (_, tier, _, _) = held(fleet.type_in(0, "\r").await);
+    assert_eq!(
+        tier,
+        Tier::High,
+        "rated, not sent to a non-existent full-screen program"
+    );
+}
+
 // ---- The audit log -------------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

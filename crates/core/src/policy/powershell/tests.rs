@@ -854,3 +854,123 @@ fn a9_digit_programs_interactive_tools_and_more_runners() {
         assert!(why.contains("can't be read-only"), "{entry}: {why}");
     }
 }
+
+// ---- Re-review PR #78: the classifier fails closed on lexing ambiguity (P1 to P7) ---------------------------------
+
+#[test]
+fn p1_a_glued_comment_marker_makes_the_script_unreadable() {
+    // A `#` or `<#` not at a clear boundary may or may not start a comment in PowerShell, so the script can't be read
+    // as only reading. These all hid `Stop-Service Spooler` behind `#'…'` before; each is now not read-only.
+    for trick in [
+        "& {\nWrite-Output 'a'#'\nStop-Service Spooler\n#'\n}",
+        "& {\nWrite-Output \"a\"#'\nStop-Service Spooler\n#'\n}",
+        "& {\nWrite-Output [int]#'\nStop-Service Spooler\n#'\n}",
+        "& {\nWrite-Output {}#'\nStop-Service Spooler\n#'\n}",
+        "& {\nWrite-Output @{}#'\nStop-Service Spooler\n#'\n}",
+        "& {\nWrite-Output $x[0]#'\nStop-Service Spooler\n#'\n}",
+        "& {\nWrite-Output a,b#'\nStop-Service Spooler\n#'\n}",
+        "& {\nGet-Date -a:#'\nStop-Service Spooler\n#'\n}",
+        "& {\nWrite-Output 'a'<#'\nStop-Service Spooler\n#'#>\n}",
+        "if ($true) {\nWrite-Output 'a'#'\nStop-Service Spooler\n#'\n}",
+    ] {
+        assert!(!read_only(trick), "{trick} should not be read-only");
+    }
+    // A hidden dangerous command is still caught by the rules on the raw text.
+    assert!(flagged(
+        "if ($true) {\nGet-Date | Where-Object {}#'\nRemove-Item C:\\data -Recurse -Force\n#'\n}",
+        "Remove-Item -Recurse / rd /s"
+    ));
+    // A comment after whitespace or a boundary still reads.
+    assert!(read_only("Get-Date # today's date"));
+    assert!(read_only("(Get-Date) # a comment"));
+}
+
+#[test]
+fn p2_a_redirect_target_glued_to_null_writes_a_file() {
+    for trick in [
+        "Get-Process >$null'C:\\inetpub\\wwwroot\\web.config'",
+        "Get-Date >$null\\Windows\\Temp\\x.txt",
+        "Get-Date 2>$null\\x.txt",
+        "Get-Date >$null-x",
+        "Get-Date >${null}x",
+    ] {
+        assert!(!read_only(trick), "{trick} should not be read-only");
+    }
+    // A clean `$null` redirect still reads.
+    assert!(read_only("Get-Date >$null"));
+    assert!(read_only("Get-Date 2>$null; Get-Service"));
+}
+
+#[test]
+fn p3_a_type_literal_that_may_run_a_constructor_is_not_read_only() {
+    for trick in [
+        "[IO.StreamWriter] -join 'C:\\data\\f.txt'",
+        "[IO.StreamWriter]-join 'C:\\data\\f.txt'",
+        "'C:\\data\\f.txt' -as [string][IO.StreamWriter]",
+        "'C:\\data\\f.txt' -as [string]'IO.StreamWriter'",
+        "'C:\\data\\f.txt' -as [int] -as [IO.StreamWriter]",
+        "'C:\\data\\f.txt' -as 'IO.StreamWriter'",
+    ] {
+        assert!(!read_only(trick), "{trick} should not be read-only");
+    }
+    // A value-type `-as` or a `-is` type test still reads.
+    assert!(read_only("'5' -as [int]"));
+    assert!(read_only("$x -is [IO.StreamWriter]"));
+}
+
+#[test]
+fn p4_a_foreach_variable_that_assigns_is_not_read_only() {
+    for trick in [
+        "foreach ($alias:hostname in 'Stop-Service') { hostname Spooler }",
+        "foreach ($function:hostname in 'Stop-Service Spooler') { hostname }",
+        "foreach ($env:PSModulePath in 'C:\\x') { }",
+        "foreach ($PSDefaultParameterValues in @{ '*:MemberName' = 'Kill' }) { }",
+    ] {
+        assert!(!read_only(trick), "{trick} should not be read-only");
+    }
+    // A plain loop variable still reads.
+    assert!(read_only("foreach ($s in Get-Service) { $s.Name }"));
+}
+
+#[test]
+fn p5_invoker_cmdlets_with_a_variable_block_write() {
+    for trick in [
+        "Get-Service | Where-Object -FilterScript:$sb",
+        "Get-Service | Sort-Object -Property:$sb",
+        "Measure-Command -Expression:$sb",
+        "Compare-Object $a $b -Property $sb",
+        "Get-Service | ConvertTo-Html -Property $sb",
+        // A bare Where-Object runs whatever $PSDefaultParameterValues sets for its filter.
+        "Get-Date | Where-Object",
+    ] {
+        assert!(!read_only(trick), "{trick} should not be read-only");
+    }
+    // A literal filter or property names still read.
+    assert!(read_only("Get-Service | Where-Object { $_.Status -eq 'Running' }"));
+    assert!(read_only("Get-Service | Sort-Object Status, Name"));
+}
+
+#[test]
+fn p6_run_together_cmd_switches_are_flagged() {
+    assert!(flagged("cmd /c rd/s/q C:\\data", "Remove-Item -Recurse / rd /s"));
+    assert!(flagged("cmd /c \"rd/s/q C:\\data\"", "Remove-Item -Recurse / rd /s"));
+    assert!(flagged("cmd /c shutdown/r/t 0", "shutdown / logoff"));
+}
+
+#[test]
+fn p7_only_long_decimal_and_size_suffixes_are_numbers() {
+    // Windows PowerShell 5.1 runs `1s`, `1u`, `1y`, `1n` as commands (programs on PATH).
+    for command in [
+        "1s Get-Date",
+        "1u Get-Date",
+        "1y Get-Date",
+        "1n Get-Date",
+        "1us Get-Date",
+    ] {
+        let token = command.split(' ').next().unwrap();
+        assert_eq!(names(command).first().map(String::as_str), Some(token), "{command}");
+    }
+    // `l`, `d` and the size multipliers are numbers.
+    assert!(read_only("1l + 1d"));
+    assert!(read_only("1kb"));
+}

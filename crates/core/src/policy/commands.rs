@@ -774,16 +774,56 @@ const INTERACTIVE: &[&str] = &[
     "less", "more", "most", "pg", "man", "vi", "vim", "view", "nvim", "vimdiff", "ex", "nano", "emacs", "ed", "fc",
 ];
 
-/// SS-10: the first program in the script that stays open and reads keys ([`INTERACTIVE`]), as the
-/// command of any part of it (after `sudo`, `env` and assignments; `/usr/bin/less` is less).
-pub(crate) fn interactive_program(script: &str) -> Option<&'static str> {
+/// SS-10 (review B7): programs that take over the whole screen (xterm's alternate buffer) and read keys, beyond the
+/// editors and pagers of [`INTERACTIVE`]: the monitors and multiplexers. MultiExec trusts a tab's alternate-screen flag
+/// (keys pass straight through unrated) only after it released a line that started one of these, so this list need not
+/// match the policy engine's rating list. It is not exhaustive; a program missing from it is only rated as usual.
+const FULL_SCREEN: &[&str] = &[
+    "top",
+    "htop",
+    "btop",
+    "atop",
+    "glances",
+    "watch",
+    "tmux",
+    "screen",
+    "mc",
+    "ncdu",
+    "tig",
+    "lazygit",
+    "lazydocker",
+    "nmon",
+    "iotop",
+    "iftop",
+    "nethogs",
+    "ranger",
+    "vifm",
+    "gdb",
+    "k9s",
+];
+
+/// The first program in the script drawn from `list`, as the command of any part of it (after `sudo`, `env` and
+/// assignments; `/usr/bin/less` is less).
+fn first_program_in<'a>(script: &str, list: &'a [&'a str]) -> Option<&'a str> {
     let without_redirects = REDIRECT.replace_all(script, " ");
     SEPARATOR.split(&without_redirects).find_map(|segment| {
         let words = command_words(segment).unwrap_or_else(|| shell_words(segment));
         let first = words.first()?;
         let name = first.rsplit('/').next().unwrap_or(first);
-        INTERACTIVE.iter().find(|program| **program == name).copied()
+        list.iter().find(|program| **program == name).copied()
     })
+}
+
+/// SS-10: the first program in the script that stays open and reads keys ([`INTERACTIVE`]), used by the policy engine
+/// to rate a line that opens one as not read-only.
+pub(crate) fn interactive_program(script: &str) -> Option<&'static str> {
+    first_program_in(script, INTERACTIVE)
+}
+
+/// SS-10 (review B7): the first full-screen program the script starts — an editor or pager ([`INTERACTIVE`]) or a
+/// monitor or multiplexer ([`FULL_SCREEN`]). MultiExec uses it to decide whether a tab's alternate-screen flag is real.
+pub(crate) fn full_screen_program(script: &str) -> Option<&'static str> {
+    first_program_in(script, INTERACTIVE).or_else(|| first_program_in(script, FULL_SCREEN))
 }
 
 /// The words of one command as the shell splits them: quotes (`'…'`, `"…"`, `$'…'`) and backslashes

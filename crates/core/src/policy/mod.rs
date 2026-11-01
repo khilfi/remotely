@@ -14,7 +14,7 @@
 
 #[cfg(test)]
 mod bundle_tests;
-mod commands;
+pub(crate) mod commands;
 #[cfg(test)]
 mod convert_tests;
 #[cfg(test)]

@@ -623,9 +623,58 @@ impl BulkVerifier {
     }
 }
 
-/// Review C2: the WinRM logins (user + vault item) that already refused a sign-in in this job, so the other hosts that
-/// share one are skipped instead of signing in too and perhaps locking a domain account.
-type WinrmFails = Arc<tokio::sync::Mutex<std::collections::HashSet<String>>>;
+/// Review C2: a per-account gate shared by a job's targets, so WinRM hosts that share one login (lower-cased user and
+/// vault item) don't all sign in at once and lock a domain account. The first host to use an account signs in alone;
+/// the others wait for its result, then go in parallel if it succeeded or are skipped if its password was refused.
+type WinrmGate = Arc<tokio::sync::Mutex<HashMap<String, Arc<AccountGate>>>>;
+
+/// One account's gate: whether a host took the lead on the first sign-in, and its result (`None` until the first
+/// sign-in finishes, then whether the password was accepted) on a watch so waiters see it without a missed-wake race.
+struct AccountGate {
+    leader_taken: std::sync::Mutex<bool>,
+    result: tokio::sync::watch::Sender<Option<bool>>,
+}
+
+impl Default for AccountGate {
+    fn default() -> Self {
+        Self {
+            leader_taken: std::sync::Mutex::new(false),
+            result: tokio::sync::watch::channel(None).0,
+        }
+    }
+}
+
+/// The leader of an account's first sign-in. On drop it publishes a result (cancelled counts as "accepted", so waiters
+/// go on rather than hang), unless one was already set.
+struct Leader {
+    gate: Arc<AccountGate>,
+    set: bool,
+}
+
+impl Leader {
+    fn finish(mut self, accepted: bool) {
+        let _ = self.gate.result.send(Some(accepted));
+        self.set = true;
+    }
+}
+
+impl Drop for Leader {
+    fn drop(&mut self) {
+        if !self.set {
+            let _ = self.gate.result.send(Some(true));
+        }
+    }
+}
+
+/// What a host does at an account's gate.
+enum GateRole {
+    /// Be the first to sign in with this account; publish the result when done.
+    Leader(Leader),
+    /// The account already signed in, or is not password auth: go now.
+    Proceed,
+    /// The account's password was refused: skip, don't try it again.
+    Skip,
+}
 
 /// What every target of one job shares while it runs.
 struct TargetsRun<'a> {
@@ -636,8 +685,8 @@ struct TargetsRun<'a> {
     halt: &'a CancellationToken,
     safety_name: &'a Option<Arc<str>>,
     rollout: Rollout,
-    /// Review C2: the shared set of WinRM logins that refused a sign-in in this job.
-    winrm_fails: WinrmFails,
+    /// Review C2: the per-account sign-in gate for this job's WinRM hosts.
+    winrm_gate: WinrmGate,
 }
 
 pub struct JobRunner {
@@ -1126,7 +1175,7 @@ impl JobRunner {
             halt: &halt,
             safety_name: &safety_name,
             rollout,
-            winrm_fails: Arc::new(tokio::sync::Mutex::new(std::collections::HashSet::new())),
+            winrm_gate: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         };
         if let Command::Stack { op, .. } = &spec.command {
             // VM-08: step by step, in boot order (the last step first to stop).
@@ -1285,9 +1334,9 @@ impl JobRunner {
             let token = run.token.clone();
             let halt = run.halt.clone();
             let safety_name = run.safety_name.clone();
-            let winrm_fails = Arc::clone(&run.winrm_fails);
+            let winrm_gate = Arc::clone(&run.winrm_gate);
             tasks.spawn(async move {
-                this.run_target(id, spec, target, semaphore, token, halt, safety_name, winrm_fails)
+                this.run_target(id, spec, target, semaphore, token, halt, safety_name, winrm_gate)
                     .await
             });
         }
@@ -1404,7 +1453,6 @@ impl JobRunner {
 
     /// One target, once the parallel limit lets it.
     #[allow(clippy::too_many_arguments)]
-    #[allow(clippy::too_many_arguments)]
     async fn run_target(
         self: Arc<Self>,
         id: Uuid,
@@ -1414,7 +1462,7 @@ impl JobRunner {
         token: CancellationToken,
         halt: CancellationToken,
         safety_name: Option<Arc<str>>,
-        winrm_fails: WinrmFails,
+        winrm_gate: WinrmGate,
     ) -> Ran {
         let stopped = |target: Target, stop: Stop| Ran {
             target,
@@ -1467,7 +1515,7 @@ impl JobRunner {
             safety_taken = Some(name.to_string());
         }
         let accepted = Arc::new(Mutex::new(None));
-        let mut outcome = self.execute(id, &spec, &target, &token, &accepted, &winrm_fails).await;
+        let mut outcome = self.execute(id, &spec, &target, &token, &accepted, &winrm_gate).await;
         let note = outcome.as_mut().ok().and_then(|o| o.note.take());
         let host_key = locks::lock(&accepted).take();
         Ran {
@@ -1676,7 +1724,7 @@ impl JobRunner {
         target: &Target,
         token: &CancellationToken,
         accepted: &Arc<Mutex<Option<String>>>,
-        winrm_fails: &WinrmFails,
+        winrm_gate: &WinrmGate,
     ) -> Result<TargetOutcome> {
         match (&spec.command, &target.target) {
             (Command::VmPower { op, .. }, TargetRef::Vm { vmx_path }) => {
@@ -1801,7 +1849,7 @@ impl JobRunner {
                 // BX-13: a host rated by the PowerShell rules runs the script in PowerShell over WinRM.
                 if rated_kind(spec, target) == ScriptKind::PowerShell {
                     return self
-                        .run_winrm(spec, target, *session_id, run, token, accepted, winrm_fails)
+                        .run_winrm(spec, target, *session_id, run, token, accepted, winrm_gate)
                         .await;
                 }
                 self.run_remote(spec, target, *session_id, run, token, accepted).await
@@ -2059,7 +2107,7 @@ impl JobRunner {
             }
             // FD-04: one host's commands and files into the job's bundle.
             (Command::SupportBundle { spec: bundle, .. }, TargetRef::Session { session_id }) => {
-                self.collect_bundle(job_id, spec, target, *session_id, bundle, token, accepted, winrm_fails)
+                self.collect_bundle(job_id, spec, target, *session_id, bundle, token, accepted, winrm_gate)
                     .await
             }
             (command, other) => Err(CoreError::WrongTargetKind {
@@ -2245,7 +2293,7 @@ impl JobRunner {
         session_id: Uuid,
         trust_new_host_keys: bool,
         token: &CancellationToken,
-        winrm_fails: &WinrmFails,
+        winrm_gate: &WinrmGate,
     ) -> Result<WinrmLogin> {
         use crate::login_guard::{self, ParkReason, ParkScope, Parked};
         let winrm = self
@@ -2258,16 +2306,6 @@ impl JobRunner {
         }
         // SS-04: a run the user started counts as activity, as for SSH hosts.
         self.vault.note_activity();
-        // Review C2: once a host in this job refused this login (its user and vault item), the other hosts that share
-        // it are skipped, so one run can't keep trying a wrong password across many hosts and lock a domain account.
-        let account = format!("{:?}|{:?}", winrm.username, winrm.password_id);
-        if winrm.password_id.is_some() && winrm_fails.lock().await.contains(&account) {
-            return Err(CoreError::AuthFailed(format!(
-                "skipped: a host with the same login ('{}') refused the sign-in earlier in this run, so it wasn't tried \
-                 again (this could lock the account)",
-                winrm.username.as_deref().unwrap_or("")
-            )));
-        }
         // Review C2: the login guard, as background checks use it (`checks::WindowsServices::connection`), so a run
         // never keeps signing in to a host that refused: a parked session is refused up front, a refusal parks it, and
         // the hourly cap is counted. This stops one run (or Retry after it) from locking a domain account.
@@ -2303,6 +2341,29 @@ impl JobRunner {
                 wait_secs: wait.as_secs(),
             });
         }
+        // Review C2: the per-account gate, so many hosts sharing one domain password don't sign in at once and lock the
+        // account. The first host with an account signs in alone; the others wait for its result (then go in parallel if
+        // it was accepted, or are skipped if it was refused). Password auth only; the Windows sign-in can't be locked.
+        let leader = if winrm.password_id.is_some() {
+            let account = format!(
+                "{}|{:?}",
+                winrm.username.as_deref().unwrap_or("").to_lowercase(),
+                winrm.password_id
+            );
+            match Self::winrm_gate_role(winrm_gate, &account).await {
+                GateRole::Skip => {
+                    return Err(CoreError::AuthFailed(format!(
+                        "skipped: a host with the same login ('{}') had its sign-in refused in this run, so it wasn't \
+                         tried again (this could lock the account)",
+                        winrm.username.as_deref().unwrap_or("")
+                    )));
+                }
+                GateRole::Leader(leader) => Some(leader),
+                GateRole::Proceed => None,
+            }
+        } else {
+            None
+        };
         let verifier = Arc::new(BulkVerifier {
             known_hosts: Arc::clone(&self.known_hosts),
             ctx: spec.ctx,
@@ -2319,10 +2380,8 @@ impl JobRunner {
                 let verifier = Arc::clone(&verifier) as Arc<dyn HostKeyVerifier>;
                 let guard = guard.clone();
                 let session_uuid = winrm.id;
-                let winrm_fails = Arc::clone(winrm_fails);
-                let has_password = winrm.password_id.is_some();
                 async move {
-                    let session = match adapter
+                    let connected = adapter
                         .connect(WinrmConnect {
                             spec: &winrm,
                             password,
@@ -2332,12 +2391,17 @@ impl JobRunner {
                                 ..WinrmTuning::default()
                             },
                         })
-                        .await
-                    {
+                        .await;
+                    // Review C2: the gate's result is whether the account's password was accepted — false only for a
+                    // refused sign-in, so the other hosts sharing it are skipped (a cert or network failure isn't a
+                    // lockout risk, so they go on).
+                    if let Some(leader) = leader {
+                        leader.finish(!matches!(connected, Err(CoreError::AuthFailed(_))));
+                    }
+                    let session = match connected {
                         Ok(session) => session,
                         // Review C2: a refused sign-in or a changed certificate parks the session, so a later host (or
-                        // Retry) does not try it again; Retry and credential changes clear the park. An auth failure
-                        // also marks the login, so the other hosts sharing it in this run are skipped.
+                        // Retry) does not try it again; Retry and credential changes clear the park.
                         Err(err) => {
                             if let Some(reason) = ParkReason::of(&err) {
                                 let parked = Parked {
@@ -2345,9 +2409,6 @@ impl JobRunner {
                                     message: login_guard::parked_message(&err.to_string()),
                                 };
                                 guard.park(session_uuid, ParkScope::Login, &key, parked);
-                            }
-                            if has_password && matches!(err, CoreError::AuthFailed(_)) {
-                                winrm_fails.lock().await.insert(account);
                             }
                             return Err(err);
                         }
@@ -2364,6 +2425,38 @@ impl JobRunner {
         })
     }
 
+    /// Review C2: a host's role at an account's gate. The first host becomes the leader and signs in alone; the others
+    /// wait for its result, then go in parallel if the password was accepted or are skipped if it was refused.
+    async fn winrm_gate_role(gate: &WinrmGate, account: &str) -> GateRole {
+        let entry = {
+            let mut map = gate.lock().await;
+            Arc::clone(map.entry(account.to_owned()).or_default())
+        };
+        let mut rx = entry.result.subscribe();
+        if let Some(accepted) = *rx.borrow() {
+            return if accepted { GateRole::Proceed } else { GateRole::Skip };
+        }
+        {
+            let mut leader_taken = locks::lock(&entry.leader_taken);
+            if !*leader_taken {
+                *leader_taken = true;
+                return GateRole::Leader(Leader {
+                    gate: Arc::clone(&entry),
+                    set: false,
+                });
+            }
+        }
+        // Wait for the leader to publish its result (the watch buffers it, so no wake is missed).
+        loop {
+            if rx.changed().await.is_err() {
+                return GateRole::Proceed;
+            }
+            if let Some(accepted) = *rx.borrow() {
+                return if accepted { GateRole::Proceed } else { GateRole::Skip };
+            }
+        }
+    }
+
     /// BX-13: runs a script on one saved session's Windows host, in a PowerShell of its own over WinRM (the output
     /// scrubbed of the sign-in password and capped, as for SSH hosts). sudo never gets here: the bus refuses it for
     /// Windows hosts.
@@ -2376,7 +2469,7 @@ impl JobRunner {
         run: RemoteRun<'_>,
         token: &CancellationToken,
         accepted: &Arc<Mutex<Option<String>>>,
-        winrm_fails: &WinrmFails,
+        winrm_gate: &WinrmGate,
     ) -> Result<TargetOutcome> {
         if run.sudo {
             return Err(CoreError::InvalidInput(
@@ -2384,7 +2477,7 @@ impl JobRunner {
             ));
         }
         let login = self
-            .winrm_connect(spec, target, session_id, run.trust_new_host_keys, token, winrm_fails)
+            .winrm_connect(spec, target, session_id, run.trust_new_host_keys, token, winrm_gate)
             .await?;
         let max_output = locks::read(&self.exec_tuning).max_output;
         let WinrmLogin { connect, .. } = login;
@@ -2445,13 +2538,13 @@ impl JobRunner {
         bundle: &crate::support_bundle::BundleSpec,
         token: &CancellationToken,
         accepted: &Arc<Mutex<Option<String>>>,
-        winrm_fails: &WinrmFails,
+        winrm_gate: &WinrmGate,
     ) -> Result<TargetOutcome> {
         let bundles = self.bundles()?;
         // BX-13: a Windows host gives the bundle's Windows items over WinRM.
         if rated_kind(spec, target) == ScriptKind::PowerShell {
             let login = self
-                .winrm_connect(spec, target, session_id, bundle.trust_new_host_keys, token, winrm_fails)
+                .winrm_connect(spec, target, session_id, bundle.trust_new_host_keys, token, winrm_gate)
                 .await?;
             let WinrmLogin {
                 address,

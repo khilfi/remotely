@@ -531,8 +531,16 @@ impl Editor {
                 b'\t' => {}
                 b if b < 0x20 => {}
                 _ => {
-                    // A whole UTF-8 character, or wait for the rest of it.
+                    // A whole UTF-8 character, or wait for the rest of it. Review B4/R2: the bytes after the lead must
+                    // be continuation bytes; if one isn't (a stray byte from a mouse report, a control key), the lead
+                    // is invalid, so consume only it — otherwise a control byte (Ctrl+C, Ctrl+U) inside the run would be
+                    // swallowed.
                     let len = utf8_len(byte);
+                    let have = (data.len() - at).min(len);
+                    if data[at + 1..at + have].iter().any(|b| !(0x80..=0xbf).contains(b)) {
+                        at += 1;
+                        continue;
+                    }
                     if at + len > data.len() {
                         self.partial = data[at..].to_vec();
                         break;
@@ -585,6 +593,14 @@ impl Editor {
 
     fn interrupt(&mut self, shown: &mut Vec<u8>, out: &mut Vec<Action>) {
         shown.extend_from_slice(b"^C");
+        // Review M2: Ctrl+C drops whatever was typed, running or not — the line, what was typed ahead while a statement
+        // ran, and any half-read character or escape — so a later LF can't run a line the user cancelled.
+        self.line.clear();
+        self.partial.clear();
+        self.escape = Escape::None;
+        self.escape_bytes.clear();
+        self.masked = false;
+        self.browsing = None;
         // Pasted lines still waiting go too: Ctrl+C stops the paste with the statement.
         self.queued.clear();
         if self.state == State::Running {
@@ -594,11 +610,8 @@ impl Editor {
             out.push(Action::Send(marker_line(&self.nonce)));
             return;
         }
-        self.line.clear();
         self.open.clear();
         self.syntax = Syntax::default();
-        self.browsing = None;
-        self.masked = false;
         shown.extend_from_slice(format!("\r\n{}", self.prompt()).as_bytes());
     }
 
@@ -1032,6 +1045,21 @@ mod tests {
         let secret = editor.secret(b"s3cret\r");
         assert_eq!(sent(&secret), vec!["s3cret\r\n".to_owned()]);
         assert!(!shown(&secret).contains("s3cret"));
+    }
+
+    #[test]
+    fn an_invalid_utf8_lead_byte_does_not_swallow_the_next_key() {
+        // Review B4/R2: a stray high byte — an X10 mouse report a host turned on, which xterm delivers as binary — is a
+        // UTF-8 lead not followed by continuation bytes. The console must consume only that byte, never keep it pending
+        // and swallow the key after it: a swallowed Ctrl+C would leave the statement running while the line's keys
+        // desync from what MultiExec followed.
+        let mut editor = Editor::new("n1".into());
+        ready(&mut editor);
+        editor.keys(b"Read-Host 'Name'\r", false);
+        editor.keys(b"typed-ahead", false);
+        // 0xe0 is a 3-byte UTF-8 lead; the Ctrl+C (0x03) right after it is not a continuation byte.
+        let out = editor.keys(b"\xe0\x03", false);
+        assert!(out.contains(&Action::Interrupt), "the Ctrl+C still interrupts: {out:?}");
     }
 
     #[test]

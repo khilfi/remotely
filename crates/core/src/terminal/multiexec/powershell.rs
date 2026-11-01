@@ -105,8 +105,8 @@ impl PsLine {
                 Step::Run(RunKey::Enter(b'\r'))
             }
             b'\n' if after_cr => {
-                // The same Enter as the CR before it: the console ignores it.
-                out.push(byte);
+                // Review M2: the CR before it was held (never sent to the console), so this LF must not be forwarded —
+                // the console would run its line on it. Drop it: it is the same Enter as that CR.
                 Step::Key
             }
             b'\n' => Step::Run(RunKey::Enter(b'\n')),

@@ -636,16 +636,16 @@ pub(crate) fn writes(command: &PsCommand) -> bool {
     };
     match key {
         "foreach-object" => foreach_writes(command),
-        // A4: cmdlets that invoke a script block given as a value run arbitrary code when the block comes from a
-        // variable or subexpression (`Where-Object $sb`, `Sort-Object $sb`, `Measure-Command $sb`, a calculated
-        // property from `$ht`). A block written in the script is read like any other, and a comma list of property
-        // names (`Sort-Object Status, Name`) is literal; only a dynamic value (`$…`, `(…)`, `@…`) could be an invoked
-        // block, so that is what makes it write.
-        "where-object" | "sort-object" | "group-object" | "select-object" | "measure-command" | "format-table"
-        | "format-list" | "format-wide" | "format-custom" => command
-            .args
-            .iter()
-            .any(|a| a.kind == ArgKind::Expression && a.text.trim_start().starts_with(['$', '(', '@'])),
+        // A4, P5: cmdlets that invoke a script block given as a value run arbitrary code when the block comes from a
+        // variable or subexpression (`Where-Object $sb`, `Sort-Object $sb`, `Measure-Command $sb`, a calculated property
+        // from `$ht`). A block written in the script is read like any other, and a comma list of property names
+        // (`Sort-Object Status, Name`) is literal; only a dynamic value (`$…`, `(…)`, `@…`), positional or attached to a
+        // parameter (`-FilterScript:$sb`), could be an invoked block, so that is what makes it write.
+        "sort-object" | "group-object" | "select-object" | "measure-command" | "format-table" | "format-list"
+        | "format-wide" | "format-custom" | "compare-object" | "convertto-html" => invoker_writes(command),
+        // A bare `Where-Object` (no filter) runs whatever `$PSDefaultParameterValues` sets for its `-FilterScript`, like
+        // a bare `ForEach-Object`, so it needs a filter written in the script.
+        "where-object" => command.args.is_empty() || invoker_writes(command),
         // `-Online` opens the help's address with the host's shell, whatever a function's HelpUri says.
         "get-help" => command
             .args
@@ -753,6 +753,20 @@ fn args_match(command: &PsCommand, test: impl Fn(&[String]) -> bool) -> bool {
         Some(args) => test(&args),
         None => true,
     }
+}
+
+/// A4, P5: whether a block-invoking cmdlet (`Where-Object`, `Sort-Object`, `Measure-Command`, `Format-*`...) is given a
+/// script block only it could invoke: a dynamic value (`$…`, `(…)`, `@…`), positional or attached to a parameter
+/// (`-FilterScript:$sb`). A literal block or a property name is read like any other.
+fn invoker_writes(command: &PsCommand) -> bool {
+    command.args.iter().any(|a| match a.kind {
+        ArgKind::Expression => a.text.trim_start().starts_with(['$', '(', '@']),
+        ArgKind::Parameter if a.attached() => a
+            .text
+            .split_once(':')
+            .is_some_and(|(_, value)| value.trim_start().starts_with(['$', '(', '@'])),
+        _ => false,
+    })
 }
 
 /// `ForEach-Object` reads when it only runs script blocks written in the script (read like any other): a member's

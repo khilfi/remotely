@@ -871,10 +871,12 @@ struct Current {
     powershell: bool,
 }
 
-/// BX-13: Ctrl+C went to the tabs: a PowerShell console drops the statement it held open.
+/// BX-13: Ctrl+C went to the tabs: a PowerShell console drops the statement it held open and the input to a running one.
 fn forget_open(state: &mut State) {
     state.ps_open.clear();
     state.ps_open_unreliable = false;
+    state.ps_running.clear();
+    state.ps.clear();
 }
 
 /// A line about to be held: where it goes, what is rated, and the keys that run it.
@@ -920,6 +922,14 @@ struct State {
     ps_open: Vec<String>,
     /// BX-13: one of those lines was unreliable.
     ps_open_unreliable: bool,
+    /// Review M1: the raw lines sent to a running statement's stdin since it started. While a console runs, a typed line
+    /// is its input, which PowerShell may run as the next statement, so each is rated with the ones before it and held.
+    ps_running: Vec<String>,
+    /// Review B7: the SSH targets where MultiExec itself released a line that started a full-screen program
+    /// ([`crate::policy::commands::interactive_program`]: an editor or pager). xterm's alternate-screen flag is trusted
+    /// for a target (keys pass straight through) only while it is in here, so a flag left stale by background output or a
+    /// program that did not restore the screen (a cursor on an empty line, say) does not let a line run unrated.
+    fullscreen: HashSet<Uuid>,
 }
 
 struct Shared {
@@ -1154,7 +1164,13 @@ impl MultiExec {
     pub async fn input(&self, from: Uuid, data: Vec<u8>) -> Result<InputOutcome> {
         let mut state = self.shared.state.lock().await;
         if let Some(held) = &state.held {
-            if state.targets.contains(&from) || held.from == from {
+            // Review R5: queue by `held.to`, not just the current targets. A target of the held line that the user
+            // un-picks while it waits is no longer in `state.targets`, so without this its keys would fall through to
+            // `process` and be written straight to that tab's console (the "alone" branch). On a PowerShell tab that
+            // changes the line the console holds, and the held Enter — sent to every `held.to` on approval — would then
+            // run the changed line under the wrong approval. Queuing keeps every held target's console on the rated
+            // line until the Enter; the queued keys are replayed as a fresh, rated line afterwards.
+            if held.to.contains(&from) || state.targets.contains(&from) || held.from == from {
                 let line_id = held.id;
                 let room = MAX_QUEUED_BYTES.saturating_sub(state.queued.len());
                 let dropped = data.len() > room;
@@ -1315,7 +1331,9 @@ impl MultiExec {
 
     /// A line starts in `from`: how its keys are handled, and which targets get them.
     async fn start_line(&self, state: &mut State, from: &Seen) -> Current {
-        let mode = if from.alternate {
+        // Review B7: a full-screen program is only believed where MultiExec started one, so a stale alternate-screen flag
+        // does not open the straight-through path on its own.
+        let mode = if from.alternate && state.fullscreen.contains(&from.id) {
             LineMode::FullScreen
         } else if from.password {
             LineMode::Password
@@ -1339,10 +1357,12 @@ impl MultiExec {
             } else if !seen.connected {
                 Some("not connected")
             } else {
+                // Review B7: a target's alternate-screen flag counts only where MultiExec started a full-screen program.
+                let full_screen = seen.alternate && state.fullscreen.contains(&id);
                 match mode {
-                    LineMode::FullScreen if !seen.alternate => Some("no full-screen program is open"),
-                    LineMode::Password if seen.alternate || !seen.password => Some("not at a password prompt"),
-                    LineMode::Command if seen.alternate => Some("a full-screen program is open"),
+                    LineMode::FullScreen if !full_screen => Some("no full-screen program is open"),
+                    LineMode::Password if full_screen || !seen.password => Some("not at a password prompt"),
+                    LineMode::Command if full_screen => Some("a full-screen program is open"),
                     LineMode::Command if seen.password => Some("at a password prompt"),
                     _ => None,
                 }
@@ -1447,15 +1467,10 @@ impl MultiExec {
                 LineMode::Password => {
                     // Review B5: a PowerShell tab's password prompt can end mid-line (the statement that asked finishes),
                     // and the console goes back to its prompt, where straight-through keys would run as a statement
-                    // unrated. Before forwarding, re-check the console: if it is no longer running, drop password mode and
-                    // let the rest start a fresh, rated line.
-                    if current.powershell
-                        && self
-                            .seen(from)
-                            .await
-                            .and_then(|s| s.console)
-                            .is_some_and(|c| c.at_prompt)
-                    {
+                    // unrated. Review M3: before forwarding, re-check every target's console, not just the one typed into:
+                    // if any is back at its prompt, drop password mode for all of them and let the rest start a fresh,
+                    // rated line, so a password line can't run as a statement in a tab whose prompt returned.
+                    if current.powershell && self.any_console_at_prompt(&current.to).await {
                         state.current = None;
                         continue;
                     }
@@ -1500,13 +1515,13 @@ impl MultiExec {
                         Step::Key => {}
                         Step::Interrupt => {
                             // The shells drop the line; the next keys start a new one. The PowerShell console drops a
-                            // statement left open too.
+                            // statement left open and the input to a running one (M1, M2).
                             state.current = None;
                             state.buffer.clear();
-                            state.ps.clear();
                             if current.powershell {
-                                state.ps_open.clear();
-                                state.ps_open_unreliable = false;
+                                forget_open(state);
+                            } else {
+                                state.ps.clear();
                             }
                             for id in &current.to {
                                 self.shared.terminals.set_dirty(*id, false);
@@ -1600,7 +1615,11 @@ impl MultiExec {
             });
         }
         if script.trim().is_empty() && !unreliable && keys.iter().all(|b| matches!(*b, b'\r' | b'\n')) {
-            // Enter on an empty line runs nothing: no rating, no audit.
+            // Enter on an empty line runs nothing: no rating, no audit. Review B7: the tabs are at a prompt, not behind a
+            // full-screen program, so stop trusting any stale alternate-screen flag there.
+            for id in &to {
+                state.fullscreen.remove(id);
+            }
             let mut left_out = left_out;
             let reached = self.send(&to, &keys, &mut left_out).await;
             if after.is_empty() {
@@ -1611,6 +1630,17 @@ impl MultiExec {
                 });
             }
             return Box::pin(self.process(state, from, after)).await;
+        }
+        // Review B7: a line that starts a full-screen program (an editor, pager, monitor or multiplexer) means its
+        // targets are now behind one, so their alternate-screen flag may be trusted; any other command means they are
+        // back at a prompt.
+        let starts_program = crate::policy::commands::full_screen_program(&script).is_some();
+        for id in &to {
+            if starts_program {
+                state.fullscreen.insert(*id);
+            } else {
+                state.fullscreen.remove(id);
+            }
         }
         let line = HeldLine {
             from,
@@ -1687,9 +1717,26 @@ impl MultiExec {
                     left_out,
                 });
             }
-            // A statement is running: this line goes to it as input, and may run as the next statement.
-            unreliable = true;
+            // Review M1: every console is running a statement, so this line is its input. PowerShell runs the next raw
+            // line it buffered as a statement once the running one stops reading, so it is never passed through: it is
+            // rated with the raw lines sent since the statement started (`ps_open` does not apply while running) and
+            // held. A statement left open by it still can't be read yet, so it stays unreliable.
+            state.ps_running.extend(lines.iter().cloned());
+            let script = state.ps_running.join("\n").trim_end().to_owned();
+            let line = HeldLine {
+                from,
+                to,
+                script,
+                unreliable: true,
+                keys,
+                after,
+                leaves_text: false,
+                run,
+            };
+            return self.hold(state, line, reached, left_out).await;
         }
+        // At the prompt holding what we followed: the running statement (if any) finished, so its input is done with.
+        state.ps_running.clear();
         let (sent, held) = console::statements(&state.ps_open, &lines);
         let open_before = std::mem::replace(&mut state.ps_open, held);
         unreliable |= state.ps_open_unreliable;

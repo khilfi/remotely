@@ -428,6 +428,73 @@ async fn a_refused_winrm_sign_in_parks_the_session_so_the_next_run_does_not_try_
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn hosts_that_share_one_wrong_login_make_a_single_refused_sign_in() {
+    // Review C2: a run reaches up to JobLimits.remote hosts at once (10 by default), so without a per-account gate a
+    // wrong shared domain password would make one refused sign-in per host at the same moment — enough to lock the
+    // account at a low lockout threshold. The first host with an account signs in alone; when it is refused, the others
+    // sharing the login are skipped, so exactly one refused sign-in reaches the hosts however many share it.
+    let core = core().await;
+    // One vault item for every host, holding a password none of the hosts actually accepts.
+    let shared = password_item(&core, "shared domain login", &new_password()).await;
+    let mut servers = Vec::new();
+    let mut sessions = Vec::new();
+    for name in ["win01", "win02", "win03"] {
+        // Each host's real password differs from the shared one, so every sign-in with the shared item is refused.
+        let server = WinrmTestServer::start(FakeWinrm::HttpsBasic, "alice", &new_password())
+            .await
+            .unwrap();
+        // The shared item goes to a new host each time, so creating the session confirms with the vault password.
+        let id = core
+            .sessions
+            .create_with(
+                &core.ctx(),
+                input(name, server.port(), shared, winrm(WinrmCertificate::Windows)),
+                Some(&SecretString::new(VAULT_PASSWORD)),
+            )
+            .await
+            .unwrap()
+            .id;
+        servers.push(server);
+        sessions.push(id);
+    }
+
+    let job = run(&core, exec("Get-Service", &sessions)).await;
+    assert_eq!(finished(&core, job).await, JobStatus::Failed);
+
+    let refused: usize = servers.iter().map(|s| s.stats().refused_sign_ins).sum();
+    assert_eq!(
+        refused, 1,
+        "only the leader tries the shared login; the rest are skipped"
+    );
+
+    // Two hosts are skipped by the gate (not simply refused), so no further sign-in reaches them.
+    let targets = core.store.job_targets(&core.ctx(), job).await.unwrap();
+    let skipped = targets
+        .iter()
+        .filter(|t| t.error.as_deref().is_some_and(|e| e.contains("skipped")))
+        .count();
+    assert_eq!(skipped, 2, "{targets:?}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn preview_refuses_a_script_over_the_size_cap_before_parsing_it() {
+    // Review A5/A8: preview applies the 64 KB script cap before anything parses, so a huge paste can't be rated in a
+    // preview (where submit's full validate does not run) and can't drive the recursive parser deep. The script here
+    // would be deeply nested casts if parsed; the cap refuses it first.
+    let core = core().await;
+    let (_server, win01) = windows(&core, "win01").await;
+    let huge = "[int]".repeat(20_000);
+    assert!(huge.len() > 64 * 1024);
+    let refused = core
+        .bus
+        .preview(&core.ctx(), &exec(&huge, &[win01]))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(refused.contains("at most") && refused.contains("KB"), "{refused}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn a_powershell_tab_picks_its_session_for_compare_hosts_only() {
     let core = core().await;
     let ctx = core.ctx();
@@ -858,6 +925,124 @@ async fn a_recalled_history_line_is_refused_not_run_unrated() {
             1,
             "only the first run reached the host: {:?}",
             fleet.statements(i)
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_line_that_opens_a_statement_while_one_runs_is_held_not_passed_through() {
+    // Review M1 (R1/R6): while a console runs a statement, a typed line is its stdin, which PowerShell runs as the next
+    // statement once the running one stops reading. A line that would merely open a statement at a prompt (`$x = @'`, a
+    // here-string start) must not be passed through unrated on that ground while running — it is rated and held like
+    // any other line, with the raw lines sent since the statement started.
+    let mut fleet = Fleet::new(2).await;
+    let mut events = fleet.core.multiexec.subscribe();
+
+    // A statement that keeps reading, so the consoles are mid-statement, not at their prompt.
+    fleet.type_in(0, "Read-Host 'Name'").await;
+    let (line, _, request) = held(fleet.type_in(0, "\r").await);
+    fleet
+        .core
+        .multiexec
+        .approve(line, answers(&request.unwrap()))
+        .await
+        .unwrap();
+    assert!(line_done(&mut events, line).await);
+    for pane in &mut fleet.panes {
+        pane.expect("Name: ").await;
+    }
+
+    // `$x = @'` opens a here-string at a prompt (it would go through unrated there). While running it is input to the
+    // running statement: `held` panics unless the Enter was held and rated.
+    let (opener, _, _) = held(fleet.type_in(0, "$x = @'\r").await);
+    fleet.core.multiexec.cancel(opener).await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_password_line_stops_being_straight_through_once_a_console_returns_to_its_prompt() {
+    // Review M3 (B5): password mode forwards keys straight through until Enter. If a tab's prompt comes back mid-line
+    // (its statement ended), a forwarded line would run there as a statement unrated. Before forwarding each chunk,
+    // every target's console is re-checked; when any is back at its prompt, password mode is dropped and the line is
+    // rated instead of sent straight through.
+    let mut fleet = Fleet::new(2).await;
+    let mut events = fleet.core.multiexec.subscribe();
+
+    fleet.type_in(0, "Read-Host 'Password'").await;
+    let (line, _, request) = held(fleet.type_in(0, "\r").await);
+    fleet
+        .core
+        .multiexec
+        .approve(line, answers(&request.unwrap()))
+        .await
+        .unwrap();
+    assert!(line_done(&mut events, line).await);
+    for pane in &mut fleet.panes {
+        pane.expect("Password: ").await;
+    }
+
+    // A first password key is forwarded while both consoles are at the prompt.
+    fleet.type_in(0, "x").await;
+    // Tab 1's Read-Host ends from outside Type in all tabs, so its console returns to its prompt.
+    fleet.core.terminals.write(fleet.panes[1].id, b"\r".to_vec()).await;
+    fleet.panes[1].expect("PS C:\\Users\\alice> ").await;
+
+    // The rest of the "password" line would run as a statement in tab 1. Re-checking every console drops password mode
+    // and re-rates, so tab 1 (back at its prompt) is left out and never receives the keys.
+    let rest = fleet.type_in(0, "\x15Restart-Computer\r").await;
+    if let InputOutcome::Typed { reached, .. } = &rest {
+        assert!(
+            !reached.contains(&fleet.panes[1].id),
+            "tab 1 was left out once its prompt returned: {rest:?}"
+        );
+    }
+    for i in 0..2 {
+        assert!(
+            !fleet.statements(i).iter().any(|s| s.contains("Restart-Computer")),
+            "tab {i} never ran the line as a statement unrated: {:?}",
+            fleet.statements(i)
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_held_line_is_not_diverted_by_typing_into_an_unpicked_tab() {
+    // Review R5: a tab still in a held line's targets is queued even after it is un-picked, so its console cannot be
+    // changed to a different statement and then run under the first line's approval once it is re-picked.
+    let fleet = Fleet::new(2).await;
+    let mut events = fleet.core.multiexec.subscribe();
+
+    // A line typed into both tabs and held for approval.
+    fleet.type_in(0, "Stop-Computer -Force").await;
+    let (line, tier, request) = held(fleet.type_in(0, "\r").await);
+    assert_eq!(tier, Tier::High);
+    let request = request.expect("asked first");
+
+    // Un-pick tab 1, then type a different, dangerous statement into it alone. It is still a target of the held line, so
+    // the keys are queued (not written to its console), keeping its console on the rated line.
+    fleet.core.multiexec.set_targets(vec![fleet.panes[0].id]).await.unwrap();
+    let diverted = fleet.type_in(1, "\x15Restart-Computer -Force\r").await;
+    assert!(matches!(diverted, InputOutcome::Queued { .. }), "{diverted:?}");
+
+    // Re-pick tab 1 and approve the first line.
+    fleet
+        .core
+        .multiexec
+        .set_targets(vec![fleet.panes[0].id, fleet.panes[1].id])
+        .await
+        .unwrap();
+    fleet.core.multiexec.approve(line, answers(&request)).await.unwrap();
+    assert!(line_done(&mut events, line).await);
+
+    // Both tabs ran the approved statement; neither ran the one typed while tab 1 was un-picked.
+    for i in 0..2 {
+        let sent = fleet.statements(i);
+        assert!(
+            sent.iter().any(|s| s.contains("Stop-Computer")),
+            "tab {i} ran the approved line: {sent:?}"
+        );
+        assert!(
+            !sent.iter().any(|s| s.contains("Restart-Computer")),
+            "tab {i} never ran the diverted line under the wrong approval: {sent:?}"
         );
     }
 }
