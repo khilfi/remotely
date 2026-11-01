@@ -373,7 +373,10 @@ export interface BundleRequest {
 /** A support bundle as the approval dialog shows it (its commands are in `exec`). */
 export interface BundleDetails {
   presets: string[];
+  /** Files read over SFTP as the login user (Linux hosts). */
   files: string[];
+  /** BX-13: files read by PowerShell as the sign-in user (Windows hosts). */
+  windowsFiles: string[];
   /** Where the zip is saved. */
   output: string;
   limits: BundleLimits;

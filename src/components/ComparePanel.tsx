@@ -457,7 +457,8 @@ export function ComparePanel({
                           Trust new host keys
                         </Label>
                         <p className="text-xs break-words text-muted-foreground">
-                          Else a host with a key not trusted yet fails. A changed key always blocks.
+                          Else a host with a key not trusted yet fails (a Windows host&apos;s HTTPS certificate counts
+                          as its key). A changed key always blocks.
                         </p>
                       </div>
                     </div>

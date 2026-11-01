@@ -108,32 +108,37 @@ export function SupportBundleDialog({ sessionIds, vault, onSubmit, onOpenSession
 
   const hosts = resolved?.hosts ?? [];
   const reach = hosts.filter((h) => !h.protected).length;
-  const commands = lines(commandsText);
-  const files = lines(filesText);
-  const windowsCommands = lines(windowsCommandsText);
-  const windowsFiles = lines(windowsFilesText);
   const windowsHosts = hosts.filter((h) => h.scriptKind === "powerShell").length;
   const linuxHosts = hosts.length - windowsHosts;
+  // Review D2: a kind's commands and files count only while a host of that kind is picked, so a hidden box's text (or
+  // a bad path in it) never affects the bundle.
+  const commands = linuxHosts > 0 ? lines(commandsText) : [];
+  const files = linuxHosts > 0 ? lines(filesText) : [];
+  const windowsCommands = windowsHosts > 0 ? lines(windowsCommandsText) : [];
+  const windowsFiles = windowsHosts > 0 ? lines(windowsFilesText) : [];
   const timeoutSecs = timeout.trim() === "" ? null : Number(timeout);
   const timeoutOk =
     timeoutSecs === null || (Number.isInteger(timeoutSecs) && timeoutSecs >= 1 && timeoutSecs <= 86_400);
   const stopAfterParsed = parseStopAfter(stopAfter);
+  // Review D1: only the presets for a picked host kind are sent, so the summary, audit and manifest never name a
+  // preset of a kind nobody picked.
+  const shownChosen = new Set(shownPresets(presets, linuxHosts, windowsHosts).map((p) => p.id));
   const request: BundleRequest = {
     sessionIds: hosts.map((h) => h.sessionId),
-    presets: chosen,
+    presets: chosen.filter((id) => shownChosen.has(id)),
     commands,
     files,
     windowsCommands,
     windowsFiles,
-    sudo,
-    sudoPasswordId: sudo && sudoPassword !== LOGIN ? sudoPassword : null,
+    sudo: sudo && linuxHosts > 0,
+    sudoPasswordId: sudo && linuxHosts > 0 && sudoPassword !== LOGIN ? sudoPassword : null,
     trustNewHostKeys: trustNew,
     timeoutSecs: timeoutOk ? timeoutSecs : null,
     rollout: { canary, stopAfterFailures: stopAfterParsed.value },
   };
   const requestKey = JSON.stringify(request);
-  const items = itemCount(presets, chosen, commands, files, "linux");
-  const windowsItems = itemCount(presets, chosen, windowsCommands, windowsFiles, "windows");
+  const items = itemCount(presets, request.presets, commands, files, "linux");
+  const windowsItems = itemCount(presets, request.presets, windowsCommands, windowsFiles, "windows");
   const notReady = collectReason({
     readOnly: readOnlyLocked(presentation),
     hosts,
@@ -306,33 +311,40 @@ export function SupportBundleDialog({ sessionIds, vault, onSubmit, onOpenSession
               ))}
             </fieldset>
 
-            <div className="grid gap-4 sm:grid-cols-2">
-              <div className="grid gap-1.5">
-                <Label htmlFor="bundle-commands">More commands, one per line</Label>
-                <Textarea
-                  id="bundle-commands"
-                  rows={3}
-                  spellCheck={false}
-                  className="font-mono text-xs"
-                  placeholder="journalctl -u nginx -n 200"
-                  value={commandsText}
-                  onChange={(e) => setCommandsText(e.currentTarget.value)}
-                />
+            {/* Review D2: the Linux boxes show only while a Linux host is picked. */}
+            {linuxHosts > 0 && (
+              <div className="grid gap-4 sm:grid-cols-2">
+                <div className="grid gap-1.5">
+                  <Label htmlFor="bundle-commands">
+                    {windowsHosts > 0 ? "More commands for Linux hosts, one per line" : "More commands, one per line"}
+                  </Label>
+                  <Textarea
+                    id="bundle-commands"
+                    rows={3}
+                    spellCheck={false}
+                    className="font-mono text-xs"
+                    placeholder="journalctl -u nginx -n 200"
+                    value={commandsText}
+                    onChange={(e) => setCommandsText(e.currentTarget.value)}
+                  />
+                </div>
+                <div className="grid gap-1.5">
+                  <Label htmlFor="bundle-files">
+                    {windowsHosts > 0 ? "Linux files, one full path per line" : "Files, one full path per line"}
+                  </Label>
+                  <Textarea
+                    id="bundle-files"
+                    rows={3}
+                    spellCheck={false}
+                    className="font-mono text-xs"
+                    placeholder="/etc/nginx/nginx.conf"
+                    value={filesText}
+                    onChange={(e) => setFilesText(e.currentTarget.value)}
+                    aria-invalid={pathProblem(files) ? true : undefined}
+                  />
+                </div>
               </div>
-              <div className="grid gap-1.5">
-                <Label htmlFor="bundle-files">Files, one full path per line</Label>
-                <Textarea
-                  id="bundle-files"
-                  rows={3}
-                  spellCheck={false}
-                  className="font-mono text-xs"
-                  placeholder="/etc/nginx/nginx.conf"
-                  value={filesText}
-                  onChange={(e) => setFilesText(e.currentTarget.value)}
-                  aria-invalid={pathProblem(files) ? true : undefined}
-                />
-              </div>
-            </div>
+            )}
 
             {windowsHosts > 0 && (
               <div className="grid gap-4 sm:grid-cols-2">
@@ -379,12 +391,24 @@ export function SupportBundleDialog({ sessionIds, vault, onSubmit, onOpenSession
                 </button>
               </CollapsibleTrigger>
               <CollapsibleContent className="grid gap-3 border-t p-3">
-                <div className="flex items-center gap-3">
-                  <Switch id="bundle-sudo" checked={sudo} onCheckedChange={setSudo} />
-                  <Label htmlFor="bundle-sudo" className="font-normal">
-                    {windowsHosts > 0 ? "Run the Linux hosts' commands with sudo" : "Run the commands with sudo"}
-                  </Label>
-                </div>
+                {/* Review D8: sudo is for Linux hosts; with only Windows hosts picked it does nothing, so it is off. */}
+                <WhyDisabled
+                  reason={
+                    linuxHosts === 0 ? "sudo is for Linux hosts; the Windows hosts run as the sign-in user" : null
+                  }
+                >
+                  <div className="flex items-center gap-3">
+                    <Switch
+                      id="bundle-sudo"
+                      checked={sudo && linuxHosts > 0}
+                      disabled={linuxHosts === 0}
+                      onCheckedChange={setSudo}
+                    />
+                    <Label htmlFor="bundle-sudo" className="font-normal">
+                      {windowsHosts > 0 ? "Run the Linux hosts' commands with sudo" : "Run the commands with sudo"}
+                    </Label>
+                  </div>
+                </WhyDisabled>
                 {sudo && (
                   <div className="grid min-w-0 gap-1.5 pl-12">
                     <Label htmlFor="bundle-sudo-password" className="font-normal text-muted-foreground">

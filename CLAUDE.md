@@ -631,8 +631,10 @@ crates/core/          remotely-core: all app logic
     support_bundle/   FD-04 support bundles (no migration): spec.rs BundleSpec (Command::SupportBundle; presets expanded
                       into its items before the bus rates them; refused from the UI: the zip's place comes from the
                       shell's save dialog; never retried), its checks, entry names safe for Windows and the file name
-                      `remotely-bundle-<workspace>-<UTC time>.zip`; presets.rs PRESETS (System, Logs, Containers,
-                      Network) by HostKind, every command read-only by the default rules (policy/bundle_tests.rs);
+                      `remotely-bundle-<workspace>-<UTC time>.zip`; presets.rs PRESETS by HostKind (Linux: System, Logs,
+                      Containers, Network; BX-13 Windows: WindowsSystem, WindowsLogs, WindowsNetwork), every command
+                      read-only by that kind's default rules (policy/bundle_tests.rs); mod.rs keeps only the presets
+                      whose kind has a picked host, so the summary and audit never name a kind nobody picked;
                       collect.rs the BundleHost trait (SshHost: commands on a kept connection's exec channels, sudo
                       through BX-07; files over SFTP on the same connection as the login user, ExecSession::files;
                       BX-13 WinrmHost: commands in a PowerShell each, files by windows_read_script, one line after
@@ -909,7 +911,8 @@ src/                  React + TypeScript UI
                       SaveStatus (useSaveStatus, SaveStatus: "Saved" with Undo in a card's header; NumberSetting saves
                       on Enter or blur), ToolPathsCard (every tool path in one table, Change opens a dialog; qemu-img
                       too), ApprovalRulesCard (the summary, the change ID rule, PolicyRulesEditor under Advanced with
-                      its sticky Save bar); the Vault page's Unlocking card holds the Windows-login switch and warning;
+                      its sticky Save bar, Shell and BX-13 PowerShell tabs sharing a DangerousList); the Vault page's
+                      Unlocking card holds the Windows-login switch and warning;
                       UX-01 to UX-13 (0.6.0), the shared pieces every page uses ("UI rules" under Conventions):
                       PageHeader, HelpTip, Term, SelectionBar, RowMenu, EmptyState, Tip and ShowTipsAgainButton,
                       RefreshButton; FD-09 toolbox/: the Toolbox's tabs (ProbeTools: Ping, Trace route, DNS lookup,
@@ -960,7 +963,8 @@ src/                  React + TypeScript UI
                       multi-line confirm's preview; TerminalSettings.confirm_multiline_paste, on by default),
                       terminal-input.ts (SS-10 input told from xterm.js's replies to the host, which skip MultiExec:
                       xterm's internal onUserInput, checked by a test), session-kinds.ts (SS-12 each kind's defaults,
-                      ports, checks, one-line summaries and why a tab can't join), console-open.ts (SS-12 an RDP or VNC
+                      ports, checks, one-line summaries; BX-13 joinsTyping and typingKind: SSH or PowerShell panes join
+                      Type in all tabs, one kind at a time, and why a tab can't), console-open.ts (SS-12 an RDP or VNC
                       window from the Terminal or Sessions page; the presenting notice), multiexec.ts,
                       multiexec-groups.ts (QL-19 which
                       tabs a group picks or opens, saving picked tabs, editor checks), scrollback-search.ts (QL-18
@@ -1009,7 +1013,8 @@ src/                  React + TypeScript UI
                       addresses as `mac-N`; FD-02 workspace names, `data-mask="workspace"`, learnWorkspace),
                       workspaces.ts and workspaces-api.ts (FD-02 checks and texts; wrappers that teach the masker every
                       workspace name), rollout.ts (H9 canary, stop after failures, retry choices),
-                      support-bundle.ts (FD-04 the dialog's typed lines, item count, QL-08 reasons and caps),
+                      support-bundle.ts (FD-04 the dialog's typed lines, item count, QL-08 reasons and caps; BX-13
+                      windowsPathProblem, per-kind item counts and shownPresets for the picked host kinds),
                       reports.ts and reports-api.ts (0.7.0 F6: local days as the core's range, the Activity filter as
                       days, the dialogs' QL-08 reasons and toasts; the exports' types and wrappers),
                       key-options.ts (SS-09 expiry-time and from for a pushed key),

@@ -768,9 +768,13 @@ function ExecSummary({ exec, targets }: { exec: NonNullable<ApprovalRequest["exe
         </p>
       )}
       {(!exec.windowsScript || exec.script) && (
-        <pre className="max-h-40 overflow-auto rounded-md border bg-muted/40 px-3 py-2 font-mono text-xs whitespace-pre-wrap">
-          {exec.script || <span className="text-muted-foreground italic">(nothing Remotely could follow)</span>}
-        </pre>
+        <>
+          {/* Review D7: with both languages, label each block so "On the Windows hosts" isn't ambiguous. */}
+          {exec.windowsScript && exec.script && <p className="text-sm text-muted-foreground">On the Linux hosts:</p>}
+          <pre className="max-h-40 overflow-auto rounded-md border bg-muted/40 px-3 py-2 font-mono text-xs whitespace-pre-wrap">
+            {exec.script || <span className="text-muted-foreground italic">(nothing Remotely could follow)</span>}
+          </pre>
+        </>
       )}
       {exec.windowsScript && (
         <>
@@ -897,6 +901,22 @@ function BundleSummary({ bundle }: { bundle: NonNullable<ApprovalRequest["bundle
           </p>
           <ul className="max-h-32 divide-y overflow-auto rounded-md border">
             {bundle.files.map((f) => (
+              <li key={f} className="truncate px-3 py-1 font-mono text-xs" title={f}>
+                {f}
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
+      {bundle.windowsFiles.length > 0 && (
+        <>
+          {/* Review C3: a bundle's Windows files, read by PowerShell as the sign-in user. */}
+          <p className="text-muted-foreground">
+            Reads {plural(bundle.windowsFiles.length, "file")} on the Windows hosts with PowerShell, as each
+            session&apos;s sign-in user:
+          </p>
+          <ul className="max-h-32 divide-y overflow-auto rounded-md border">
+            {bundle.windowsFiles.map((f) => (
               <li key={f} className="truncate px-3 py-1 font-mono text-xs" title={f}>
                 {f}
               </li>

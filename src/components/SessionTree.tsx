@@ -478,8 +478,9 @@ function SessionRow({
   const seen =
     session.lastHostname || session.lastIp ? [session.lastHostname, session.lastIp].filter(Boolean).join(" · ") : null;
   const applied = appliedEnvironment(session, vms);
-  // SS-12: Compare hosts and host details are for SSH sessions.
-  const ssh = (session.kind?.protocol ?? "ssh") === "ssh";
+  // SS-12, BX-13: Compare hosts runs on SSH and WinRM sessions (a WinRM host runs PowerShell).
+  const protocol = session.kind?.protocol ?? "ssh";
+  const canCompare = protocol === "ssh" || protocol === "winrm";
   const env = applied.environment;
   const tooltip = [
     `${session.name} (${sessionAddress(session)})`,
@@ -488,7 +489,7 @@ function SessionRow({
     seen && `Last seen as ${seen}, ${formatWhen(session.lastSeenAt)}`,
     reachText(reach),
     checked && "Picked for Compare hosts",
-    ssh ? "Double-click to open; Ctrl+click to pick for Compare hosts" : "Double-click to open",
+    canCompare ? "Double-click to open; Ctrl+click to pick for Compare hosts" : "Double-click to open",
   ]
     .filter(Boolean)
     .join("\n");
@@ -505,7 +506,7 @@ function SessionRow({
         checked && "bg-primary/10",
       )}
       style={{ paddingLeft: `${0.5 + depth * 0.75}rem` }}
-      onClick={(e) => (ssh && (e.ctrlKey || e.metaKey) ? onToggleCheck() : onPick())}
+      onClick={(e) => (canCompare && (e.ctrlKey || e.metaKey) ? onToggleCheck() : onPick())}
       onDoubleClick={onOpen}
       onKeyDown={(e) => {
         if (e.key === "Enter") onOpen();
@@ -539,7 +540,7 @@ function SessionRow({
         className="ml-auto size-6 opacity-0 group-hover/row:opacity-100 focus-visible:opacity-100 data-[state=open]:opacity-100"
       >
         <DropdownMenuItem onSelect={onOpen}>{openLabel(session)}</DropdownMenuItem>
-        {ssh && (
+        {canCompare && (
           <DropdownMenuItem onSelect={onToggleCheck}>
             {checked ? "Unpick for Compare hosts" : "Pick for Compare hosts"}
           </DropdownMenuItem>

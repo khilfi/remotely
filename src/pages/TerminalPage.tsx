@@ -902,6 +902,11 @@ export function TerminalPage({
     pickedTabs.flatMap((t) => allPanes(t.layout)).map((p) => p.kind),
   );
   const pickedPanes = pickedTabs.flatMap((t) => allPanes(t.layout)).filter((p) => p.kind === typing);
+  // Review D5: picked tabs of the other kind (SSH vs PowerShell) can't take this line; they wait until one is the
+  // current tab. The bar says so, rather than counting them among the tabs being typed in.
+  const waitingOtherKind = pickedTabs.filter((t) =>
+    allPanes(t.layout).some((p) => joinsTyping(p.kind) && p.kind !== typing),
+  ).length;
   /** SS-12: the tabs that can join Type in all tabs (an SSH or PowerShell terminal in them). */
   const joinTabs = tabs.filter((t) => allPanes(t.layout).some((p) => joinsTyping(p.kind))).length;
   const pickedIds = pickedPanes.map((p) => p.terminalId).filter((id): id is string => id !== null);
@@ -1882,6 +1887,7 @@ export function TerminalPage({
       on={multiExec}
       tabs={pickable}
       picked={multiExec ? pickedTabs.length : selectedTabs.length}
+      waitingOtherKind={multiExec ? waitingOtherKind : 0}
       terminals={pickedOutput.length}
       status={mxStatus}
       note={mxNote}
@@ -2299,7 +2305,10 @@ function TabButton({
     multiExec &&
       multiExec !== "receives" &&
       multiExec !== "off" &&
-      (multiExecOk ? `Type in all tabs: ${multiExec}` : `Type in all tabs: picked, but gets no keys now: ${multiExec}`),
+      // Review D10: one colon, and say how to make it the tab that is typed into.
+      (multiExecOk
+        ? `Type in all tabs — ${multiExec}`
+        : `Type in all tabs: picked, but not getting keys now (${multiExec}). Click this tab to type here.`),
     "Ctrl+click or Shift+click to pick several tabs",
   ]
     .filter(Boolean)
