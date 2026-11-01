@@ -38,7 +38,7 @@ function memory(): HistoryStorage & { data: Map<string, string> } {
 
 test("the tools are tabs in a fixed order, each id once", () => {
   const ids = TOOLBOX_TOOLS.map((t) => t.id);
-  assert.deepEqual(ids, ["ping", "trace", "dns", "ports", "certificate", "subnet", "wake"]);
+  assert.deepEqual(ids, ["ping", "trace", "dns", "ports", "certificate", "subnet", "wake", "fileServer"]);
   assert.ok(isToolboxTool("ports"));
   assert.ok(!isToolboxTool("scan"));
   assert.ok(!isToolboxTool(undefined));

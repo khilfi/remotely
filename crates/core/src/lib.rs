@@ -220,11 +220,14 @@ pub struct AuditExport {
     pub redacted: usize,
 }
 
-/// QL-15: the terminals and approvals a window had open, from [`Core::ui_snapshot`].
+/// QL-15: the terminals and approvals a window had open, from [`Core::ui_snapshot`]; FD-09: and the file server it
+/// started.
 #[derive(Debug, Clone, Default)]
 pub struct UiSnapshot {
     pub terminals: Vec<uuid::Uuid>,
     pub approvals: Vec<uuid::Uuid>,
+    /// FD-09: the file server's job.
+    pub file_servers: Vec<uuid::Uuid>,
 }
 
 /// QL-15: what [`Core::release_ui`] closed.
@@ -232,11 +235,29 @@ pub struct UiSnapshot {
 pub struct UiReleased {
     pub terminals: usize,
     pub approvals: usize,
+    pub file_servers: usize,
 }
 
 impl UiSnapshot {
     pub fn is_empty(&self) -> bool {
-        self.terminals.is_empty() && self.approvals.is_empty()
+        self.terminals.is_empty() && self.approvals.is_empty() && self.file_servers.is_empty()
+    }
+}
+
+/// FD-09: how long a stop path waits for the file server's job to end (journaled and audited).
+const FILE_SERVER_STOP_WAIT: Duration = Duration::from_secs(10);
+
+/// FD-09: the server serving as one of `jobs` stops for `reason`; the rest (queued, or in their approval countdown)
+/// are cancelled, so none starts serving after what stopped it.
+fn stop_file_server_jobs(
+    runner: &toolbox::file_server::Runner,
+    runner_jobs: &JobRunner,
+    jobs: &[uuid::Uuid],
+    reason: toolbox::file_server::StopReason,
+) {
+    let stopped = runner.stop_these(jobs, reason);
+    for job_id in jobs.iter().filter(|id| !stopped.contains(id)) {
+        runner_jobs.cancel(*job_id);
     }
 }
 
@@ -332,6 +353,9 @@ pub struct Core {
     /// FD-09: ping, trace route, DNS, port checks and the certificate viewer (reads), and Wake-on-LAN's options;
     /// sending a magic packet goes through [`Core::bus`].
     pub toolbox: toolbox::Toolbox,
+    /// FD-09: the quick file server (TFTP and HTTP). Starting it is a command on [`Core::bus`]; it stops at its time
+    /// limit, on Stop, on a workspace switch, a vault lock, a window reload and at [`Core::shutdown`].
+    pub file_server: toolbox::file_server::FileServers,
     /// MO-08: health checks, their history and state; the shell starts the runner ([`checks::Checks::run`]).
     pub checks: checks::Checks,
     /// MO-02, CT-01: parks refused background logins and caps them per host per hour.
@@ -378,12 +402,25 @@ struct LockParts {
     terminals: Terminals,
     transfer_closed: transfer::Closer,
     bindings: SecretBindings,
+    /// FD-09: nobody may be at the PC any more, so the file server stops too.
+    file_server: Arc<toolbox::file_server::Runner>,
+    jobs: Arc<JobRunner>,
 }
 
 impl LockParts {
     async fn vault_locked(&self) {
         self.bindings.vault_locked();
         self.terminals.forget_logins();
+        let open = self.jobs.file_server_jobs(None);
+        stop_file_server_jobs(
+            &self.file_server,
+            &self.jobs,
+            &open,
+            toolbox::file_server::StopReason::VaultLocked,
+        );
+        if !open.is_empty() {
+            tracing::info!("the vault locked: the file server stops");
+        }
         let file_closed = self.transfer_closed.close();
         self.containers.close_all().await;
         self.host_details.close_all().await;
@@ -430,7 +467,8 @@ impl Core {
         // SS-04: the vault in this database, unlocked by the Windows login (DPAPI) or the master password.
         let vault = LocalVault::open(store.clone(), ctx, Arc::new(Dpapi), VaultOptions::default()).await?;
         let qemu_img = saved_qemu_img_path(&store, &ctx).await?;
-        Self::assemble(
+        let data_folder = config.db_path.parent().map(std::path::Path::to_path_buf);
+        let core = Self::assemble(
             store,
             ctx,
             Adapters {
@@ -447,7 +485,12 @@ impl Core {
             },
             JobLimits::default(),
         )
-        .await
+        .await?;
+        // FD-09: the database's folder (the vault, logs and WebView2's profile beside it) is never served.
+        if let Some(folder) = data_folder.filter(|f| !f.as_os_str().is_empty()) {
+            core.file_server.runner().protect(&folder);
+        }
+        Ok(core)
     }
 
     /// Wires the modules together. Tests pass fake adapters here.
@@ -581,8 +624,10 @@ impl Core {
         );
         // CT-01, CT-02: container changes go from the job runner to the containers service.
         jobs.set_containers(Arc::new(containers.clone()));
-        // FD-09: Wake-on-LAN's magic packet leaves through the job runner.
+        // FD-09: Wake-on-LAN's magic packet leaves through the job runner, and the file server runs as a job.
         jobs.set_network_tools(Arc::clone(&adapters.network_tools));
+        let file_server_runner = Arc::new(toolbox::file_server::Runner::new());
+        jobs.set_file_servers(file_server_runner.clone());
         // MO-06: a prune compacts the file only while no job runs.
         history.set_jobs(Arc::clone(&jobs));
         // VM-11: network targets and port forward previews.
@@ -604,6 +649,12 @@ impl Core {
                 .with_host_networks(networks.clone()),
         ));
         bus.set_bindings(bindings.clone());
+        let file_server = toolbox::file_server::FileServers::new(
+            store.clone(),
+            Arc::clone(&adapters.network_tools),
+            Arc::clone(&bus),
+            file_server_runner,
+        );
         if let Some(limit) = store.get_setting::<usize>(&ctx, store::POWER_ON_LIMIT_KEY).await? {
             jobs.set_power_on_limit(limit.clamp(1, JobLimits::MAX_POWER_ON));
         }
@@ -748,6 +799,7 @@ impl Core {
                 .with_checks(checks.clone()),
             host_details,
             toolbox,
+            file_server,
             checks,
             login_guard,
             presentation,
@@ -779,6 +831,8 @@ impl Core {
             terminals: self.terminals.clone(),
             transfer_closed: self.transfer.closer(),
             bindings: self.bindings.clone(),
+            file_server: Arc::clone(self.file_server.runner()),
+            jobs: Arc::clone(&self.jobs),
         };
         runtime.spawn(async move {
             let mut was = *status.borrow_and_update();
@@ -876,16 +930,21 @@ impl Core {
         UiSnapshot {
             terminals: self.terminals.open_ids(),
             approvals: self.bus.pending_approvals(),
+            file_servers: self.jobs.file_server_jobs(Some(self.ctx().workspace_id)),
         }
     }
 
     /// QL-15: the page that showed `shown` is gone, so nothing it started may go on without anyone seeing it:
-    /// MultiExec stops (a held line is cancelled), its terminals close with their tunnels (each audited), and the
-    /// approvals it would have answered are cancelled (audited). Running jobs go on; Activity shows them.
+    /// MultiExec stops (a held line is cancelled), its terminals close with their tunnels (each audited), the
+    /// approvals it would have answered are cancelled (audited), and FD-09's file server stops (its job ends,
+    /// audited). Other running jobs go on; Activity shows them.
     pub async fn release_ui(&self, shown: UiSnapshot) -> UiReleased {
         if let Err(err) = self.multiexec.stop().await {
             tracing::warn!(error = %err, "MultiExec did not stop cleanly after the window reloaded");
         }
+        let file_servers = self
+            .stop_file_servers(&shown.file_servers, toolbox::file_server::StopReason::PageReloaded)
+            .await;
         self.terminals.close_these(&shown.terminals).await;
         let approvals = self
             .bus
@@ -894,12 +953,36 @@ impl Core {
         UiReleased {
             terminals: shown.terminals.len(),
             approvals,
+            file_servers,
         }
     }
 
+    /// FD-09: stops the file server of `jobs` (a job not serving yet, still in its countdown, is cancelled) and waits
+    /// for each job to end (journaled and audited), up to [`FILE_SERVER_STOP_WAIT`]. Returns how many there were.
+    pub(crate) async fn stop_file_servers(
+        &self,
+        jobs: &[uuid::Uuid],
+        reason: toolbox::file_server::StopReason,
+    ) -> usize {
+        stop_file_server_jobs(self.file_server.runner(), &self.jobs, jobs, reason);
+        for job_id in jobs {
+            if tokio::time::timeout(FILE_SERVER_STOP_WAIT, self.jobs.wait(*job_id))
+                .await
+                .is_err()
+            {
+                tracing::warn!(%job_id, "the file server's job did not end in time");
+            }
+        }
+        jobs.len()
+    }
+
     /// Before the app exits, also when an update's installer is about to end it (FD-14, QL-15): every terminal
-    /// closes, audited, with its tunnels, and session logs are written out to the end.
+    /// closes, audited, with its tunnels, and session logs are written out to the end. FD-09: the file server stops
+    /// and its job ends, audited.
     pub async fn shutdown(&self) {
+        let open = self.jobs.file_server_jobs(None);
+        self.stop_file_servers(&open, toolbox::file_server::StopReason::AppClosing)
+            .await;
         self.terminals.close_all().await;
         // MO-06: the minute still open is written as it is.
         if let Err(err) = self.history.flush_all().await {

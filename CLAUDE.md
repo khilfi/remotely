@@ -118,9 +118,9 @@ crates/core/          remotely-core: all app logic
                       clock), Purge now, audited journal_purged; secure_delete, a WAL checkpoint and VACUUM after a big
                       purge; the read-only lock refuses the setting and Purge now, never the schedule
     save_guard.rs     No save path writes into a Git working tree (audit CSV, Compare and MultiExec exports, saved
-                      output, session logs, downloads, FD-07 exports, FD-04 bundles); write_atomically (a `.part` file,
-                      renamed), and AtomicFile, the same for a file written bit by bit (a bundle's zip; its `.part` goes
-                      on every failure, a failed commit's too)
+                      output, session logs, downloads, FD-07 exports, FD-04 bundles, FD-09's upload folder);
+                      write_atomically (a `.part` file, renamed), and AtomicFile, the same for a file written bit by bit
+                      (a bundle's zip; its `.part` goes on every failure, a failed commit's too)
     adapters/         vmware.rs (VM-23 also the .vmx's backup, atomic write and restore, vdiskmanager and vmware.exe
                       found beside vmrun, vmrun_change; VM-21 ovftool found like vmrun, Workstation's default VM
                       folder), vmx_file.rs (VM-23 a .vmx as its lines: unknown keys, order,
@@ -506,8 +506,38 @@ crates/core/          remotely-core: all app logic
                       terminal's ScrubbedCommands included), wake.rs
                       (WakeSpec: MAC, an adapter's subnet broadcast or a typed address, port 9; the magic packet;
                       Command::WakeOnLan is Low, Medium on Prod, audited; one target: the session, the VM, or
-                      TargetRef::App named "MAC ..." for a MAC typed alone); MO-08: reach_held, session_connection
-                      and release_holds: a check holds a kept connection until its next run (one login, not one a run)
+                      TargetRef::App named "MAC ..." for a MAC typed alone), file_server/ (F9: Command::FileServer,
+                      Medium serving, High with uploads (ActionKind::FileServer, FileServerUploads), target
+                      TargetRef::App named "this PC (<address>)"; never built by the UI: Core.file_server's
+                      FileServers::submit checks the root, the empty upload folder (save_guard) and that the address is
+                      this PC's; no path comes from the window: the shell's dialogs hand the core each choice
+                      (remember_pick) and the window sends back its token (PathChoice::Picked) or PathChoice::Last,
+                      this workspace's last choice, checked again; Runner::protect: Remotely's data folder (the
+                      database's, set at init; the shell adds the logs folder), anything in it or holding it, a drive's
+                      root and the user profile's own folder are never served or written into; the job runs as long as
+                      the server, its output the request log (MAX_JOB_OUTPUT, 8 MB), its end note the
+                      uploads; Runner serves for the job runner, one at a time, and stops on Stop, the time limit (30
+                      minutes by default, 8 hours at most), the job's cancel, a workspace switch (open_user_jobs leaves
+                      it out, switch_workspace stops it), a vault lock, release_ui and Core::shutdown; the last choices
+                      are `fileServer.last`, per workspace): paths.rs (a request as text: `.` `..` `\` `//`, drives,
+                      `:` (streams), trailing dots and spaces, control and Cf characters, device names, one
+                      percent-decoding and nothing still encoded; an upload name is one part, Cf to `_`, never a file
+                      Explorer acts on by itself: is_shell_file, `.lnk`, `.url`, `.scf`, `.library-ms`, desktop.ini...),
+                      served.rs
+                      (each part looked up without following links or junctions; a file served only when its handle's
+                      final path is under the root; folder listings), tftp.rs (RFC 1350, blksize and tsize; a socket
+                      per transfer connected to the client; resent only on timeout; at most 65,535 blocks, so no
+                      wraparound; transfers capped in all and per client), http.rs (httparse: GET, HEAD, PUT with a
+                      Content-Length, Expect: 100-continue; the head within its timeout, 16 KB, 32 headers, a 4 KB
+                      target; one request a connection; check_host: `Host` must be the bound IP literal and port, 421
+                      otherwise (DNS rebinding), none only for HTTP/1.0; nosniff, attachments, an escaped listing with
+                      a CSP), uploads.rs (create_new in the folder, never a replace; caps per file and in all, counted
+                      as bytes arrive (a declared size is checked, never set aside); UploadLimits: 2 uploads per
+                      client, at least 60 KB a minute; a part deleted; the Mark of the Web through
+                      terminal::files::mark_downloaded), log.rs (transfers kept, repeats summed, never pushed out;
+                      refusals folded per client, past 1,000 clients counted only; totals of all); MO-08: reach_held,
+                      session_connection and release_holds: a check holds a kept connection until its next run (one
+                      login, not one a run)
     checks/           MO-08 health checks (migration 0030; Core.checks; edits audited check_changed, no tier,
                       Change::HealthChecks; runs are reads, not audited): spec.rs CheckSpec (ping, tcp, http,
                       certificate, dns, service), CheckInput and its checks (30 s to 1 h, timeout, failures before down;
@@ -661,7 +691,10 @@ crates/core/          remotely-core: all app logic
                       rcgen certificate made at run time, jump hosts through the test SSH server, Wake-on-LAN to
                       127.0.0.1; consoles.rs: SS-12 RDP, VNC, Telnet, serial and tunnel tabs; checks.rs: MO-08 on a
                       FakeClock with FakeNetworkTools, HTTP and TLS servers on 127.0.0.1 (rcgen), the test SSH server's
-                      `systemctl is-active` and a jump host held to one login); opt-in workstation_it.rs,
+                      `systemctl is-active` and a jump host held to one login; file_server.rs: FD-09 TFTP and HTTP on
+                      127.0.0.1 with port 0 and the test's own clients, folders made in the temp folder: every
+                      traversal form on both protocols, links, junctions and streams, uploads and their caps, slow and
+                      flooding clients, every stop path giving the ports back); opt-in workstation_it.rs,
                       virtualbox_it.rs and
                       conversion_it.rs (the real conversion tools on small images in the temp folder)
 src-tauri/            Tauri 2 shell: window, IPC commands (ipc.rs), terminal bridge, MultiExec (multiexec.rs; groups.rs
@@ -700,12 +733,13 @@ src-tauri/            Tauri 2 shell: window, IPC commands (ipc.rs), terminal bri
                       switcher's commands, Unassigned VMs, the change ID rule, FD-07 import into a new workspace); FD-04
                       support_bundle.rs (presets, the tier preview, the zip's save dialog in Downloads, Show folder by
                       job id); FD-09 toolbox.rs (each tool's run under an id the UI chose, `toolbox://progress` events,
-                      toolbox_cancel, the certificate file dialog, Wake up's adapters and MACs); MO-08 checks.rs (the
-                      runner, `checks://event`, the Checks tab's commands); 0.7.0 F5 comfort.rs (FD-06 notes, render, a
-                      note's web link through ShellExecute after the window's confirm, http(s) only; QL-26 stars and
-                      recents; QL-27 the trash, its Undo, and its daily purge started in lib.rs; QL-28 bulk edit preview
-                      and save); lib.rs and schedules.rs pass job and schedule events to the window only for the shown
-                      workspace
+                      toolbox_cancel, the certificate file dialog, Wake up's adapters and MACs), file_server.rs (the File
+                      server tab's options, file and folder dialogs, start, Stop and status, `fileserver://event`);
+                      MO-08 checks.rs (the runner, `checks://event`, the Checks tab's commands); 0.7.0 F5 comfort.rs
+                      (FD-06 notes, render, a note's web link through ShellExecute after the window's confirm, http(s)
+                      only; QL-26 stars and recents; QL-27 the trash, its Undo, and its daily purge started in lib.rs;
+                      QL-28 bulk edit preview and save); lib.rs and schedules.rs pass job and schedule events to the
+                      window only for the shown workspace
 src/                  React + TypeScript UI
   components/ui/      shadcn/ui components (generated)
   components/         app components (approval dialog, badges, Compare panel with its one-shot and MultiExec views
@@ -759,7 +793,8 @@ src/                  React + TypeScript UI
                       UX-01 to UX-13 (0.6.0), the shared pieces every page uses ("UI rules" under Conventions):
                       PageHeader, HelpTip, Term, SelectionBar, RowMenu, EmptyState, Tip and ShowTipsAgainButton,
                       RefreshButton; FD-09 toolbox/: the Toolbox's tabs (ProbeTools: Ping, Trace route, DNS lookup,
-                      Check ports; CertificateTool, SubnetTool, WakeTool), TargetField and ToolboxMenu, the "Toolbox"
+                      Check ports; CertificateTool, SubnetTool, WakeTool, FileServerTool: the form, the running server
+                      and its requests), TargetField and ToolboxMenu, the "Toolbox"
                       submenu of session rows and the palette's VM and session views, and ToolboxIconMenu in the VM
                       details panel's header; no recent inputs are offered while presenting, since a native dropdown
                       is out of the masker's reach); MO-08 checks/: ChecksTab (the Dashboard's Checks tab), CheckDialog,
@@ -877,7 +912,8 @@ src/                  React + TypeScript UI
                       shortcut), first-run.ts (QL-23); FD-09 toolbox.ts (the tools, row targets, the last 20 inputs
                       per tool and workspace in local storage, every access in try/catch, result wording),
                       toolbox-api.ts (wrappers
-                      and types), subnet.ts (the subnet calculator, IPv4 and IPv6 with BigInt) and
+                      and types), subnet.ts (the subnet calculator, IPv4 and IPv6 with BigInt), file-server.ts and
+                      file-server-api.ts (the File server tab's form, checks and wording; wrappers and types) and
                       hooks/use-probe-run.ts (a run's id, progress and Stop); MO-08 checks.ts (kinds, defaults, the
                       editor's checks, wording, the sparkline's path) and checks-api.ts; 0.7.0 F5: comfort-api.ts
                       (notes, stars, recents, trash, bulk edit: types and wrappers), notes.ts (FD-06 link actions and

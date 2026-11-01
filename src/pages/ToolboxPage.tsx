@@ -1,14 +1,16 @@
 // FD-09: the Toolbox, in the sidebar's Remote group. A tab per tool: Ping, Trace route, DNS lookup, Check ports,
-// Certificate, Subnet calculator and Wake up (F9 adds the file server after them). Session and VM row menus open a tool
-// with their target filled in, through a `toolbox` link (lib/links.ts); the palette opens the page.
+// Certificate, Subnet calculator, Wake up and File server. Session and VM row menus open a tool with their target
+// filled in, through a `toolbox` link (lib/links.ts); the palette opens the page.
 //
-// Every tool but Wake up only reads (no tier, not audited, allowed while presenting with the read-only lock). Each
-// tab keeps its last 20 inputs in the window's local storage (lib/toolbox.ts).
+// Every tool but Wake up and File server only reads (no tier, not audited, allowed while presenting with the read-only
+// lock). Each tab keeps its last 20 inputs in the window's local storage (lib/toolbox.ts); the file server keeps its
+// last choices in the core, per workspace.
 
 import { useEffect, useState } from "react";
 import {
   ActivityIcon,
   CalculatorIcon,
+  FolderUpIcon,
   GlobeIcon,
   NetworkIcon,
   PowerIcon,
@@ -19,6 +21,7 @@ import {
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { PageHeader } from "@/components/PageHeader";
 import { CertificateTool } from "@/components/toolbox/CertificateTool";
+import { FileServerTool } from "@/components/toolbox/FileServerTool";
 import { DnsTool, PingTool, PortsTool, TraceTool, type Incoming } from "@/components/toolbox/ProbeTools";
 import { SubnetTool } from "@/components/toolbox/SubnetTool";
 import { WakeTool } from "@/components/toolbox/WakeTool";
@@ -41,6 +44,7 @@ const ICONS: Record<ToolboxTool, LucideIcon> = {
   certificate: ShieldCheckIcon,
   subnet: CalculatorIcon,
   wake: PowerIcon,
+  fileServer: FolderUpIcon,
 };
 
 /** A target from a link only when it is one (links can come back from the notification centre as plain JSON). */
@@ -131,6 +135,9 @@ export function ToolboxPage({ active, request, onSubmitted }: Props) {
         </TabsContent>
         <TabsContent value="wake" forceMount className="data-[state=inactive]:hidden">
           <WakeTool incoming={incoming.wake ?? null} shown={active && tab === "wake"} onSubmitted={onSubmitted} />
+        </TabsContent>
+        <TabsContent value="fileServer" forceMount className="data-[state=inactive]:hidden">
+          <FileServerTool shown={active && tab === "fileServer"} onSubmitted={onSubmitted} />
         </TabsContent>
       </Tabs>
     </div>

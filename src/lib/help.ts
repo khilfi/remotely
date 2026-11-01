@@ -73,7 +73,7 @@ export const HELP = {
   "page.toolbox": {
     title: "Toolbox",
     body: [
-      "Ping, trace route, DNS lookups, port checks, certificates, a subnet calculator and Wake-on-LAN, run from this PC. Only Wake up sends something to a machine, so only it goes through the approval rules.",
+      "Ping, trace route, DNS lookups, port checks, certificates, a subnet calculator, Wake-on-LAN and a file server, run from this PC. Only Wake up and the file server change something, so only they go through the approval rules.",
       "A session behind a jump host has its ports and certificate checked from the jump host. Ping and trace route can't go that way.",
     ],
   },
@@ -96,6 +96,20 @@ export const HELP = {
     body: [
       "Sends a Wake-on-LAN magic packet for the machine's network card. It works only if the card and its firmware have Wake-on-LAN on, and the packet reaches its network.",
       "From an adapter, the packet goes to that adapter's subnet broadcast. For a subnet behind a router, type its directed broadcast, like 192.0.2.255.",
+    ],
+  },
+  "toolbox.fileServer": {
+    title: "File server",
+    body: [
+      "Serves one file or folder from this PC over TFTP and HTTP, so a switch can fetch its firmware or a host a config. It listens only on the address you choose, and stops at its time limit, on Stop, in another workspace, when the vault locks, the window reloads or Remotely closes.",
+      "TFTP sends at most 65,535 blocks: 32 MB at the usual 512-byte blocks, more when the client asks for larger ones. Paths that lead out of what you serve, links and junctions are refused. Each request is listed here and kept in the job in Activity.",
+    ],
+  },
+  "toolbox.fileServer.uploads": {
+    title: "Accept uploads",
+    body: [
+      "Lets other computers send files to this PC, over TFTP or HTTP PUT, into one empty folder outside any Git repository. A file never replaces one that is there, and each is marked as from the internet, so Windows warns before opening it.",
+      "A file past its limits, or slower than 1 KB a second, is cut off and deleted; one address sends two at a time. Shortcuts and other files Explorer opens by itself, such as desktop.ini, are refused. Starting with uploads on needs the full approval.",
     ],
   },
   "page.dashboard": {

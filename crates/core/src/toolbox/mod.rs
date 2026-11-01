@@ -1,9 +1,11 @@
-//! FD-09 toolbox: ping, trace route, DNS lookups, port checks, the certificate viewer and Wake-on-LAN, run from this
-//! PC. The subnet calculator is the UI's own (pure TypeScript).
+//! FD-09 toolbox: ping, trace route, DNS lookups, port checks, the certificate viewer, Wake-on-LAN and the quick file
+//! server ([`file_server`]), run from this PC. The subnet calculator is the UI's own (pure TypeScript).
 //!
-//! Every tool but Wake-on-LAN only reads: no tier, not audited, allowed while presenting with the read-only lock
-//! (FD-03), like QL-04's checks. Wake-on-LAN sends a packet to the network, so it is
-//! [`crate::command_bus::Command::WakeOnLan`] on the bus: Low, Medium on a Prod target, audited.
+//! Every tool but Wake-on-LAN and the file server only reads: no tier, not audited, allowed while presenting with the
+//! read-only lock (FD-03), like QL-04's checks. Wake-on-LAN sends a packet to the network, so it is
+//! [`crate::command_bus::Command::WakeOnLan`] on the bus: Low, Medium on a Prod target, audited. The file server lets
+//! other computers fetch (and maybe send) files: [`crate::command_bus::Command::FileServer`], Medium, High with
+//! uploads.
 //!
 //! * **Targets.** A host typed in, a saved session (its host), or a VM (its guest IP) ([`ProbeTarget`]).
 //! * **Jump hosts (SS-07).** A session behind a jump host is reached from that jump host: port and certificate checks
@@ -17,6 +19,7 @@
 
 pub mod certs;
 pub mod dns;
+pub mod file_server;
 pub mod icmp;
 mod jump;
 pub mod ports;
