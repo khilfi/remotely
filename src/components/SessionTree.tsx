@@ -1,3 +1,4 @@
+// QL-26: starred sessions first: a Starred group at the top, and first in every group.
 // QL-04: the session tree on the left of the Terminal page. The same library as the Sessions page,
 // grouped by folder, tag or environment label (the core builds the tree), with a search box and the
 // recently opened sessions on top. Double-click (or Enter) opens a session in a new tab.
@@ -25,6 +26,7 @@ import {
   FolderOpenIcon,
   ListTreeIcon,
   SearchIcon,
+  StarIcon,
   TagIcon,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -45,6 +47,10 @@ import { RefreshButton } from "@/components/RefreshButton";
 import { RowMenu } from "@/components/RowMenu";
 import { Tip } from "@/components/Tip";
 import { appliedEnvironment, environmentText, type EnvironmentOfVm } from "@/lib/session-environment";
+import { isStarred, starredFirst } from "@/lib/stars";
+import { toggleStar, useStars } from "@/lib/stars-store";
+import { requestLink } from "@/lib/links";
+import { noteLink } from "@/lib/notes";
 import { jumpChain, routeText, viaText, type JumpLink } from "@/lib/tunnels";
 import {
   api,
@@ -162,6 +168,12 @@ export function SessionTree({
   }, [grouping, open]);
 
   const byId = useMemo(() => new Map((tree?.records ?? []).map((s) => [s.id, s])), [tree]);
+  const stars = useStars();
+  const starred = useMemo(() => (tree?.records ?? []).filter((s) => isStarred(stars, "session", s.id)), [tree, stars]);
+  const firstStarred = useCallback(
+    (ids: string[]) => starredFirst(ids, (id) => isStarred(stars, "session", id)),
+    [stars],
+  );
   const total = tree?.records.length ?? 0;
   const isOpen = useCallback(
     (key: string) => searching || (open[key] ?? total <= OPEN_BY_DEFAULT_UP_TO),
@@ -170,7 +182,7 @@ export function SessionTree({
 
   // The sessions on screen: the recent ones and those in open groups. Only these are checked.
   const shown = useMemo(() => {
-    const ids = new Set<string>(searching ? [] : recent.map((s) => s.id));
+    const ids = new Set<string>(searching ? [] : [...recent, ...starred].map((s) => s.id));
     const walk = (nodes: TreeNode[]) => {
       for (const node of nodes) {
         if (!isOpen(node.key)) continue;
@@ -183,7 +195,7 @@ export function SessionTree({
       tree.sessions.forEach((id) => ids.add(id));
     }
     return [...ids].sort();
-  }, [tree, recent, isOpen, searching]);
+  }, [tree, recent, starred, isOpen, searching]);
   const shownKey = shown.join(",");
 
   useEffect(() => {
@@ -264,7 +276,7 @@ export function SessionTree({
         {expanded && (
           <>
             {node.children.map((child) => group(child, depth + 1))}
-            {node.sessions.map((id) => row(id, depth + 1, node.key))}
+            {firstStarred(node.sessions).map((id) => row(id, depth + 1, node.key))}
           </>
         )}
       </div>
@@ -311,6 +323,21 @@ export function SessionTree({
       </div>
       <ScrollArea className="min-h-0 flex-1">
         <div className="flex flex-col gap-0.5 pr-2 pb-2" role="tree" aria-label="Sessions">
+          {!searching && starred.length > 0 && (
+            <div role="group" aria-label="Starred sessions" className="mb-1 border-b pb-1">
+              <button
+                type="button"
+                className="flex h-7 w-full items-center gap-1.5 rounded-md pr-2 pl-1 text-left text-xs font-medium text-muted-foreground hover:bg-accent [&_svg]:size-3.5"
+                aria-expanded={isOpen("starred")}
+                onClick={() => toggle("starred")}
+              >
+                <ChevronRightIcon className={cn("transition-transform", isOpen("starred") && "rotate-90")} />
+                <StarIcon />
+                Starred
+              </button>
+              {isOpen("starred") && starred.map((s) => row(s.id, 1, "starred"))}
+            </div>
+          )}
           {!searching && recent.length > 0 && (
             <div role="group" aria-label="Recent sessions" className="mb-1 border-b pb-1">
               <button
@@ -344,7 +371,7 @@ export function SessionTree({
             </div>
           )}
           {tree?.nodes.map((node) => group(node, 0))}
-          {tree?.sessions.map((id) => row(id, 0, "top"))}
+          {tree && firstStarred(tree.sessions).map((id) => row(id, 0, "top"))}
           {tree && tree.records.length === 0 && (
             <p className="px-2 py-4 text-sm text-muted-foreground">
               {searching ? "No session matches." : "No saved sessions yet. Use New terminal and tick Save as session."}
@@ -441,6 +468,7 @@ function SessionRow({
   onHostDetails?: () => void;
 }) {
   const ref = useRef<HTMLDivElement>(null);
+  const starredRow = isStarred(useStars(), "session", session.id);
   const seen =
     session.lastHostname || session.lastIp ? [session.lastHostname, session.lastIp].filter(Boolean).join(" · ") : null;
   const applied = appliedEnvironment(session, vms);
@@ -511,6 +539,12 @@ function SessionRow({
           Copy the address
         </DropdownMenuItem>
         {onHostDetails && <DropdownMenuItem onSelect={onHostDetails}>Host details…</DropdownMenuItem>}
+        <DropdownMenuItem onSelect={() => requestLink(noteLink("session", session.id, session.name))}>
+          Note…
+        </DropdownMenuItem>
+        <DropdownMenuItem onSelect={() => void toggleStar("session", session.id)}>
+          {starredRow ? "Unstar" : "Star"}
+        </DropdownMenuItem>
       </RowMenu>
     </div>
   );

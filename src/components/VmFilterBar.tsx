@@ -56,6 +56,9 @@ interface Props {
   onApplySaved: (saved: SavedFilter) => void;
   onSaveCurrent: () => void;
   onDeleteSaved: (saved: SavedFilter) => void;
+  /** QL-26: only the starred VMs (the window's own filter; the core's list is filtered here). */
+  starredOnly: boolean;
+  onStarredOnly: (on: boolean) => void;
 }
 
 export function VmFilterBar({
@@ -66,8 +69,10 @@ export function VmFilterBar({
   onApplySaved,
   onSaveCurrent,
   onDeleteSaved,
+  starredOnly,
+  onStarredOnly,
 }: Props) {
-  const count = activeFilterCount(filter);
+  const count = activeFilterCount(filter) + (starredOnly ? 1 : 0);
   const keepOpen = (e: Event) => e.preventDefault();
 
   return (
@@ -94,6 +99,9 @@ export function VmFilterBar({
           </Button>
         </DropdownMenuTrigger>
         <DropdownMenuContent align="start" className="w-56">
+          <DropdownMenuCheckboxItem checked={starredOnly} onCheckedChange={onStarredOnly} onSelect={keepOpen}>
+            Starred only
+          </DropdownMenuCheckboxItem>
           <DropdownMenuSub>
             <DropdownMenuSubTrigger>
               State

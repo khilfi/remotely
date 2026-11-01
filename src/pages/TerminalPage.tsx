@@ -142,6 +142,8 @@ import { alertNotification, recordAlert } from "@/lib/terminal-alerts";
 import { fromCommandFinished, fromTerminalAlert } from "@/lib/notifications";
 import { notify as keepNotification } from "@/lib/notifications-store";
 import { sendCommand } from "@/lib/command-send";
+import { setNoteSendHandler } from "@/lib/note-send";
+import { refreshRecents } from "@/lib/stars-store";
 import { connectedReason, multiExecReason, READ_ONLY_REASON, splitReason, uploadReason } from "@/lib/disabled-reasons";
 import {
   appliedEnvironment,
@@ -610,8 +612,11 @@ export function TerminalPage({
       } else {
         addTab(createPane({ kind: "session", sessionId: session.id }, session.name));
       }
-      // Recent sessions moved.
-      window.setTimeout(() => setVersion((v) => v + 1), 500);
+      // Recent sessions moved (QL-26: Ctrl+K's Recent too).
+      window.setTimeout(() => {
+        setVersion((v) => v + 1);
+        refreshRecents();
+      }, 500);
     },
     [addTab, createPane],
   );
@@ -702,6 +707,21 @@ export function TerminalPage({
   const current = tabs.find((t) => t.key === activeTab) ?? null;
   const currentPane = current ? findPane(current.layout, current.activePane) : undefined;
   const currentSnapshot = usePane(currentPane);
+  // FD-06: a note's code block goes to the current terminal as a paste, which asks first when it has a line break
+  // (QL-05) and never presses Enter.
+  const notePane = useRef(currentPane);
+  useEffect(() => {
+    notePane.current = currentPane;
+  }, [currentPane]);
+  useEffect(() => {
+    setNoteSendHandler((text) => {
+      const pane = notePane.current;
+      if (!pane || !pane.connected) return false;
+      void pane.paste(text);
+      return true;
+    });
+    return () => setNoteSendHandler(null);
+  }, []);
 
   // QL-07: looking at a tab clears its "finished in the background" mark.
   const viewing = active ? activeTab : null;

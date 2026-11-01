@@ -13,6 +13,7 @@
 
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { toast } from "sonner";
+import { toastDeleted } from "@/lib/undo-delete";
 import {
   BoxesIcon,
   CopyIcon,
@@ -674,9 +675,10 @@ export function TemplatesPage({ active, request, onDeploy, onSubmitted, onImport
           what={`the size ${dialog.size.name}`}
           used={usedBy((t) => t.sizeId === dialog.size.id)}
           onConfirm={async () => {
-            await api.catalogSizeDelete(dialog.size.id);
-            toast.success(`Deleted the size ${dialog.size.name}`);
+            const { id, name } = dialog.size;
+            await api.catalogSizeDelete(id);
             load();
+            toastDeleted("size", id, name, load);
           }}
           onClose={() => setDialog(null)}
         />
@@ -687,9 +689,10 @@ export function TemplatesPage({ active, request, onDeploy, onSubmitted, onImport
           extra="Only the catalogue's entry goes: the file or VM stays where it is."
           used={usedBy((t) => t.imageId === dialog.image.id)}
           onConfirm={async () => {
-            await api.catalogImageDelete(dialog.image.id);
-            toast.success(`Deleted the image ${dialog.image.name}`);
+            const { id, name } = dialog.image;
+            await api.catalogImageDelete(id);
             load();
+            toastDeleted("image", id, name, load);
           }}
           onClose={() => setDialog(null)}
         />
@@ -699,9 +702,10 @@ export function TemplatesPage({ active, request, onDeploy, onSubmitted, onImport
           what={`the launch template ${dialog.template.name}`}
           used={[]}
           onConfirm={async () => {
-            await api.catalogTemplateDelete(dialog.template.id);
-            toast.success(`Deleted the launch template ${dialog.template.name}`);
+            const { id, name } = dialog.template;
+            await api.catalogTemplateDelete(id);
             load();
+            toastDeleted("template", id, name, load);
           }}
           onClose={() => setDialog(null)}
         />
@@ -726,6 +730,7 @@ function DeleteDialog({
   const description = useMemo(
     () => (
       <>
+        <span className="block">It goes to the trash for 30 days.</span>
         {extra && <span className="block">{extra}</span>}
         {used.length > 0 ? (
           <span className="block">

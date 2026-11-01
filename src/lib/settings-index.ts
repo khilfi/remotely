@@ -123,6 +123,12 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
     title: "Job outputs",
     keywords: "data retention job journal outputs command text purge now days keep",
   },
+  {
+    id: "trash",
+    group: "privacy",
+    title: "Trash",
+    keywords: "deleted restore undo recycle bin empty sessions commands sizes images templates stacks 30 days",
+  },
   { id: "dashboard", group: "dashboard", title: "Dashboard polling", keywords: "poll watched hosts guest seconds" },
   { id: "history", group: "dashboard", title: "Dashboard history", keywords: "metrics history retention days prune" },
   { id: "updates", group: "updates", title: "Updates", keywords: "update checks github token release version" },

@@ -101,6 +101,8 @@ import { VmImportDialog } from "@/components/VmImportDialog";
 import { CommandPalette, type PaletteAction } from "@/components/CommandPalette";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { ReauthDialog } from "@/components/ReauthDialog";
+import { NoteSheet, type NoteSheetTarget } from "@/components/NoteSheet";
+import { noteOpened } from "@/lib/stars-store";
 import {
   PresentationButton,
   PresentationLayer,
@@ -233,6 +235,10 @@ function inTerminal(target: EventTarget | null) {
 
 export default function App() {
   const [page, setPage] = useState<PageId>("vms");
+  // FD-06: the note sheet, opened by a { kind: "note" } link from anywhere.
+  const [noteTarget, setNoteTarget] = useState<NoteSheetTarget | null>(null);
+  // QL-26: each page shown goes to the top of Ctrl+K's Recent.
+  useEffect(() => noteOpened("page", page), [page]);
   const [info, setInfo] = useState<AppInfo | null>(null);
   // The open approval, and who wants the job id once it is approved (Compare output follows its run).
   const [approval, setApproval] = useState<{ request: ApprovalRequest; onJob?: (jobId: string) => void } | null>(null);
@@ -695,6 +701,9 @@ export default function App() {
           break;
         case "hostNetworks":
           openVmsPanel("networks");
+          break;
+        case "note":
+          setNoteTarget({ kind: link.noteKind, key: link.key, title: link.title });
           break;
       }
     },
@@ -1354,6 +1363,13 @@ export default function App() {
         }
       />
       <ReauthDialog />
+      {noteTarget && (
+        <NoteSheet
+          key={`${noteTarget.kind}:${noteTarget.key}`}
+          target={noteTarget}
+          onClose={() => setNoteTarget(null)}
+        />
+      )}
       {/* MO-07: alerts notify through Windows whatever page shows. */}
       <AlertNotifier />
       {/* QL-25: jobs and alerts are kept in the notification centre whatever page shows. */}

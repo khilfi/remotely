@@ -39,7 +39,9 @@ export type AppLink =
   /** VM-14, VM-27: a schedule's runs on the Schedules page. */
   | { kind: "schedule"; scheduleId: string }
   /** VM-11: the Virtual machines page's host networks. */
-  | { kind: "hostNetworks" };
+  | { kind: "hostNetworks" }
+  /** FD-06: the note of a session, VM or folder, in its sheet. */
+  | { kind: "note"; noteKind: "session" | "vm" | "folder"; key: string; title?: string };
 
 export type AppLinkKind = AppLink["kind"];
 
@@ -59,6 +61,7 @@ const KINDS: Record<AppLinkKind, readonly string[]> = {
   map: [],
   schedule: ["scheduleId"],
   hostNetworks: [],
+  note: ["noteKind", "key"],
 };
 
 /** A value (from the core, say) is a link this version can open: a known kind with its text fields. */
@@ -73,6 +76,7 @@ export function isAppLink(value: unknown): value is AppLink {
     if (!host || (host.kind !== "thisPc" && !(host.kind === "session" && typeof host.sessionId === "string")))
       return false;
   }
+  if (kind === "note" && !["session", "vm", "folder"].includes(link.noteKind as string)) return false;
   if (kind === "catalog" && !["sizes", "images", "templates"].includes(link.tab as string)) return false;
   return true;
 }
@@ -134,5 +138,7 @@ export function linkLabel(link: AppLink): string {
       return "Show its runs";
     case "hostNetworks":
       return "Show the host networks";
+    case "note":
+      return "Show the note";
   }
 }

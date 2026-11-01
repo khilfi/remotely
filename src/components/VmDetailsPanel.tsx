@@ -12,7 +12,16 @@
 // guest tools row is named for it ("VMware Tools" or "Guest Additions").
 
 import { useEffect, useState, type ReactNode } from "react";
-import { CameraIcon, HistoryIcon, MonitorIcon, ShieldIcon, TriangleAlertIcon, XIcon, ZapIcon } from "lucide-react";
+import {
+  CameraIcon,
+  HistoryIcon,
+  MonitorIcon,
+  NotebookPenIcon,
+  ShieldIcon,
+  TriangleAlertIcon,
+  XIcon,
+  ZapIcon,
+} from "lucide-react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -31,6 +40,8 @@ import { VmSystemTab } from "@/components/VmSystemTab";
 import { WhyDisabled } from "@/components/WhyDisabled";
 import { VmSettingsTab } from "@/components/VmSettingsTab";
 import { VmLogTab } from "@/components/VmLogTab";
+import { requestLink } from "@/lib/links";
+import { noteLink } from "@/lib/notes";
 import { VmTimelineTab } from "@/components/VmTimelineTab";
 import { VmSchedulesTab, type ScheduleAsk } from "@/components/VmSchedulesTab";
 import {
@@ -169,6 +180,11 @@ export function VmDetailsPanel(props: Props) {
           icon={<MonitorIcon />}
           disabledReason={props.readOnly}
           onClick={props.onOpenConsole}
+        />
+        <IconAction
+          label="Note"
+          icon={<NotebookPenIcon />}
+          onClick={() => requestLink(noteLink("vm", vm.vmxPath, vm.displayName))}
         />
         <IconAction label="Actions: power and protection" icon={<ZapIcon />} onClick={onActions} />
         <IconAction label="Close the details" icon={<XIcon />} onClick={onClose} />

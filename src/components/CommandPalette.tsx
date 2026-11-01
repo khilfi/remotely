@@ -9,6 +9,9 @@
 // ranked (lib/search.ts) and grouped, the best group first, so Enter takes the best match. Each provider reads what
 // the app already has, once per opening.
 //
+// QL-26 (0.7.0): opened, it lists the 20 sessions, VMs and pages opened last under Recent first, and starred VMs,
+// sessions and commands come first (in the lists, and among close search results). FD-06: notes are searched too.
+//
 // UX-03, UX-07 (0.6.0): opened, it lists the pages, then what makes something new, then the other actions, VMs and
 // sessions (lib/palette.ts). The actions on every running VM at once show only when the search asks for them
 // (typedForBulk), never at the top of an empty search. A term found by the search shows its definition in the list.
@@ -16,6 +19,7 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   ArrowLeftIcon,
+  ClockIcon,
   EyeIcon,
   EyeOffIcon,
   GaugeIcon,
@@ -55,6 +59,8 @@ import { groupRanked, rankItems, type SearchItem } from "@/lib/search";
 import { SEARCH_PROVIDERS, loadSearchItems } from "@/lib/search-providers";
 import { splitActions, typedForBulk } from "@/lib/palette";
 import { actionItems, pageItems } from "@/lib/search-sources";
+import { boostStarred, isStarred, starredFirst } from "@/lib/stars";
+import { useRecents, useStars } from "@/lib/stars-store";
 import type { VmView } from "@/lib/vm-snapshots";
 import {
   api,
@@ -212,6 +218,31 @@ export function CommandPalette({
   }, [open]);
 
   const running = useMemo(() => vms.filter((v) => v.powerState === "running" && !v.protected), [vms]);
+  // QL-26: starred first, and what was opened last.
+  const stars = useStars();
+  const recents = useRecents();
+  const listedVms = useMemo(() => starredFirst(vms, (v) => isStarred(stars, "vm", v.vmxPath)), [vms, stars]);
+  const listedSessions = useMemo(
+    () => starredFirst(sessions, (s) => isStarred(stars, "session", s.id)),
+    [sessions, stars],
+  );
+  const recentItems = useMemo(() => {
+    const vmByKey = new Map(vms.map((v) => [v.vmxPath.toLowerCase(), v]));
+    const sessionById = new Map(sessions.map((s) => [s.id, s]));
+    const pageById = new Map(pages.map((p) => [p.id, p]));
+    return recents.flatMap((r): { key: string; label: string; kind: "vm" | "session" | "page"; id: string }[] => {
+      if (r.kind === "vm") {
+        const v = vmByKey.get(r.key.toLowerCase());
+        return v ? [{ key: `vm:${v.vmxPath}`, label: v.displayName, kind: "vm", id: v.vmxPath }] : [];
+      }
+      if (r.kind === "session") {
+        const s = sessionById.get(r.key);
+        return s ? [{ key: `session:${s.id}`, label: s.name, kind: "session", id: s.id }] : [];
+      }
+      const p = pageById.get(r.key);
+      return p ? [{ key: `page:${p.id}`, label: p.label, kind: "page", id: p.id }] : [];
+    });
+  }, [recents, vms, sessions, pages]);
   const vm = view.kind === "vm" ? vms.find((v) => v.vmxPath === view.vmxPath) : undefined;
   const session = view.kind === "session" ? sessions.find((s) => s.id === view.id) : undefined;
 
@@ -248,9 +279,9 @@ export function CommandPalette({
     () => [
       ...pageItems(pages),
       ...actionItems([...bulkShown.map((b) => ({ id: `bulk:${b.id}`, label: b.label })), ...actions]),
-      ...found,
+      ...boostStarred(found, stars),
     ],
-    [pages, bulkShown, actions, found],
+    [pages, bulkShown, actions, found, stars],
   );
   const results = useMemo(
     () =>
@@ -565,6 +596,27 @@ export function CommandPalette({
 
           {view.kind === "root" && !query && (
             <>
+              {recentItems.length > 0 && (
+                <CommandGroup heading="Recent">
+                  {recentItems.map((r) => (
+                    <CommandItem
+                      key={r.key}
+                      value={`recent ${r.kind} ${r.label} ${r.id}`}
+                      onSelect={() => {
+                        if (r.kind === "vm") goTo({ kind: "vm", vmxPath: r.id });
+                        else if (r.kind === "session") goTo({ kind: "session", id: r.id });
+                        else {
+                          close();
+                          onNavigate(r.id);
+                        }
+                      }}
+                    >
+                      {r.kind === "vm" ? <MonitorIcon /> : r.kind === "session" ? <ServerIcon /> : <ClockIcon />}
+                      <span className="truncate">{r.label}</span>
+                    </CommandItem>
+                  ))}
+                </CommandGroup>
+              )}
               <CommandGroup heading="Go to">
                 {pages.map((p) => (
                   <CommandItem
@@ -606,7 +658,7 @@ export function CommandPalette({
               )}
               {vms.length > 0 && (
                 <CommandGroup heading="Virtual machines">
-                  {vms.map((v) => (
+                  {listedVms.map((v) => (
                     <CommandItem
                       key={v.vmxPath}
                       value={`vm ${v.displayName} ${v.ipAddress ?? ""} ${v.tags.join(" ")} ${v.vmxPath} ${v.hypervisor}`}
@@ -623,7 +675,7 @@ export function CommandPalette({
               )}
               {sessions.length > 0 && (
                 <CommandGroup heading="Sessions">
-                  {sessions.map((s) => (
+                  {listedSessions.map((s) => (
                     <CommandItem
                       key={s.id}
                       value={`session ${s.name} ${s.host} ${s.username ?? ""} ${s.tags.join(" ")}`}

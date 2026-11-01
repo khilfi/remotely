@@ -10,6 +10,8 @@
 // UX-01, UX-02, UX-12: the page header holds the search and filters, New session (its one primary) and "⋯" (import and
 // export); rows and folders have one "⋯" menu each; the Environment column shows the environment that applies (a Prod
 // VM the session reaches makes it Prod) and where it comes from when it is not the session's own.
+// 0.7.0: QL-28 rows can be selected (the selection bar's Edit changes them all at once), QL-26 a star on each row, FD-06
+// a session's and a folder's note in their menus, and QL-27 a delete's toast offers Undo (the item is in the trash).
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
@@ -24,6 +26,8 @@ import {
   LaptopIcon,
   LibraryIcon,
   ListTreeIcon,
+  NotebookPenIcon,
+  PencilIcon,
   PlusIcon,
   SearchIcon,
   ShieldIcon,
@@ -32,6 +36,7 @@ import {
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
   DropdownMenu,
   DropdownMenuCheckboxItem,
@@ -50,6 +55,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { ColorDot, EnvBadge } from "@/components/Badges";
+import { BulkEditDialog } from "@/components/BulkEditDialog";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { EmptyState } from "@/components/EmptyState";
 import { ExportDialog } from "@/components/ExportDialog";
@@ -59,6 +65,8 @@ import { HostDetailsSheet } from "@/components/HostDetailsSheet";
 import { ImportDialog } from "@/components/ImportDialog";
 import { NameDialog } from "@/components/NameDialog";
 import { RowMenu } from "@/components/RowMenu";
+import { SelectionBar } from "@/components/SelectionBar";
+import { StarButton } from "@/components/StarButton";
 import { SessionDialog } from "@/components/SessionDialog";
 import { TransferImportDialog } from "@/components/TransferImportDialog";
 import { SessionVmLink } from "@/components/VmLinkControls";
@@ -77,7 +85,10 @@ import {
 } from "@/lib/api";
 import { flattenFolders, folderPath, subtree } from "@/lib/folders";
 import { formatWhen, plural } from "@/lib/format";
+import { requestLink } from "@/lib/links";
 import { useThresholds } from "@/lib/metrics";
+import { noteLink } from "@/lib/notes";
+import { toastDeleted } from "@/lib/undo-delete";
 import { withVaultPassword } from "@/lib/reauth-prompt";
 import { reveal } from "@/lib/reveal";
 import { appliedEnvironment, environmentText, sourceText, vmsById } from "@/lib/session-environment";
@@ -105,6 +116,7 @@ type DialogState =
   | { kind: "import" }
   | { kind: "export" }
   | { kind: "importExport" }
+  | { kind: "bulkEdit" }
   | null;
 
 const LABELS: { value: Environment; label: string; className: string }[] = [
@@ -135,6 +147,8 @@ export function SessionsPage({ vault, onVaultChanged, onOpenVault, onConnect, ac
   const [version, setVersion] = useState(0);
   const [loaded, setLoaded] = useState(false);
   const [dialog, setDialog] = useState<DialogState>(null);
+  /** QL-28: the sessions picked for the selection bar's Edit. */
+  const [selected, setSelected] = useState<Set<string>>(new Set());
   /** MO-13, MO-14: a session's host details. */
   const [hostDetails, setHostDetails] = useState<{ id: string; name: string } | null>(null);
   const [thresholds] = useThresholds();
@@ -172,6 +186,7 @@ export function SessionsPage({ vault, onVaultChanged, onOpenVault, onConnect, ac
       ([f, s, t, v]) => {
         setFolders(f);
         setAll(s);
+        setSelected((prev) => (prev.size === 0 ? prev : new Set([...prev].filter((id) => s.some((x) => x.id === id)))));
         setTags(t.filter((tag) => tag.sessionCount > 0));
         setSecrets(v);
         setLoaded(true);
@@ -274,6 +289,16 @@ export function SessionsPage({ vault, onVaultChanged, onOpenVault, onConnect, ac
   }
 
   const newSession = () => setDialog({ kind: "editSession" });
+  const selectedSessions = all.filter((s) => selected.has(s.id));
+  const allShownSelected = shown.length > 0 && shown.every((s) => selected.has(s.id));
+  function toggleSelected(id: string) {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
 
   return (
     <div className="flex min-h-0 flex-col gap-4">
@@ -313,65 +338,78 @@ export function SessionsPage({ vault, onVaultChanged, onOpenVault, onConnect, ac
           </>
         }
       >
-        <div className="relative w-full max-w-xs">
-          <SearchIcon className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground" />
-          <Input
-            aria-label="Search sessions"
-            placeholder="Search name, host, user, tag"
-            className="pl-8"
-            value={text}
-            onChange={(e) => setText(e.currentTarget.value)}
-          />
-        </div>
-        <ToggleGroup
-          type="multiple"
-          variant="outline"
-          aria-label="Environment"
-          value={environments}
-          onValueChange={(v) => setEnvironments(v as Environment[])}
-        >
-          {LABELS.map((l) => (
-            <ToggleGroupItem key={l.value} value={l.value} className={cn("font-medium", l.className)}>
-              {l.label}
-            </ToggleGroupItem>
-          ))}
-        </ToggleGroup>
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <Button variant="outline">
-              <TagIcon data-icon="inline-start" />
-              Tags{tagFilter.length > 0 ? ` (${tagFilter.length})` : ""}
+        {selectedSessions.length > 0 ? (
+          <SelectionBar count={selectedSessions.length} onClear={() => setSelected(new Set())}>
+            <Button variant="ghost" size="sm" onClick={() => setDialog({ kind: "bulkEdit" })}>
+              <PencilIcon data-icon="inline-start" />
+              Edit…
             </Button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="start" className="w-56">
-            <DropdownMenuLabel>Sessions with any of</DropdownMenuLabel>
-            {tags.length === 0 && <DropdownMenuItem disabled>No tags yet</DropdownMenuItem>}
-            {tags.map((t) => (
-              <DropdownMenuCheckboxItem
-                key={t.id}
-                checked={tagFilter.some((x) => x.toLowerCase() === t.name.toLowerCase())}
-                onSelect={(e) => e.preventDefault()}
-                onCheckedChange={(checked) =>
-                  setTagFilter((list) =>
-                    checked ? [...list, t.name] : list.filter((x) => x.toLowerCase() !== t.name.toLowerCase()),
-                  )
-                }
-              >
-                {t.name}
-                <DropdownMenuShortcut>{t.sessionCount}</DropdownMenuShortcut>
-              </DropdownMenuCheckboxItem>
-            ))}
-            {tagFilter.length > 0 && (
-              <>
-                <DropdownMenuSeparator />
-                <DropdownMenuItem onSelect={() => setTagFilter([])}>Clear</DropdownMenuItem>
-              </>
-            )}
-          </DropdownMenuContent>
-        </DropdownMenu>
-        <span className="text-sm text-muted-foreground">
-          {filtered || folderId ? `${shown.length} of ${plural(all.length, "session")}` : plural(all.length, "session")}
-        </span>
+          </SelectionBar>
+        ) : (
+          <>
+            <div className="relative w-full max-w-xs">
+              <SearchIcon className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground" />
+              <Input
+                aria-label="Search sessions"
+                placeholder="Search name, host, user, tag"
+                className="pl-8"
+                value={text}
+                onChange={(e) => setText(e.currentTarget.value)}
+              />
+            </div>
+            <ToggleGroup
+              type="multiple"
+              variant="outline"
+              aria-label="Environment"
+              value={environments}
+              onValueChange={(v) => setEnvironments(v as Environment[])}
+            >
+              {LABELS.map((l) => (
+                <ToggleGroupItem key={l.value} value={l.value} className={cn("font-medium", l.className)}>
+                  {l.label}
+                </ToggleGroupItem>
+              ))}
+            </ToggleGroup>
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button variant="outline">
+                  <TagIcon data-icon="inline-start" />
+                  Tags{tagFilter.length > 0 ? ` (${tagFilter.length})` : ""}
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="start" className="w-56">
+                <DropdownMenuLabel>Sessions with any of</DropdownMenuLabel>
+                {tags.length === 0 && <DropdownMenuItem disabled>No tags yet</DropdownMenuItem>}
+                {tags.map((t) => (
+                  <DropdownMenuCheckboxItem
+                    key={t.id}
+                    checked={tagFilter.some((x) => x.toLowerCase() === t.name.toLowerCase())}
+                    onSelect={(e) => e.preventDefault()}
+                    onCheckedChange={(checked) =>
+                      setTagFilter((list) =>
+                        checked ? [...list, t.name] : list.filter((x) => x.toLowerCase() !== t.name.toLowerCase()),
+                      )
+                    }
+                  >
+                    {t.name}
+                    <DropdownMenuShortcut>{t.sessionCount}</DropdownMenuShortcut>
+                  </DropdownMenuCheckboxItem>
+                ))}
+                {tagFilter.length > 0 && (
+                  <>
+                    <DropdownMenuSeparator />
+                    <DropdownMenuItem onSelect={() => setTagFilter([])}>Clear</DropdownMenuItem>
+                  </>
+                )}
+              </DropdownMenuContent>
+            </DropdownMenu>
+            <span className="text-sm text-muted-foreground">
+              {filtered || folderId
+                ? `${shown.length} of ${plural(all.length, "session")}`
+                : plural(all.length, "session")}
+            </span>
+          </>
+        )}
       </PageHeader>
       <div className="flex min-h-0 flex-col gap-4 md:flex-row">
         <aside className="flex shrink-0 flex-col gap-1 md:w-60">
@@ -415,6 +453,10 @@ export function SessionsPage({ vault, onVaultChanged, onOpenVault, onConnect, ac
               >
                 <DropdownMenuItem onSelect={() => setDialog({ kind: "folderDefaults", folder })}>
                   Defaults…
+                </DropdownMenuItem>
+                <DropdownMenuItem onSelect={() => requestLink(noteLink("folder", folder.id, folder.name))}>
+                  <NotebookPenIcon />
+                  Note…
                 </DropdownMenuItem>
                 <DropdownMenuItem onSelect={() => setDialog({ kind: "newFolder", parentId: folder.id })}>
                   New folder inside…
@@ -492,6 +534,24 @@ export function SessionsPage({ vault, onVaultChanged, onOpenVault, onConnect, ac
               <Table>
                 <TableHeader>
                   <TableRow>
+                    <TableHead className="w-10">
+                      <Checkbox
+                        aria-label="Select all shown sessions"
+                        checked={
+                          allShownSelected ? true : shown.some((s) => selected.has(s.id)) ? "indeterminate" : false
+                        }
+                        onCheckedChange={() =>
+                          setSelected((prev) => {
+                            const next = new Set(prev);
+                            for (const s of shown) {
+                              if (allShownSelected) next.delete(s.id);
+                              else next.add(s.id);
+                            }
+                            return next;
+                          })
+                        }
+                      />
+                    </TableHead>
                     <TableHead>Name</TableHead>
                     <TableHead>Address</TableHead>
                     <TableHead>Login</TableHead>
@@ -513,16 +573,25 @@ export function SessionsPage({ vault, onVaultChanged, onOpenVault, onConnect, ac
                       <TableRow
                         key={s.id}
                         id={`session-row-${s.id}`}
+                        data-state={selected.has(s.id) ? "selected" : undefined}
                         className={cn(
-                          "select-none",
+                          "group select-none",
                           applied.environment === "prod" && "bg-env-prod/5",
                           lit === s.id && "bg-accent ring-2 ring-ring ring-inset",
                         )}
                         onDoubleClick={() => connect(s)}
                       >
+                        <TableCell onDoubleClick={(e) => e.stopPropagation()}>
+                          <Checkbox
+                            aria-label={`Select ${s.name}`}
+                            checked={selected.has(s.id)}
+                            onCheckedChange={() => toggleSelected(s.id)}
+                          />
+                        </TableCell>
                         <TableCell className="whitespace-normal">
                           <div className="flex flex-wrap items-center gap-1.5 font-medium">
                             <span className="inline-flex items-center gap-1.5">
+                              <StarButton kind="session" itemKey={s.id} name={s.name} className="-ml-1" />
                               <ColorDot color={s.color} />
                               {s.name}
                             </span>
@@ -606,6 +675,9 @@ export function SessionsPage({ vault, onVaultChanged, onOpenVault, onConnect, ac
                               <DropdownMenuItem onSelect={() => setHostDetails({ id: s.id, name: s.name })}>
                                 Host details…
                               </DropdownMenuItem>
+                              <DropdownMenuItem onSelect={() => requestLink(noteLink("session", s.id, s.name))}>
+                                Note…
+                              </DropdownMenuItem>
                               <DropdownMenuItem onSelect={() => void duplicate(s)}>Duplicate</DropdownMenuItem>
                               <DropdownMenuSub>
                                 <DropdownMenuSubTrigger>Move to</DropdownMenuSubTrigger>
@@ -665,13 +737,15 @@ export function SessionsPage({ vault, onVaultChanged, onOpenVault, onConnect, ac
             title={`Delete '${dialog.session.name}'?`}
             description={
               all.some((s) => s.jumpSessionId === dialog.session.id)
-                ? "Sessions that use it as their jump host will connect directly afterwards. Its passwords and keys stay in the vault."
-                : "Its passwords and keys stay in the vault."
+                ? "Sessions that use it as their jump host will connect directly afterwards. It goes to the trash for 30 days; its passwords and keys stay in the vault."
+                : "It goes to the trash for 30 days, with its port forwards and note. Its passwords and keys stay in the vault."
             }
             confirmLabel="Delete"
             onConfirm={async () => {
-              await api.deleteSession(dialog.session.id);
+              const { id, name } = dialog.session;
+              await api.deleteSession(id);
               reload();
+              toastDeleted("session", id, name, reload);
             }}
             onClose={() => setDialog(null)}
           />
@@ -755,6 +829,19 @@ export function SessionsPage({ vault, onVaultChanged, onOpenVault, onConnect, ac
                 { description: report.path },
               )
             }
+            onClose={() => setDialog(null)}
+          />
+        )}
+        {dialog?.kind === "bulkEdit" && (
+          <BulkEditDialog
+            sessions={selectedSessions}
+            all={all}
+            folders={folders}
+            secrets={secrets}
+            onSaved={() => {
+              setSelected(new Set());
+              reload();
+            }}
             onClose={() => setDialog(null)}
           />
         )}

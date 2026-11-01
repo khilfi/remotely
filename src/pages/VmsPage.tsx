@@ -65,6 +65,9 @@ import { Alert, AlertAction, AlertDescription, AlertTitle } from "@/components/u
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
+import { StarButton } from "@/components/StarButton";
+import { isStarred, starredFirst } from "@/lib/stars";
+import { noteOpened, useStars } from "@/lib/stars-store";
 import {
   DropdownMenu,
   DropdownMenuCheckboxItem,
@@ -537,15 +540,23 @@ export function VmsPage({
   }, [readUsage]);
 
   const usageOf = useCallback((vm: VmRecord) => usage.get(keyOf(vm.vmxPath)), [usage]);
+  // QL-26: starred VMs first, and the filter's "Starred only".
+  const stars = useStars();
+  const [starredOnly, setStarredOnly] = useState(false);
   // The shown order. Selection and shift-click ranges follow it.
   const sorted = useMemo(() => {
-    if (sort.key === "name" && sort.dir === 1) return listed;
-    return [...listed].sort(
-      (a, b) =>
-        compareNullsLast(sortValue(a, sort.key, usageOf(a)), sortValue(b, sort.key, usageOf(b)), sort.dir) ||
-        a.displayName.localeCompare(b.displayName),
-    );
-  }, [listed, sort, usageOf]);
+    const starred = (vm: VmRecord) => isStarred(stars, "vm", vm.vmxPath);
+    const base = starredOnly ? listed.filter(starred) : listed;
+    const ordered =
+      sort.key === "name" && sort.dir === 1
+        ? base
+        : [...base].sort(
+            (a, b) =>
+              compareNullsLast(sortValue(a, sort.key, usageOf(a)), sortValue(b, sort.key, usageOf(b)), sort.dir) ||
+              a.displayName.localeCompare(b.displayName),
+          );
+    return starredFirst(ordered, starred);
+  }, [listed, sort, usageOf, stars, starredOnly]);
   // VM-08: a stack instance's VMs as a group under its header row, the other VMs after them.
   const groups = useMemo(() => groupByInstance(sorted, instances), [sorted, instances]);
   const vms = useMemo(() => groups.flatMap((g) => g.vms), [groups]);
@@ -661,6 +672,8 @@ export function VmsPage({
   function toggleDetails(vmxPath: string) {
     setNotice(null);
     setDetail((open) => (open === vmxPath ? null : vmxPath));
+    // QL-26: a VM's details opened go to the top of Ctrl+K's Recent.
+    noteOpened("vm", vmxPath);
   }
 
   function sortBy(key: SortKey) {
@@ -904,7 +917,7 @@ export function VmsPage({
   const sharedLabel = selectedLabels.size === 1 ? [...selectedLabels][0] : "";
   const missingWorkstation = warnings.some((w) => w.code === "vmrun_not_found");
   const virtualboxTrouble = warnings.some((w) => w.code.startsWith("vboxmanage"));
-  const filtered = !isEmptyFilter(filter);
+  const filtered = !isEmptyFilter(filter) || starredOnly;
   const oldAfterDays = limits?.oldAfterDays ?? 30;
   // UX-02: More shows only what applies to the selection.
   const more = moreGroups(selectedVms, {
@@ -1095,6 +1108,7 @@ export function VmsPage({
       head: sortHead("name", "Name", "min-w-40"),
       cell: (vm) => (
         <div className="flex min-w-0 flex-wrap items-center gap-1.5">
+          <StarButton kind="vm" itemKey={vm.vmxPath} name={vm.displayName} className="-ml-1" />
           <Tooltip>
             <TooltipTrigger asChild>
               <button
@@ -1382,6 +1396,8 @@ export function VmsPage({
               onApplySaved={(saved) => void selectMatching(saved.filter)}
               onSaveCurrent={() => setDialog({ kind: "saveFilter" })}
               onDeleteSaved={(saved) => void deleteSaved(saved)}
+              starredOnly={starredOnly}
+              onStarredOnly={setStarredOnly}
             />
             <span className="ml-auto text-sm whitespace-nowrap text-muted-foreground">
               {filtered ? `${vms.length} of ${plural(total.vms, "VM")}` : plural(total.vms, "VM")} · {total.running}{" "}
@@ -1543,7 +1559,7 @@ export function VmsPage({
                               data-state={selected.has(vm.vmxPath) ? "selected" : undefined}
                               onClick={(e) => toggle(i, e)}
                               className={cn(
-                                "select-none",
+                                "group select-none",
                                 detail === vm.vmxPath && "shadow-[inset_3px_0_0_var(--color-primary)]",
                               )}
                             >

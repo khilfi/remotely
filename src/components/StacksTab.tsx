@@ -6,6 +6,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
+import { toastDeleted } from "@/lib/undo-delete";
 import {
   CopyIcon,
   LayersIcon,
@@ -303,12 +304,14 @@ export function StacksTab({
           description={
             dialog.stack.instances > 0
               ? `Its ${plural(dialog.stack.instances, "instance")} stay${dialog.stack.instances === 1 ? "s" : ""}, with their VMs.`
-              : "Only the stack goes; no VM is touched."
+              : "Only the stack goes, to the trash for 30 days; no VM is touched."
           }
           confirmLabel="Delete"
           onConfirm={async () => {
-            await stacksApi.remove(dialog.stack.id);
+            const { id, name } = dialog.stack;
+            await stacksApi.remove(id);
             load();
+            toastDeleted("stack", id, name, load);
           }}
           onClose={() => setDialog(null)}
         />
