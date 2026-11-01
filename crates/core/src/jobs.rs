@@ -2288,7 +2288,7 @@ impl JobRunner {
                 winrm.username.as_deref().unwrap_or("").to_lowercase(),
                 winrm.password_id
             );
-            match guard.winrm_gate_role(&account).await {
+            match guard.winrm_gate_role(winrm.id, &account).await {
                 GateRole::Skip => {
                     return Err(CoreError::AuthFailed(format!(
                         "skipped: a host with the same login ('{}') had its sign-in refused, so it wasn't tried again \
