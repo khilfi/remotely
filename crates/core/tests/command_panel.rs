@@ -276,7 +276,7 @@ async fn favourites_are_reordered_within_their_folder_and_deleted() {
     )));
     assert!(log.contains(&(
         "Deleted the favourite command 'A'".into(),
-        "from the folder 'Web'".into()
+        "from the folder 'Web'; moved to the trash for 30 days".into()
     )));
 }
 
