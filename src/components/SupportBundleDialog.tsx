@@ -225,7 +225,9 @@ export function SupportBundleDialog({ sessionIds, vault, onSubmit, onOpenSession
             <HelpTip topic="supportBundle" />
           </DialogTitle>
           <DialogDescription>
-            The same commands&apos; output and files from each host, in one zip with a manifest.
+            {jobId && !ended
+              ? "The zip is saved once every host is done. Cancel saves nothing."
+              : "The same commands' output and files from each host, in one zip with a manifest."}
           </DialogDescription>
         </DialogHeader>
 

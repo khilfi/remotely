@@ -26,7 +26,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-pub use collect::{BundleHost, FileRead, HostReport, SshHost};
+pub use collect::{BundleHost, FileRead, HostReport, ItemLimits, SshHost};
 pub use presets::{HostKind, PresetId, PresetView};
 pub use runner::{BundleActions, BundleRunner};
 pub use spec::{BundleItem, BundleSpec, MAX_BUNDLE_BYTES, MAX_FILE_BYTES, MAX_HOST_BYTES, MAX_ITEMS};

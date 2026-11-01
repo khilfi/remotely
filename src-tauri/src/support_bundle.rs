@@ -8,6 +8,7 @@
 use std::path::PathBuf;
 
 use remotely_core::command_bus::{CommandPreview, SubmitOutcome};
+use remotely_core::support_bundle::spec::zip_path;
 use remotely_core::support_bundle::{BundleLimits, BundleRequest, PresetView, LIMITS};
 use remotely_core::CoreError;
 use tauri::{Manager, State, WebviewWindow};
@@ -68,12 +69,11 @@ pub async fn bundle_submit(
     let Some(chosen) = rx.await.ok().flatten() else {
         return Ok(None);
     };
-    let mut output: PathBuf = chosen
+    let chosen: PathBuf = chosen
         .into_path()
         .map_err(|err| CoreError::InvalidInput(format!("can't use that file: {err}")))?;
-    if !output.extension().is_some_and(|e| e.eq_ignore_ascii_case("zip")) {
-        output.set_extension("zip");
-    }
+    // A name given `.zip` here never replaces a file the dialog didn't ask about.
+    let output = zip_path(&chosen)?;
     Ok(Some(core.bundles.submit(&ctx, &request, &output).await?))
 }
 

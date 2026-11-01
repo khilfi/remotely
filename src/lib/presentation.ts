@@ -114,6 +114,11 @@ const PROFILE_RE =
 /** /home/<name> on a Linux host. */
 const HOME_RE = /(?<![\w.~-])\/home\/([A-Za-z0-9_][A-Za-z0-9._-]{0,63})(?![\w-])/g;
 const STAND_IN_RE = /^(?:host|ip|user|mac|workspace)-\d+$/;
+/**
+ * FD-04: a support bundle's file name, `remotely-bundle-<workspace>-<UTC time>.zip`. The workspace's name is in it as
+ * its words joined by hyphens (`workspaceSlug`), which the phrase matcher can't see, so this finds it by its place.
+ */
+const BUNDLE_NAME_RE = /(?<![\p{L}\p{N}_.-])remotely-bundle-([\p{L}\p{N}-]{1,80}?)-\d{8}T\d{6}Z/gu;
 /** MO-13: six hex pairs split by colons or by hyphens (not mixed). */
 const MAC_RE = /(?<![\w:.-])[0-9A-Fa-f]{2}([:-])(?:[0-9A-Fa-f]{2}\1){4}[0-9A-Fa-f]{2}(?![\w:.-])/g;
 
@@ -212,6 +217,15 @@ export function hostPart(name: string): string | null {
   const host = labels.join(".");
   if (TLDS.has(last) || last.length === 2) return host;
   return labels.length >= 3 ? host : null;
+}
+
+/**
+ * FD-04: a workspace's name as a support bundle's file name holds it (the core's `default_file_name`): its words
+ * (letters and digits) joined by hyphens, at most 40 characters.
+ */
+export function workspaceSlug(name: string): string {
+  const words = name.split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+  return Array.from(words.join("-")).slice(0, 40).join("");
 }
 
 /** A value found in a text; `value` gets its stand-in only once the candidates are chosen, so they number in order. */
@@ -359,6 +373,7 @@ export class Masker {
     this.ipv6(text, found);
     this.ipv4(text, found);
     this.names(text, found);
+    this.bundleNames(text, found);
     this.knownWords(text, found);
     if (found.length === 0) return [];
     found.sort((a, b) => a.start - b.start || b.end - a.end);
@@ -479,6 +494,25 @@ export class Masker {
         start,
         end: start + host.length,
         parts: [{ start, end: start + host.length, kind: "host", value: host }],
+      });
+    }
+  }
+
+  /**
+   * FD-04: the workspace in a support bundle's file name, whether or not the name is known yet: a known workspace's
+   * name gets its own stand-in, so the file name and the top bar show the same one.
+   */
+  private bundleNames(text: string, found: Candidate[]) {
+    for (const m of text.matchAll(BUNDLE_NAME_RE)) {
+      const slug = m[1] ?? "";
+      if (this.issued.has(slug)) continue;
+      const known = [...this.known.workspace].find((w) => workspaceSlug(w).toLowerCase() === slug.toLowerCase());
+      const at = m.index ?? 0;
+      const start = at + "remotely-bundle-".length;
+      found.push({
+        start: at,
+        end: start + slug.length,
+        parts: [{ start, end: start + slug.length, kind: "workspace", value: known ?? slug }],
       });
     }
   }

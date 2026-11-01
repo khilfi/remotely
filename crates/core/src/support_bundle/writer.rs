@@ -13,7 +13,10 @@ use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, DateTime, ZipWriter};
 
 use super::presets::{self, PresetId};
-use super::spec::{safe_name, unique, BundleItem, BundleSpec, MAX_BUNDLE_BYTES, MAX_FILE_BYTES, MAX_HOST_BYTES};
+use super::spec::{
+    safe_name, unique, BundleItem, BundleSpec, COMMAND_LIMIT_SECS, FILE_LIMIT_SECS, MAX_BUNDLE_BYTES, MAX_FILE_BYTES,
+    MAX_HOST_BYTES,
+};
 use crate::domain::{now_rfc3339, Target};
 use crate::error::{CoreError, Result};
 use crate::export::redact_secrets;
@@ -80,12 +83,17 @@ pub struct Caps {
     pub file_bytes: u64,
     pub host_bytes: u64,
     pub bundle_bytes: u64,
+    /// Seconds one command may run, and one file's read take, before the host goes on without it.
+    pub command_secs: u64,
+    pub file_secs: u64,
 }
 
 pub const CAPS: Caps = Caps {
     file_bytes: MAX_FILE_BYTES,
     host_bytes: MAX_HOST_BYTES,
     bundle_bytes: MAX_BUNDLE_BYTES,
+    command_secs: COMMAND_LIMIT_SECS,
+    file_secs: FILE_LIMIT_SECS,
 };
 
 #[derive(Serialize)]
@@ -108,6 +116,32 @@ struct Manifest<'a> {
     /// Everything cut or left out, one line each.
     cut: Vec<String>,
     hosts: &'a [HostRecord],
+}
+
+/// Bytes of the bundle's cap held for one file ([`OpenBundle::hold`]). What isn't kept goes back when it is dropped.
+pub struct Reservation {
+    bundle: Arc<OpenBundle>,
+    held: u64,
+}
+
+impl Reservation {
+    /// The bytes held: at most what the file may keep.
+    pub fn granted(&self) -> u64 {
+        self.held
+    }
+
+    /// Keeps `bytes` of it for good (what the file stored); the rest goes back now.
+    pub fn keep(mut self, bytes: u64) {
+        self.held = self.held.saturating_sub(bytes);
+    }
+}
+
+impl Drop for Reservation {
+    fn drop(&mut self) {
+        if self.held > 0 {
+            self.bundle.release(self.held);
+        }
+    }
 }
 
 /// What [`OpenBundle::finish`] saved.
@@ -201,14 +235,43 @@ impl OpenBundle {
         *used = used.saturating_sub(bytes);
     }
 
-    /// Adds a file to the zip (blocking: call it on a blocking thread).
-    pub fn add(&self, name: &str, data: &[u8]) -> Result<()> {
+    /// [`Self::reserve`] as a guard: whatever becomes of the item (it fails, times out, or its host's work is dropped
+    /// by a time limit or a cancel), what it doesn't keep goes back.
+    pub fn hold(self: &Arc<Self>, want: u64) -> Reservation {
+        Reservation {
+            held: self.reserve(want),
+            bundle: Arc::clone(self),
+        }
+    }
+
+    /// Adds a host's file to the zip and its record to the manifest, together, under the zip's lock: the job's end
+    /// either sees both or neither, even when the item's own work was dropped meanwhile (blocking: call it on a
+    /// blocking thread). The reservation keeps the bytes written; a failed write gives them all back.
+    pub fn add_file(
+        &self,
+        key: &str,
+        entry: &str,
+        data: &[u8],
+        mut record: ItemRecord,
+        reservation: Reservation,
+    ) -> Result<()> {
         let mut zip = locks::lock(&self.zip);
-        let zip = zip
-            .as_mut()
-            .ok_or_else(|| CoreError::InvalidInput("the bundle was closed".into()))?;
-        zip.start_file(name, options()).map_err(zip_error)?;
-        zip.write_all(data)?;
+        let written = match zip.as_mut() {
+            Some(zip) => zip
+                .start_file(entry, options())
+                .map_err(zip_error)
+                .and_then(|()| zip.write_all(data).map_err(CoreError::from)),
+            None => Err(CoreError::InvalidInput("the bundle was closed".into())),
+        };
+        if let Err(err) = &written {
+            record.error = Some(redact_secrets(&err.to_string()).0);
+            self.record_item(key, record);
+            return written;
+        }
+        record.file = Some(entry.to_owned());
+        record.bytes = data.len() as u64;
+        reservation.keep(record.bytes);
+        self.record_item(key, record);
         Ok(())
     }
 

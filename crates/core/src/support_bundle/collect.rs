@@ -7,18 +7,23 @@
 //! * Every file is text and scrubbed: the connection's vault secrets (the login and sudo passwords) through
 //!   `exec_output`'s scrubber, then what looks like a password, a token or a private key ([`redact_secrets`] and PEM
 //!   blocks). A file that isn't text (a NUL byte in it) can't be checked, so it is left out.
-//! * A command that fails (an exit code, not found) or a file that can't be read is noted, and the host goes on; a
-//!   connection that drops, or sudo refusing its password, ends the host.
+//! * A command that fails (an exit code, not found), takes longer than [`COMMAND_LIMIT_SECS`], or a file that can't be
+//!   read within [`FILE_LIMIT_SECS`] is noted, and the host goes on; a connection that drops, or sudo refusing its
+//!   password, ends the host.
+//! * However an item ends, even when its host's work is dropped part way (the host's time limit, a cancel), the bytes
+//!   it held of the bundle's cap go back ([`super::writer::Reservation`]), and a file goes into the zip only with its
+//!   manifest record ([`OpenBundle::add_file`]).
 
 use std::net::IpAddr;
 use std::sync::{Arc, LazyLock};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use regex::Regex;
 use sha2::{Digest, Sha256};
 
 use super::presets::HostKind;
-use super::spec::{BundleItem, MAX_BUNDLE_BYTES, MAX_FILE_BYTES, MAX_HOST_BYTES};
+use super::spec::{BundleItem, COMMAND_LIMIT_SECS, FILE_LIMIT_SECS, MAX_BUNDLE_BYTES, MAX_FILE_BYTES, MAX_HOST_BYTES};
 use super::writer::{blocking, ItemRecord, OpenBundle};
 use crate::adapters::exec_output::{human_bytes, Scrubber, REDACTED};
 use crate::adapters::remote::{EntryKind, ExecResult, ExecSession, RemoteFiles};
@@ -170,11 +175,34 @@ pub struct HostReport {
     pub lines: Vec<String>,
 }
 
-/// PEM private keys: a whole block, or one cut off at the end of what was kept.
+/// Private keys, in the order they are redacted: a PEM or PGP block (`-----BEGIN … PRIVATE KEY-----`, `-----BEGIN PGP
+/// PRIVATE KEY BLOCK-----`), whole or cut off at the end of what was kept; the lines before an END whose BEGIN was cut
+/// away (an output cut in its middle); PuTTY's `.ppk` private lines; kubeconfig's `client-key-data`. Constant
+/// patterns, compiled by the tests below; `expect` can't fire on what a host gives.
 #[allow(clippy::expect_used)]
-static PRIVATE_KEY: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?s)(-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----).*?(-----END [A-Z0-9 ]*PRIVATE KEY-----|\z)")
-        .expect("valid private key pattern")
+static PRIVATE_KEYS: LazyLock<Vec<(Regex, String)>> = LazyLock::new(|| {
+    const KIND: &str = r"[A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?";
+    [
+        (
+            format!(r"(?s)(-----BEGIN {KIND}-----).*?(-----END {KIND}-----|\z)"),
+            format!("${{1}}\n{REDACTED}\n${{2}}"),
+        ),
+        (
+            format!(r"(?m)(?:^[A-Za-z0-9+/=]{{4,}}\r?\n)+(-----END {KIND}-----)"),
+            format!("{REDACTED}\n${{1}}"),
+        ),
+        (
+            r"(?s)(Private-Lines:[ \t]*\d+[ \t]*\r?\n).*?(\r?\nPrivate-(?:MAC|Hash):|\z)".to_owned(),
+            format!("${{1}}{REDACTED}${{2}}"),
+        ),
+        (
+            r#"(?i)(client-key-data["']?[ \t]*:[ \t]*["']?)[A-Za-z0-9+/=]+"#.to_owned(),
+            format!("${{1}}{REDACTED}"),
+        ),
+    ]
+    .into_iter()
+    .map(|(pattern, with)| (Regex::new(&pattern).expect("valid private key pattern"), with))
+    .collect()
 });
 
 /// Scrubs the connection's secrets from `bytes`, then redacts what looks like a password, a token or a private key.
@@ -185,9 +213,13 @@ pub fn redact(bytes: &[u8], secrets: &[SecretString]) -> (String, usize) {
     let mut out = Vec::with_capacity(bytes.len());
     scrubber.push(bytes, &mut out);
     scrubber.finish(&mut out);
-    let text = String::from_utf8_lossy(&out);
-    let keys = PRIVATE_KEY.replace_all(&text, format!("${{1}}\n{REDACTED}\n${{2}}"));
-    let (text, _) = redact_secrets(&keys);
+    let mut text = String::from_utf8_lossy(&out).into_owned();
+    for (re, with) in PRIVATE_KEYS.iter() {
+        if re.is_match(&text) {
+            text = re.replace_all(&text, with.as_str()).into_owned();
+        }
+    }
+    let (text, _) = redact_secrets(&text);
     let count = text.matches(REDACTED).count();
     (text, count)
 }
@@ -223,14 +255,51 @@ fn no_room(host_left: u64) -> String {
     }
 }
 
-/// Collects `items` (saved under `names` in the host's folder) from one host into the bundle. An error means the
-/// host stopped (its connection dropped, sudo refused its password); what it gave until then stays in the bundle.
+/// How long one item may take before its host goes on without it ([`COMMAND_LIMIT_SECS`], [`FILE_LIMIT_SECS`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ItemLimits {
+    pub command: Duration,
+    pub file: Duration,
+}
+
+impl Default for ItemLimits {
+    fn default() -> Self {
+        Self {
+            command: Duration::from_secs(COMMAND_LIMIT_SECS),
+            file: Duration::from_secs(FILE_LIMIT_SECS),
+        }
+    }
+}
+
+/// Why an item gave nothing: on its own (the host goes on), or because the host can't go on.
+enum Failure {
+    Item(String),
+    Host(CoreError),
+}
+
+impl Failure {
+    /// A run's or read's error: the host stops when its connection dropped or sudo refused its password.
+    fn of(err: CoreError, host: &dyn BundleHost) -> Self {
+        if matches!(err, CoreError::SudoPasswordRefused) || host.lost() {
+            Failure::Host(err)
+        } else {
+            Failure::Item(redact_secrets(&err.to_string()).0)
+        }
+    }
+}
+
+/// Collects `items` (saved under `names` in the host's folder) from one host into the bundle. An item that takes longer
+/// than its limit is noted as timed out and the host goes on. An error means the host stopped (its connection
+/// dropped, sudo refused its password); what it gave until then stays in the bundle. Dropped part way (the host's time
+/// limit, a cancel), it leaves the bundle as it was after its last whole item: every file in the zip has its record,
+/// and the bytes of the item it was on go back to the bundle's cap.
 pub async fn collect_host(
     bundle: &Arc<OpenBundle>,
     key: &str,
     host: &dyn BundleHost,
     items: &[BundleItem],
     names: &[String],
+    limits: ItemLimits,
 ) -> Result<HostReport> {
     let folder = bundle
         .folder(key)
@@ -251,7 +320,9 @@ pub async fn collect_host(
             ..ItemRecord::default()
         };
         let host_left = MAX_HOST_BYTES.saturating_sub(report.bytes);
-        let granted = bundle.reserve(MAX_FILE_BYTES.min(host_left));
+        // Given back as it drops, however this item ends.
+        let reservation = bundle.hold(MAX_FILE_BYTES.min(host_left));
+        let granted = reservation.granted();
         if granted == 0 {
             record.error = Some(no_room(host_left));
             report.failed += 1;
@@ -259,36 +330,26 @@ pub async fn collect_host(
             bundle.record_item(key, record);
             continue;
         }
-        let bytes = match item {
+        let got = match item {
             BundleItem::Command { command } => {
                 let max = usize::try_from(granted.saturating_sub(CUT_NOTE_ROOM).max(1)).unwrap_or(usize::MAX);
-                match host.run(command, max).await {
-                    Ok(result) => command_text(result, &mut record),
-                    Err(err) => {
-                        bundle.release(granted);
-                        if matches!(err, CoreError::SudoPasswordRefused) || host.lost() {
-                            bundle.record_item(key, failed(record, &err));
-                            return Err(err);
-                        }
-                        report.failed += 1;
-                        report.lines.push(format!("{source}: {err}"));
-                        bundle.record_item(key, failed(record, &err));
-                        continue;
-                    }
+                match tokio::time::timeout(limits.command, host.run(command, max)).await {
+                    Ok(Ok(result)) => Ok(command_text(result, &mut record)),
+                    Ok(Err(err)) => Err(Failure::of(err, host)),
+                    Err(_) => Err(Failure::Item(format!(
+                        "timed out after {}; it may still be running on the host",
+                        seconds(limits.command)
+                    ))),
                 }
             }
-            BundleItem::File { path } => match host.read(path, granted).await {
-                Ok(read) if read.bytes.contains(&0) => {
-                    bundle.release(granted);
-                    let why = "left out: it isn't text, so Remotely can't check it for secrets";
-                    record.error = Some(why.into());
+            BundleItem::File { path } => match tokio::time::timeout(limits.file, host.read(path, granted)).await {
+                Ok(Ok(read)) if read.bytes.contains(&0) => {
                     record.original_bytes = Some(read.size);
-                    report.failed += 1;
-                    report.lines.push(format!("{source}: {why}"));
-                    bundle.record_item(key, record);
-                    continue;
+                    Err(Failure::Item(
+                        "left out: it isn't text, so Remotely can't check it for secrets".into(),
+                    ))
                 }
-                Ok(read) => {
+                Ok(Ok(read)) => {
                     if read.more {
                         record.original_bytes = Some(read.size);
                         record.cut = Some(format!(
@@ -297,20 +358,29 @@ pub async fn collect_host(
                             human_bytes(read.bytes.len())
                         ));
                     }
-                    read.bytes
+                    Ok(read.bytes)
                 }
-                Err(err) => {
-                    bundle.release(granted);
-                    if host.lost() {
-                        bundle.record_item(key, failed(record, &err));
-                        return Err(err);
-                    }
-                    report.failed += 1;
-                    report.lines.push(format!("{source}: {err}"));
-                    bundle.record_item(key, failed(record, &err));
-                    continue;
-                }
+                Ok(Err(err)) => Err(Failure::of(err, host)),
+                Err(_) => Err(Failure::Item(format!(
+                    "timed out after {} reading it",
+                    seconds(limits.file)
+                ))),
             },
+        };
+        let bytes = match got {
+            Ok(bytes) => bytes,
+            Err(Failure::Item(why)) => {
+                report.failed += 1;
+                report.lines.push(format!("{source}: {why}"));
+                record.error = Some(why);
+                bundle.record_item(key, record);
+                continue;
+            }
+            Err(Failure::Host(err)) => {
+                record.error = Some(redact_secrets(&err.to_string()).0);
+                bundle.record_item(key, record);
+                return Err(err);
+            }
         };
         let (mut text, redacted) = redact(&bytes, host.secrets());
         if fit(&mut text, granted, "a file keeps at most what fits the bundle's limits") {
@@ -324,33 +394,31 @@ pub async fn collect_host(
         }
         let data = text.into_bytes();
         let stored = data.len() as u64;
-        let sha256 = hex::encode(Sha256::digest(&data));
-        bundle.release(granted.saturating_sub(stored));
-        let entry = format!("{folder}/{name}");
-        let written = {
-            let entry = entry.clone();
-            blocking(bundle, move |b| b.add(&entry, &data)).await
-        };
-        if let Err(err) = written {
-            bundle.release(stored);
-            bundle.record_item(key, failed(record, &err));
-            return Err(err);
-        }
-        record.file = Some(entry);
-        record.bytes = stored;
-        record.sha256 = Some(sha256);
+        record.sha256 = Some(hex::encode(Sha256::digest(&data)));
         record.redacted = redacted;
+        record.bytes = stored;
+        let line = describe(&record);
+        let entry = format!("{folder}/{name}");
+        let key = key.to_owned();
+        // The file and its record go in together, on a blocking thread that finishes even if this is dropped.
+        blocking(bundle, move |b| b.add_file(&key, &entry, &data, record, reservation)).await?;
         report.saved += 1;
         report.bytes += stored;
-        report.lines.push(describe(&record));
-        bundle.record_item(key, record);
+        report.lines.push(line);
     }
     Ok(report)
 }
 
-fn failed(mut record: ItemRecord, err: &CoreError) -> ItemRecord {
-    record.error = Some(redact_secrets(&err.to_string()).0);
-    record
+/// "60 s", "3 min".
+fn seconds(limit: Duration) -> String {
+    let secs = limit.as_secs();
+    if secs >= 120 && secs.is_multiple_of(60) {
+        format!("{} min", secs / 60)
+    } else if secs == 0 {
+        format!("{} ms", limit.as_millis())
+    } else {
+        format!("{secs} s")
+    }
 }
 
 /// A command's output as one text: stdout, then stderr under a line that says so.
@@ -419,6 +487,44 @@ mod tests {
         assert!(clean.contains(&format!("-----BEGIN {kind}-----\n[redacted]\n-----END {kind}-----")));
         assert!(clean.ends_with("ok\n"));
         assert_eq!(count, 3);
+    }
+
+    #[test]
+    fn pgp_putty_kubeconfig_and_headless_keys_are_redacted() {
+        // Built at run time, so no key-shaped text sits in the repository.
+        let pgp = "PGP PRIVATE KEY BLOCK";
+        let text = format!(
+            "a\n-----BEGIN {pgp}-----\n\nlQOYBGXYZ0123456789abcdefgh\n=Ab12\n-----END {pgp}-----\nb\n\
+             PuTTY-User-Key-File-3: ssh-ed25519\nPublic-Lines: 2\nAAAApublicpart\nAAAApublic2\nPrivate-Lines: 1\n\
+             AAAAIsecretpart0123\nPrivate-MAC: 0f0f\n\
+             users:\n- user:\n    client-key-data: LS0tLS1CRUdJTiBSU0E=\n    token: sha256~abc\n"
+        );
+        let (clean, count) = redact(text.as_bytes(), &[]);
+        for secret in [
+            "lQOYBGXYZ",
+            "=Ab12",
+            "AAAAIsecretpart",
+            "LS0tLS1CRUdJTiBSU0E",
+            "sha256~abc",
+        ] {
+            assert!(!clean.contains(secret), "{secret} in {clean}");
+        }
+        assert!(clean.contains("AAAApublicpart"), "the public half stays");
+        assert!(clean.contains(&format!("-----BEGIN {pgp}-----\n[redacted]\n-----END {pgp}-----")));
+        assert!(
+            clean.contains("Private-Lines: 1\n[redacted]\nPrivate-MAC: 0f0f"),
+            "{clean}"
+        );
+        assert_eq!(count, 4, "{clean}");
+
+        // An output cut in its middle lost the key's BEGIN line: the lines before its END go.
+        let kind = "RSA PRIVATE KEY";
+        let tail = format!("… [Remotely cut 2 MB from the middle] …\nQ2hhbmdlZEtleUJvZHk=\nTWlkZGxlTGluZQ==\n-----END {kind}-----\nok\n");
+        let (clean, count) = redact(tail.as_bytes(), &[]);
+        assert!(!clean.contains("Q2hhbmdl") && !clean.contains("TWlkZGxl"), "{clean}");
+        assert!(clean.starts_with("… [Remotely cut 2 MB from the middle] …\n[redacted]\n-----END"));
+        assert!(clean.ends_with("ok\n"));
+        assert_eq!(count, 1);
     }
 
     #[test]

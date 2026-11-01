@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use uuid::Uuid;
 
-use super::collect::{collect_host, BundleHost, HostReport};
+use super::collect::{collect_host, BundleHost, HostReport, ItemLimits};
 use super::spec::{entry_names, BundleSpec};
 use super::writer::{blocking, OpenBundle, Saved};
 use crate::adapters::exec_output::human_bytes;
@@ -120,7 +120,15 @@ impl BundleActions for BundleRunner {
         let bundle = self.bundle(job_id)?;
         let items = bundle.spec().items.clone();
         let names = entry_names(&items);
-        collect_host(&bundle, &target.target.key(), host, &items, &names).await
+        collect_host(
+            &bundle,
+            &target.target.key(),
+            host,
+            &items,
+            &names,
+            ItemLimits::default(),
+        )
+        .await
     }
 
     fn host_finished(&self, job_id: Uuid, target: &str, status: TargetStatus, error: Option<&str>) {

@@ -103,13 +103,16 @@ where
 }
 
 /// [`write_atomically`] for a file written bit by bit over a long time (FD-04: a support bundle's zip, as each host
-/// gives its files): the same `<name>.part` beside `path`, which takes its name on [`AtomicFile::commit`] and is
-/// removed when dropped without it (a failed or cancelled job), so no half file is left behind. Blocking I/O: use
-/// it on a blocking thread.
+/// gives its files): the same `<name>.part` beside `path`, which takes its name on [`AtomicFile::commit`]. Whatever
+/// else happens (dropped without a commit by a failed or cancelled job, or a commit that fails: the disk is full, or
+/// the old file of that name is open in another program), the `.part` is removed, so no half file and no copy of the
+/// data is left behind. Blocking I/O: use it on a blocking thread.
 pub struct AtomicFile {
     path: PathBuf,
     temp: PathBuf,
     file: Option<std::fs::File>,
+    /// The `.part` took its name: nothing is left to remove.
+    committed: bool,
 }
 
 impl AtomicFile {
@@ -120,6 +123,7 @@ impl AtomicFile {
             path: path.to_owned(),
             temp,
             file: Some(file),
+            committed: false,
         })
     }
 
@@ -129,12 +133,16 @@ impl AtomicFile {
             .ok_or_else(|| std::io::Error::other("the file was closed"))
     }
 
-    /// Writes what is buffered to the disk and gives the file its name.
+    /// Writes what is buffered to the disk and gives the file its name (replacing a file of that name, which the save
+    /// dialog asked about). On an error the `.part` is removed when this is dropped.
     pub fn commit(mut self) -> Result<()> {
         if let Some(file) = self.file.take() {
             file.sync_all()?;
+            // Closed before the rename: Windows doesn't rename an open file.
+            drop(file);
         }
         std::fs::rename(&self.temp, &self.path)?;
+        self.committed = true;
         Ok(())
     }
 }
@@ -157,8 +165,9 @@ impl std::io::Seek for AtomicFile {
 
 impl Drop for AtomicFile {
     fn drop(&mut self) {
-        // Not committed: the half file goes (closed first, so Windows lets it go).
-        if self.file.take().is_some() {
+        // Not committed, or the commit failed: the `.part` goes (closed first, so Windows lets it go).
+        drop(self.file.take());
+        if !self.committed {
             let _ = std::fs::remove_file(&self.temp);
         }
     }
@@ -227,6 +236,24 @@ mod tests {
         file.commit().unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), b"whole");
         assert!(!part.exists());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_commit_that_fails_leaves_no_part_behind() {
+        use std::io::Write;
+        let dir = std::env::temp_dir().join(format!("remotely-atomic-fail-{}", Uuid::new_v4()));
+        // A folder where the file should go: the rename fails, as it does over a file another program holds open.
+        let path = dir.join("bundle.zip");
+        std::fs::create_dir_all(&path).unwrap();
+        let mut file = AtomicFile::create(&path).unwrap();
+        file.write_all(b"every host's logs").unwrap();
+        assert!(file.commit().is_err());
+        assert!(
+            !dir.join("bundle.zip.part").exists(),
+            "the copy of the data went with the failure"
+        );
+        assert!(path.is_dir(), "what was there is left as it was");
         let _ = std::fs::remove_dir_all(dir);
     }
 }

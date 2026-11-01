@@ -23,6 +23,11 @@ pub const MAX_HOST_BYTES: u64 = 100 * 1024 * 1024;
 pub const MAX_BUNDLE_BYTES: u64 = 1024 * 1024 * 1024;
 /// The most commands and files one bundle collects from each host.
 pub const MAX_ITEMS: usize = 100;
+/// How long one command may run before it counts as timed out and the host goes on to its next item (a `df -h` on a
+/// stale NFS mount never ends).
+pub const COMMAND_LIMIT_SECS: u64 = 60;
+/// How long reading one file may take (up to 10 MB over SFTP) before the host goes on to its next item.
+pub const FILE_LIMIT_SECS: u64 = 180;
 /// The longest command a bundle runs.
 pub const MAX_COMMAND_BYTES: usize = 4 * 1024;
 /// The longest file path a bundle reads.
@@ -337,6 +342,24 @@ pub(crate) fn unique(taken: &mut HashSet<String>, base: &str, ext: &str) -> Stri
     }
 }
 
+/// The save dialog's choice as the bundle's path. A `.zip` is taken as chosen: the dialog asked before replacing a file
+/// of that name. Another name gets `.zip` in place of its extension (`report.txt` is `report.zip`), which the dialog
+/// never asked about, so a file there already is refused rather than replaced.
+pub fn zip_path(chosen: &Path) -> Result<std::path::PathBuf> {
+    if chosen.extension().is_some_and(|e| e.eq_ignore_ascii_case("zip")) {
+        return Ok(chosen.to_owned());
+    }
+    let mut path = chosen.to_owned();
+    path.set_extension("zip");
+    if path.exists() {
+        return Err(CoreError::InvalidInput(format!(
+            "{} is there already. Choose another name, or choose that file itself to replace it.",
+            path.display()
+        )));
+    }
+    Ok(path)
+}
+
 /// The zip's name the save dialog offers: `remotely-bundle-<workspace>-<UTC time>.zip`, the workspace's name made
 /// safe for a file name (`remotely-bundle-Acme-Lab-20261101T143000Z.zip`).
 pub fn default_file_name(workspace: &str, now: time::OffsetDateTime) -> String {
@@ -460,6 +483,23 @@ mod tests {
         assert_eq!(safe_name("", "host"), "host");
         assert_eq!(safe_name("evil\u{202e}txt", "host"), "evil_txt");
         assert_eq!(safe_name(&"a".repeat(300), "host").len(), 100);
+    }
+
+    #[test]
+    fn a_name_that_isnt_a_zip_never_replaces_a_file_unasked() {
+        let dir = std::env::temp_dir().join(format!("remotely-zip-path-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // Chosen as a .zip: the dialog asked about replacing it.
+        std::fs::write(dir.join("old.zip"), b"x").unwrap();
+        assert_eq!(zip_path(&dir.join("old.zip")).unwrap(), dir.join("old.zip"));
+        assert_eq!(zip_path(&dir.join("new.ZIP")).unwrap(), dir.join("new.ZIP"));
+        // `report.txt` becomes `report.zip`, which nobody was asked about.
+        assert_eq!(zip_path(&dir.join("report")).unwrap(), dir.join("report.zip"));
+        std::fs::write(dir.join("report.zip"), b"someone's report").unwrap();
+        let err = zip_path(&dir.join("report.txt")).unwrap_err();
+        assert!(err.to_string().contains("is there already"), "{err}");
+        assert_eq!(std::fs::read(dir.join("report.zip")).unwrap(), b"someone's report");
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

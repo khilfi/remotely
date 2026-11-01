@@ -31,7 +31,8 @@ use remotely_core::support_bundle::collect::collect_host;
 use remotely_core::support_bundle::spec::entry_names;
 use remotely_core::support_bundle::writer::OpenBundle;
 use remotely_core::support_bundle::{
-    BundleHost, BundleItem, BundleRequest, BundleSpec, FileRead, HostKind, PresetId, MAX_FILE_BYTES, MAX_HOST_BYTES,
+    BundleHost, BundleItem, BundleRequest, BundleSpec, FileRead, HostKind, ItemLimits, PresetId, MAX_BUNDLE_BYTES,
+    MAX_FILE_BYTES, MAX_HOST_BYTES,
 };
 use remotely_core::vault::{SecretKind, SecretString};
 use remotely_core::Core;
@@ -640,9 +641,16 @@ async fn a_host_stops_at_its_cap_and_the_rest_is_listed_as_left_out() {
         )
         .unwrap(),
     );
-    let report = collect_host(&bundle, &target.target.key(), &EndlessHost, &items, &names)
-        .await
-        .unwrap();
+    let report = collect_host(
+        &bundle,
+        &target.target.key(),
+        &EndlessHost,
+        &items,
+        &names,
+        ItemLimits::default(),
+    )
+    .await
+    .unwrap();
     assert_eq!(report.saved, per_host);
     assert_eq!(report.bytes, MAX_HOST_BYTES);
     assert_eq!(report.failed, 2, "the last file and the command");
@@ -665,12 +673,169 @@ async fn a_host_stops_at_its_cap_and_the_rest_is_listed_as_left_out() {
     let _ = std::fs::remove_dir_all(folder);
 }
 
+/// A host where the command `hang` and the file `/hang` never answer (a `df -h` on a stale NFS mount), and the rest
+/// answer at once.
+struct HangingHost;
+
+#[async_trait]
+impl BundleHost for HangingHost {
+    fn kind(&self) -> HostKind {
+        HostKind::Linux
+    }
+
+    fn address(&self) -> String {
+        "alice@web01.example.com:22".into()
+    }
+
+    fn peer_ip(&self) -> Option<IpAddr> {
+        None
+    }
+
+    async fn run(&self, command: &str, max_bytes: usize) -> CoreResult<ExecResult> {
+        if command == "hang" {
+            std::future::pending::<()>().await;
+        }
+        Ok(ExecResult {
+            exit_code: Some(0),
+            signal: None,
+            output: OutputCollector::collect(b"ok\n", b"", &[], max_bytes),
+            duration_ms: 1,
+            peer_ip: None,
+        })
+    }
+
+    async fn read(&self, path: &str, _: u64) -> CoreResult<FileRead> {
+        if path == "/hang" {
+            std::future::pending::<()>().await;
+        }
+        Ok(FileRead {
+            bytes: b"127.0.0.1 localhost\n".to_vec(),
+            size: 20,
+            more: false,
+        })
+    }
+
+    fn secrets(&self) -> &[SecretString] {
+        &[]
+    }
+
+    fn lost(&self) -> bool {
+        false
+    }
+}
+
+fn web01() -> Target {
+    Target {
+        target: TargetRef::Session {
+            session_id: Uuid::new_v4(),
+        },
+        name: "web01".into(),
+        environment: Environment::Lab,
+        protected: false,
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_item_that_hangs_times_out_and_the_host_goes_on() {
+    let folder = temp_folder("bundle-hang");
+    let output = folder.join("bundle.zip");
+    let items = vec![
+        BundleItem::command("hang"),
+        BundleItem::command("uptime"),
+        BundleItem::file("/hang"),
+        BundleItem::file("/etc/hosts"),
+    ];
+    let names = entry_names(&items);
+    let target = web01();
+    let bundle = Arc::new(
+        OpenBundle::create(
+            Uuid::new_v4(),
+            &spec(items.clone(), &output),
+            std::slice::from_ref(&target),
+        )
+        .unwrap(),
+    );
+    let limits = ItemLimits {
+        command: Duration::from_millis(150),
+        file: Duration::from_millis(150),
+    };
+    let report = collect_host(&bundle, &target.target.key(), &HangingHost, &items, &names, limits)
+        .await
+        .unwrap();
+    assert_eq!((report.saved, report.failed), (2, 2), "{:?}", report.lines);
+    assert!(
+        report.lines[0].starts_with("hang: timed out after 150 ms"),
+        "{:?}",
+        report.lines
+    );
+    assert!(report.lines[2].starts_with("/hang: timed out"), "{:?}", report.lines);
+    // The timed-out items held nothing back: only the two small files count against the cap.
+    assert_eq!(bundle.reserve(MAX_BUNDLE_BYTES), MAX_BUNDLE_BYTES - report.bytes);
+    let saved = tokio::task::spawn_blocking(move || bundle.finish())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(saved.files, 2);
+    let (files, manifest) = read_zip(&output);
+    let h = host(&manifest, "web01");
+    assert!(item(h, "hang")["error"].as_str().unwrap().contains("timed out"));
+    assert!(item(h, "hang")["file"].is_null());
+    assert_eq!(files["web01/commands/uptime.txt"], b"ok\n");
+    assert_eq!(manifest["caps"]["commandSecs"], 60);
+    let _ = std::fs::remove_dir_all(folder);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_host_dropped_part_way_gives_its_bytes_back_and_leaves_no_file_without_its_record() {
+    let folder = temp_folder("bundle-dropped");
+    let output = folder.join("bundle.zip");
+    let items = vec![BundleItem::command("uptime"), BundleItem::file("/hang")];
+    let names = entry_names(&items);
+    let target = web01();
+    let bundle = Arc::new(
+        OpenBundle::create(
+            Uuid::new_v4(),
+            &spec(items.clone(), &output),
+            std::slice::from_ref(&target),
+        )
+        .unwrap(),
+    );
+    // The host's own time limit (or a cancel) drops its work while it waits on `/hang`.
+    let dropped = tokio::time::timeout(
+        Duration::from_millis(300),
+        collect_host(
+            &bundle,
+            &target.target.key(),
+            &HangingHost,
+            &items,
+            &names,
+            ItemLimits::default(),
+        ),
+    )
+    .await;
+    assert!(dropped.is_err(), "it was still waiting");
+    // Only the finished item's 3 bytes stay held; the 10 MB the dropped one held went back.
+    assert_eq!(bundle.reserve(MAX_BUNDLE_BYTES), MAX_BUNDLE_BYTES - 3);
+    let saved = tokio::task::spawn_blocking(move || bundle.finish())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(saved.files, 1);
+    let (files, manifest) = read_zip(&output);
+    let records = host(&manifest, "web01")["items"].as_array().unwrap().len();
+    // Every file in the zip but the manifest has its record.
+    assert_eq!(files.len() - 1, records);
+    let _ = std::fs::remove_dir_all(folder);
+}
+
 #[test]
 fn the_bundle_gives_out_no_more_than_its_cap() {
     let folder = temp_folder("bundle-cap");
     let output: PathBuf = folder.join("bundle.zip");
     let bundle = OpenBundle::create(Uuid::new_v4(), &spec(vec![BundleItem::command("uptime")], &output), &[]).unwrap();
-    let cap = remotely_core::support_bundle::MAX_BUNDLE_BYTES;
+    let cap = MAX_BUNDLE_BYTES;
     assert_eq!(bundle.reserve(cap - 10), cap - 10);
     assert_eq!(bundle.reserve(100), 10, "only what is left");
     assert_eq!(bundle.reserve(100), 0);

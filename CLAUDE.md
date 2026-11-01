@@ -119,7 +119,8 @@ crates/core/          remotely-core: all app logic
                       purge; the read-only lock refuses the setting and Purge now, never the schedule
     save_guard.rs     No save path writes into a Git working tree (audit CSV, Compare and MultiExec exports, saved
                       output, session logs, downloads, FD-07 exports, FD-04 bundles); write_atomically (a `.part` file,
-                      renamed), and AtomicFile, the same for a file written bit by bit (a bundle's zip)
+                      renamed), and AtomicFile, the same for a file written bit by bit (a bundle's zip; its `.part` goes
+                      on every failure, a failed commit's too)
     adapters/         vmware.rs (VM-23 also the .vmx's backup, atomic write and restore, vdiskmanager and vmware.exe
                       found beside vmrun, vmrun_change; VM-21 ovftool found like vmrun, Workstation's default VM
                       folder), vmx_file.rs (VM-23 a .vmx as its lines: unknown keys, order,
@@ -445,13 +446,18 @@ crates/core/          remotely-core: all app logic
                       Network) by HostKind, every command read-only by the default rules (policy/bundle_tests.rs);
                       collect.rs the BundleHost trait (SshHost: commands on a kept connection's exec channels, sudo
                       through BX-07; files over SFTP on the same connection as the login user, ExecSession::files; F8
-                      adds Windows) and collect_host (caps 10 MB a file, 100 MB a host, 1 GB a bundle; exec_output's
-                      scrubber, redact_secrets and PEM private keys; a file with a NUL byte left out); writer.rs
-                      OpenBundle (the zip through save_guard::AtomicFile, written as hosts give files, on blocking
-                      threads; manifest.json); runner.rs BundleRunner, the job runner's BundleActions (begin, collect,
-                      each host's end, save and audit `data_exported`; a cancelled job saves nothing); mod.rs
-                      SupportBundles (Core.bundles: presets, preview, check, submit, saved_at for Show folder). The
-                      policy engine rates a bundle's commands as a Compare hosts run (Command::rated_script)
+                      adds Windows) and collect_host (caps 10 MB a file, 100 MB a host, 1 GB a bundle; ItemLimits: a
+                      command 60 s, a file read 180 s, then the item is noted as timed out and the host goes on;
+                      exec_output's scrubber, redact_secrets and private keys: PEM and PGP blocks, a key whose BEGIN was
+                      cut away, PuTTY's private lines, kubeconfig's client-key-data; a file with a NUL byte left out);
+                      writer.rs OpenBundle (the zip through save_guard::AtomicFile, written as hosts give files, on
+                      blocking threads; Reservation gives an item's bytes of the cap back however it ends; add_file
+                      puts a file and its manifest record in together; manifest.json); runner.rs BundleRunner, the job
+                      runner's BundleActions (begin, collect, each host's end, save and audit `data_exported`; a
+                      cancelled job saves nothing); mod.rs SupportBundles (Core.bundles: presets, preview, check,
+                      submit, saved_at for Show folder); spec.rs zip_path (a name given `.zip` never replaces a file
+                      unasked). The policy engine rates a bundle's commands as a Compare hosts run
+                      (Command::rated_script). FD-03: presentation.ts masks the workspace in a bundle's file name
     multiexec_groups.rs QL-19 saved MultiExec groups (Core.groups): named sets of saved sessions in order (1 to 60
                       characters, 1 to 100 sessions, 200 groups); audited multiexec_group_changed with the member
                       sessions as targets, refused by the read-only lock (Change::MultiExecGroups); a deleted session

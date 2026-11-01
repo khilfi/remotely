@@ -12,6 +12,7 @@ import {
   PAD,
   parseIpv6,
   TerminalMasker,
+  workspaceSlug,
 } from "./presentation.ts";
 
 const ESC = "\x1b";
@@ -282,4 +283,25 @@ test("FD-02: an FD-07 preview's workspace field is learnt like a host field", ()
   const m = new Masker();
   learnFields(m, { file: "export.remotely", workspace: "Globex Retail" });
   assert.equal(m.text("from Globex Retail"), "from workspace-1");
+});
+
+test("FD-04: the workspace in a support bundle's file name is masked, known or not", () => {
+  const m = new Masker();
+  assert.equal(workspaceSlug("Acme Corp / Lab"), "Acme-Corp-Lab");
+  assert.equal(workspaceSlug("…"), "");
+  assert.ok(m.learnWorkspace("Acme Corp"));
+  const top = m.text("Acme Corp");
+  // The approval dialog's path and the job's note in Activity.
+  const path = String.raw`Saves the zip as C:\Users\alice\Downloads\remotely-bundle-Acme-Corp-20261101T143000Z.zip`;
+  const masked = m.text(path);
+  assert.doesNotMatch(masked, /Acme/i);
+  assert.doesNotMatch(masked, /alice/);
+  assert.ok(masked.endsWith(`remotely-bundle-${top}-20261101T143000Z.zip`), "the same stand-in as the name");
+  assert.equal(m.text(masked), masked, "masking twice changes nothing");
+  // A workspace not learnt yet (or another one) is masked too.
+  const other = m.text(String.raw`saved the support bundle to D:\bundles\remotely-bundle-Globex-20261101T090000Z.zip`);
+  assert.doesNotMatch(other, /Globex/);
+  assert.match(other, /remotely-bundle-workspace-\d+-20261101T090000Z\.zip$/);
+  // Anything else that looks alike is left alone.
+  assert.equal(m.text("remotely-bundle-notes.txt"), "remotely-bundle-notes.txt");
 });

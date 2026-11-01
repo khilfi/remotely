@@ -881,7 +881,8 @@ function BundleSummary({ bundle }: { bundle: NonNullable<ApprovalRequest["bundle
         </>
       )}
       <p className="text-muted-foreground">
-        Saves the zip as <code className="font-mono text-xs break-all">{bundle.output}</code>, with secrets redacted.
+        Saves the zip as <code className="font-mono text-xs break-all">{bundle.output}</code>, with what looks like a
+        secret redacted.
       </p>
     </div>
   );
