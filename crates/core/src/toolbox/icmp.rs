@@ -111,7 +111,7 @@ pub struct PingSummary {
 }
 
 /// Ping and trace route go from this PC: a session behind a jump host can't be reached that way.
-pub(super) fn refuse_jump(route: &Route, what: &str) -> Result<()> {
+pub(crate) fn refuse_jump(route: &Route, what: &str) -> Result<()> {
     match &route.via {
         Some(jump) => Err(CoreError::InvalidInput(format!(
             "'{}' is behind the jump host '{}', so this PC can't {what} it: ping and trace route go from this PC. \

@@ -314,7 +314,9 @@ crates/core/          remotely-core: all app logic
                       Evaluator: threshold and duration, resolve after a minute clear, cooldown, unreachable, VMs
                       stopped without a Remotely job; no I/O), mod.rs (Alerts: the RoundObserver, the round's targets
                       as the grid shows them, rule edits and acknowledge audited and locked (Change::Alerts), the
-                      alert list, AlertEvent for the UI and QL-25; open alerts closed at start)
+                      alert list, AlertEvent for the UI and QL-25; open alerts closed at start; MO-08 checkDown,
+                      checkSlow (ms) and certExpiring (days, fires below) on the allChecks and check scopes, built-ins
+                      check-down and cert-expiring on, each round adding CheckReadings from the checks; migration 0030)
     schedules/        VM-14, VM-27 (migration 0025, Core.schedules, Change::Schedules): spec.rs ScheduleSpec (action:
                       snapshot keep N, start, stop, suspend, resume; targets: VMs, tags, VM-08 stacks (every VM of every
                       instance, via_stack for the ask-again message);
@@ -501,7 +503,26 @@ crates/core/          remotely-core: all app logic
                       as bytes arrive (a declared size is checked, never set aside); UploadLimits: 2 uploads per
                       client, at least 60 KB a minute; a part deleted; the Mark of the Web through
                       terminal::files::mark_downloaded), log.rs (transfers kept, repeats summed, never pushed out;
-                      refusals folded per client, past 1,000 clients counted only; totals of all)
+                      refusals folded per client, past 1,000 clients counted only; totals of all); MO-08: reach_held,
+                      session_connection and release_holds: a check holds a kept connection until its next run (one
+                      login, not one a run)
+    checks/           MO-08 health checks (migration 0030; Core.checks; edits audited check_changed, no tier,
+                      Change::HealthChecks; runs are reads, not audited): spec.rs CheckSpec (ping, tcp, http,
+                      certificate, dns, service), CheckInput and its checks (30 s to 1 h, timeout, failures before down;
+                      check_unit: a systemd unit by a strict pattern), probe.rs one run with F1's probes (up, down, or
+                      unknown when Remotely couldn't check: vault locked, login parked or capped; hold_for; Backoffs:
+                      a host or jump host that couldn't be reached waits 1 minute doubling to 15 before the next login
+                      try, and the runs between are skipped: nothing kept, the status stays, waiting_until shown),
+                      http.rs a GET with hyper over Reach's stream (direct or a jump host's channel, never a proxy;
+                      headers 64 KB, body 256 KB read only to find text, 5 redirects to http(s) only; HTTPS checked by
+                      Windows' trust and the name unless allowed), service.rs the ServiceReader trait (F4 adds Windows
+                      services; check_service_name by the session's kind) and SystemdOverSsh (`systemctl is-active
+                      'unit'` on the session's connection), mod.rs Checks: the runner (tick each second on a Clock for
+                      the shown workspace only, 8 at once; leave() on a switch, which loads nothing of the workspace
+                      left until another is shown, resume() when the switch fails), history and sparkline buckets,
+                      CheckReadings for MO-07 (unknown after down stays down), overview, attention (the widget's read,
+                      no history), summary and CheckEvent for the UI; results kept with metrics.historyRetention and
+                      pruned with MO-06; store/checks.rs check_uptime: uptime over any range for one workspace (F6)
     reachability.rs   QL-04 background TCP checks of the sessions the tree shows (reads only; each shows in the host's
                       sshd log): every 5 minutes by default, a host that is down less often (next_check_after: doubling
                       up to 30 minutes), none for a host with an open connection (OpenConnections: connected terminals,
@@ -563,7 +584,9 @@ crates/core/          remotely-core: all app logic
                       set themselves and folders with their defaults (a folder here with other defaults: keep or
                       replace); groups.rs QL-19 MultiExec groups by name with their sessions' ids (members become the
                       sessions imported or matched here, the rest left out with a note); stacks.rs VM-08 stacks with
-                      the catalogue, each step's template mapped to what it became here (instances stay out)
+                      the catalogue, each step's template mapped to what it became here (instances stay out);
+                      checks.rs MO-08 check definitions by name (a session target mapped to the session it became, a VM
+                      only when it is here; results never travel), saved through Checks
     import/           SS-02 parsers (PuTTY, MobaXterm, OpenSSH config, CSV), preview and commit; guide.rs QL-10 a
                       format guide and a sample file per format (the CSV guide is made from csv.rs's COLUMNS,
                       ENVIRONMENTS and AUTH_METHODS tables; tests/import.rs imports every sample); A3 a key path or
@@ -632,11 +655,13 @@ crates/core/          remotely-core: all app logic
                       switching; change_ids.rs: AP-08; support_bundle.rs: FD-04 on the test SSH server, zips in the
                       temp folder; toolbox.rs: FD-09 on FakeNetworkTools, a TLS server with an
                       rcgen certificate made at run time, jump hosts through the test SSH server, Wake-on-LAN to
-                      127.0.0.1; consoles.rs: SS-12 RDP, VNC, Telnet, serial and tunnel tabs; file_server.rs: FD-09
-                      TFTP and HTTP on 127.0.0.1 with port 0 and the test's own clients, folders made in the temp
-                      folder: every traversal form on both protocols, links, junctions and streams, uploads and their
-                      caps, slow and flooding clients, every stop path giving the ports back); opt-in
-                      workstation_it.rs, virtualbox_it.rs and
+                      127.0.0.1; consoles.rs: SS-12 RDP, VNC, Telnet, serial and tunnel tabs; checks.rs: MO-08 on a
+                      FakeClock with FakeNetworkTools, HTTP and TLS servers on 127.0.0.1 (rcgen), the test SSH server's
+                      `systemctl is-active` and a jump host held to one login; file_server.rs: FD-09 TFTP and HTTP on
+                      127.0.0.1 with port 0 and the test's own clients, folders made in the temp folder: every
+                      traversal form on both protocols, links, junctions and streams, uploads and their caps, slow and
+                      flooding clients, every stop path giving the ports back); opt-in workstation_it.rs,
+                      virtualbox_it.rs and
                       conversion_it.rs (the real conversion tools on small images in the temp folder)
 src-tauri/            Tauri 2 shell: window, IPC commands (ipc.rs), terminal bridge, MultiExec (multiexec.rs; groups.rs
                       QL-19 saved MultiExec groups; terminal_rules.rs QL-17 rules), command
@@ -676,7 +701,8 @@ src-tauri/            Tauri 2 shell: window, IPC commands (ipc.rs), terminal bri
                       job id); FD-09 toolbox.rs (each tool's run under an id the UI chose, `toolbox://progress` events,
                       toolbox_cancel, the certificate file dialog, Wake up's adapters and MACs), file_server.rs (the File
                       server tab's options, file and folder dialogs, start, Stop and status, `fileserver://event`);
-                      lib.rs and schedules.rs pass job and schedule events to the window only for the shown workspace
+                      MO-08 checks.rs (the runner, `checks://event`, the Checks tab's commands); lib.rs and
+                      schedules.rs pass job and schedule events to the window only for the shown workspace
 src/                  React + TypeScript UI
   components/ui/      shadcn/ui components (generated)
   components/         app components (approval dialog, badges, Compare panel with its one-shot and MultiExec views
@@ -734,7 +760,9 @@ src/                  React + TypeScript UI
                       and its requests), TargetField and ToolboxMenu, the "Toolbox"
                       submenu of session rows and the palette's VM and session views, and ToolboxIconMenu in the VM
                       details panel's header; no recent inputs are offered while presenting, since a native dropdown
-                      is out of the masker's reach)
+                      is out of the masker's reach); MO-08 checks/: ChecksTab (the Dashboard's Checks tab), CheckDialog,
+                      CheckHistorySheet, ChecksWidget (MO-16) and CheckBits (status badge, sparkline); the row menus'
+                      "Add a check" opens a `checks` link
   pages/              one file per page (bulk execution is in TerminalPage: Type in all tabs (MultiExec) and Compare
                       hosts; QL-14 VmsPage
                       is VMs and snapshots, with the selection's bulk snapshot actions and the details panel;
@@ -846,7 +874,8 @@ src/                  React + TypeScript UI
                       toolbox-api.ts (wrappers
                       and types), subnet.ts (the subnet calculator, IPv4 and IPv6 with BigInt), file-server.ts and
                       file-server-api.ts (the File server tab's form, checks and wording; wrappers and types) and
-                      hooks/use-probe-run.ts (a run's id, progress and Stop); pure helpers with
+                      hooks/use-probe-run.ts (a run's id, progress and Stop); MO-08 checks.ts (kinds, defaults, the
+                      editor's checks, wording, the sparkline's path) and checks-api.ts; pure helpers with
                       *.test.ts
                       next to them (Node's test runner: `npm test`)
 ```

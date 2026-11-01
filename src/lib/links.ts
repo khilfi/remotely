@@ -42,7 +42,9 @@ export type AppLink =
   /** VM-11: the Virtual machines page's host networks. */
   | { kind: "hostNetworks" }
   /** FD-09: a tool of the Toolbox, with a session, VM or host filled in. */
-  | { kind: "toolbox"; tool: ToolboxTool; target?: ToolTarget };
+  | { kind: "toolbox"; tool: ToolboxTool; target?: ToolTarget }
+  /** MO-08: the Dashboard's Checks tab: a check's history, or a new check on a session, VM or host. */
+  | { kind: "checks"; checkId?: string; add?: ToolTarget };
 
 export type AppLinkKind = AppLink["kind"];
 
@@ -63,6 +65,7 @@ const KINDS: Record<AppLinkKind, readonly string[]> = {
   schedule: ["scheduleId"],
   hostNetworks: [],
   toolbox: ["tool"],
+  checks: [],
 };
 
 /** A value (from the core, say) is a link this version can open: a known kind with its text fields. */
@@ -141,5 +144,7 @@ export function linkLabel(link: AppLink): string {
       return "Show the host networks";
     case "toolbox":
       return "Open the toolbox";
+    case "checks":
+      return link.add ? "Add a check" : link.checkId ? "Show the check" : "Show the checks";
   }
 }

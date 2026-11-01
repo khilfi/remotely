@@ -215,8 +215,55 @@ fn protocol_name(version: rustls::ProtocolVersion) -> String {
     }
 }
 
+/// The name a TLS client sends (SNI) for a host name or an IP address.
+pub(crate) fn server_name(name: &str) -> Result<ServerName<'static>> {
+    match crate::adapters::network::ip_literal(name) {
+        Some(ip) => Ok(ServerName::IpAddress(ip.into())),
+        None => ServerName::try_from(name.to_owned())
+            .map_err(|_| CoreError::InvalidInput(format!("'{name}' can't be sent as a TLS server name."))),
+    }
+}
+
+/// MO-08: a TLS connection over `stream` for an HTTPS check, speaking HTTP/1.1, with the chain the server sent. Any
+/// chain is taken here (its handshake signature still checked); the caller checks it against Windows' trust store and
+/// the name with [`report_for`], so a check that allows certificate errors still gets its answer.
+pub(crate) async fn tls_connect(
+    stream: BoxedStream,
+    name: ServerName<'static>,
+    timeout: Duration,
+) -> Result<(tokio_rustls::client::TlsStream<BoxedStream>, Vec<Vec<u8>>)> {
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let verifier = Arc::new(ReadAnyChain {
+        provider: Arc::clone(&provider),
+        seen: Arc::clone(&seen),
+    });
+    let mut config = rustls::ClientConfig::builder_with_provider(provider)
+        .with_safe_default_protocol_versions()
+        .map_err(|err| CoreError::Network(format!("TLS isn't available: {err}")))?
+        .dangerous()
+        .with_custom_certificate_verifier(verifier)
+        .with_no_client_auth();
+    config.alpn_protocols = vec![b"http/1.1".to_vec()];
+    let connector = tokio_rustls::TlsConnector::from(Arc::new(config));
+    match tokio::time::timeout(timeout, connector.connect(name, stream)).await {
+        Ok(Ok(tls)) => {
+            let chain = locks::lock(&seen).clone();
+            Ok((tls, chain))
+        }
+        Ok(Err(err)) => Err(CoreError::Network(format!(
+            "the TLS handshake failed: {}",
+            handshake_words(&err)
+        ))),
+        Err(_) => Err(CoreError::Network(format!(
+            "no TLS answer within {} s: is it a TLS port?",
+            timeout.as_secs().max(1)
+        ))),
+    }
+}
+
 /// The certificate a server presents, read and checked.
-pub(super) async fn from_server(
+pub(crate) async fn from_server(
     tools: &dyn NetworkTools,
     route: &Route,
     reach: &Reach,
@@ -234,11 +281,7 @@ pub(super) async fn from_server(
         .map(super::check_host)
         .transpose()?;
     let checked_name = typed.clone().unwrap_or_else(|| route.host.clone());
-    let sni = match crate::adapters::network::ip_literal(&checked_name) {
-        Some(ip) => ServerName::IpAddress(ip.into()),
-        None => ServerName::try_from(checked_name.clone())
-            .map_err(|_| CoreError::InvalidInput(format!("'{checked_name}' can't be sent as a TLS server name.")))?,
-    };
+    let sni = server_name(&checked_name)?;
     let stream = reach
         .open(request.port, timeout)
         .await
@@ -282,7 +325,11 @@ pub(super) async fn from_file(tools: &dyn NetworkTools, path: &Path) -> Result<C
 }
 
 /// The chain read and checked, with nothing about where it came from yet.
-async fn report_for(tools: &dyn NetworkTools, chain: &[Vec<u8>], usage: TrustUse) -> Result<CertificateReport> {
+pub(crate) async fn report_for(
+    tools: &dyn NetworkTools,
+    chain: &[Vec<u8>],
+    usage: TrustUse,
+) -> Result<CertificateReport> {
     if chain.is_empty() {
         return Err(CoreError::Network("the server sent no certificate".into()));
     }

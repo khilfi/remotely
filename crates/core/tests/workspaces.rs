@@ -658,6 +658,7 @@ async fn an_export_holds_one_workspace_and_imports_into_the_shown_one_or_a_new_o
                 secrets: vec![],
                 favourites: vec![],
                 groups: vec![],
+                checks: vec![],
                 catalog: Default::default(),
                 keep_startup: vec![],
                 keep_forwards: vec![],
@@ -1201,4 +1202,82 @@ async fn nothing_acts_on_an_unassigned_vm_until_a_workspace_adds_it() {
         core.deploy.check_clone(&acme, &ask).await,
         Err(CoreError::VmUnassigned(_))
     ));
+}
+
+// ---- MO-08 health checks ------------------------------------------------------------------------------------------
+
+/// Rule 8: checks run for the shown workspace only; a switch cancels the old one's and runs the new one's, and neither
+/// sees the other's checks, results, counts or alerts.
+#[tokio::test]
+async fn health_checks_run_and_show_in_their_own_workspace_only() {
+    use remotely_core::checks::{CheckInput, CheckSpec, CheckStatus};
+    use remotely_core::fakes::net_tools::FakePort;
+    use remotely_core::fakes::FakeNetworkTools;
+    use remotely_core::metrics::history::HistoryRange;
+    use remotely_core::toolbox::ProbeTarget;
+    let tools = Arc::new(FakeNetworkTools::new().with_port("192.0.2.10", 443, FakePort::Banner(Vec::new())));
+    let core = Setup::new(FakeVmware::default())
+        .with_network_tools(tools.clone())
+        .build()
+        .await;
+    let input = |name: &str, port: u16| CheckInput {
+        name: name.into(),
+        target: ProbeTarget::Address {
+            host: "192.0.2.10".into(),
+        },
+        spec: CheckSpec::Tcp { port },
+        interval_secs: 60,
+        timeout_secs: 5,
+        failures_before_down: 1,
+        paused: false,
+    };
+    let acme = core.ctx();
+    let acme_check = core.checks.create(input("acme web", 443)).await.unwrap().id;
+    assert_eq!(core.checks.run_due().await.unwrap(), 1);
+    assert_eq!(core.checks.summary().up, 1);
+
+    let globex = create(&core, "Globex").await;
+    switch(&core, &globex).await;
+    assert!(
+        core.checks.list().await.unwrap().is_empty(),
+        "Acme's check isn't listed in Globex"
+    );
+    assert_eq!(core.checks.summary().total, 0);
+    assert!(core.checks.overview(HistoryRange::Hour).await.unwrap().rows.is_empty());
+    assert!(core.checks.history(acme_check, HistoryRange::Hour).await.is_err());
+    assert!(core.checks.delete(acme_check).await.is_err(), "nor deleted from there");
+    let globex_check = core.checks.create(input("globex db", 5432)).await.unwrap().id;
+    let connects = tools.connects().len();
+    assert_eq!(core.checks.run_due().await.unwrap(), 1, "only Globex's check runs");
+    assert_eq!(tools.connects().len(), connects + 1);
+    assert_eq!(core.checks.summary().down, 1);
+    core.metrics.collect_once().await;
+    let alerts = core.alerts.list(Default::default()).await.unwrap().alerts;
+    assert!(
+        alerts.iter().all(|a| a.target.key == globex_check.to_string()),
+        "{alerts:?}"
+    );
+
+    let home = core
+        .workspaces
+        .list()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|w| !w.current)
+        .unwrap();
+    switch(&core, &home).await;
+    assert_eq!(core.ctx(), acme);
+    let rows = core.checks.overview(HistoryRange::Hour).await.unwrap().rows;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].check.id, acme_check);
+    assert_eq!(
+        rows[0].status,
+        CheckStatus::Up,
+        "Acme's state comes back from its history"
+    );
+    assert_eq!(rows[0].uptime, Some(100.0));
+    assert!(core.checks.history(globex_check, HistoryRange::Hour).await.is_err());
+    let alerts = core.alerts.list(Default::default()).await.unwrap().alerts;
+    assert!(alerts.iter().all(|a| a.target.key != globex_check.to_string()));
 }

@@ -193,13 +193,15 @@ fn a_prune_says_what_went() {
             minutes: 100_800,
             series: 1,
             alerts: 3,
+            check_results: 42,
         },
         compacted: true,
     };
     assert_eq!(
         describe(&report),
         "older than 7 days (before 2026-10-18): removed 100800 one-minute readings and 3 resolved alerts; \
-         1 series that no longer report went with them; the database file was compacted"
+         1 series that no longer report went with them; 42 health check results removed; the database file was \
+         compacted"
     );
     assert_eq!(
         describe_size(&HistorySize {
