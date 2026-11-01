@@ -92,6 +92,9 @@ test("every event the core writes has plain words, and none is a code", () => {
     "host_key_changed",
     "host_key_removed",
     "terminal_opened",
+    "rdp_opened",
+    "terminal_break_sent",
+    "vnc_opened",
     "terminal_closed",
     "terminal_output_saved",
     "terminal_output_printed",
@@ -189,6 +192,7 @@ test("kinds come from a job's action, or an entry's event", () => {
   assert.equal(kindOfAction("pruneVolumes"), "containers");
   assert.equal(kindOfAction("imageConvert"), "vms");
   assert.equal(kindOfAction("appUpdate"), "app");
+  assert.equal(kindOfAction("wakeOnLan"), "sessions");
   assert.equal(kindOfEvent("host_key_trusted"), "sessions");
   assert.equal(kindOfEvent("folder_hook_installed"), "sessions");
   assert.equal(kindOfEvent("session_changed"), "sessions");

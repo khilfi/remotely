@@ -125,6 +125,7 @@ impl Chain {
             color: None,
             tags: vec![],
             vm_id: None,
+            kind: Default::default(),
         };
         let create = |mut input: SessionInput, password: Option<remotely_core::vault::SecretId>| {
             input.auth = SessionAuth::Password { password_id: password };
@@ -512,6 +513,7 @@ async fn guest_metrics_are_read_through_the_chain() {
         color: None,
         tags: vec![],
         vm_id: None,
+        kind: Default::default(),
     };
     core.sessions
         .update(&core.ctx(), chain.bastion_id, input)

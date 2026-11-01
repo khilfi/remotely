@@ -67,6 +67,10 @@ ed25519-dalek = "3"
 # FD-04: the support bundle's zip (written only; Remotely never extracts one). Deflate through flate2's zlib-rs, which
 # the dependencies already pull in; `time` gives each entry the time it was collected.
 zip = { version = "9.2", default-features = false, features = ["deflate-flate2-zlib-rs", "time"] }
+# FD-09: the certificate viewer's TLS handshake (rustls, above) over a TCP connection or a jump host's channel,
+# and a certificate's SHA-1 fingerprint beside its SHA-256 one. The versions reqwest and russh already pull in.
+tokio-rustls = { version = "0.26", default-features = false, features = ["tls12"] }
+sha1 = "0.11"
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.56"
@@ -75,9 +79,19 @@ winreg = "0.56"
 # DPAPI for the vault key (SS-04) and reverse DNS for a session's host name (QL-03). 0.62 is the version
 # Tauri already pulls in.
 windows = { version = "0.62", features = [
+    # SS-12: serial consoles (COM ports through CreateFileW, SetCommState, SetCommBreak; ReadFile and WriteFile).
+    "Win32_Devices_Communication",
+    "Win32_System_IO",
     "Wdk_System_SystemInformation",
     "Wdk_System_Threading",
     "Win32_Foundation",
+    # FD-09: the toolbox's ping and trace route (IcmpSendEcho2, Icmp6SendEcho2), DNS lookups (DnsQueryEx), this
+    # PC's adapters (GetAdaptersAddresses) and a certificate chain's trust check (CertGetCertificateChain, in
+    # Win32_Security_Cryptography).
+    "Win32_NetworkManagement_Dns",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_NetworkManagement_Ndis",
+    "Win32_System_IO",
     "Win32_Networking_WinSock",
     "Win32_Security_Cryptography",
     # SS-07: other users signed in to this PC (WTSEnumerateSessionsW), who share its loopback.
@@ -100,3 +114,6 @@ remotely-core = { path = ".", features = ["fakes"] }
 tokio = { workspace = true, features = ["test-util"] }
 # BX-07: the secret-leak test reads every log line the core and russh write.
 tracing-subscriber.workspace = true
+# FD-09: certificates for the certificate viewer's tests, made at run time (never committed), with the ring the
+# app already uses.
+rcgen = { version = "0.14", default-features = false, features = ["crypto", "ring"] }

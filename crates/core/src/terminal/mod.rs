@@ -58,6 +58,7 @@
 
 pub mod activity;
 pub mod alerts;
+pub mod console;
 pub mod files;
 pub mod folder;
 pub mod log;
@@ -86,6 +87,8 @@ use zeroize::Zeroizing;
 
 use self::activity::{is_password_prompt, is_secret_prompt, FinishedHow, RunWatch, WatchConfig};
 use self::alerts::{AlertBurst, AlertTiming, AlertWatch, TerminalAlert};
+use self::console::Carrier;
+pub use self::console::{PaneKind, WindowOpened, WindowState};
 use self::files::{Transfers, UploadReport, UploadRun};
 use self::folder::{FolderInfo, FolderTracking, FolderWatch, PromptHook};
 use self::log::{LogMessage, SessionLog};
@@ -96,6 +99,7 @@ use self::rules::RuleBook;
 use self::shell_user::{UserInfo, UserWatch};
 use self::tunnels::{TunnelInfo, TunnelRun, TunnelTable};
 use crate::adapters::exec_output::Scrubber;
+use crate::adapters::launcher::ConsoleLauncher;
 use crate::adapters::network::{ip_literal, NetworkAdapter};
 use crate::adapters::remote::forward::RemoteForwards;
 use crate::adapters::remote::{
@@ -103,6 +107,7 @@ use crate::adapters::remote::{
     Prompter, PtySize, RemoteAdapter, RemoteFiles, SessionSpec, ShellEnd, ShellHandle, ShellInput, ShellOutput,
     ShellRequest,
 };
+use crate::adapters::serial::SerialPorts;
 use crate::command_bus::CommandBus;
 use crate::containers::ContainerShell;
 use crate::domain::{Context, Environment, Target, TargetRef};
@@ -113,6 +118,7 @@ use crate::locks;
 use crate::policy::Tier;
 use crate::presentation::Change;
 use crate::save_guard::{self, Saved};
+use crate::sessions::SessionKind;
 use crate::sessions::SessionLibrary;
 use crate::store::{NewAuditEntry, Store};
 use crate::vault::{Destination, SecretBindings, SecretId, SecretKind, SecretString, Vault, VaultStatus};
@@ -468,6 +474,8 @@ pub enum TerminalInput {
         /// Typed only while that login is the one asking.
         hop: Option<Uuid>,
     },
+    /// SS-12: a serial line's break (Telnet: IAC BRK). Dropped while not connected.
+    Break,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -605,6 +613,10 @@ pub enum TerminalEvent {
     Alert {
         alert: TerminalAlert,
     },
+    /// SS-12: a tunnel tab's RDP or VNC window opened (closing it closes the tab) or could not start.
+    Window {
+        window: WindowState,
+    },
 }
 
 /// SS-10: what a pane's screen shows now, as far as its output tells.
@@ -636,6 +648,8 @@ pub struct PaneInfo {
     pub screen: PaneScreen,
     /// Text was typed on the shell's line outside MultiExec since its last Enter.
     pub dirty: bool,
+    /// SS-12: SSH, Telnet, serial or a tunnel tab; only SSH panes join MultiExec and Compare.
+    pub kind: PaneKind,
 }
 
 /// What the job runner does in open terminals: SS-10 sends a MultiExec line's held Enter, SS-08
@@ -726,6 +740,33 @@ struct Control {
     hop: Mutex<Option<Uuid>>,
     /// QL-17: the pane's alert rules, its bursts and cooldowns (kept across reconnects).
     alerts: Mutex<AlertWatch>,
+    /// SS-12: what the pane is for.
+    kind: PaneKind,
+    /// SS-12: a tunnel tab's RDP or VNC session and its forward.
+    carrier: Option<Arc<Carrier>>,
+    /// SS-12: a serial pane's COM port (one pane per port).
+    serial_port: Option<String>,
+    /// SS-12: connections made so far (1 for the first), for Telnet's "the vault password once per connection".
+    connection: std::sync::atomic::AtomicU64,
+    /// SS-12: the connection on which the vault password was given for typing into a Telnet pane (0: none).
+    clear_text_confirmed: std::sync::atomic::AtomicU64,
+}
+
+/// SS-12: what a new pane is for, with what that kind needs.
+struct PaneKindInfo {
+    kind: PaneKind,
+    carrier: Option<Arc<Carrier>>,
+    serial_port: Option<String>,
+}
+
+impl PaneKindInfo {
+    fn ssh() -> Self {
+        Self {
+            kind: PaneKind::Ssh,
+            carrier: None,
+            serial_port: None,
+        }
+    }
 }
 
 impl Control {
@@ -793,6 +834,34 @@ struct Inner {
     rules: OnceLock<tokio::sync::watch::Receiver<Arc<RuleBook>>>,
     /// QL-17: how matches gather into alerts; tests shorten it.
     alert_timing: Mutex<AlertTiming>,
+    /// SS-12: what starts RDP and VNC windows.
+    launcher: std::sync::RwLock<Arc<dyn ConsoleLauncher>>,
+    /// SS-12: this PC's COM ports.
+    serial: std::sync::RwLock<Arc<dyn SerialPorts>>,
+    /// SS-12: each COM port a pane's thread opened, by name, and whether that thread has let go of it since.
+    serial_held: Mutex<HashMap<String, tokio::sync::watch::Receiver<bool>>>,
+}
+
+/// SS-12: the longest a serial pane waits for the port's last connection to let go of it (a write held up by flow
+/// control gives up after 5 s).
+const SERIAL_RELEASE_WAIT: Duration = Duration::from_secs(10);
+
+/// SS-12: the programs and ports a new `Terminals` uses. Under the `fakes` feature (tests only) they start and open
+/// nothing until a test gives its fakes, so no test ever starts mstsc or a viewer or opens a real COM port.
+#[cfg(not(feature = "fakes"))]
+fn default_consoles() -> (Arc<dyn ConsoleLauncher>, Arc<dyn SerialPorts>) {
+    (
+        Arc::new(crate::adapters::launcher::WindowsLauncher),
+        Arc::new(crate::adapters::serial::WindowsSerialPorts),
+    )
+}
+
+#[cfg(feature = "fakes")]
+fn default_consoles() -> (Arc<dyn ConsoleLauncher>, Arc<dyn SerialPorts>) {
+    (
+        Arc::new(crate::adapters::launcher::NoLauncher),
+        Arc::new(crate::fakes::FakeSerialPorts::default()),
+    )
 }
 
 /// A pane about to open.
@@ -808,6 +877,8 @@ struct NewPane {
     detail: String,
     /// CT-01: a shell in a container.
     container: Option<ContainerShell>,
+    /// SS-12: SSH, Telnet, serial, or a tunnel tab.
+    kind: PaneKindInfo,
 }
 
 /// The open terminal panes. Cloning gives another handle to the same panes.
@@ -825,6 +896,7 @@ impl Terminals {
         known_hosts: Arc<KnownHosts>,
         links: Arc<VmLinks>,
     ) -> Self {
+        let (launcher, serial) = default_consoles();
         Self {
             inner: Arc::new(Inner {
                 store,
@@ -845,6 +917,9 @@ impl Terminals {
                 waiting: Mutex::default(),
                 rules: OnceLock::new(),
                 alert_timing: Mutex::new(AlertTiming::default()),
+                launcher: std::sync::RwLock::new(launcher),
+                serial: std::sync::RwLock::new(serial),
+                serial_held: Mutex::default(),
             }),
         }
     }
@@ -927,8 +1002,24 @@ impl Terminals {
     /// Opens a pane to a saved session and starts connecting, through its jump hosts if it has any
     /// (SS-07). Fails at once, opening nothing, for a key login with no key chosen or jump hosts that
     /// go round in a loop.
+    ///
+    /// SS-12: a Telnet or serial session opens its own kind of pane; an RDP or VNC session behind a jump host opens a
+    /// tunnel tab to the jump host (and its window once the tunnel listens). One without a jump host opens its window
+    /// with [`Terminals::open_window`] instead.
     pub async fn open(&self, ctx: &Context, session_id: Uuid, size: PtySize) -> Result<TerminalHandle> {
         self.inner.vault.note_activity();
+        let session = self
+            .inner
+            .store
+            .get_session(ctx, session_id)
+            .await?
+            .ok_or_else(|| CoreError::UnknownTarget(format!("session {session_id}")))?;
+        match session.kind {
+            SessionKind::Ssh => {}
+            SessionKind::Telnet(_) => return self.open_console(ctx, session, PaneKind::Telnet, size).await,
+            SessionKind::Serial(_) => return self.open_console(ctx, session, PaneKind::Serial, size).await,
+            SessionKind::Rdp(_) | SessionKind::Vnc(_) => return self.open_tunnel_tab(ctx, session, size).await,
+        }
         self.open_saved(
             ctx,
             session_id,
@@ -1010,6 +1101,7 @@ impl Terminals {
             remembered,
             jump_passwords,
             container,
+            kind: PaneKindInfo::ssh(),
         };
         let handle = self.start(ctx, pane, size).await?;
         // QL-02: Recent sessions. Not worth failing the terminal over.
@@ -1089,6 +1181,7 @@ impl Terminals {
             action: format!("Opened a quick-connect terminal to {address}"),
             detail: format!("{address}, {auth}; not saved as a session"),
             container: None,
+            kind: PaneKindInfo::ssh(),
         };
         let handle = self.start(ctx, pane, size).await?;
         self.inner
@@ -1107,6 +1200,27 @@ impl Terminals {
             .ok_or_else(|| CoreError::UnknownTarget(format!("terminal {id}")))?;
         let remembered = locks::lock(&control.remembered).clone();
         let jump_passwords = locks::lock(&control.jump_passwords).clone();
+        // SS-12: a COM port has one pane, a tunnel tab one window; a Telnet pane opens another like itself.
+        match control.kind {
+            PaneKind::Ssh => {}
+            PaneKind::Telnet => {
+                let Source::Saved(session_id) = control.source else {
+                    return Err(CoreError::UnknownTarget(format!("terminal {id}")));
+                };
+                return self.open(ctx, session_id, size).await;
+            }
+            PaneKind::Serial => {
+                return Err(CoreError::SerialPort(
+                    "a COM port has one tab at a time, so a serial terminal can't be split".into(),
+                ))
+            }
+            PaneKind::Tunnel => {
+                return Err(CoreError::InvalidInput(
+                    "A tunnel tab carries one window, so it can't be split. Open the session again for another one."
+                        .into(),
+                ))
+            }
+        }
         match &control.source {
             Source::Saved(session_id) => {
                 // CT-01: a split of a container's shell is another shell in that container.
@@ -1141,6 +1255,7 @@ impl Terminals {
                     action: format!("Opened another quick-connect terminal to {address}"),
                     detail: format!("{address}, {auth}; not saved as a session"),
                     container: None,
+                    kind: PaneKindInfo::ssh(),
                 };
                 self.start(ctx, pane, size).await
             }
@@ -1213,6 +1328,11 @@ impl Terminals {
                 self.inner.rules.get().cloned(),
                 *locks::lock(&self.inner.alert_timing),
             )),
+            kind: pane.kind.kind,
+            carrier: pane.kind.carrier,
+            serial_port: pane.kind.serial_port,
+            connection: std::sync::atomic::AtomicU64::new(0),
+            clear_text_confirmed: std::sync::atomic::AtomicU64::new(0),
         });
         audit(
             &self.inner.store,
@@ -1279,6 +1399,7 @@ impl Terminals {
             },
             screen: control.screen(),
             dirty: control.dirty.load(Ordering::SeqCst),
+            kind: control.kind,
         })
     }
 
@@ -1345,7 +1466,7 @@ impl Terminals {
                 None => (format!("{} (not saved)", control.name), Default::default(), false),
             },
         };
-        Ok(Target {
+        let target = Target {
             target: TargetRef::Terminal {
                 terminal_id: id,
                 session_id,
@@ -1353,7 +1474,9 @@ impl Terminals {
             name,
             environment,
             protected,
-        })
+        };
+        // SS-12: a tunnel tab is as sensitive as the RDP or VNC session it reaches.
+        self.raise_for_carrier(ctx, &control, target).await
     }
 
     pub async fn resize(&self, id: Uuid, cols: u16, rows: u16) {
@@ -1682,7 +1805,26 @@ impl Terminals {
         let what = format!("the {} '{}'", meta.kind.label(), meta.label);
         let mut asked = None;
         let mut allow = false;
-        if let Some(bindings) = self.inner.bindings.get() {
+        // SS-12: Telnet sends what is typed in clear text, so the vault password comes once per connection, however
+        // recently it was given, and wherever the password already goes.
+        let clear_text = control.kind == PaneKind::Telnet;
+        let connection = control.connection.load(Ordering::SeqCst);
+        if let (true, Some(bindings)) = (clear_text, self.inner.bindings.get()) {
+            if force || control.clear_text_confirmed.load(Ordering::SeqCst) != connection {
+                let reason = if force {
+                    format!("No password prompt is showing, so {what} would be typed at the command line")
+                } else {
+                    format!(
+                        "Telnet sends what is typed in clear text, so typing {what} into {} asks for the vault \
+                         password on each connection",
+                        quoted_name(&control)
+                    )
+                };
+                let action = format!("Failed to type {what} into the terminal to {}", quoted_name(&control));
+                asked = Some(bindings.confirm_given(ctx, vault_password, &action, &reason).await?);
+            }
+        }
+        if let (false, Some(bindings)) = (clear_text, self.inner.bindings.get()) {
             let goes = bindings.goes_to(ctx, secret_id, &place, None).await?;
             let new_place = !goes && !bindings.may_go(ctx, secret_id, &place, None).await?;
             if force || new_place {
@@ -1739,11 +1881,17 @@ impl Terminals {
                 return Err(err);
             }
         };
+        if clear_text {
+            control.clear_text_confirmed.store(connection, Ordering::SeqCst);
+        }
         let mut detail = if prompt {
             "at a password prompt".to_owned()
         } else {
             "no password prompt was showing; typed at the user's request".to_owned()
         };
+        if clear_text {
+            detail.push_str("; over Telnet, in clear text");
+        }
         if let Some((_, name)) = session.as_ref().filter(|(s, _)| hop == Some(*s)) {
             detail.push_str(&format!("; for the login to the jump host '{name}'"));
         }
@@ -1777,6 +1925,17 @@ impl Terminals {
         control: &Control,
         hop: Option<Uuid>,
     ) -> Result<(Destination, Option<(Uuid, String)>)> {
+        // SS-12: a Telnet or serial pane's password goes to its host (or COM port), never through a jump host.
+        if let (PaneKind::Telnet | PaneKind::Serial, Some(session_id)) = (control.kind, control.session_id()) {
+            let session = self
+                .inner
+                .store
+                .get_session(ctx, session_id)
+                .await?
+                .ok_or_else(|| CoreError::UnknownTarget("the session was deleted".into()))?;
+            let place = Destination::new(&session.host, session.port, None);
+            return Ok((place, Some((session_id, session.name))));
+        }
         match hop.or(control.session_id()) {
             Some(session_id) => {
                 let spec = self
@@ -1884,6 +2043,15 @@ impl ExecSession for ScrubbedCommands {
     }
 
     async fn close(&self) {}
+
+    // FD-09: the toolbox's checks of a host behind this terminal's host go through its connection.
+    async fn open_direct(
+        &self,
+        host: &str,
+        port: u16,
+    ) -> std::result::Result<crate::adapters::net_tools::BoxedStream, crate::adapters::net_tools::ConnectFailure> {
+        self.inner.open_direct(host, port).await
+    }
 }
 
 fn scrub(text: &str, secrets: &[SecretString]) -> String {
@@ -2016,6 +2184,34 @@ async fn audit_entry(
                 targets,
                 approval: None,
                 result: None,
+                detail: Some(detail),
+            },
+        )
+        .await
+        .map(drop)
+}
+
+/// SS-12: an audit entry with its result (`failed`), e.g. a window that did not start.
+async fn audit_entry_result(
+    store: &Store,
+    ctx: &Context,
+    event: &str,
+    action: &str,
+    targets: &[Target],
+    detail: &str,
+    result: &str,
+) -> Result<()> {
+    store
+        .append_audit(
+            ctx,
+            NewAuditEntry {
+                event,
+                action,
+                tier: None,
+                job_id: None,
+                targets,
+                approval: None,
+                result: Some(result),
                 detail: Some(detail),
             },
         )
@@ -2385,6 +2581,11 @@ impl Pane {
     /// returns what the pump types by itself: the session's startup command (SS-01), at the first
     /// shell prompt once the SS-08 prompt hook is out of the way, and whether the hook may go.
     async fn connect(&mut self) -> Result<(ShellHandle, Typed)> {
+        // SS-12: Telnet and serial panes connect their own way.
+        if matches!(self.control.kind, PaneKind::Telnet | PaneKind::Serial) {
+            self.automatic = false;
+            return self.connect_console().await;
+        }
         // SS-01: the pane's own retry after a lost connection, not a connection the user asked for.
         let automatic = std::mem::take(&mut self.automatic);
         let spec = self.spec().await?;
@@ -2503,6 +2704,99 @@ impl Pane {
                 startup,
                 hook,
                 environment: spec.environment,
+            },
+        ))
+    }
+
+    /// SS-12: whether this pane's screen shows a password, passphrase or code prompt now, for a console's local echo
+    /// (which then shows nothing of what is typed). Holds the pane weakly.
+    fn secret_prompt_shown(&self) -> crate::adapters::remote::SecretPromptShown {
+        let control = Arc::downgrade(&self.control);
+        Arc::new(move || control.upgrade().is_some_and(|c| c.screen().at_secret_prompt()))
+    }
+
+    /// SS-12: a Telnet or serial pane's connection: the session as saved now, then the transport. Nothing logs in
+    /// for the user here (the remote side asks), and nothing is typed by itself.
+    async fn connect_console(&mut self) -> Result<(ShellHandle, Typed)> {
+        let Source::Saved(session_id) = self.control.source else {
+            return Err(CoreError::UnknownTarget("the session".into()));
+        };
+        let session = self
+            .inner
+            .store
+            .get_session(&self.ctx, session_id)
+            .await?
+            .ok_or_else(|| CoreError::UnknownTarget("the session was deleted".into()))?;
+        locks::lock(&self.control.secrets).clear();
+        let tuning = self.tuning();
+        let handle = match session.kind {
+            SessionKind::Telnet(options) if self.control.kind == PaneKind::Telnet => {
+                let address = crate::known_hosts::address(&session.host, session.port);
+                self.say(format!("\x1b[2mConnecting to {address} (Telnet, clear text)…\x1b[0m\r\n").into_bytes())
+                    .await;
+                if !self.asked_dns {
+                    self.asked_dns = true;
+                    self.ask_dns(&session.host);
+                }
+                let shell = crate::adapters::telnet::connect(crate::adapters::telnet::TelnetRequest {
+                    host: &session.host,
+                    port: session.port,
+                    size: self.size,
+                    line_ending: options.line_ending,
+                    connect_timeout: tuning.connect_timeout,
+                    term: "xterm-256color",
+                    secret_prompt: self.secret_prompt_shown(),
+                })
+                .await?;
+                if let Some(ip) = shell.peer_ip {
+                    self.learn(|facts| facts.learn_ip(ip, FactSource::Host)).await;
+                }
+                console::console_handle(shell.input, shell.output, shell.peer_ip)
+            }
+            SessionKind::Serial(options) if self.control.kind == PaneKind::Serial => {
+                self.say(format!("\x1b[2mOpening {} ({})…\x1b[0m\r\n", session.host, options.frame()).into_bytes())
+                    .await;
+                let ports = Terminals {
+                    inner: Arc::clone(&self.inner),
+                }
+                .serial();
+                // A reconnect, or a tab opened right after another to the same port closed: the old pane's thread
+                // lets go of the port first (after its current read, or a write held up by flow control).
+                let port_key = session.host.to_ascii_uppercase();
+                let held = locks::lock(&self.inner.serial_held).get(&port_key).cloned();
+                if let Some(mut released) = held {
+                    let waited = tokio::time::timeout(SERIAL_RELEASE_WAIT, released.wait_for(|done| *done)).await;
+                    if waited.is_err() {
+                        return Err(CoreError::SerialPort(format!(
+                            "{} is still held by this tab's last connection; try again in a moment",
+                            session.host
+                        )));
+                    }
+                }
+                let port = session.host.clone();
+                let link = tokio::task::spawn_blocking(move || ports.open(&port, &options))
+                    .await
+                    .map_err(|err| CoreError::SerialPort(format!("the COM port could not be opened: {err}")))??;
+                let shell = crate::adapters::serial::serial_shell(link, options, self.secret_prompt_shown());
+                locks::lock(&self.inner.serial_held).insert(port_key, shell.released);
+                self.learn(|facts| facts.learn_hostname(&session.host, FactSource::Host))
+                    .await;
+                console::console_handle(shell.input, shell.output, None)
+            }
+            _ => {
+                return Err(CoreError::WrongSessionKind {
+                    session: session.name.clone(),
+                    kind: session.kind.label(),
+                    needs: "this tab was opened for another kind. Close it and open the session again".into(),
+                })
+            }
+        };
+        Ok((
+            handle,
+            Typed {
+                startup: Vec::new(),
+                hook: false,
+                environment: session.environment,
             },
         ))
     }
@@ -2701,21 +2995,26 @@ impl Pane {
             forwards,
             commands,
         } = shell;
+        // SS-12: Telnet's "the vault password once per connection" counts connections.
+        self.control.connection.fetch_add(1, Ordering::SeqCst);
+        let ssh = self.control.kind.is_ssh();
         // SS-08: this connection's files; the folder is learnt again. QL-09: transfers run as its login.
         let login = files.user();
-        *locks::lock(&self.control.files) = Some(files);
-        // SS-07: tunnels approved for this terminal open again on the new connection, and its first
-        // connection asks for the session's that start with it (through the bus, so beside the shell).
-        *locks::lock(&self.control.forwards) = Some(forwards);
-        let terminals = Terminals {
-            inner: Arc::clone(&self.inner),
-        };
-        tokio::spawn(tunnels::connected(
-            terminals,
-            self.ctx,
-            self.id,
-            Arc::clone(&self.control),
-        ));
+        if ssh {
+            *locks::lock(&self.control.files) = Some(files);
+            // SS-07: tunnels approved for this terminal open again on the new connection, and its first
+            // connection asks for the session's that start with it (through the bus, so beside the shell).
+            *locks::lock(&self.control.forwards) = Some(forwards);
+            let terminals = Terminals {
+                inner: Arc::clone(&self.inner),
+            };
+            tokio::spawn(tunnels::connected(
+                terminals,
+                self.ctx,
+                self.id,
+                Arc::clone(&self.control),
+            ));
+        }
         // MO-13: the host's facts on an exec channel of this connection, beside the shell (never in it).
         let commands = commands.map(|inner| -> Arc<dyn ExecSession> {
             Arc::new(ScrubbedCommands {
@@ -2987,7 +3286,8 @@ impl Pane {
                             }
                             let mut bytes = Zeroizing::new(secret.expose().as_bytes().to_vec());
                             bytes.push(b'\r');
-                            let _ = live.input.send(ShellInput::Data(bytes.to_vec())).await;
+                            // SS-12: never echoed locally by a console.
+                            let _ = live.input.send(ShellInput::Secret(bytes.to_vec())).await;
                             live.watch.input(b"\r", Instant::now());
                             live.users.input(b"\r");
                             let _ = reply.send(Ok(prompt));
@@ -2995,6 +3295,9 @@ impl Pane {
                         Some(TerminalInput::Resize { cols, rows }) => {
                             self.size = PtySize { cols, rows };
                             let _ = live.input.send(ShellInput::Resize { cols, rows }).await;
+                        }
+                        Some(TerminalInput::Break) => {
+                            let _ = live.input.send(ShellInput::Break).await;
                         }
                         Some(TerminalInput::Reconnect) => {
                             let _ = live.input.send(ShellInput::Close).await;
@@ -3161,7 +3464,7 @@ impl Pane {
                 self.size = PtySize { cols, rows };
                 None
             }
-            Some(TerminalInput::Data(_) | TerminalInput::Keys(_)) => None,
+            Some(TerminalInput::Data(_) | TerminalInput::Keys(_) | TerminalInput::Break) => None,
             Some(TerminalInput::Record(slot)) => {
                 slot.not_sent("not connected");
                 None
@@ -3289,7 +3592,7 @@ impl Prompter for PanePrompter<'_> {
                     continue;
                 }
                 // SS-10: keys typed into several terminals are not answers to this login.
-                Some(TerminalInput::Reconnect | TerminalInput::Keys(_)) => continue,
+                Some(TerminalInput::Reconnect | TerminalInput::Keys(_) | TerminalInput::Break) => continue,
                 Some(TerminalInput::Record(slot)) => {
                     slot.not_sent("still logging in");
                     continue;

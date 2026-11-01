@@ -1,0 +1,12 @@
+-- 0.7.0 F3 (SS-12): session kinds. A session's kind is its `protocol` (which allowed 'rdp', 'vnc', 'telnet', 'serial'
+-- and 'winrm' from the start), and each kind's own fields are one JSON object here, checked by the core
+-- (crate::sessions::kinds) before it is saved and read back leniently:
+--   rdp     screen (full, all monitors, or a window's width and height), clipboard (on), drives, printers and audio
+--           (off), admin session
+--   vnc     view only
+--   telnet  line ending (the port is the session's port)
+--   serial  speed, data bits, parity, stop bits, flow control, line ending, local echo (the COM port is the
+--           session's host, and its port column is 1, which nothing reads)
+-- NULL for SSH sessions, so every session saved before stays as it was. F4 (WinRM) adds its fields here too, with
+-- no migration of its own.
+ALTER TABLE sessions ADD COLUMN kind_options TEXT CHECK (kind_options IS NULL OR json_valid(kind_options));

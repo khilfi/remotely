@@ -470,6 +470,7 @@ async fn auto_linking_never_overwrites_the_users_choice() {
         color: None,
         tags: vec![],
         vm_id: None,
+        kind: Default::default(),
     };
     store.insert_session(&ctx, session, &input, None).await.unwrap();
     let link = |s: crate::sessions::SessionRecord| (s.vm_id, s.vm_link);

@@ -79,6 +79,7 @@ fn input(name: &str, port: u16, auth: SessionAuth, environment: Environment) -> 
         color: None,
         tags: vec![],
         vm_id: None,
+        kind: Default::default(),
     }
 }
 

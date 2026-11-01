@@ -26,7 +26,7 @@ use remotely_core::fakes::{FakeFiles, FakeRemote, FakeVmware};
 use remotely_core::jobs::{ExecTuning, JobEvent, JobStatus};
 use remotely_core::known_hosts::HostKey;
 use remotely_core::policy::{ApprovalStep, Tier};
-use remotely_core::sessions::{SessionAuth, SessionInput};
+use remotely_core::sessions::{SessionAuth, SessionInput, SessionKind};
 use remotely_core::support_bundle::collect::collect_host;
 use remotely_core::support_bundle::spec::entry_names;
 use remotely_core::support_bundle::writer::OpenBundle;
@@ -92,6 +92,7 @@ async fn session(core: &Core, name: &str, port: u16, password: &str, environment
                 color: None,
                 tags: vec![],
                 vm_id: None,
+                kind: SessionKind::Ssh,
             },
         )
         .await
@@ -494,6 +495,7 @@ fn fake_session(host: &str) -> SessionInput {
         color: None,
         tags: vec![],
         vm_id: None,
+        kind: SessionKind::Ssh,
     }
 }
 

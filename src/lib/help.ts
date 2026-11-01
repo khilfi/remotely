@@ -70,6 +70,34 @@ export const HELP = {
       "Starting, stopping and removing containers go through the approval rules, like every other change.",
     ],
   },
+  "page.toolbox": {
+    title: "Toolbox",
+    body: [
+      "Ping, trace route, DNS lookups, port checks, certificates, a subnet calculator and Wake-on-LAN, run from this PC. Only Wake up sends something to a machine, so only it goes through the approval rules.",
+      "A session behind a jump host has its ports and certificate checked from the jump host. Ping and trace route can't go that way.",
+    ],
+  },
+  "toolbox.ports": {
+    title: "Check ports",
+    body: [
+      "Opens a connection to each port and closes it again; nothing is sent. Up to 100 ports a check: it checks the ports you name, it doesn't scan.",
+      "Read banners shows the first line a service sends, such as SSH's version. Each check shows in the host's logs like any connection.",
+    ],
+  },
+  "toolbox.certificate": {
+    title: "Certificate",
+    body: [
+      "Reads the certificate a TLS server sends, whatever it is, then asks Windows whether it trusts it, with only what this PC already has. Revocation isn't checked.",
+      "The name checked is the server name, which is also sent to the server (SNI). Leave it empty to use the host.",
+    ],
+  },
+  "toolbox.wake": {
+    title: "Wake up",
+    body: [
+      "Sends a Wake-on-LAN magic packet for the machine's network card. It works only if the card and its firmware have Wake-on-LAN on, and the packet reaches its network.",
+      "From an adapter, the packet goes to that adapter's subnet broadcast. For a subnet behind a router, type its directed broadcast, like 192.0.2.255.",
+    ],
+  },
   "page.dashboard": {
     title: "Dashboard",
     body: [
@@ -169,7 +197,7 @@ export const HELP = {
     title: "How Remotely finds its tools",
     body: [
       "VM actions run through Workstation's vmrun.exe and VirtualBox's VBoxManage.exe; either is enough. Without VirtualBox, the list simply has no VirtualBox VMs.",
-      "Each tool is found in this order: the path set in Settings, its variable (REMOTELY_VMRUN, REMOTELY_VBOXMANAGE, REMOTELY_OVFTOOL, REMOTELY_QEMU_IMG, REMOTELY_DOCKER), the registry, then the default install folder.",
+      "Each tool is found in this order: the path set in Settings, its variable (REMOTELY_VMRUN, REMOTELY_VBOXMANAGE, REMOTELY_OVFTOOL, REMOTELY_QEMU_IMG, REMOTELY_DOCKER, REMOTELY_VNC_VIEWER), the registry, then the default install folder (for VNC sessions, your own TigerVNC, TightVNC, RealVNC or UltraVNC viewer).",
     ],
     link: { label: "Tool settings", to: setting("vmware") },
   },

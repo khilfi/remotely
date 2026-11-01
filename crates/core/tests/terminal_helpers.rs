@@ -103,6 +103,7 @@ async fn session(core: &Core, server: &TestSshServer, password: &str) -> Uuid {
                 color: None,
                 tags: vec![],
                 vm_id: None,
+                kind: Default::default(),
             },
         )
         .await

@@ -28,6 +28,8 @@ mod standing;
 mod tests;
 #[cfg(test)]
 mod vm_settings_tests;
+#[cfg(test)]
+mod wake_tests;
 
 use std::collections::BTreeMap;
 
@@ -184,11 +186,13 @@ pub enum ActionKind {
     ImageConvert,
     /// VM-17, CV-02: export a powered-off VM for another hypervisor (reads the VM, writes new files only).
     VmExport,
+    /// FD-09: send a Wake-on-LAN magic packet from this PC.
+    WakeOnLan,
 }
 
 impl ActionKind {
     /// Every action, in the order Settings lists them (AP-01).
-    pub const ALL: [ActionKind; 55] = [
+    pub const ALL: [ActionKind; 56] = [
         ActionKind::VmStart,
         ActionKind::VmUnpause,
         ActionKind::VmPause,
@@ -243,6 +247,7 @@ impl ActionKind {
         ActionKind::PruneImages,
         ActionKind::PruneBuildCache,
         ActionKind::PruneVolumes,
+        ActionKind::WakeOnLan,
         ActionKind::AppUpdate,
     ];
 
@@ -304,6 +309,7 @@ impl ActionKind {
             ActionKind::StackTeardown => "Tear down a stack instance (deletes its VMs)",
             ActionKind::ImageConvert => "Convert a disk image (writes a new file)",
             ActionKind::VmExport => "Export a VM (writes new files)",
+            ActionKind::WakeOnLan => "Wake a machine up (Wake-on-LAN)",
         }
     }
 
@@ -935,6 +941,8 @@ impl Default for PolicyRules {
             // Medium (its data leaves the VM).
             (ImageConvert, TierRule::same(Low)),
             (VmExport, TierRule::same(Low)),
+            // FD-09 (docs/plan-0.7.md): one packet that wakes a machine; a Prod target's is Medium.
+            (WakeOnLan, TierRule::same(Low)),
         ]);
         Self {
             tiers,
@@ -1180,6 +1188,7 @@ impl PolicyEngine {
                     self.classify_script(&script)
                 }
             }
+            Command::WakeOnLan { .. } => ActionKind::WakeOnLan,
         }
     }
 
@@ -1542,7 +1551,9 @@ pub fn safety_snapshot_applies(command: &Command) -> bool {
         | Command::ImageConvert { .. }
         | Command::VmExport { .. }
         // FD-04: commands on hosts, never VMs.
-        | Command::SupportBundle { .. } => false,
+        | Command::SupportBundle { .. }
+        // FD-09: a wake-up starts a machine that is off; there is nothing in it to lose.
+        | Command::WakeOnLan { .. } => false,
     };
     on_vms && can_lose_state
 }

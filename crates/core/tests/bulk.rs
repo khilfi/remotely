@@ -69,6 +69,7 @@ fn session_input(name: &str, port: u16, auth: SessionAuth) -> SessionInput {
         color: None,
         tags: vec![],
         vm_id: None,
+        kind: Default::default(),
     }
 }
 
@@ -1159,6 +1160,7 @@ async fn linking_a_session_to_a_vm_is_checked_and_audited() {
         color: None,
         tags: vec![],
         vm_id: Some(vm_id(&core, "web").await),
+        kind: Default::default(),
     };
     let linked = core.sessions.update(ctx, s.id, input.clone()).await.unwrap();
     assert!(linked.vm_id.is_some());

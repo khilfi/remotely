@@ -24,8 +24,11 @@ import {
   FolderIcon,
   FolderOpenIcon,
   ListTreeIcon,
+  MonitorIcon,
+  NetworkIcon,
   SearchIcon,
   TagIcon,
+  UsbIcon,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -58,7 +61,9 @@ import {
 } from "@/lib/api";
 import { formatWhen } from "@/lib/format";
 import { sessionAddress } from "@/lib/terminal-session";
+import { kindLabel } from "@/lib/session-kinds";
 import { cn } from "@/lib/utils";
+import { ToolboxMenu } from "@/components/toolbox/ToolboxMenu";
 
 const GROUPING_KEY = "remotely.terminal.treeGrouping";
 const OPEN_KEY = "remotely.terminal.treeOpen";
@@ -444,6 +449,8 @@ function SessionRow({
   const seen =
     session.lastHostname || session.lastIp ? [session.lastHostname, session.lastIp].filter(Boolean).join(" · ") : null;
   const applied = appliedEnvironment(session, vms);
+  // SS-12: Compare hosts and host details are for SSH sessions.
+  const ssh = (session.kind?.protocol ?? "ssh") === "ssh";
   const env = applied.environment;
   const tooltip = [
     `${session.name} (${sessionAddress(session)})`,
@@ -452,7 +459,7 @@ function SessionRow({
     seen && `Last seen as ${seen}, ${formatWhen(session.lastSeenAt)}`,
     reachText(reach),
     checked && "Picked for Compare hosts",
-    "Double-click to open; Ctrl+click to pick for Compare hosts",
+    ssh ? "Double-click to open; Ctrl+click to pick for Compare hosts" : "Double-click to open",
   ]
     .filter(Boolean)
     .join("\n");
@@ -469,7 +476,7 @@ function SessionRow({
         checked && "bg-primary/10",
       )}
       style={{ paddingLeft: `${0.5 + depth * 0.75}rem` }}
-      onClick={(e) => (e.ctrlKey || e.metaKey ? onToggleCheck() : onPick())}
+      onClick={(e) => (ssh && (e.ctrlKey || e.metaKey) ? onToggleCheck() : onPick())}
       onDoubleClick={onOpen}
       onKeyDown={(e) => {
         if (e.key === "Enter") onOpen();
@@ -481,6 +488,7 @@ function SessionRow({
         <ReachDot reach={reach} />
       )}
       {session.color ? <ColorDot color={session.color} className="size-2" /> : <span className="size-2 shrink-0" />}
+      <KindIcon protocol={session.kind?.protocol ?? "ssh"} />
       <span className={cn("truncate", open && "font-medium")}>{session.name}</span>
       {via.length > 0 && (
         <span className="max-w-24 shrink truncate text-[11px] text-muted-foreground">{viaText(via)}</span>
@@ -501,17 +509,46 @@ function SessionRow({
         align="start"
         className="ml-auto size-6 opacity-0 group-hover/row:opacity-100 focus-visible:opacity-100 data-[state=open]:opacity-100"
       >
-        <DropdownMenuItem onSelect={onOpen}>Open in a new tab</DropdownMenuItem>
-        <DropdownMenuItem onSelect={onToggleCheck}>
-          {checked ? "Unpick for Compare hosts" : "Pick for Compare hosts"}
-        </DropdownMenuItem>
+        <DropdownMenuItem onSelect={onOpen}>{openLabel(session)}</DropdownMenuItem>
+        {ssh && (
+          <DropdownMenuItem onSelect={onToggleCheck}>
+            {checked ? "Unpick for Compare hosts" : "Pick for Compare hosts"}
+          </DropdownMenuItem>
+        )}
         <DropdownMenuItem
           onSelect={() => void navigator.clipboard?.writeText(sessionAddress(session)).catch(() => undefined)}
         >
           Copy the address
         </DropdownMenuItem>
-        {onHostDetails && <DropdownMenuItem onSelect={onHostDetails}>Host details…</DropdownMenuItem>}
+        {onHostDetails && ssh && <DropdownMenuItem onSelect={onHostDetails}>Host details…</DropdownMenuItem>}
+        {session.kind?.protocol !== "serial" && (
+          <ToolboxMenu target={{ kind: "session", sessionId: session.id, label: session.name }} />
+        )}
       </RowMenu>
     </div>
   );
+}
+
+/** SS-12: what opening a session does, for its row menu. */
+function openLabel(session: SessionRecord): string {
+  const kind = session.kind ?? { protocol: "ssh" };
+  if (kind.protocol === "rdp")
+    return session.jumpSessionId ? "Open the remote desktop (tunnel tab)" : "Open the remote desktop";
+  if (kind.protocol === "vnc")
+    return session.jumpSessionId ? "Open in the VNC viewer (tunnel tab)" : "Open in the VNC viewer";
+  return "Open in a new tab";
+}
+
+/** SS-12: a small icon for a session that is not SSH. */
+function KindIcon({ protocol }: { protocol: string }) {
+  const Icon =
+    protocol === "rdp" || protocol === "vnc"
+      ? MonitorIcon
+      : protocol === "serial"
+        ? UsbIcon
+        : protocol === "telnet"
+          ? NetworkIcon
+          : null;
+  if (!Icon) return null;
+  return <Icon className="size-3 shrink-0 text-muted-foreground" aria-label={kindLabel(protocol)} />;
 }

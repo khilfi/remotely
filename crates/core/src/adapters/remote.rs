@@ -294,6 +294,42 @@ pub trait ExecSession: Send + Sync {
     fn peer_ip(&self) -> Option<IpAddr> {
         None
     }
+
+    /// FD-09: a TCP connection the host opens to `host:port` (an SSH direct-tcpip channel), for the toolbox's port
+    /// and certificate checks of a host behind it (SS-07). Nothing runs on the host. A connection that can't open
+    /// one says so.
+    async fn open_direct(
+        &self,
+        _host: &str,
+        _port: u16,
+    ) -> std::result::Result<crate::adapters::net_tools::BoxedStream, crate::adapters::net_tools::ConnectFailure> {
+        Err(crate::adapters::net_tools::ConnectFailure::Other(
+            "this connection can't reach another host".into(),
+        ))
+    }
+}
+
+/// FD-09: a direct-tcpip channel from the host at the far end of `handle` to `host:port`, as a stream.
+async fn open_direct_channel(
+    handle: &client::Handle<Handler>,
+    host: &str,
+    port: u16,
+) -> std::result::Result<crate::adapters::net_tools::BoxedStream, crate::adapters::net_tools::ConnectFailure> {
+    use crate::adapters::net_tools::ConnectFailure;
+    if handle.is_closed() {
+        return Err(ConnectFailure::Other(
+            "the connection to the jump host is closed".into(),
+        ));
+    }
+    match handle
+        .channel_open_direct_tcpip(dial_host(host), u32::from(port), "127.0.0.1", 0)
+        .await
+    {
+        Ok(channel) => Ok(Box::new(channel.into_stream())),
+        // sshd's own connect failed: refused there, or no route from there. It doesn't say which.
+        Err(russh::Error::ChannelOpenFailure(russh::ChannelOpenFailure::ConnectFailed)) => Err(ConnectFailure::Refused),
+        Err(err) => Err(ConnectFailure::Other(forward::open_failure(&err))),
+    }
 }
 
 /// How a command ended (BX-02). The output has had the run's secrets scrubbed.
@@ -314,9 +350,21 @@ pub struct ExecResult {
 #[derive(Debug)]
 pub enum ShellInput {
     Data(Vec<u8>),
-    Resize { cols: u16, rows: u16 },
+    /// QL-06: a vault secret typed at a prompt, then Enter: sent like `Data`, but never echoed locally (SS-12's
+    /// Telnet and serial local echo).
+    Secret(Vec<u8>),
+    Resize {
+        cols: u16,
+        rows: u16,
+    },
+    /// SS-12: a serial line's break (Telnet sends IAC BRK); an SSH shell ignores it.
+    Break,
     Close,
 }
+
+/// SS-12: whether the pane's screen shows a password, passphrase or code prompt now (QL-06, SS-10's detection), so a
+/// console's local echo shows nothing of what is typed.
+pub type SecretPromptShown = std::sync::Arc<dyn Fn() -> bool + Send + Sync>;
 
 /// Output of an interactive shell: raw bytes (never decoded here, so a character split across two
 /// reads arrives whole in xterm.js), then one `Closed`.
@@ -746,6 +794,14 @@ impl ExecSession for RusshSession {
 
     fn peer_ip(&self) -> Option<IpAddr> {
         self.peer_ip
+    }
+
+    async fn open_direct(
+        &self,
+        host: &str,
+        port: u16,
+    ) -> std::result::Result<crate::adapters::net_tools::BoxedStream, crate::adapters::net_tools::ConnectFailure> {
+        open_direct_channel(&self.handle, host, port).await
     }
 }
 
@@ -1812,13 +1868,15 @@ fn pump_pty(
                         }
                     }
                     msg = input_rx.recv() => match msg {
-                        Some(ShellInput::Data(bytes)) => {
+                        Some(ShellInput::Data(bytes) | ShellInput::Secret(bytes)) => {
                             // A failed write shows up as the channel closing below.
                             let _ = channel.data_bytes(bytes).await;
                         }
                         Some(ShellInput::Resize { cols, rows }) => {
                             let _ = channel.window_change(u32::from(cols), u32::from(rows), 0, 0).await;
                         }
+                        // SS-12: a serial line's break; an SSH shell has none.
+                        Some(ShellInput::Break) => {}
                         Some(ShellInput::Close) | None => {
                             let _ = channel.close().await;
                             break ShellEnd::Exited { status: exit_status };
@@ -1899,6 +1957,14 @@ impl ExecSession for ShellCommands {
     }
 
     async fn close(&self) {}
+
+    async fn open_direct(
+        &self,
+        host: &str,
+        port: u16,
+    ) -> std::result::Result<crate::adapters::net_tools::BoxedStream, crate::adapters::net_tools::ConnectFailure> {
+        open_direct_channel(&self.handle, host, port).await
+    }
 }
 
 /// Why a connection ended. SS-07: a jump host that dropped takes the connections behind it along,

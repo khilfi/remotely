@@ -63,8 +63,15 @@ pub async fn workspace_switch_preview(state: State<'_, AppState>, id: WorkspaceI
 
 /// Shows another workspace (the UI loads again after it).
 #[tauri::command]
-pub async fn workspace_switch(state: State<'_, AppState>, id: WorkspaceId) -> IpcResult<Workspace> {
-    Ok(state.core.switch_workspace(id).await?)
+pub async fn workspace_switch(
+    state: State<'_, AppState>,
+    runs: State<'_, crate::toolbox::ToolRuns>,
+    id: WorkspaceId,
+) -> IpcResult<Workspace> {
+    let switched = state.core.switch_workspace(id).await?;
+    // FD-09: the old workspace's toolbox runs stop (the window loads again after a switch).
+    runs.cancel_all();
+    Ok(switched)
 }
 
 /// The VMs on this PC no workspace has, as the last refresh found them.

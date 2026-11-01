@@ -74,6 +74,7 @@ fn session(server: &TestSshServer, auth: SessionAuth) -> SessionInput {
         color: None,
         tags: vec![],
         vm_id: None,
+        kind: Default::default(),
     }
 }
 
@@ -786,6 +787,7 @@ async fn jump_hosts_that_go_round_in_a_loop_are_refused() {
         color: None,
         tags: vec![],
         vm_id: None,
+        kind: Default::default(),
     };
     let bastion_id = create(&core, bastion.clone()).await;
     bastion.name = "inner".into();

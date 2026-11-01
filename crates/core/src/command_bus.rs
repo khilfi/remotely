@@ -200,6 +200,12 @@ pub enum Command {
         targets: Vec<TargetRef>,
         spec: Box<crate::support_bundle::BundleSpec>,
     },
+    /// FD-09: a Wake-on-LAN magic packet from this PC ([`crate::toolbox::wake`]). The one target is the session or
+    /// VM it wakes (its label rates it), or this app ([`TargetRef::App`]) for a MAC typed on its own.
+    WakeOnLan {
+        targets: Vec<TargetRef>,
+        wake: crate::toolbox::WakeSpec,
+    },
 }
 
 /// CT-01, CT-02: what a [`Command::Container`] does.
@@ -721,6 +727,10 @@ impl Command {
             Command::Stack { targets, op } => op.validate(targets),
             Command::HostNetwork { targets, op } => net_ops::validate(targets, op),
             Command::SupportBundle { targets, spec } => spec.validate(targets),
+            Command::WakeOnLan { targets, wake } => {
+                crate::toolbox::WakeSpec::check_targets(targets)?;
+                wake.validate()
+            }
             _ => Ok(()),
         }
     }
@@ -789,11 +799,13 @@ impl Command {
             // after something else. SS-07: a tunnel belongs to its terminal. VM-24: an added VM is its file.
             // VM-11: a forward belongs to its network or VM.
             // FD-04: a bundle belongs to its zip; the hosts that failed go into a new one, with its own save dialog.
+            // FD-09: a wake-up is for its one machine.
             Command::AppUpdate { .. }
             | Command::TerminalLine { .. }
             | Command::OpenTunnel { .. }
             | Command::HostNetwork { .. }
             | Command::SupportBundle { .. }
+            | Command::WakeOnLan { .. }
             | Command::VmLifecycle {
                 op: VmLifecycleOp::Register { .. },
                 ..
@@ -820,6 +832,7 @@ impl Command {
             | Command::VmLifecycle { targets, .. }
             | Command::Deploy { targets, .. }
             | Command::HostNetwork { targets, .. }
+            | Command::WakeOnLan { targets, .. }
             | Command::Stack { targets, .. } => targets,
             Command::ImageConvert { targets, .. }
             | Command::VmExport { targets, .. }
@@ -852,6 +865,7 @@ impl Command {
             Command::ImageConvert { .. } => "imageConvert",
             Command::VmExport { .. } => "vmExport",
             Command::SupportBundle { .. } => "supportBundle",
+            Command::WakeOnLan { .. } => "wakeOnLan",
         }
     }
 
@@ -992,6 +1006,7 @@ impl Command {
             Command::ImageConvert { spec, .. } => spec.summary(),
             Command::VmExport { spec, .. } => spec.summary(),
             Command::SupportBundle { spec, .. } => spec.summary(target_count),
+            Command::WakeOnLan { wake, .. } => wake.summary(),
         }
     }
 }
@@ -2031,6 +2046,21 @@ impl CommandBus {
                     targets.push(Target {
                         target: target.clone(),
                         name: crate::inventory::unlisted_name(vmx_path),
+                        environment: Environment::None,
+                        protected: false,
+                    });
+                }
+                // FD-09: a MAC typed on its own wakes no session or VM; the audit log names the MAC.
+                TargetRef::App if matches!(command, Command::WakeOnLan { .. }) => {
+                    let mac = match command {
+                        Command::WakeOnLan { wake, .. } => wake
+                            .mac_bytes()
+                            .map_or_else(|_| wake.mac.clone(), |b| crate::toolbox::wake::format_mac(&b)),
+                        _ => String::new(),
+                    };
+                    targets.push(Target {
+                        target: TargetRef::App,
+                        name: format!("MAC {mac}"),
                         environment: Environment::None,
                         protected: false,
                     });

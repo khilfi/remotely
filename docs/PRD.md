@@ -173,6 +173,22 @@ Support bundles (0.7.0, FD-04, `docs/plan-0.7.md` "Approval tiers"). The hosts a
 | A bundle with a command that is not read-only, or one flagged dangerous | As a Compare hosts run of its commands: Medium (High on 5 or more hosts), or High for a dangerous one |
 | Save the zip (audited `data_exported`, never into a Git working tree) | Part of the bundle's job |
 
+Toolbox (0.7.0, FD-09, `docs/plan-0.7.md` "Approval tiers"). The tools run from this PC; a session behind a jump host has its ports and certificate checked from that jump host (SS-07). A Prod-labelled target moves Wake-on-LAN up one tier, and a protected one is skipped:
+
+| Action | Tier |
+| --- | --- |
+| Ping, trace route, DNS lookup, port check (up to 100 ports a run), view a certificate, the subnet calculator | Not a command: no tier, not audited (reads), allowed by the read-only lock |
+| Wake-on-LAN: one magic packet for a session's, a VM's or a typed MAC | Low |
+| Wake-on-LAN for a session or VM labelled Prod | Medium |
+
+Remote desktop and consoles (0.7.0, SS-12, `docs/plan-0.7.md` "Approval tiers"). Opening one changes nothing on the host, so it is audited like opening a terminal; mstsc and the VNC viewer ask for the password themselves, and a vault password typed into a Telnet terminal asks for the vault password again on each connection:
+
+| Action | Tier |
+| --- | --- |
+| Open an RDP window (mstsc on a `.rdp` file), a VNC viewer, or a Telnet or serial terminal | No tier; audited (`rdp_opened`, `vnc_opened`, or `terminal_opened`) before it starts |
+| Send a break on a serial (or Telnet) line (it can halt a running console) | No tier; audited (`terminal_break_sent`); a confirm first on a Prod or protected session |
+| Open an RDP or VNC session behind a jump host: a tunnel tab to the jump host, then the window | The tunnel at SS-07's tier (a loopback local forward: Low; Medium when the jump host or the session is Prod), audited `tunnel_opened`; the window as above |
+
 | ID | Requirement | Phase |
 | --- | --- | --- |
 | AP-01 | A policy engine classes every state-changing action into a tier; tier rules are editable | MVP |
@@ -220,7 +236,7 @@ These features are for work at customer sites: keeping engagements apart, sharin
 | FD-06 | Markdown notes per host, linked to its credentials and runbooks | v2 |
 | FD-07 | Encrypted backup, export and import of sessions, settings and vault; also how sessions are shared with teammates | v2 |
 | FD-08 | Handover pack for the customer: inventory, topology diagram, job history | v3 |
-| FD-09 | Toolbox: ping, traceroute, DNS lookup, port check, subnet calculator, certificate viewer, Wake-on-LAN, quick TFTP and HTTP server | v3 |
+| FD-09 | Toolbox: ping, traceroute, DNS lookup, port check, subnet calculator, certificate viewer, Wake-on-LAN, quick TFTP and HTTP server | 0.7.0 |
 | FD-10 | Subnet discovery (ping sweep, port check) to add hosts quickly | v3 |
 | FD-11 | Portable mode: runs from a USB drive with a master-password vault | v3 |
 | FD-12 | PowerShell or Python plugins and a CLI for the app itself, both going through the policy engine | v3 |

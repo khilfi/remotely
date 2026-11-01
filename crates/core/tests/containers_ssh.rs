@@ -104,6 +104,7 @@ fn input(name: &str, host: &str, port: u16, user: &str, password: SecretId, jump
         color: None,
         tags: vec![],
         vm_id: None,
+        kind: Default::default(),
     }
 }
 

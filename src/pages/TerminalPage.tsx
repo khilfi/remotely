@@ -69,8 +69,10 @@ import {
   SquareTerminalIcon,
   TextSearchIcon,
   XIcon,
+  ZapIcon,
 } from "lucide-react";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -104,6 +106,7 @@ import { MultiExecBar, type MultiExecNote } from "@/components/MultiExecBar";
 import { MultiExecGroupsDialog, type GroupsDialogStart } from "@/components/MultiExecGroupsDialog";
 import { MultiExecGroupsSubmenu } from "@/components/MultiExecGroupsMenu";
 import { NewTerminalDialog } from "@/components/NewTerminalDialog";
+import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { PasteConfirmDialog } from "@/components/PasteConfirmDialog";
 import { usePresentation } from "@/components/Presentation";
 import { ScrollbackSearchPanel, type SearchPane } from "@/components/ScrollbackSearchPanel";
@@ -188,6 +191,8 @@ import { formatSize } from "@/lib/transfers";
 import { transferStore } from "@/lib/transfers-store";
 import { liveTunnels, routeText, viaText } from "@/lib/tunnels";
 import { cn } from "@/lib/utils";
+import { joinReason, kindOf, opensWindow, paneKindOf } from "@/lib/session-kinds";
+import { openSessionWindow, warnUnmasked } from "@/lib/console-open";
 
 /** A tab's panes: one pane, or a split of several side by side or stacked. */
 type Layout =
@@ -445,6 +450,8 @@ export function TerminalPage({
   const filesShown = side === "files";
   /** SS-07: the current terminal's tunnels, from the "⋯" menu (or a link to them). */
   const [tunnelsOpen, setTunnelsOpen] = useState(false);
+  /** SS-12: a break on a Prod or protected serial line waits for this confirm. */
+  const [breakAsk, setBreakAsk] = useState<{ pane: PaneSession; name: string } | null>(null);
   /** SS-08: files picked or dropped for upload that are in the folder already. */
   const [conflict, setConflict] = useState<{
     pane: PaneSession;
@@ -540,6 +547,14 @@ export function TerminalPage({
     }
   }, [tabs, highlightRules, sessionById]);
 
+  // SS-12: each pane knows what it is for (Telnet, serial, a tunnel tab), from its session, once that is known.
+  useEffect(() => {
+    for (const pane of tabs.flatMap((t) => allPanes(t.layout))) {
+      const session = pane.sessionId ? sessionById.get(pane.sessionId) : undefined;
+      if (session && pane.kind === "ssh") pane.setKind(paneKindOf(kindOf(session), Boolean(session.jumpSessionId)));
+    }
+  }, [tabs, sessionById]);
+
   /** SS-07: a tunnel needs the approval dialog (started here, or one that starts with the terminal). */
   const askTunnel = useCallback((pane: PaneSession, forwardId: string, request: ApprovalRequest) => {
     setTunnelApprovals((queue) =>
@@ -598,6 +613,14 @@ export function TerminalPage({
 
   const openSession = useCallback(
     (session: Pick<SessionRecord, "id" | "name">, container?: ContainerShellOpen) => {
+      // SS-12: an RDP or VNC session opens its window; behind a jump host, a tunnel tab that opens it.
+      const record = sessionById.get(session.id);
+      const kind = record ? kindOf(record) : null;
+      if (!container && record && kind && opensWindow(kind) && !record.jumpSessionId) {
+        openSessionWindow({ id: record.id, name: record.name, kind }, presentation.presenting);
+        window.setTimeout(() => setVersion((v) => v + 1), 500);
+        return;
+      }
       if (container) {
         // CT-01 "Open a shell": a tab inside a container, named after it.
         const opener: PaneOpener = {
@@ -608,12 +631,17 @@ export function TerminalPage({
         };
         addTab(createPane(opener, container.title, true));
       } else {
-        addTab(createPane({ kind: "session", sessionId: session.id }, session.name));
+        const pane = createPane({ kind: "session", sessionId: session.id }, session.name);
+        if (kind) {
+          pane.setKind(paneKindOf(kind, Boolean(record?.jumpSessionId)));
+          warnUnmasked(kind, presentation.presenting);
+        }
+        addTab(pane);
       }
       // Recent sessions moved.
       window.setTimeout(() => setVersion((v) => v + 1), 500);
     },
-    [addTab, createPane],
+    [addTab, createPane, sessionById, presentation.presenting],
   );
 
   /** QL-02: the pane opens before its tab exists, so the form can show why it could not. */
@@ -838,7 +866,10 @@ export function TerminalPage({
   }, [everyPane, multiExec, compareOpen]);
 
   const pickedTabs = multiExec ? tabs.filter((t) => selection.keys.includes(t.key)) : [];
-  const pickedPanes = pickedTabs.flatMap((t) => allPanes(t.layout));
+  // SS-12: Type in all tabs and Compare hosts take SSH panes only (Telnet, serial and tunnel tabs say why).
+  const pickedPanes = pickedTabs.flatMap((t) => allPanes(t.layout)).filter((p) => p.kind === "ssh");
+  /** SS-12: the tabs that can join Type in all tabs (an SSH terminal in them). */
+  const sshTabs = tabs.filter((t) => allPanes(t.layout).some((p) => p.kind === "ssh")).length;
   const pickedIds = pickedPanes.map((p) => p.terminalId).filter((id): id is string => id !== null);
   const pickedIdsKey = pickedIds.join(",");
   // `paneTick` is read so a pane that just got its id is picked up.
@@ -1660,6 +1691,31 @@ export function TerminalPage({
               <RefreshCwIcon />
               Reconnect
             </DropdownMenuItem>
+            {currentPane.kind === "serial" && (
+              <DropdownMenuItem
+                disabled={!currentPane.connected}
+                onSelect={() => {
+                  // A break can halt a running console: a Prod or protected session asks first.
+                  const session = currentPane.sessionId ? sessionById.get(currentPane.sessionId) : undefined;
+                  const sensitive =
+                    session && (session.protected || appliedEnvironment(session, vmById).environment === "prod");
+                  if (sensitive) {
+                    setBreakAsk({ pane: currentPane, name: currentName });
+                    return;
+                  }
+                  void currentPane.sendBreak().then(
+                    () => toast.success("Break sent"),
+                    (err) => toast.error(errorMessage(err)),
+                  );
+                }}
+              >
+                <ZapIcon />
+                <span>
+                  Send break
+                  <ReasonLine reason={currentPane.connected ? null : "Not connected"} />
+                </span>
+              </DropdownMenuItem>
+            )}
             {isSplit && (
               <DropdownMenuItem onSelect={() => closePane(current.key, current.activePane)}>
                 <XIcon />
@@ -1709,7 +1765,7 @@ export function TerminalPage({
         }
         onClick={() => (multiExec ? stopMultiExec() : startMultiExec())}
         className={cn(multiExec && "bg-primary/15 text-primary")}
-        disabledReason={multiExecReason({ tabs: tabs.length, on: multiExec, readOnly })}
+        disabledReason={multiExecReason({ tabs: tabs.length, on: multiExec, readOnly, sshTabs })}
         pressed={multiExec}
       >
         <RadioTowerIcon />
@@ -1954,6 +2010,18 @@ export function TerminalPage({
           </DropdownMenuContent>
         </DropdownMenu>
       )}
+      {breakAsk && (
+        <ConfirmDialog
+          title={`Send a break to ${breakAsk.name}?`}
+          description="A break can halt a running console: a Cisco router drops to ROMMON, a SPARC to its boot prompt."
+          confirmLabel="Send break"
+          onConfirm={async () => {
+            await breakAsk.pane.sendBreak(true);
+            toast.success("Break sent");
+          }}
+          onClose={() => setBreakAsk(null)}
+        />
+      )}
       {pasteAsk && (
         <PasteConfirmDialog
           preview={pasteAsk.preview}
@@ -2106,6 +2174,8 @@ const NO_SNAPSHOT: PaneSnapshot = {
   searchResults: null,
   folder: null,
   tunnels: null,
+  paneKind: "ssh",
+  window: null,
 };
 const noSubscribe = () => () => undefined;
 
@@ -2181,6 +2251,8 @@ function TabButton({
     seen && `Host: ${seen}`,
     via.length > 0 && `Through ${routeText(via)}`,
     session ? null : "Not saved as a session",
+    snapshot.paneKind === "telnet" && "Telnet: what is typed, passwords too, crosses the network in clear text",
+    multiExec && joinReason(snapshot.paneKind),
     snapshot.logPath && `Logging to ${snapshot.logPath}`,
     attention && "A long command finished, or an alert rule matched, here",
     !tab.notify && "No notifications from this tab",
@@ -2222,7 +2294,14 @@ function TabButton({
       )}
       {session?.color && <ColorDot color={session.color} />}
       <span className="grid min-w-0 flex-1 leading-tight">
-        <span className="truncate">{name}</span>
+        <span className="flex min-w-0 items-center gap-1">
+          <span className="truncate">{name}</span>
+          {snapshot.paneKind === "telnet" && (
+            <Badge variant="outline" className="shrink-0 border-tier-high/50 px-1 py-0 text-[10px] text-tier-high">
+              Clear text
+            </Badge>
+          )}
+        </span>
         {(env !== "none" || (seen && seen !== name) || via.length > 0) && (
           <span className="truncate text-[11px] font-normal text-muted-foreground">
             {env !== "none" && (
@@ -2730,8 +2809,28 @@ function PaneStatusBar({
       );
       break;
   }
+  // SS-12: a tunnel tab says where its remote desktop or VNC window stands.
+  const win = snapshot.paneKind === "tunnel" ? snapshot.window : null;
   return (
     <>
+      {snapshot.paneKind === "tunnel" && status.state === "connected" && (
+        <div
+          className={cn(
+            "flex shrink-0 items-center gap-2 border-b px-3 py-1 text-xs",
+            win?.state === "failed" ? "border-destructive/40 bg-destructive/10" : "border-border bg-muted/50",
+          )}
+          role={win?.state === "failed" ? "alert" : "status"}
+        >
+          <CableIcon className="size-3.5 shrink-0" aria-hidden />
+          <span className="min-w-0 flex-1">
+            {win?.state === "open"
+              ? `The window is open through this tab's tunnel (${win.at}). Closing it closes this tab.`
+              : win?.state === "failed"
+                ? `The window did not open: ${win.message}`
+                : "Opening the tunnel; the window opens once it listens."}
+          </span>
+        </div>
+      )}
       {snapshot.logError && (
         <div
           className="flex shrink-0 items-center gap-2 border-b border-destructive/40 bg-destructive/10 px-3 py-1 text-xs"

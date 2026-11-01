@@ -79,6 +79,7 @@ async fn the_log_file_never_holds_a_secret() {
         network: Arc::new(FakeNetwork::default()),
         containers: Arc::new(CliEngines::without_this_pc()),
         disk_tools: Arc::new(remotely_core::fakes::FakeDiskTools::new()),
+        network_tools: Arc::new(remotely_core::fakes::FakeNetworkTools::new()),
     };
     let core = Core::assemble(store, ctx, adapters, JobLimits::default())
         .await
@@ -160,6 +161,7 @@ async fn the_log_file_never_holds_a_secret() {
             color: None,
             tags: vec![],
             vm_id: None,
+            kind: Default::default(),
         };
         sessions.push(core.sessions.create(&core.ctx(), input).await.unwrap().id);
         servers.push(server);

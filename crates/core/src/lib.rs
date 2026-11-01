@@ -51,6 +51,8 @@
 //!   notifications (QL-25): the notification centre's history, in memory and redacted
 //!   support_bundle (FD-04): commands' output and files from many hosts into one zip; collecting is a command on the
 //!     bus, which the job runner carries out on each host's kept connection (SFTP for files)
+//!   toolbox (FD-09): ping, trace route, DNS, port checks and certificates from this PC (behind a jump host, ports and
+//!     certificates from it) ──► adapters::net_tools; reads only. Wake-on-LAN is a command on the bus
 //! ```
 //!
 //! Only [`command_bus::CommandBus`] can enqueue jobs, and adapters are only reachable through the job
@@ -101,6 +103,7 @@ pub mod stacks;
 pub mod store;
 pub mod support_bundle;
 pub mod terminal;
+pub mod toolbox;
 pub mod transfer;
 pub mod untrusted;
 pub mod updates;
@@ -119,6 +122,7 @@ use adapters::containers::cli::{validate_docker_path, CliEngines};
 use adapters::containers::ContainerEngines;
 use adapters::host_counters::{HostCounters, WindowsCounters};
 use adapters::hypervisor::Hypervisors;
+use adapters::net_tools::{NetworkTools, SystemNetworkTools};
 use adapters::network::{NetworkAdapter, SystemNetwork};
 use adapters::remote::{RemoteAdapter, RusshAdapter};
 use adapters::updater::UpdaterAdapter;
@@ -195,6 +199,9 @@ pub struct Adapters {
     pub containers: Arc<dyn ContainerEngines>,
     /// CV-01 to CV-03, VM-17: the disk conversion tools (qemu-img when installed; the hypervisors' own).
     pub disk_tools: Arc<dyn adapters::disk_tools::DiskTools>,
+    /// FD-09: the toolbox's probes from this PC (ICMP, DNS, TCP, a chain's trust check, adapters) and the
+    /// Wake-on-LAN datagram.
+    pub network_tools: Arc<dyn NetworkTools>,
 }
 
 /// AP-05: what an audit export wrote.
@@ -309,6 +316,9 @@ pub struct Core {
     pub notifications: Notifications,
     /// MO-13, MO-14: OS and specs of VMs and SSH hosts, and an SSH host's admin details. Reads only.
     pub host_details: HostDetails,
+    /// FD-09: ping, trace route, DNS, port checks and the certificate viewer (reads), and Wake-on-LAN's options;
+    /// sending a magic packet goes through [`Core::bus`].
+    pub toolbox: toolbox::Toolbox,
     /// MO-02, CT-01: parks refused background logins and caps them per host per hour.
     pub login_guard: LoginGuard,
     /// FD-03: presentation mode and its read-only lock (saved; the lock is shared through the store).
@@ -349,6 +359,7 @@ struct LockParts {
     guest: std::sync::Weak<Metrics>,
     containers: Containers,
     host_details: HostDetails,
+    toolbox: toolbox::Toolbox,
     terminals: Terminals,
     transfer_closed: transfer::Closer,
     bindings: SecretBindings,
@@ -361,6 +372,7 @@ impl LockParts {
         let file_closed = self.transfer_closed.close();
         self.containers.close_all().await;
         self.host_details.close_all().await;
+        self.toolbox.close_all().await;
         if let Some(metrics) = self.guest.upgrade() {
             metrics.guest().close_all().await;
         }
@@ -416,6 +428,7 @@ impl Core {
                 network: Arc::new(SystemNetwork),
                 containers: Arc::new(CliEngines::new(docker.as_deref())),
                 disk_tools: Arc::new(adapters::disk_tools::LocalDiskTools::new(qemu_img)),
+                network_tools: Arc::new(SystemNetworkTools),
             },
             JobLimits::default(),
         )
@@ -522,6 +535,18 @@ impl Core {
             remote: Arc::clone(&adapters.remote),
             known_hosts: Arc::clone(&known_hosts),
         });
+        // FD-09: the toolbox's reads; a session behind a jump host is reached over its jump host's connection.
+        let toolbox = toolbox::Toolbox::new(toolbox::ToolboxParts {
+            store: store.clone(),
+            tools: Arc::clone(&adapters.network_tools),
+            network: Arc::clone(&adapters.network),
+            remote: Arc::clone(&adapters.remote),
+            vault: Arc::clone(&adapters.vault),
+            known_hosts: Arc::clone(&known_hosts),
+            login_guard: login_guard.clone(),
+            terminals: terminals.clone(),
+            host_details: host_details.clone(),
+        });
         let jobs = JobRunner::new(
             store.clone(),
             hypervisors.clone(),
@@ -534,6 +559,8 @@ impl Core {
         );
         // CT-01, CT-02: container changes go from the job runner to the containers service.
         jobs.set_containers(Arc::new(containers.clone()));
+        // FD-09: Wake-on-LAN's magic packet leaves through the job runner.
+        jobs.set_network_tools(Arc::clone(&adapters.network_tools));
         // MO-06: a prune compacts the file only while no job runs.
         history.set_jobs(Arc::clone(&jobs));
         // VM-11: network targets and port forward previews.
@@ -690,6 +717,7 @@ impl Core {
             layouts: Layouts::new(store.clone(), current),
             notifications: Notifications::new(),
             host_details,
+            toolbox,
             login_guard,
             presentation,
             store,
@@ -716,6 +744,7 @@ impl Core {
             guest: Arc::downgrade(&self.metrics),
             containers: self.containers.clone(),
             host_details: self.host_details.clone(),
+            toolbox: self.toolbox.clone(),
             terminals: self.terminals.clone(),
             transfer_closed: self.transfer.closer(),
             bindings: self.bindings.clone(),
@@ -960,6 +989,41 @@ impl Core {
                 .map_or_else(|| "not found".to_owned(), |p| p.display().to_string())
         );
         self.audit_setting("Set the docker.exe path", &detail).await?;
+        Ok(in_use)
+    }
+
+    /// SS-12: the VNC viewer in use (the path saved in Settings, `REMOTELY_VNC_VIEWER`, or a viewer's default
+    /// folder), or `None` when none was found.
+    pub async fn vnc_viewer_path(&self) -> Result<Option<PathBuf>> {
+        self.terminals.vnc_viewer(&self.ctx()).await
+    }
+
+    /// SS-12: the VNC viewer path saved in Settings, if any.
+    pub async fn saved_vnc_viewer_path(&self) -> Result<Option<PathBuf>> {
+        self.terminals.saved_vnc_viewer(&self.ctx()).await
+    }
+
+    /// SS-12: saves the VNC viewer's path (`None` = find it: `REMOTELY_VNC_VIEWER`, then the viewers' default
+    /// folders). The path must be an existing viewer `.exe` on this PC. Audited, since it decides which program a VNC
+    /// session starts.
+    pub async fn set_vnc_viewer_path(&self, path: Option<PathBuf>) -> Result<Option<PathBuf>> {
+        self.store.read_only().check(Change::Settings)?;
+        if let Some(path) = &path {
+            adapters::launcher::validate_vnc_viewer_path(path)?;
+        }
+        let as_text = path.as_ref().map(|p| p.display().to_string());
+        self.store
+            .put_setting(&self.ctx(), terminal::console::VNC_VIEWER_PATH_KEY, &as_text)
+            .await?;
+        let in_use = self.vnc_viewer_path().await?;
+        let detail = format!(
+            "saved: {}; in use: {}",
+            as_text.as_deref().unwrap_or("find automatically"),
+            in_use
+                .as_ref()
+                .map_or_else(|| "not found".to_owned(), |p| p.display().to_string())
+        );
+        self.audit_setting("Set the VNC viewer path", &detail).await?;
         Ok(in_use)
     }
 

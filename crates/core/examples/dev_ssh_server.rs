@@ -48,6 +48,10 @@
 //! KVM without lscpu and with an lsblk too old for JSON, and dnf updates. Opening a terminal reads its OS
 //! and specs; the session's Host details panel shows them, and its Admin tab lists services (one failed),
 //! listening ports, logged-in users, boots and top processes, and pending updates.
+//!
+//! Telnet (SS-12): a router-style console (`fakes::telnet_server`) on the port after the web page, logging alice in
+//! with the same password (`show version`, `show clock`, `echo <text>`, `exit`), for a Telnet session: the "Clear
+//! text" tab, reconnects, and "Type vault password", which asks for the vault password on each connection.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -61,6 +65,7 @@ use remotely_core::adapters::containers::EngineKind;
 use remotely_core::fakes::containers::Fixture;
 use remotely_core::fakes::ssh_server::host::HostFixture;
 use remotely_core::fakes::ssh_server::{SudoMode, TestSshServer};
+use remotely_core::fakes::TelnetTestServer;
 use remotely_core::metrics::procfs::samples;
 
 /// SS-08: a log file of a few hundred KB, so a download shows its progress.
@@ -187,6 +192,15 @@ async fn main() {
     }
     if let Some(web) = web {
         println!("Tunnels: web.test:80 is the page on 127.0.0.1:{web}, reached from the servers by that name");
+    }
+    // SS-12: a Telnet router console on the port after the web page, with the same user and password.
+    let telnet = TelnetTestServer::start_on(port + count + 1, "alice", &password, true).await;
+    match &telnet {
+        Ok(telnet) => println!(
+            "Telnet:      a router console on 127.0.0.1:{} (alice, the same password): show version, show clock, echo <text>, exit",
+            telnet.port()
+        ),
+        Err(err) => println!("Telnet:      not started ({err})"),
     }
     println!("Stop with Ctrl+C.");
     // Runs until the process is stopped; the servers go with it.

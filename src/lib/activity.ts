@@ -36,6 +36,9 @@ export const EVENT_LABELS: Record<string, string> = {
   host_key_changed: "Host key changed: blocked",
   host_key_removed: "Host key forgotten",
   terminal_opened: "Terminal opened",
+  terminal_break_sent: "Break sent",
+  rdp_opened: "Remote desktop opened",
+  vnc_opened: "VNC viewer opened",
   terminal_closed: "Terminal closed",
   terminal_output_saved: "Output saved",
   terminal_output_printed: "Output printed",
@@ -179,6 +182,8 @@ export function kindOfAction(action: string): ActivityKind {
     return "containers";
   }
   if (action === "appUpdate") return "app";
+  // FD-09: a wake-up is for a machine on the network, as often a host as a VM.
+  if (action === "wakeOnLan") return "sessions";
   return "vms";
 }
 

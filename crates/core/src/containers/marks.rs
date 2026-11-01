@@ -122,6 +122,10 @@ impl ContainerMarks {
             .get_session(ctx, session_id)
             .await?
             .ok_or_else(|| CoreError::UnknownTarget(format!("session {session_id}")))?;
+        // SS-12: containers are reached over SSH.
+        if !inputs.is_empty() {
+            session.require_ssh("container hosts are reached over SSH only")?;
+        }
         let mut after: Vec<ContainerMark> = Vec::new();
         for input in inputs {
             if after.iter().any(|m| m.engine == input.engine) {

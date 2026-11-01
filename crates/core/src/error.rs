@@ -299,6 +299,30 @@ pub enum CoreError {
     #[error("not implemented yet ({0})")]
     NotImplemented(&'static str),
 
+    /// SS-12: something that works on one kind of session was asked of another (Compare hosts on a Telnet
+    /// session, a jump host that is a serial session).
+    #[error("'{session}' is a {kind} session, and {needs}")]
+    WrongSessionKind {
+        session: String,
+        kind: &'static str,
+        /// "this works over SSH only".
+        needs: String,
+    },
+
+    /// SS-12: no VNC viewer was found: none set in Settings and none in the default folders.
+    #[error(
+        "no VNC viewer was found. Install TigerVNC, TightVNC, RealVNC or UltraVNC, or give its path in Settings, Tools"
+    )]
+    VncViewerNotFound,
+
+    /// SS-12: mstsc.exe or the VNC viewer could not be started, or the tunnel it needs did not open.
+    #[error("{0}")]
+    Console(String),
+
+    /// SS-12: a COM port could not be opened or set up (in use, unplugged, or settings it refuses).
+    #[error("{0}")]
+    SerialPort(String),
+
     /// VM-16: vmware-vdiskmanager.exe is not beside vmrun.exe (nor where `REMOTELY_VDISKMANAGER` says).
     #[error(
         "vmware-vdiskmanager.exe was not found next to vmrun.exe. It comes with VMware Workstation Pro: repair the install, or set REMOTELY_VDISKMANAGER to its full path"
@@ -485,6 +509,10 @@ impl CoreError {
             CoreError::Sftp(_) => "sftp",
             CoreError::ReadOnlyLock { .. } => "read_only_lock",
             CoreError::NotImplemented(_) => "not_implemented",
+            CoreError::WrongSessionKind { .. } => "wrong_session_kind",
+            CoreError::VncViewerNotFound => "vnc_viewer_not_found",
+            CoreError::Console(_) => "console_failed",
+            CoreError::SerialPort(_) => "serial_port",
             CoreError::VdiskManagerNotFound => "vdiskmanager_not_found",
             CoreError::VdiskManager { .. } => "vdiskmanager_failed",
             CoreError::VmSettingRefused(_) => "vm_setting_refused",

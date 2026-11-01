@@ -22,6 +22,7 @@ mod stacks;
 mod support_bundle;
 mod terminal;
 mod terminal_rules;
+mod toolbox;
 mod tunnels;
 pub mod updater;
 mod vm_insight;
@@ -94,6 +95,8 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .manage(diagnostics::LogsFolder(log_dir.clone()))
         .manage(PageLoads::default())
+        // FD-09: the toolbox's runs going on, so the UI can stop one.
+        .manage(toolbox::ToolRuns::default())
         .setup(move |app| {
             // Tauri turns a setup error into a panic, so a failed start is explained here and ends here.
             if let Err(err) = start(app, setup_logs.as_deref()) {
@@ -156,6 +159,13 @@ fn page_loaded<R: Runtime>(webview: &Webview<R>, payload: &PageLoadPayload<'_>) 
     let loads = webview.state::<PageLoads>().0.fetch_add(1, Ordering::SeqCst);
     if loads == 0 {
         return;
+    }
+    // FD-09: the old page's toolbox runs (a ping of 1000 requests, say) stop with it.
+    if let Some(runs) = webview.try_state::<toolbox::ToolRuns>() {
+        let stopped = runs.cancel_all();
+        if stopped > 0 {
+            tracing::info!(stopped, "the window reloaded; stopped its toolbox runs");
+        }
     }
     let Some(state) = webview.try_state::<AppState>() else {
         return;
@@ -603,6 +613,9 @@ fn commands() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         terminal::terminal_output_save,
         terminal::terminal_log_start,
         terminal::terminal_log_stop,
+        terminal::console_open_window,
+        terminal::serial_ports_list,
+        terminal::terminal_send_break,
         containers::containers_hosts,
         containers::containers_marks,
         containers::containers_set_marks,
@@ -618,6 +631,7 @@ fn commands() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         containers::containers_release,
         containers::container_shell_open,
         ipc::settings_set_docker_path,
+        ipc::settings_set_vnc_viewer_path,
         tunnels::forwards_list,
         tunnels::forwards_all,
         tunnels::forwards_save,
@@ -749,6 +763,15 @@ fn commands() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         workspaces::change_id_rules,
         workspaces::change_id_rules_set,
         workspaces::transfer_commit_new_workspace,
+        // FD-09 the toolbox.
+        toolbox::toolbox_ping,
+        toolbox::toolbox_trace,
+        toolbox::toolbox_dns,
+        toolbox::toolbox_ports,
+        toolbox::toolbox_certificate,
+        toolbox::toolbox_certificate_file,
+        toolbox::toolbox_cancel,
+        toolbox::toolbox_wake_options,
     ]
 }
 
