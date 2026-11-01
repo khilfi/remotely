@@ -233,8 +233,8 @@ pub enum WinrmSignIn {
     Ntlm,
     /// The session's user and its vault password in the request header: HTTPS only (the host must allow Basic).
     Basic,
-    /// The Windows account signed in to this PC, through Windows' Negotiate (Kerberos for domain hosts). No
-    /// password is stored or sent by Remotely.
+    /// The Windows account signed in to this PC, through Kerberos only (Negotiate without NTLM): a host in this PC's
+    /// or a trusted domain, by its name. No password is stored or sent by Remotely, and NTLM never answers for it.
     Windows,
 }
 
@@ -243,7 +243,7 @@ impl WinrmSignIn {
         match self {
             WinrmSignIn::Ntlm => "user and password (NTLM)",
             WinrmSignIn::Basic => "user and password (Basic)",
-            WinrmSignIn::Windows => "my Windows sign-in (Kerberos)",
+            WinrmSignIn::Windows => "my Windows sign-in (Kerberos only)",
         }
     }
 }
@@ -452,6 +452,12 @@ impl SessionKind {
                         "Basic sends the password as it is, so it needs HTTPS. Choose HTTPS, or sign in with NTLM.",
                     );
                 }
+                // Review F4 #1: Kerberos needs the host's name (its SPN); this PC's account never signs in to an address.
+                if o.sign_in == WinrmSignIn::Windows && crate::adapters::network::ip_literal(host).is_some() {
+                    return invalid(
+                        "My Windows sign-in is Kerberos, which needs the host's name, not its IP address. Enter the name, or sign in with NTLM and a password from the vault.",
+                    );
+                }
             }
             SessionKind::Rdp(o) => {
                 if let RdpScreen::Window { width, height } = o.screen {
@@ -641,6 +647,17 @@ mod tests {
             ..WinrmOptions::default()
         });
         assert!(basic_https.tidy(&mut host, &mut port).is_ok());
+        // This PC's own account signs in only with Kerberos, which needs a name.
+        let windows = SessionKind::Winrm(WinrmOptions {
+            sign_in: WinrmSignIn::Windows,
+            ..WinrmOptions::default()
+        });
+        assert!(windows.tidy(&mut host, &mut port).is_ok());
+        for address in ["198.51.100.7", "[2001:db8::5]", "2001:db8::5"] {
+            let mut ip = address.to_owned();
+            let refused = windows.tidy(&mut ip, &mut port).unwrap_err().to_string();
+            assert!(refused.contains("Kerberos"), "{address}: {refused}");
+        }
         let kind: SessionKind =
             serde_json::from_str(r#"{"protocol":"winrm","transport":"http","signIn":"windows"}"#).unwrap();
         assert_eq!(

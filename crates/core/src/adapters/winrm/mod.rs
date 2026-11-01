@@ -198,10 +198,19 @@ impl WinrmAdapter for HttpWinrm {
                     credentials: sspi::acquire(Package::Ntlm, Some(Identity { user, password }))?,
                 }
             }
-            WinrmSignIn::Windows => SignIn::Sspi {
-                package: Package::Negotiate,
-                credentials: sspi::acquire(Package::Negotiate, None)?,
-            },
+            WinrmSignIn::Windows => {
+                // Review F4 #1: Kerberos needs the host's name; this PC's account never goes to an address.
+                if crate::adapters::network::ip_literal(&spec.host).is_some() {
+                    return Err(CoreError::AuthFailed(format!(
+                        "'{}' is reached by its IP address, and Kerberos needs the host's name. Use the name, or sign in with NTLM and a password from the vault",
+                        spec.name
+                    )));
+                }
+                SignIn::Sspi {
+                    package: Package::KerberosOnly,
+                    credentials: sspi::acquire(Package::KerberosOnly, None)?,
+                }
+            }
         };
         let endpoint = Endpoint {
             host: spec.host.clone(),
@@ -279,10 +288,18 @@ impl ExecSession for HttpSession {
     }
 
     async fn close(&self) {
-        if let Some(kept) = self.runner.lock().await.take() {
-            kept.runner.stop().await;
+        // A read in progress holds the runner: it is dropped (and stopped) when that read ends.
+        if let Ok(mut kept) = self.runner.try_lock() {
+            if let Some(kept) = kept.take() {
+                kept.runner.stop().await;
+            }
         }
+        // Review F4 #6: refuse new work, then delete every shell still on the host (runs in flight, a console), on a
+        // connection of their own, so a vault lock or a workspace switch leaves nothing running there.
         self.client.close();
+        for id in self.client.live_shells() {
+            self.client.delete_shell(&id).await;
+        }
     }
 
     fn peer_ip(&self) -> Option<IpAddr> {
@@ -308,26 +325,31 @@ impl WinrmSession for HttpSession {
 
     async fn read(&self, script: &str, max_output: usize, deadline: Duration) -> Result<String> {
         let mut kept = self.runner.lock().await;
-        if kept.is_none() {
-            let permit = Arc::clone(&self.shells)
-                .try_acquire_owned()
-                .map_err(|_| Self::too_many())?;
-            let runner = Runner::start(Arc::clone(&self.client), self.tuning.idle, self.tuning.request_timeout).await?;
-            *kept = Some(KeptRunner {
-                runner,
-                _permit: permit,
-            });
-        }
-        let Some(current) = kept.as_mut() else {
-            return Err(CoreError::Winrm("no PowerShell to read with".into()));
+        // Review F4 #3: the runner is taken out for the read and put back only when it went well. A read dropped half
+        // way (its caller's time limit) drops the runner with it, which stops its PowerShell, so the next read starts a
+        // new one instead of reading the old read's output as its own.
+        let mut current = match kept.take() {
+            Some(current) => current,
+            None => {
+                let permit = Arc::clone(&self.shells)
+                    .try_acquire_owned()
+                    .map_err(|_| Self::too_many())?;
+                let runner =
+                    Runner::start(Arc::clone(&self.client), self.tuning.idle, self.tuning.request_timeout).await?;
+                KeptRunner {
+                    runner,
+                    _permit: permit,
+                }
+            }
         };
         match current.runner.read(script, max_output, deadline).await {
-            Ok(text) => Ok(text),
+            Ok(text) => {
+                *kept = Some(current);
+                Ok(text)
+            }
             Err(err) => {
                 // A read that failed leaves its PowerShell in an unknown state: the next read starts another.
-                if let Some(old) = kept.take() {
-                    old.runner.stop().await;
-                }
+                current.runner.stop().await;
                 Err(err)
             }
         }

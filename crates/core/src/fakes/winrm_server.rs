@@ -63,6 +63,21 @@ pub struct WinrmStats {
     pub signals: Vec<String>,
     /// Guest metrics reads answered.
     pub metrics_reads: u64,
+    /// NTLM messages received (NEGOTIATE and AUTHENTICATE), whoever sent them.
+    pub ntlm_messages: usize,
+    /// AUTHENTICATE messages whose channel binding wasn't this TLS channel's.
+    pub bad_bindings: usize,
+}
+
+/// How the fake spoils its answers after the sign-in over HTTP, for the client's refusals.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Tamper {
+    #[default]
+    None,
+    /// In clear text, as if sealing were off.
+    Plain,
+    /// Sealed, then one byte changed.
+    Forged,
 }
 
 /// A shell's commands, by id.
@@ -78,6 +93,9 @@ struct Shared {
     round: AtomicU64,
     refusing: AtomicBool,
     drop_all: broadcast::Sender<()>,
+    /// The HTTPS certificate, for checking a client's channel binding.
+    certificate: Mutex<Option<Vec<u8>>>,
+    tamper: Mutex<Tamper>,
 }
 
 /// A WinRM endpoint on 127.0.0.1. Stops when dropped.
@@ -125,9 +143,12 @@ impl WinrmTestServer {
             round: AtomicU64::new(0),
             refusing: AtomicBool::new(false),
             drop_all,
+            certificate: Mutex::default(),
+            tamper: Mutex::default(),
         });
         let (acceptor, certificate) = if mode.https() {
             let (acceptor, der) = tls_acceptor().map_err(std::io::Error::other)?;
+            *locks::lock(&shared.certificate) = Some(der.clone());
             (Some(acceptor), Some(der))
         } else {
             (None, None)
@@ -186,6 +207,11 @@ impl WinrmTestServer {
                 services.remove(&name.to_ascii_lowercase());
             }
         }
+    }
+
+    /// Spoils the answers after the sign-in over HTTP from now on.
+    pub fn set_tamper(&self, tamper: Tamper) {
+        *locks::lock(&self.shared.tamper) = tamper;
     }
 
     /// Drops every connection now (the client reconnects); with `refusing`, new ones too until called with false.
@@ -403,6 +429,10 @@ async fn handle(shared: &Arc<Shared>, auth: &mut Auth, request: Request) -> Resp
                 locks::lock(&shared.stats).sign_ins += 1;
                 *auth = Auth::Basic;
             }
+            // The client's sign-in check: an empty POST.
+            if request.body.is_empty() {
+                return Response::empty(200);
+            }
             let xml = String::from_utf8_lossy(&request.body).into_owned();
             let (status, body) = soap(shared, &xml).await;
             xml_response(status, body.into_bytes())
@@ -447,9 +477,18 @@ async fn handle(shared: &Arc<Shared>, auth: &mut Auth, request: Request) -> Resp
             if shared.mode.https() {
                 return xml_response(status, body.into_bytes());
             }
+            let tamper = *locks::lock(&shared.tamper);
+            if tamper == Tamper::Plain {
+                return xml_response(status, body.into_bytes());
+            }
             let k = keys.as_mut();
-            let (signature, sealed) =
+            let (signature, mut sealed) =
                 ntlm::seal(&mut k.server_seal, &k.server_sign, &mut k.server_seq, body.as_bytes());
+            if tamper == Tamper::Forged {
+                if let Some(first) = sealed.first_mut() {
+                    *first ^= 0x55;
+                }
+            }
             Response {
                 status,
                 headers: vec![(
@@ -471,6 +510,10 @@ fn xml_response(status: u16, body: Vec<u8>) -> Response {
 }
 
 fn sign_in(shared: &Arc<Shared>, auth: &mut Auth, token: &[u8]) -> Response {
+    // Any NTLM message, raw or inside SPNEGO: the Windows sign-in (Kerberos only) must never send one.
+    if token.windows(8).any(|w| w == b"NTLMSSP\0") {
+        locks::lock(&shared.stats).ntlm_messages += 1;
+    }
     match ntlm::message_type(token) {
         Some(1) => {
             let Some(flags) = ntlm::negotiate_flags(token) else {
@@ -502,6 +545,10 @@ fn sign_in(shared: &Arc<Shared>, auth: &mut Auth, token: &[u8]) -> Response {
                 return Response::challenge(&["Negotiate"]);
             };
             let password = locks::lock(&shared.password).clone();
+            // Over TLS the client binds its sign-in to the channel (Extended Protection).
+            let bindings = locks::lock(&shared.certificate)
+                .as_deref()
+                .map(|der| ntlm::channel_bindings_hash(&crate::adapters::winrm::http::tls_server_end_point(der)));
             match ntlm::authenticate(
                 &negotiate,
                 &challenge,
@@ -510,14 +557,19 @@ fn sign_in(shared: &Arc<Shared>, auth: &mut Auth, token: &[u8]) -> Response {
                 token,
                 &shared.user,
                 &password,
+                bindings,
             ) {
                 Ok(keys) => {
                     locks::lock(&shared.stats).sign_ins += 1;
                     *auth = Auth::Ntlm(Box::new(keys));
                     Response::empty(200)
                 }
-                Err(_) => {
-                    locks::lock(&shared.stats).refused_sign_ins += 1;
+                Err(refused) => {
+                    let mut stats = locks::lock(&shared.stats);
+                    stats.refused_sign_ins += 1;
+                    if refused == ntlm::Refused::BadBindings {
+                        stats.bad_bindings += 1;
+                    }
                     Response::challenge(&["Negotiate"])
                 }
             }
@@ -885,10 +937,7 @@ impl Proc {
                 Some(Deferred::Line(line)) => self.statement(shared, &line),
                 Some(Deferred::Marker(nonce)) => {
                     let location = self.location.clone();
-                    self.print(&format!(
-                        "]7790;{nonce};{location}
-"
-                    ));
+                    self.print(&format!("\x1b]7790;{nonce};{location}\x07\r\n"));
                 }
                 None => break,
             }

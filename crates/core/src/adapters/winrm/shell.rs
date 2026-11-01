@@ -83,7 +83,10 @@ impl RemoteShell {
             )
             .await?
         {
-            Answer::Body(body) => shell.id = soap::shell_id(&body)?,
+            Answer::Body(body) => {
+                shell.id = soap::shell_id(&body)?;
+                shell.client.shell_opened(&shell.id);
+            }
             Answer::Fault(fault) => return Err(fault.to_error("a new shell")),
         }
         Ok(shell)
@@ -166,16 +169,13 @@ impl RemoteShell {
     }
 
     /// Deletes the shell on the host (and whatever still runs in it). Once.
+    /// Deletes the shell on the host, once: also after the client closed (a vault lock, a workspace switch), so what still
+    /// ran in it doesn't linger until the host's idle timeout.
     pub async fn delete(&self) {
-        if self.deleted.swap(true, Ordering::SeqCst) || self.client.is_closed() {
+        if self.deleted.swap(true, Ordering::SeqCst) {
             return;
         }
-        let deleted = self
-            .call(soap::ACTION_DELETE, Some(&self.id), &[], "", Duration::from_secs(10))
-            .await;
-        if let Err(err) = deleted {
-            tracing::debug!(error = %err, "winrm: a shell could not be deleted; the host drops it when it idles");
-        }
+        self.client.delete_shell(&self.id).await;
     }
 
     pub fn id(&self) -> &str {
@@ -183,8 +183,9 @@ impl RemoteShell {
     }
 }
 
-/// Deletes a shell when a run is dropped half way (its caller's time limit), on a task of its own.
-struct DeleteOnDrop(Option<Arc<RemoteShell>>);
+/// Deletes a shell when what holds it is dropped half way (a caller's time limit, a start that failed), on a task of its
+/// own. `.0 = None` keeps it.
+pub(super) struct DeleteOnDrop(pub(super) Option<Arc<RemoteShell>>);
 
 impl Drop for DeleteOnDrop {
     fn drop(&mut self) {
@@ -257,56 +258,72 @@ pub async fn run_script(
     })
 }
 
-/// One PowerShell kept open for reads (MO-05): each [`Runner::read`] sends its lines and a marker line, and reads
-/// up to the marker.
+/// One PowerShell kept open for reads (MO-05): each [`Runner::read`] sends its lines and a marker line of its own, and
+/// reads up to that marker. A read that fails, or is dropped half way (its caller's time limit), leaves the runner in an
+/// unknown state: the caller drops it, and dropping it stops the PowerShell (its cleanup deletes the shell), so a later
+/// read never takes an earlier read's output as its own.
 pub struct Runner {
     shell: Arc<RemoteShell>,
     command: String,
-    marker: String,
+    nonce: String,
+    /// Reads made: each marker names its read, `@@remotely-end-<nonce>-<n>`.
+    reads: u64,
     /// Output after the last marker (none, as reads are one at a time).
     pending: Vec<u8>,
+    /// Deletes the shell when the runner is dropped without [`Runner::stop`].
+    cleanup: DeleteOnDrop,
 }
 
 impl Runner {
     pub async fn start(client: Arc<Client>, idle: Duration, timeout: Duration) -> Result<Self> {
         let shell = Arc::new(RemoteShell::create(client, idle, timeout).await?);
-        let mut cleanup = DeleteOnDrop(Some(Arc::clone(&shell)));
+        let cleanup = DeleteOnDrop(Some(Arc::clone(&shell)));
         let command = shell
             .command(POWERSHELL, "-NoLogo -NoProfile -NonInteractive -Command -", false)
             .await?;
-        cleanup.0 = None;
         Ok(Self {
             shell,
             command,
-            marker: format!("@@remotely-end-{}", Uuid::new_v4().simple()),
+            nonce: Uuid::new_v4().simple().to_string(),
+            reads: 0,
             pending: Vec::new(),
+            cleanup,
         })
+    }
+
+    fn marker_prefix(&self) -> String {
+        format!("@@remotely-end-{}-", self.nonce)
     }
 
     /// Runs the lines of `script` (each a statement of its own) and returns what they printed on stdout, up to
     /// `max_output` bytes, within `deadline`. A failure leaves the runner unusable: the caller drops it.
     pub async fn read(&mut self, script: &str, max_output: usize, deadline: Duration) -> Result<String> {
         let started = Instant::now();
+        self.reads += 1;
+        let marker = format!("{}{}", self.marker_prefix(), self.reads);
         let mut text = String::new();
         for line in script.lines().map(str::trim).filter(|l| !l.is_empty()) {
             text.push_str(line);
             text.push_str("\r\n");
         }
-        text.push_str(&format!("[Console]::Out.WriteLine('{}')\r\n", self.marker));
+        text.push_str(&format!("[Console]::Out.WriteLine('{marker}')\r\n"));
         self.shell.send(&self.command, text.as_bytes(), false).await?;
         let mut out = std::mem::take(&mut self.pending);
         loop {
-            if let Some(at) = find(&out, self.marker.as_bytes()) {
-                self.pending = out.split_off(at);
+            if let Some(at) = find_marker(&out, marker.as_bytes()) {
+                let mut rest = out.split_off(at);
                 // The marker's own line goes; anything after it waits for the next read.
-                let after: Vec<u8> = self
-                    .pending
-                    .iter()
-                    .skip(self.marker.len())
-                    .skip_while(|b| matches!(b, b'\r' | b'\n'))
-                    .copied()
-                    .collect();
-                self.pending = after;
+                let after = rest.split_off(marker.len().min(rest.len()));
+                self.pending = after.into_iter().skip_while(|b| matches!(b, b'\r' | b'\n')).collect();
+                // Output of an earlier read (one that stopped half way) is not this read's.
+                let prefix = self.marker_prefix();
+                if let Some(old) = rfind(&out, prefix.as_bytes()) {
+                    let line_end = out[old..]
+                        .iter()
+                        .position(|b| *b == b'\n')
+                        .map_or(out.len(), |p| old + p + 1);
+                    out.drain(..line_end);
+                }
                 out.truncate(max_output);
                 return Ok(String::from_utf8_lossy(&out).into_owned());
             }
@@ -321,7 +338,7 @@ impl Runner {
             let empty = got.stdout.is_empty() && got.done.is_none();
             out.extend_from_slice(&got.stdout);
             // Remotely's reads print a few KB: a host that prints far more is not answering them.
-            if out.len() > max_output + self.marker.len() + 64 {
+            if out.len() > max_output + marker.len() + 64 {
                 return Err(CoreError::Winrm(format!(
                     "the host printed more than {} KB for one read",
                     max_output / 1024
@@ -335,10 +352,32 @@ impl Runner {
     }
 
     /// Ends the PowerShell and deletes its shell.
-    pub async fn stop(self) {
+    pub async fn stop(mut self) {
+        self.cleanup.0 = None;
         let _ = self.shell.signal(&self.command, soap::SIGNAL_TERMINATE).await;
         self.shell.delete().await;
     }
+}
+
+/// Where `marker` starts as a whole line's text: not followed by another digit (`-1` isn't `-12`).
+fn find_marker(haystack: &[u8], marker: &[u8]) -> Option<usize> {
+    let mut from = 0;
+    while let Some(at) = find(&haystack[from..], marker).map(|p| p + from) {
+        let next = haystack.get(at + marker.len());
+        if !next.is_some_and(u8::is_ascii_digit) {
+            return Some(at);
+        }
+        from = at + 1;
+    }
+    None
+}
+
+/// The last place `needle` starts in `haystack`.
+fn rfind(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() || haystack.len() < needle.len() {
+        return None;
+    }
+    haystack.windows(needle.len()).rposition(|w| w == needle)
 }
 
 fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {

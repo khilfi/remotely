@@ -93,7 +93,9 @@ fn unescape(text: &str) -> String {
     while let Some(at) = rest.find('&') {
         out.push_str(&rest[..at]);
         let after = &rest[at..];
-        let Some(end) = after.find(';').filter(|e| *e <= 10) else {
+        // Review F4 #8: an entity is short, so only its first bytes are searched (a text full of `&` and no `;`
+        // would otherwise be read once per `&`).
+        let Some(end) = after.as_bytes().iter().take(11).position(|b| *b == b';') else {
             out.push('&');
             rest = &after[1..];
             continue;

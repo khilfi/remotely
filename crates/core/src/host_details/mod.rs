@@ -543,6 +543,7 @@ impl HostDetails {
 
     /// MO-14: services, ports, users, boots and processes, read now.
     pub async fn admin(&self, ctx: &Context, session_id: Uuid) -> Result<AdminReport> {
+        self.require_linux(ctx, session_id).await?;
         let (exec, via) = self.connection(ctx, session_id).await?;
         linux_only(exec.as_ref())?;
         let timeout = self.inner.collector.tuning().admin_timeout;
@@ -582,6 +583,7 @@ impl HostDetails {
 
     /// MO-14: pending updates (apt's lists as they are, or dnf, which may refresh its metadata first).
     pub async fn updates(&self, ctx: &Context, session_id: Uuid) -> Result<UpdatesCheck> {
+        self.require_linux(ctx, session_id).await?;
         let (exec, via) = self.connection(ctx, session_id).await?;
         linux_only(exec.as_ref())?;
         let timeout = self.inner.collector.tuning().updates_timeout;
@@ -694,6 +696,19 @@ impl HostDetails {
     }
 
     /// The connection a read uses: an open terminal's, the dashboard's, or Remotely's own.
+    /// Review F4 #15: MO-14's reads are for Linux hosts: a WinRM session is refused before anything signs in to it.
+    async fn require_linux(&self, ctx: &Context, session_id: Uuid) -> Result<()> {
+        match self.inner.store.session_spec(ctx, session_id).await {
+            Err(CoreError::WrongSessionKind { .. })
+                if matches!(self.inner.store.winrm_spec(ctx, session_id).await, Ok(Some(_))) =>
+            {
+                Err(windows_refusal())
+            }
+            Err(err @ CoreError::WrongSessionKind { .. }) => Err(err),
+            _ => Ok(()),
+        }
+    }
+
     async fn connection(&self, ctx: &Context, session_id: Uuid) -> Result<(Arc<dyn ExecSession>, Via)> {
         if let Some(exec) = self.inner.terminals.commands_for(session_id) {
             return Ok((exec, Via::Terminal));
@@ -885,10 +900,14 @@ impl HostDetails {
 fn linux_only(exec: &dyn ExecSession) -> Result<()> {
     match exec.script_kind() {
         ScriptKind::Posix => Ok(()),
-        ScriptKind::PowerShell => Err(CoreError::InvalidInput(
-            "This read is for Linux hosts. A Windows host's listening ports are on its System tab.".into(),
-        )),
+        ScriptKind::PowerShell => Err(windows_refusal()),
     }
+}
+
+fn windows_refusal() -> CoreError {
+    CoreError::InvalidInput(
+        "This read is for Linux hosts. A Windows host's listening ports are on its System tab.".into(),
+    )
 }
 
 async fn close_idle(inner: &Inner) {

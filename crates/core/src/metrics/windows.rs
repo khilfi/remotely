@@ -56,12 +56,15 @@ pub fn parse(output: &str) -> GuestReading {
         };
         match tag {
             "@@cpu" => {
-                reading.cpu = numbers::<2>(rest).and_then(|[idle, stamp]| {
+                let pair = numbers::<2>(rest);
+                reading.cpu = pair.and_then(|[idle, stamp]| {
                     Some(CpuJiffies {
                         busy: stamp.checked_sub(idle)?,
                         total: stamp,
                     })
                 });
+                // 100 ns units: the rates' clock, finer than the uptime's whole seconds.
+                reading.clock_secs = pair.map(|[_, stamp]| stamp as f64 / 10_000_000.0);
             }
             "@@mem" => {
                 if let Some([total, free, page_total, page_free]) = numbers::<4>(rest) {
@@ -148,6 +151,13 @@ mod tests {
         assert!((r.cpu_pct.unwrap() - 25.0).abs() < 0.001, "{r:?}");
         assert!((r.disk_read_bps.unwrap() - 2_097_152.0).abs() < 1.0);
         assert!((r.net_rx_bps.unwrap() - 209_715.2).abs() < 1.0);
+        // The uptime is whole seconds (rounded to 6 s here, and this PC's clock says 7 s): the rates still use the
+        // 5 s the CPU counter's own timestamp grew.
+        let mut rounded = parse(&sample(1));
+        rounded.uptime_secs = Some(86_406.0);
+        let r = rates(Some((&first, at)), &rounded, at + Duration::from_secs(7));
+        assert!((r.disk_read_bps.unwrap() - 2_097_152.0).abs() < 1.0, "{r:?}");
+        assert!((r.net_tx_bps.unwrap() - 104_857.6).abs() < 1.0, "{r:?}");
     }
 
     #[test]

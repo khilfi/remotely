@@ -121,16 +121,18 @@ if ($remotelyService) {{ '@@service ' + $remotelyService.Status }} else {{ '@@se
     ))
 }
 
-/// `Get-Service`'s answer: the status word (`Running`, `Stopped`, `StartPending`, `Paused`...), or `None` when the
-/// host has no such service. Up only while `Running`.
+/// `Get-Service`'s answer: whether it runs and the status word (`Running`, `Stopped`, `StartPending`, `Paused`...,
+/// or `missing` when the host has no such service); `None` for an answer without the state line. Up only while
+/// `Running`.
 pub fn parse_get_service(stdout: &str) -> Option<(bool, String)> {
     let line = stdout.lines().map(str::trim).find(|l| l.starts_with("@@service "))?;
-    let word: String = line["@@service ".len()..]
+    let word: String = line
+        .strip_prefix("@@service ")?
         .chars()
         .filter(|c| c.is_ascii_alphabetic())
         .take(32)
         .collect();
-    if word.is_empty() || word == "missing" {
+    if word.is_empty() {
         return None;
     }
     Some((word == "Running", word))
@@ -321,6 +323,10 @@ impl ServiceReader for WindowsServices {
             Ok(Ok(text)) => text,
             Ok(Err(err)) => {
                 self.forget(request.session_id).await;
+                // Review F4 #2: a sign-in refused on a later connection parks the session, as at the first.
+                if let Some(reason) = ParkReason::of(&err) {
+                    self.park(request.ctx, request.session_id, reason, &err).await;
+                }
                 return Err(err);
             }
             Err(_) => {
@@ -331,12 +337,10 @@ impl ServiceReader for WindowsServices {
             }
         };
         let took_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
-        let Some((running, state)) = parse_get_service(&text) else {
-            return Err(CoreError::InvalidInput(format!(
-                "this host has no service named {}.",
-                request.unit.trim()
-            )));
-        };
+        // Review F4 #5: a service the host no longer has is down (as systemd's missing unit is inactive), so the
+        // check-down alert fires. An answer without the state line is Remotely not knowing, not the service down.
+        let (running, state) = parse_get_service(&text)
+            .ok_or_else(|| CoreError::Winrm("the host's answer held no service state".into()))?;
         Ok(ServiceState {
             running,
             state,
@@ -356,6 +360,19 @@ impl ServiceReader for WindowsServices {
 }
 
 impl WindowsServices {
+    /// Parks the session's background sign-ins after the host refused one, until its login or credentials change.
+    async fn park(&self, ctx: &Context, session_id: Uuid, reason: ParkReason, err: &CoreError) {
+        if let Ok(Some(spec)) = self.inner.store.winrm_spec(ctx, session_id).await {
+            let parked = Parked {
+                reason,
+                message: login_guard::parked_message(&err.to_string()),
+            };
+            self.inner
+                .guard
+                .park(spec.id, ParkScope::Login, &spec.login_key(), parked);
+        }
+    }
+
     /// Drops a host's kept connection after a read failed on it (the next run signs in again).
     async fn forget(&self, session_id: Uuid) {
         let slot = locks::lock(&self.inner.kept).remove(&session_id);
@@ -560,7 +577,7 @@ mod tests {
             parse_get_service("@@service StartPending"),
             Some((false, "StartPending".into()))
         );
-        assert_eq!(parse_get_service("@@service missing"), None);
+        assert_eq!(parse_get_service("@@service missing"), Some((false, "missing".into())));
         assert_eq!(parse_get_service("nothing"), None);
         assert_eq!(
             parse_get_service("@@service Run\u{202e}ning\u{7}"),

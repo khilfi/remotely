@@ -1199,16 +1199,25 @@ by hand on Windows 11 with Windows PowerShell 5.1.
   later message is `multipart/encrypted;protocol="application/HTTP-SPNEGO-session-encrypted"` with the
   `OriginalContent: ...;Length=` part, then a 4-byte little-endian signature length, the signature and the sealed bytes.
   The Kerberos SPN is `HTTP/<host>`. Basic needs HTTPS and the host's `Basic` setting; Remotely never sends it over HTTP.
+  "My Windows sign-in" is Kerberos only (SSPI's `Negotiate` with the package list `!NTLM`, mutual authentication
+  required, any token holding `NTLMSSP` refused), so this PC's account never answers a host's NTLM challenge; it
+  needs the host's name, so a session reached by an IP address is refused when saved and when connecting. Over HTTPS
+  the sign-in carries RFC 5929's `tls-server-end-point` channel binding (Extended Protection); the fake checks
+  NTLM's `MsvAvChannelBindings` against it.
 - Windows PowerShell 5.1 with `-Command -` reads statements from stdin a line at a time: `Read-Host` takes the next
   stdin line (so a line queued after a statement is eaten by it) and shows no prompt while stdin is a pipe; a
   multi-line string sent raw waits for a blank line; a parse error inside `. { ... }` sent over several lines makes it
   wait for more. So the console sends each statement as one line, `try { . ([scriptblock]::Create('<typed text>')) }
   catch { ... }; "<marker>"`, which parses, runs in the console's scope, survives a parse error, `throw` and `exit N`,
   and gives `Read-Host` the line typed next. A single-quoted string ends at `'` and at U+2018 to U+201B, so each is
-  doubled.
+  doubled. A paste of two lines or more that comes while a statement runs waits, and goes one statement per prompt
+  (Ctrl+C drops what waits); a line typed alone then is the statement's input, shown as `*`.
 - CIM: `Win32_PerfRawData_PerfOS_Processor` `_Total`'s `PercentProcessorTime` counts idle time in 100 ns averaged over
-  the CPUs beside `Timestamp_Sys100NS` (checked on 32 CPUs); the facts script runs in about 3 s; booleans print `True`
-  and `False`; `Get-NetTCPConnection -State Listen` and `Win32_NetworkAdapterConfiguration` give ports and adapters.
+  the CPUs beside `Timestamp_Sys100NS` (checked on 32 CPUs), which is the system time, so it is also the rates' clock
+  (the uptime is whole seconds) and goes on across a restart while the idle counter starts again: an uptime that went
+  back drops the round before. The facts script runs in about 3 s; booleans print `True` and `False`;
+  `Get-NetTCPConnection -State Listen` and `Win32_NetworkAdapterConfiguration` give ports and adapters. A service
+  check's `Get-Service` on a name the host doesn't have is down ("missing"), as a missing systemd unit is inactive.
 
 ## Conversion tools facts
 

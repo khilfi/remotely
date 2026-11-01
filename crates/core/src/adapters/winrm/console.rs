@@ -26,7 +26,7 @@ use std::time::Instant;
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
-use super::shell::{RemoteShell, MIN_EMPTY_GAP, POWERSHELL, RECEIVE_WAIT};
+use super::shell::{DeleteOnDrop, RemoteShell, MIN_EMPTY_GAP, POWERSHELL, RECEIVE_WAIT};
 use super::soap::{self, Received};
 use crate::adapters::remote::{SecretPromptShown, ShellEnd, ShellInput, ShellOutput};
 use crate::error::{CoreError, Result};
@@ -37,6 +37,8 @@ const HISTORY: usize = 200;
 pub const MAX_LINE: usize = 32 * 1024;
 /// Bytes held while a sequence that may be the prompt marker is incomplete.
 const MAX_HELD: usize = 4096;
+/// Pasted lines kept while a statement runs; more are left out, and the pane says so.
+const MAX_QUEUED: usize = 500;
 /// The OSC number of the prompt marker.
 const MARKER: &[u8] = b"\x1b]7790;";
 
@@ -93,6 +95,8 @@ pub async fn start(
     secret_prompt: SecretPromptShown,
     permit: tokio::sync::OwnedSemaphorePermit,
 ) -> Result<ConsoleShell> {
+    // Review F4 #6: the shell goes if the start fails (a reconnect loop would otherwise leave one each try).
+    let mut cleanup = DeleteOnDrop(Some(Arc::clone(&shell)));
     let command = shell
         .command(POWERSHELL, "-NoLogo -NoProfile -Command - 2>&1", true)
         .await?;
@@ -100,6 +104,7 @@ pub async fn start(
     // Progress bars mean nothing without a console; then the first prompt.
     let setup = format!("$ProgressPreference = 'SilentlyContinue'\r\n{}", marker_line(&nonce));
     shell.send(&command, setup.as_bytes(), false).await?;
+    cleanup.0 = None;
     let (input_tx, input_rx) = mpsc::channel(256);
     let (output_tx, output_rx) = mpsc::channel(256);
     let (received_tx, received_rx) = mpsc::channel(16);
@@ -180,6 +185,10 @@ impl Console {
                         }
                         if let Some(code) = got.done {
                             break Some(ShellEnd::Exited { status: code.map(|c| c as u32) });
+                        }
+                        let actions = self.editor.after_prompt();
+                        if let Err(err) = self.act(actions).await {
+                            break Some(ShellEnd::Lost { reason: err.to_string() });
                         }
                     }
                     Some(Err(err)) => break Some(ShellEnd::Lost { reason: lost_reason(&err) }),
@@ -270,6 +279,10 @@ pub struct Editor {
     after_cr: bool,
     /// The line being typed was typed while a statement ran, so it shows as `*` and isn't shown again at the prompt.
     masked: bool,
+    /// Pasted lines that came while a statement ran: each goes at the prompt after it, as if typed then.
+    queued: VecDeque<String>,
+    /// Pasted lines were left out (more than [`MAX_QUEUED`]).
+    queue_overflow: bool,
     /// Output held while it may be an incomplete prompt marker.
     held: Vec<u8>,
     /// The CR LF after a marker that PowerShell writes, still to hide.
@@ -294,6 +307,8 @@ impl Editor {
             partial: Vec::new(),
             after_cr: false,
             masked: false,
+            queued: VecDeque::new(),
+            queue_overflow: false,
             held: Vec::new(),
             swallow: 0,
             at_line_start: true,
@@ -332,6 +347,9 @@ impl Editor {
         let mut shown = Vec::new();
         let mut data = std::mem::take(&mut self.partial);
         data.extend_from_slice(bytes);
+        // Review F4 #9: two lines or more at once are a paste: lines of it that come while a statement runs wait, and
+        // go one statement per prompt. A line typed alone while a statement runs is its input (Read-Host).
+        let paste = line_endings(&data) >= 2;
         let mut at = 0;
         while at < data.len() {
             let byte = data[at];
@@ -367,11 +385,11 @@ impl Editor {
                 0x1b => self.escape = Escape::Start,
                 b'\r' => {
                     self.after_cr = true;
-                    self.enter(secret, &mut shown, &mut out);
+                    self.enter(secret, paste, &mut shown, &mut out);
                 }
                 b'\n' => {
                     if !after_cr {
-                        self.enter(secret, &mut shown, &mut out);
+                        self.enter(secret, paste, &mut shown, &mut out);
                     }
                 }
                 0x7f | 0x08 => {
@@ -405,11 +423,12 @@ impl Editor {
                         if self.line.len() + text.len() <= MAX_LINE {
                             self.line.push_str(text);
                             self.browsing = None;
-                            if self.state != State::Idle {
+                            let waiting = paste && self.state != State::Idle;
+                            if self.state != State::Idle && !waiting {
                                 self.masked = true;
                             }
-                            if secret {
-                                // Nothing at a password prompt.
+                            if secret || waiting {
+                                // Nothing at a password prompt; a pasted line shows when it goes.
                             } else if self.masked {
                                 shown.extend(std::iter::repeat_n(b'*', text.chars().count()));
                             } else {
@@ -447,6 +466,8 @@ impl Editor {
 
     fn interrupt(&mut self, shown: &mut Vec<u8>, out: &mut Vec<Action>) {
         shown.extend_from_slice(b"^C");
+        // Pasted lines still waiting go too: Ctrl+C stops the paste with the statement.
+        self.queued.clear();
         if self.state == State::Running {
             out.push(Action::Show(std::mem::take(shown)));
             out.push(Action::Interrupt);
@@ -462,7 +483,18 @@ impl Editor {
         shown.extend_from_slice(format!("\r\n{}", self.prompt()).as_bytes());
     }
 
-    fn enter(&mut self, secret: bool, shown: &mut Vec<u8>, out: &mut Vec<Action>) {
+    fn enter(&mut self, secret: bool, paste: bool, shown: &mut Vec<u8>, out: &mut Vec<Action>) {
+        if paste && self.state != State::Idle {
+            // A pasted line while a statement runs: it goes as a statement of its own at the next prompt.
+            let line = std::mem::take(&mut self.line);
+            if self.queued.len() < MAX_QUEUED {
+                self.queued.push_back(line);
+            } else {
+                self.queue_overflow = true;
+            }
+            self.masked = false;
+            return;
+        }
         shown.extend_from_slice(b"\r\n");
         let line = std::mem::take(&mut self.line);
         self.browsing = None;
@@ -507,6 +539,9 @@ impl Editor {
         data.extend_from_slice(bytes);
         let mut out = Vec::with_capacity(data.len() + 16);
         let mut at = 0;
+        // Review F4 #7: where the next BEL is, found once and reused, so output full of marker-like starts without a
+        // BEL costs one scan, not one per start.
+        let mut next_bel: Option<Option<usize>> = None;
         while at < data.len() {
             let byte = data[at];
             if self.swallow > 0 && matches!(byte, b'\r' | b'\n') {
@@ -520,20 +555,29 @@ impl Editor {
             self.swallow = 0;
             if byte == 0x1b {
                 let rest = &data[at..];
-                let maybe_marker = rest.len() < MARKER.len() && MARKER.starts_with(rest) || rest.starts_with(MARKER);
-                if maybe_marker {
-                    match rest.iter().position(|b| *b == 0x07) {
-                        Some(end) => {
-                            let body = &rest[MARKER.len()..end];
+                let partial = rest.len() < MARKER.len() && MARKER.starts_with(rest);
+                if partial && rest.len() < MAX_HELD {
+                    self.held = rest.to_vec();
+                    break;
+                }
+                if rest.starts_with(MARKER) {
+                    if next_bel.is_none_or(|bel| bel.is_some_and(|b| b < at)) {
+                        next_bel = Some(data[at..].iter().position(|b| *b == 0x07).map(|p| p + at));
+                    }
+                    // A marker is short: one whose BEL is further than MAX_HELD away is not one.
+                    match next_bel.flatten().filter(|bel| bel - at < MAX_HELD) {
+                        Some(bel) => {
+                            let body = &data[at + MARKER.len()..bel];
                             if let Some(folder) = self.marker_folder(body) {
                                 self.folder = folder;
                                 self.prompt_now(&mut out);
                                 self.swallow = 2;
-                                at += end + 1;
+                                at = bel + 1;
                                 continue;
                             }
                         }
-                        None if rest.len() < MAX_HELD => {
+                        // No BEL yet, and the start is near the end: the rest may still come.
+                        None if next_bel.flatten().is_none() && rest.len() < MAX_HELD => {
                             self.held = rest.to_vec();
                             break;
                         }
@@ -576,10 +620,62 @@ impl Editor {
             self.line.clear();
             self.masked = false;
         }
-        out.extend_from_slice(self.line.as_bytes());
+        // With pasted lines waiting, they go first ([`Editor::after_prompt`]) and the line being typed after them.
+        if self.queued.is_empty() {
+            out.extend_from_slice(self.line.as_bytes());
+        }
         self.at_line_start = false;
         self.last_output_cr = false;
     }
+
+    /// Review F4 #9: at a prompt, the pasted lines that waited go, each shown as if typed now. Lines that leave a
+    /// statement open go on with it; once one statement is sent, the rest wait for the prompt after it.
+    pub fn after_prompt(&mut self) -> Vec<Action> {
+        let mut out = Vec::new();
+        if self.state != State::Idle || (self.queued.is_empty() && !self.queue_overflow) {
+            return out;
+        }
+        let typing = std::mem::take(&mut self.line);
+        let mut shown = Vec::new();
+        while self.state == State::Idle {
+            let Some(line) = self.queued.pop_front() else {
+                break;
+            };
+            shown.extend_from_slice(line.as_bytes());
+            self.line = line;
+            self.enter(false, false, &mut shown, &mut out);
+        }
+        self.line = typing;
+        if self.state == State::Idle {
+            if std::mem::take(&mut self.queue_overflow) {
+                shown.extend_from_slice(
+                    format!(
+                        "\r\n(more than {MAX_QUEUED} pasted lines: the rest were left out)\r\n{}",
+                        self.prompt()
+                    )
+                    .as_bytes(),
+                );
+            }
+            shown.extend_from_slice(self.line.as_bytes());
+        }
+        out.push(Action::Show(shown));
+        merge_shows(out)
+    }
+}
+
+/// Line endings in `bytes`, CR LF counted once.
+fn line_endings(bytes: &[u8]) -> usize {
+    let mut count = 0;
+    let mut after_cr = false;
+    for byte in bytes {
+        match byte {
+            b'\r' => count += 1,
+            b'\n' if !after_cr => count += 1,
+            _ => {}
+        }
+        after_cr = *byte == b'\r';
+    }
+    count
 }
 
 fn utf8_len(first: u8) -> usize {
@@ -815,6 +911,54 @@ mod tests {
         let secret = editor.secret(b"s3cret\r");
         assert_eq!(sent(&secret), vec!["s3cret\r\n".to_owned()]);
         assert!(!shown(&secret).contains("s3cret"));
+    }
+
+    #[test]
+    fn a_pasted_block_goes_one_statement_per_prompt() {
+        let mut editor = Editor::new("n1".into());
+        ready(&mut editor);
+        // Three lines at once: the first goes, the others wait (not to the running statement's stdin, not shown).
+        let pasted = editor.keys(b"Get-Date\r\nfunction f {\r\n  1 }\r\n$x = 2\r\nGet-Ch", false);
+        let lines = sent(&pasted);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(lines[0].starts_with("try { . ([scriptblock]::Create('Get-Date'))"));
+        assert_eq!(shown(&pasted), "Get-Date\r\n");
+        assert!(
+            editor.after_prompt().is_empty(),
+            "nothing goes while the statement runs"
+        );
+        // Its prompt: the open function goes on with its next line, as one statement.
+        let prompt = editor.output(b"Sunday\n\x1b]7790;n1;C:\\\x07\r\n");
+        assert_eq!(String::from_utf8_lossy(&prompt), "Sunday\r\nPS C:\\> ");
+        let next = editor.after_prompt();
+        assert_eq!(shown(&next), "function f {\r\n>>   1 }\r\n");
+        let lines = sent(&next);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(
+            lines[0].contains("Create('function f {' + \"`n\" + '  1 }')"),
+            "{lines:?}"
+        );
+        editor.output(b"\x1b]7790;n1;C:\\\x07\r\n");
+        let last = editor.after_prompt();
+        assert!(sent(&last)[0].contains("Create('$x = 2')"));
+        // The line still being typed comes back once the pasted ones went.
+        editor.output(b"\x1b]7790;n1;C:\\\x07\r\n");
+        let typing = editor.after_prompt();
+        assert!(sent(&typing).is_empty());
+        let rest = editor.keys(b"ildItem\r", false);
+        assert!(sent(&rest)[0].contains("Create('Get-ChildItem')"), "{rest:?}");
+        // Ctrl+C drops what still waits.
+        editor.output(b"\x1b]7790;n1;C:\\\x07\r\n");
+        editor.keys(b"Start-Sleep 9\r\n1\r\n2\r\n", false);
+        editor.keys(b"\x03", false);
+        editor.output(b"\x1b]7790;n1;C:\\\x07\r\n");
+        assert!(sent(&editor.after_prompt()).is_empty());
+        // A line typed alone while a statement runs is still its input, masked.
+        editor.keys(b"Read-Host\r", false);
+        let answer = editor.keys(b"pw\r", false);
+        assert_eq!(sent(&answer), vec!["pw\r\n".to_owned()]);
+        assert_eq!(shown(&answer), "**\r\n");
+        assert_eq!(line_endings(b"a\r\nb\nc\r"), 3);
     }
 
     #[test]

@@ -252,7 +252,7 @@ export function SessionDialog({
       : kind.protocol === "rdp"
         ? rdpProblem(kind)
         : kind.protocol === "winrm"
-          ? winrmProblem(kind)
+          ? winrmProblem(kind, host)
           : null;
   /** What saving waits for: the kind's fields right, and an SSH session's forwards loaded and right. */
   const savable = kindIssue === null && (!ssh || (forwards !== null && forwardsProblem(forwards) === null));
@@ -335,6 +335,19 @@ export function SessionDialog({
     (takesJumpHost(kind) && Boolean(chain?.loops)) ||
     kindIssue !== null;
 
+  /** F4: what a WinRM session signing in "from folder" uses: only a folder's vault password works for WinRM. */
+  function winrmFolderLogin(): string {
+    const from = inherited?.inherited.auth;
+    const login = inherited?.auth;
+    if (!from || !login || login.method === "folder") {
+      return "No folder above sets a login yet, so it can't sign in until one does or you choose a password.";
+    }
+    if (login.method !== "password") {
+      return `Folder ${from.name} logs in with ${loginText(login)}, which WinRM can't use: choose a password instead.`;
+    }
+    return `Signs in with ${loginText(login)}, from folder ${from.name}.`;
+  }
+
   function auth(): SessionAuth {
     const pick = (v: string) => (v === NONE ? null : v);
     if (method === "password") return { method, passwordId: pick(password) };
@@ -370,7 +383,12 @@ export function SessionDialog({
         protocol === "vnc" || protocol === "serial" || (protocol === "winrm" && !winrmVault)
           ? null
           : username.trim() || null,
-      auth: ssh ? auth() : { method: "password", passwordId: winrmVault && password !== NONE ? password : null },
+      // F4: a WinRM session may take its folder's vault password, like an SSH session's login.
+      auth: ssh
+        ? auth()
+        : winrmVault && method === "folder"
+          ? { method: "folder" }
+          : { method: "password", passwordId: winrmVault && password !== NONE ? password : null },
       jumpSessionId: !jumps || jump === NONE || jump === DIRECT ? null : jump,
       jumpDirect: !jumps || jump === DIRECT,
       startupCommand: ssh ? startup.trim() || null : null,
@@ -585,7 +603,23 @@ export function SessionDialog({
             {winrmVault && (
               <div className="grid gap-2">
                 <Label htmlFor="session-password">Password from the vault</Label>
-                {secretPicker("password", password, setPassword, "None: ask when connecting")}
+                {(folder !== NONE || method === "folder") && (
+                  <ToggleGroup
+                    type="single"
+                    variant="outline"
+                    className="justify-self-start"
+                    value={method === "folder" ? "folder" : "password"}
+                    onValueChange={(v) => v && setMethod(v as Method)}
+                  >
+                    <ToggleGroupItem value="folder">From folder</ToggleGroupItem>
+                    <ToggleGroupItem value="password">Choose one</ToggleGroupItem>
+                  </ToggleGroup>
+                )}
+                {method === "folder" ? (
+                  <p className="text-sm text-muted-foreground">{winrmFolderLogin()}</p>
+                ) : (
+                  secretPicker("password", password, setPassword, "None chosen: it can't sign in yet")
+                )}
               </div>
             )}
 

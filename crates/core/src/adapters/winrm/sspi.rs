@@ -4,12 +4,15 @@
 //! * **NTLM** (`NTLM` package) with the session's user and its vault password, given to `AcquireCredentialsHandleW`
 //!   once per connection and zeroized as soon as it returns (Windows keeps its own copy in LSA for that handle).
 //!   NTLMv2 with a MIC, sealing and signing as Windows does them.
-//! * **My Windows sign-in** (`Negotiate` package) with the account signed in to this PC: Kerberos for a domain host
-//!   (the SPN `HTTP/<host>`), NTLM where Kerberos can't be used.
+//! * **My Windows sign-in** with the account signed in to this PC: **Kerberos only** (`Negotiate` with `!NTLM` in its
+//!   package list, the SPN `HTTP/<host>`). NTLM never answers for this PC's account: a host that can't do Kerberos
+//!   (outside the domain, or reached by an IP address) fails, saying to sign in with NTLM and a vault password. The
+//!   caller also refuses any token that is NTLM, and requires the context complete with mutual authentication.
 //!
 //! Over HTTP every message after the sign-in is sealed with the context ([`Context::seal`], `EncryptMessage`) and
 //! each answer unsealed ([`Context::unseal`], `DecryptMessage`): Windows keeps the sequence numbers and RC4 state, so
-//! the messages of one connection must be sealed in order (the connection holds the context under a lock).
+//! the messages of one connection must be sealed in order (the connection holds the context under a lock). Over HTTPS
+//! the context is bound to the TLS channel (Extended Protection, RFC 5929's `tls-server-end-point`).
 //!
 //! No token, key or password from here reaches a log, an error or the UI: errors name only Windows' status code.
 
@@ -18,8 +21,26 @@ use crate::vault::SecretString;
 /// Which SSPI package signs in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Package {
+    /// `NTLM` with a user and password.
     Ntlm,
-    Negotiate,
+    /// `Negotiate` restricted to Kerberos (`!NTLM`), with this PC's own account.
+    KerberosOnly,
+}
+
+/// A token holds NTLM (raw, or inside SPNEGO): its `NTLMSSP\0` signature.
+pub fn is_ntlm(token: &[u8]) -> bool {
+    token.windows(8).any(|w| w == b"NTLMSSP\0")
+}
+
+/// The `SEC_CHANNEL_BINDINGS` SSPI takes for `application` data: eight 32-bit fields (only the application data's length
+/// and offset set), then the data.
+pub fn channel_bindings(application: &[u8]) -> Vec<u8> {
+    let mut out = vec![0u8; 32];
+    let len = u32::try_from(application.len()).unwrap_or(0);
+    out[24..28].copy_from_slice(&len.to_le_bytes());
+    out[28..32].copy_from_slice(&32u32.to_le_bytes());
+    out.extend_from_slice(application);
+    out
 }
 
 /// A user and password for [`acquire`]. The user may be `DOMAIN\user`, `user@domain` or a local account's name.
@@ -36,11 +57,12 @@ pub fn split_user(user: &str) -> (&str, &str) {
     }
 }
 
-/// One step of the sign-in: the token to send, and whether the context is complete.
-#[derive(Debug)]
+/// One step of the sign-in: the token to send, whether the context is complete, and whether the host proved itself
+/// (mutual authentication: Kerberos does, NTLM never). No `Debug`: the token may be NTLM's AUTHENTICATE message.
 pub struct Step {
     pub token: Vec<u8>,
     pub complete: bool,
+    pub mutual: bool,
 }
 
 #[cfg(windows)]
@@ -56,15 +78,19 @@ mod imp {
         AcquireCredentialsHandleW, DecryptMessage, DeleteSecurityContext, EncryptMessage, FreeContextBuffer,
         FreeCredentialsHandle, InitializeSecurityContextW, QueryContextAttributesW, SecBuffer, SecBufferDesc,
         SecPkgContext_Sizes, ISC_REQ_ALLOCATE_MEMORY, ISC_REQ_CONFIDENTIALITY, ISC_REQ_INTEGRITY, ISC_REQ_MUTUAL_AUTH,
-        ISC_REQ_REPLAY_DETECT, ISC_REQ_SEQUENCE_DETECT, SECBUFFER_DATA, SECBUFFER_PADDING, SECBUFFER_TOKEN,
-        SECBUFFER_VERSION, SECPKG_ATTR_SIZES, SECPKG_CRED_OUTBOUND, SECURITY_NATIVE_DREP,
+        ISC_REQ_REPLAY_DETECT, ISC_REQ_SEQUENCE_DETECT, ISC_RET_MUTUAL_AUTH, SECBUFFER_CHANNEL_BINDINGS,
+        SECBUFFER_DATA, SECBUFFER_PADDING, SECBUFFER_TOKEN, SECBUFFER_VERSION, SECPKG_ATTR_SIZES, SECPKG_CRED_OUTBOUND,
+        SECURITY_NATIVE_DREP, SEC_CHANNEL_BINDINGS, SEC_WINNT_AUTH_IDENTITY_EXW, SEC_WINNT_AUTH_IDENTITY_VERSION,
     };
     use windows::Win32::Security::Credentials::SecHandle;
     use windows::Win32::System::Rpc::{SEC_WINNT_AUTH_IDENTITY_UNICODE, SEC_WINNT_AUTH_IDENTITY_W};
     use zeroize::Zeroizing;
 
-    use super::{split_user, Identity, Package, Step};
+    use super::{channel_bindings, split_user, Identity, Package, Step};
     use crate::error::{CoreError, Result};
+
+    // [`channel_bindings`] writes this structure by hand.
+    const _: () = assert!(std::mem::size_of::<SEC_CHANNEL_BINDINGS>() == 32);
 
     fn wide(text: &str) -> Zeroizing<Vec<u16>> {
         let mut out: Vec<u16> = text.encode_utf16().collect();
@@ -109,11 +135,44 @@ mod imp {
     pub fn acquire(package: Package, identity: Option<Identity<'_>>) -> Result<Arc<Credentials>> {
         let name = match package {
             Package::Ntlm => wide("NTLM"),
-            Package::Negotiate => wide("Negotiate"),
+            Package::KerberosOnly => wide("Negotiate"),
         };
         let mut handle = SecHandle::default();
-        let result = match identity {
-            Some(identity) => {
+        let result = match (package, identity) {
+            // The signed-in user's own credentials, with NTLM taken out of Negotiate's list: Kerberos or nothing, so this
+            // PC's account never answers an NTLM challenge.
+            (Package::KerberosOnly, _) => {
+                let mut packages = wide("!NTLM");
+                let auth = SEC_WINNT_AUTH_IDENTITY_EXW {
+                    Version: SEC_WINNT_AUTH_IDENTITY_VERSION,
+                    Length: std::mem::size_of::<SEC_WINNT_AUTH_IDENTITY_EXW>() as u32,
+                    User: std::ptr::null_mut(),
+                    UserLength: 0,
+                    Domain: std::ptr::null_mut(),
+                    DomainLength: 0,
+                    Password: std::ptr::null_mut(),
+                    PasswordLength: 0,
+                    Flags: SEC_WINNT_AUTH_IDENTITY_UNICODE.0,
+                    PackageList: packages.as_mut_ptr(),
+                    PackageListLength: (packages.len() - 1) as u32,
+                };
+                // SAFETY: every pointer is valid for the call; with no user, domain or password the signed-in user's
+                // own credentials are used, restricted to the package list.
+                unsafe {
+                    AcquireCredentialsHandleW(
+                        PCWSTR::null(),
+                        PCWSTR(name.as_ptr()),
+                        SECPKG_CRED_OUTBOUND,
+                        None,
+                        Some(std::ptr::from_ref(&auth).cast()),
+                        None,
+                        None,
+                        &mut handle,
+                        None,
+                    )
+                }
+            }
+            (Package::Ntlm, Some(identity)) => {
                 let (user, domain) = split_user(identity.user);
                 let mut user = wide(user);
                 let mut domain = wide(domain);
@@ -143,20 +202,12 @@ mod imp {
                     )
                 }
             }
-            // SAFETY: as above, with no identity: the signed-in user's.
-            None => unsafe {
-                AcquireCredentialsHandleW(
-                    PCWSTR::null(),
-                    PCWSTR(name.as_ptr()),
-                    SECPKG_CRED_OUTBOUND,
-                    None,
-                    None,
-                    None,
-                    None,
-                    &mut handle,
-                    None,
-                )
-            },
+            // NTLM signs in only with a user and password: never with this PC's own account.
+            (Package::Ntlm, None) => {
+                return Err(CoreError::AuthFailed(
+                    "NTLM signs in with the session's user and a password from the vault".into(),
+                ))
+            }
         };
         result.map_err(|err| status_error(err.code()))?;
         Ok(Arc::new(Credentials { handle }))
@@ -169,6 +220,9 @@ mod imp {
         target: Vec<u16>,
         flags: u32,
         sizes: Option<SecPkgContext_Sizes>,
+        /// HTTPS: a SEC_CHANNEL_BINDINGS with `tls-server-end-point:` and the certificate's hash (RFC 5929), given with
+        /// every step, so a host that requires Extended Protection takes the sign-in.
+        bindings: Option<Vec<u8>>,
     }
 
     impl Drop for Context {
@@ -182,7 +236,7 @@ mod imp {
 
     impl Context {
         /// A context for the service `spn` (`HTTP/win01.example.com`).
-        pub fn new(credentials: Arc<Credentials>, spn: &str) -> Self {
+        pub fn new(credentials: Arc<Credentials>, spn: &str, channel: Option<&[u8]>) -> Self {
             let flags = ISC_REQ_CONFIDENTIALITY.0
                 | ISC_REQ_INTEGRITY.0
                 | ISC_REQ_SEQUENCE_DETECT.0
@@ -195,23 +249,36 @@ mod imp {
                 target: wide(spn).to_vec(),
                 flags,
                 sizes: None,
+                bindings: channel.map(channel_bindings),
             }
         }
 
         /// The next token: the first without `input`, then each with the host's answer.
         pub fn step(&mut self, input: Option<&[u8]>) -> Result<Step> {
             let mut input_bytes = input.map(<[u8]>::to_vec).unwrap_or_default();
-            let mut in_buffer = SecBuffer {
-                cbBuffer: u32::try_from(input_bytes.len())
-                    .map_err(|_| CoreError::Winrm("a sign-in token is too long".into()))?,
-                BufferType: SECBUFFER_TOKEN,
-                pvBuffer: input_bytes.as_mut_ptr().cast(),
-            };
+            let mut bindings = self.bindings.clone().unwrap_or_default();
+            let mut in_buffers = Vec::with_capacity(2);
+            if input.is_some() {
+                in_buffers.push(SecBuffer {
+                    cbBuffer: u32::try_from(input_bytes.len())
+                        .map_err(|_| CoreError::Winrm("a sign-in token is too long".into()))?,
+                    BufferType: SECBUFFER_TOKEN,
+                    pvBuffer: input_bytes.as_mut_ptr().cast(),
+                });
+            }
+            if !bindings.is_empty() {
+                in_buffers.push(SecBuffer {
+                    cbBuffer: bindings.len() as u32,
+                    BufferType: SECBUFFER_CHANNEL_BINDINGS,
+                    pvBuffer: bindings.as_mut_ptr().cast(),
+                });
+            }
             let in_desc = SecBufferDesc {
                 ulVersion: SECBUFFER_VERSION,
-                cBuffers: 1,
-                pBuffers: &mut in_buffer,
+                cBuffers: in_buffers.len() as u32,
+                pBuffers: in_buffers.as_mut_ptr(),
             };
+            let has_input = !in_buffers.is_empty();
             let mut out_buffer = SecBuffer {
                 cbBuffer: 0,
                 BufferType: SECBUFFER_TOKEN,
@@ -234,7 +301,7 @@ mod imp {
                     windows::Win32::Security::Authentication::Identity::ISC_REQ_FLAGS(self.flags),
                     0,
                     SECURITY_NATIVE_DREP,
-                    input.map(|_| std::ptr::from_ref(&in_desc)),
+                    has_input.then(|| std::ptr::from_ref(&in_desc)),
                     0,
                     Some(&mut handle),
                     Some(&mut out_desc),
@@ -256,10 +323,19 @@ mod imp {
                 let _ = unsafe { FreeContextBuffer(out_buffer.pvBuffer) };
                 bytes
             };
+            let mutual = attributes & ISC_RET_MUTUAL_AUTH != 0;
             if status == SEC_E_OK {
-                Ok(Step { token, complete: true })
+                Ok(Step {
+                    token,
+                    complete: true,
+                    mutual,
+                })
             } else if status == SEC_I_CONTINUE_NEEDED {
-                Ok(Step { token, complete: false })
+                Ok(Step {
+                    token,
+                    complete: false,
+                    mutual,
+                })
             } else {
                 Err(status_error(status))
             }
@@ -395,7 +471,7 @@ mod imp {
     pub struct Context;
 
     impl Context {
-        pub fn new(_credentials: Arc<Credentials>, _spn: &str) -> Self {
+        pub fn new(_credentials: Arc<Credentials>, _spn: &str, _channel: Option<&[u8]>) -> Self {
             Self
         }
         pub fn step(&mut self, _input: Option<&[u8]>) -> Result<Step> {
@@ -442,12 +518,36 @@ mod tests {
             }),
         )
         .unwrap();
-        let mut context = Context::new(credentials, &spn("win01.test"));
+        let mut context = Context::new(credentials, &spn("win01.test"), None);
         let first = context.step(None).unwrap();
         assert!(!first.complete);
         assert!(
             first.token.starts_with(b"NTLMSSP\0\x01\0\0\0"),
             "an NTLM NEGOTIATE message"
         );
+        assert!(is_ntlm(&first.token));
+    }
+
+    /// Review F4 #1: the Windows sign-in never offers NTLM for this PC's account, even where Kerberos can't work (an IP
+    /// address has no Kerberos name).
+    #[cfg(windows)]
+    #[test]
+    fn the_windows_sign_in_offers_no_ntlm() {
+        let credentials = acquire(Package::KerberosOnly, None).unwrap();
+        let mut context = Context::new(credentials, &spn("192.0.2.10"), None);
+        // An error is Kerberos unable to start: refused before anything is sent.
+        if let Ok(first) = context.step(None) {
+            assert!(!is_ntlm(&first.token), "no NTLM token for this PC's account");
+        }
+    }
+
+    #[test]
+    fn channel_bindings_carry_only_the_application_data() {
+        let bindings = channel_bindings(b"tls-server-end-point:abc");
+        assert_eq!(bindings.len(), 32 + 24);
+        assert!(bindings[..24].iter().all(|b| *b == 0));
+        assert_eq!(&bindings[24..28], &24u32.to_le_bytes());
+        assert_eq!(&bindings[28..32], &32u32.to_le_bytes());
+        assert_eq!(&bindings[32..], b"tls-server-end-point:abc");
     }
 }

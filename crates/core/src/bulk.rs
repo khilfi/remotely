@@ -145,7 +145,17 @@ impl Picked {
         sessions: &HashMap<Uuid, &SessionRecord>,
         via: String,
     ) {
-        let all = linked.get(&vm.id).map(Vec::as_slice).unwrap_or_default();
+        // Review F4 #4: a VM's WinRM session (F4 links those too) can't take a bulk run yet, so only its SSH sessions
+        // count here (F8 widens this), and a VM linked to both picks the SSH one.
+        let all: Vec<Uuid> = linked
+            .get(&vm.id)
+            .map(Vec::as_slice)
+            .unwrap_or_default()
+            .iter()
+            .copied()
+            .filter(|id| sessions.get(id).is_some_and(|s| s.kind.is_ssh()))
+            .collect();
+        let all = all.as_slice();
         // A4, H11: only links the user chose or confirmed reach a VM.
         let confirmed: Vec<Uuid> = all
             .iter()

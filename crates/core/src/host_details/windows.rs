@@ -222,10 +222,11 @@ pub fn parse(output: &str) -> HostSpecs {
         if fields.len() < 5 {
             continue;
         }
-        sockets += 1;
+        // Review F4 #14: the host's numbers can't overflow (`panic = "abort"` would end the app).
+        sockets = sockets.saturating_add(1);
         let cores = fields[0].trim().parse::<u32>().ok();
         let threads = fields[1].trim().parse::<u32>().ok();
-        logical += threads.unwrap_or(0);
+        logical = logical.saturating_add(threads.unwrap_or(0));
         if sockets == 1 {
             cpu.cores_per_socket = cores;
             cpu.threads_per_core = cores.zip(threads).and_then(|(c, t)| (c > 0).then(|| t / c));

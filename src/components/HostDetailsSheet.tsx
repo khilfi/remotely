@@ -876,6 +876,8 @@ export function HostDetailsSheet({ session, tab, thresholds, onClose }: Props) {
     };
   }, [sessionId]);
   const windows = sessionId !== null && windowsFor === sessionId;
+  // A Windows host opened on Admin (a link, the last tab) shows System instead of an empty tab.
+  const tabShown: HostDetailsTab = windows ? "system" : shown;
 
   // Remotely's own connection, if a read made one, closes with the panel.
   useEffect(() => {
@@ -900,7 +902,7 @@ export function HostDetailsSheet({ session, tab, thresholds, onClose }: Props) {
               Reads only: nothing here changes the host. Commands offered for fixes are copied, never run.
             </SheetDescription>
           </SheetHeader>
-          <Tabs value={shown} onValueChange={(v) => setShown(v as HostDetailsTab)} className="min-h-0 flex-1 gap-0">
+          <Tabs value={tabShown} onValueChange={(v) => setShown(v as HostDetailsTab)} className="min-h-0 flex-1 gap-0">
             <div className="border-b px-4 pb-2">
               <TabsList>
                 <TabsTrigger value="system">System</TabsTrigger>

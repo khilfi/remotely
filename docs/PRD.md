@@ -202,7 +202,7 @@ Remote desktop and consoles (0.7.0, SS-12, `docs/plan-0.7.md` "Approval tiers").
 | Send a break on a serial (or Telnet) line (it can halt a running console) | No tier; audited (`terminal_break_sent`); a confirm first on a Prod or protected session |
 | Open an RDP or VNC session behind a jump host: a tunnel tab to the jump host, then the window | The tunnel at SS-07's tier (a loopback local forward: Low; Medium when the jump host or the session is Prod), audited `tunnel_opened`; the window as above |
 
-WinRM (0.7.0, SS-12, MO-05, MO-13, F4). Remotely's own WinRM client signs in with the session's user and vault password (NTLM through Windows' SSPI, or Basic over HTTPS only) or this PC's Windows sign-in (Kerberos), and changes nothing on this PC. Lines typed in a PowerShell console are not rated in 0.7.0's F4 (as an SSH terminal's keys aren't); F8 brings PowerShell rules for Type in all tabs and Compare hosts:
+WinRM (0.7.0, SS-12, MO-05, MO-13, F4). Remotely's own WinRM client signs in with the session's user and vault password (NTLM through Windows' SSPI, or Basic over HTTPS only) or this PC's Windows sign-in (Kerberos only: it never falls back to NTLM, and needs the host's name), and changes nothing on this PC. Lines typed in a PowerShell console are not rated in 0.7.0's F4 (as an SSH terminal's keys aren't); F8 brings PowerShell rules for Type in all tabs and Compare hosts:
 
 | Action | Tier |
 | --- | --- |

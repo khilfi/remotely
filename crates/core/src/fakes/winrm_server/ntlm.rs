@@ -276,6 +276,8 @@ pub enum Refused {
     WrongUser,
     WrongPassword,
     BadMic,
+    /// The channel binding (MsvAvChannelBindings) isn't this TLS channel's.
+    BadBindings,
     NoSealing,
 }
 
@@ -309,7 +311,8 @@ pub fn keys(exported: &[u8; 16], flags: u32) -> ([u8; 16], [u8; 16], [u8; 16], [
 }
 
 /// Checks an AUTHENTICATE against `user` and `password` (the user's letter case aside), the MIC over the three
-/// messages included, and gives the session's keys.
+/// messages included, and gives the session's keys. `bindings`: over TLS, the channel binding the client must send.
+#[allow(clippy::too_many_arguments)]
 pub fn authenticate(
     negotiate: &[u8],
     challenge_message: &[u8],
@@ -318,6 +321,7 @@ pub fn authenticate(
     message: &[u8],
     user: &str,
     password: &str,
+    bindings: Option<[u8; 16]>,
 ) -> Result<Keys, Refused> {
     if message_type(message) != Some(3) || message.len() < 72 {
         return Err(Refused::Malformed);
@@ -353,6 +357,12 @@ pub fn authenticate(
         Rc4::new(&session_base).apply(&mut exported);
     }
     // The MIC is there when the client's AV pairs say so (MsvAvFlags bit 0x2).
+    // Over TLS: MsvAvChannelBindings must be the MD5 of this channel's bindings (Extended Protection).
+    if let Some(expected) = bindings {
+        if av_pair(&temp[28..], 0x000a) != Some(&expected[..]) {
+            return Err(Refused::BadBindings);
+        }
+    }
     if mic_present(&temp[28..]) {
         let mut zeroed = message.to_vec();
         zeroed[72..88].fill(0);
@@ -372,6 +382,32 @@ pub fn authenticate(
         user: name,
         domain,
     })
+}
+
+/// An AV pair's value, by its id.
+fn av_pair(pairs: &[u8], wanted: u16) -> Option<&[u8]> {
+    let mut at = 0;
+    while at + 4 <= pairs.len() {
+        let id = u16::from_le_bytes([pairs[at], pairs[at + 1]]);
+        let len = u16::from_le_bytes([pairs[at + 2], pairs[at + 3]]) as usize;
+        if id == 0 {
+            return None;
+        }
+        if id == wanted {
+            return pairs.get(at + 4..at + 4 + len);
+        }
+        at += 4 + len;
+    }
+    None
+}
+
+/// MsvAvChannelBindings for a TLS channel: the MD5 of the GSS channel bindings with only `tls-server-end-point:` and
+/// the certificate's hash as application data (RFC 5929, MS-NLMP 3.1.5.1.2).
+pub fn channel_bindings_hash(application: &[u8]) -> [u8; 16] {
+    let mut gss = vec![0u8; 16];
+    gss.extend_from_slice(&(application.len() as u32).to_le_bytes());
+    gss.extend_from_slice(application);
+    md5(&[&gss])
 }
 
 fn mic_present(pairs: &[u8]) -> bool {

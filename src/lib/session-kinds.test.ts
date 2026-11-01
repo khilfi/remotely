@@ -114,6 +114,12 @@ test("WinRM: a PowerShell tab, its sign-in, its port and Basic only over HTTPS",
   assert.equal(winrmPortAfterTransport("15986", "http"), "15986");
   assert.ok(winrmProblem({ ...WINRM_DEFAULTS, transport: "http", signIn: "basic" }));
   assert.equal(winrmProblem(WINRM_DEFAULTS), null);
+  // The Windows sign-in is Kerberos only, which needs a name.
+  const kerberos = { ...WINRM_DEFAULTS, signIn: "windows" as const };
+  assert.ok(winrmProblem(kerberos, "192.0.2.10"));
+  assert.ok(winrmProblem(kerberos, "[2001:db8::1]"));
+  assert.equal(winrmProblem(kerberos, "win01.example.com"), null);
+  assert.equal(winrmProblem(WINRM_DEFAULTS, "192.0.2.10"), null);
   assert.equal(kindSummary(winrm), "HTTPS · NTLM");
   assert.equal(kindSummary({ protocol: "winrm", ...WINRM_DEFAULTS, transport: "http" }), "HTTP, encrypted · NTLM");
 });

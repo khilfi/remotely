@@ -17,7 +17,7 @@ use remotely_core::adapters::remote::{AgentSource, PtySize};
 use remotely_core::checks::{CheckInput, CheckSpec, CheckStatus, RunResult};
 use remotely_core::domain::Environment;
 use remotely_core::fakes::clock::{FakeClock, FakeZone};
-use remotely_core::fakes::{FakeNetworkTools, FakeVmware, FakeWinrm, WinrmTestServer};
+use remotely_core::fakes::{FakeNetworkTools, FakeVmware, FakeWinrm, Tamper, WinrmTestServer};
 use remotely_core::host_details::CollectedBy;
 use remotely_core::known_hosts::HostKey;
 use remotely_core::metrics::history::HistoryRange;
@@ -388,6 +388,98 @@ async fn a_certificate_windows_doesnt_trust_is_refused_or_trusted_by_its_fingerp
     assert_eq!(code, "certificate_changed");
 }
 
+#[tokio::test]
+async fn ntlm_over_https_binds_its_sign_in_to_the_tls_channel() {
+    let password = new_password();
+    let server = WinrmTestServer::start(FakeWinrm::HttpsNtlm, "alice", &password)
+        .await
+        .unwrap();
+    let core = core(Arc::new(FakeNetworkTools::new().with_verdict(trusted()))).await;
+    let o = options(WinrmTransport::Https, WinrmSignIn::Ntlm, WinrmCertificate::Windows);
+    let id = session(&core, &server, &password, o).await;
+    let mut pane = Pane::open(&core, id).await;
+    pane.expect_output("PS C:\\Users\\alice> ").await;
+    let stats = server.stats();
+    // The fake checks the AUTHENTICATE message's channel binding against its own certificate (RFC 5929's
+    // tls-server-end-point), as a host with Extended Protection does: Windows' NTLM got the same hash from Remotely.
+    assert!(stats.sign_ins >= 1, "{stats:?}");
+    assert_eq!(stats.bad_bindings, 0, "{stats:?}");
+    assert_eq!(stats.refused_sign_ins, 0, "{stats:?}");
+    core.terminals.close(pane.id).await;
+}
+
+/// The next status that says the pane lost (or never had) its connection: its reason.
+async fn lost_reason(pane: &mut Pane) -> String {
+    pane.expect_event(|e| match e {
+        TerminalEvent::Status {
+            status: TerminalStatus::Reconnecting { reason, .. },
+        } => Some(reason.clone()),
+        TerminalEvent::Status {
+            status: TerminalStatus::Disconnected { message, .. },
+        } => Some(message.clone()),
+        _ => None,
+    })
+    .await
+}
+
+#[tokio::test]
+async fn an_answer_in_clear_text_or_forged_over_http_is_refused() {
+    let password = new_password();
+    let server = WinrmTestServer::start(FakeWinrm::HttpNtlm, "alice", &password)
+        .await
+        .unwrap();
+    let core = core(Arc::new(FakeNetworkTools::new())).await;
+    let o = options(WinrmTransport::Http, WinrmSignIn::Ntlm, WinrmCertificate::Windows);
+    let id = session(&core, &server, &password, o).await;
+    for (tamper, says) in [(Tamper::Plain, "clear text"), (Tamper::Forged, "")] {
+        server.set_tamper(Tamper::None);
+        let mut pane = Pane::open(&core, id).await;
+        pane.expect_output("PS C:\\Users\\alice> ").await;
+        server.set_tamper(tamper);
+        pane.type_text(&core, "Get-Date\r").await;
+        let reason = lost_reason(&mut pane).await;
+        assert!(reason.contains(says), "{tamper:?}: {reason}");
+        while let Ok(chunk) = pane.output.try_recv() {
+            pane.unread.extend_from_slice(&chunk);
+        }
+        let shown = String::from_utf8_lossy(&pane.unread).into_owned();
+        assert!(
+            !shown.contains("November 1, 2026"),
+            "{tamper:?}: nothing of the answer shows: {shown:?}"
+        );
+        core.terminals.close(pane.id).await;
+    }
+}
+
+#[tokio::test]
+async fn the_windows_sign_in_never_sends_ntlm_even_to_a_host_that_only_takes_it() {
+    let password = new_password();
+    // The fake takes only NTLM, as a workgroup host would.
+    let server = WinrmTestServer::start(FakeWinrm::HttpNtlm, "alice", &password)
+        .await
+        .unwrap();
+    let core = core(Arc::new(FakeNetworkTools::new())).await;
+    let mut mine = input(
+        "win05",
+        server.port(),
+        None,
+        options(WinrmTransport::Http, WinrmSignIn::Windows, WinrmCertificate::Windows),
+    );
+    // A name, which Kerberos needs; it resolves to 127.0.0.1 alone (no packet leaves this PC).
+    mine.host = "localhost".into();
+    mine.username = None;
+    let id = core.sessions.create(&core.ctx(), mine).await.unwrap().id;
+    let mut pane = Pane::open(&core, id).await;
+    let reason = lost_reason(&mut pane).await;
+    let stats = server.stats();
+    assert_eq!(
+        stats.ntlm_messages, 0,
+        "nothing derived from this PC's Windows password went to the host: {reason}"
+    );
+    assert_eq!(stats.sign_ins, 0, "{reason}");
+    core.terminals.close(pane.id).await;
+}
+
 // ---- Sessions ---------------------------------------------------------------------------------------------
 
 #[tokio::test]
@@ -427,14 +519,25 @@ async fn a_winrm_session_keeps_its_password_and_never_sends_basic_over_http() {
     keyed.auth = SessionAuth::Agent;
     assert!(core.sessions.create(&core.ctx(), keyed).await.is_err());
 
+    // The Windows sign-in is Kerberos only, which needs the host's name: an IP address is refused.
     let windows = options(WinrmTransport::Https, WinrmSignIn::Windows, WinrmCertificate::Windows);
-    let mine = core
+    let by_ip = core
         .sessions
         .create(&core.ctx(), input("win04", 5986, Some(secret), windows))
         .await
-        .unwrap();
+        .unwrap_err();
+    assert!(by_ip.to_string().contains("Kerberos"), "{by_ip}");
+    let mut named = input("win04", 5986, Some(secret), windows);
+    named.host = "win04.example.com".into();
+    let mine = core.sessions.create(&core.ctx(), named).await.unwrap();
     assert_eq!(mine.auth, SessionAuth::Password { password_id: None });
     assert_eq!(mine.username, None, "the Windows sign-in is this PC's user");
+
+    // MO-14's Linux reads refuse it before anything signs in (nothing listens on its port).
+    let admin = core.host_details.admin(&core.ctx(), saved.id).await.unwrap_err();
+    assert!(admin.to_string().contains("Linux"), "{admin}");
+    let updates = core.host_details.updates(&core.ctx(), saved.id).await.unwrap_err();
+    assert!(updates.to_string().contains("Linux"), "{updates}");
 
     // SSH-only features still refuse it.
     assert_eq!(
@@ -568,6 +671,73 @@ async fn a_refused_password_parks_a_watched_windows_host_until_the_session_chang
 }
 
 #[tokio::test]
+async fn a_wrong_basic_password_parks_the_dashboard_and_service_checks() {
+    let password = new_password();
+    let server = WinrmTestServer::start(FakeWinrm::HttpsBasic, "alice", &password)
+        .await
+        .unwrap();
+    let core = core(Arc::new(FakeNetworkTools::new().with_verdict(trusted()))).await;
+    let clock = Arc::new(FakeClock::new(OffsetDateTime::now_utc(), FakeZone::central_europe()));
+    core.checks.set_clock(clock.clone());
+    let o = options(WinrmTransport::Https, WinrmSignIn::Basic, WinrmCertificate::Windows);
+    let id = session(&core, &server, &password, o).await;
+    server.set_password("rotated-elsewhere");
+
+    // The dashboard: refused once, then parked.
+    core.metrics.set_watched(&core.ctx(), id, true).await.unwrap();
+    let state = timeout(WAIT, async {
+        loop {
+            core.metrics.collect_once().await;
+            if let Some(status) = core.metrics.guest().statuses().get(&id) {
+                if status.state != GuestState::Connecting {
+                    return status.clone();
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(state.state, GuestState::LoginFailed, "{state:?}");
+    assert!(state.parked);
+    for _ in 0..3 {
+        core.metrics.collect_once().await;
+    }
+    assert_eq!(server.stats().refused_sign_ins, 1, "parked: no new sign-in");
+
+    // A service check on the same session: parked too (one login key), so it signs in no more.
+    let check = core
+        .checks
+        .create(CheckInput {
+            name: "Spooler".into(),
+            target: ProbeTarget::Session { session_id: id },
+            spec: CheckSpec::Service { unit: "Spooler".into() },
+            interval_secs: 60,
+            timeout_secs: 10,
+            failures_before_down: 1,
+            paused: false,
+        })
+        .await
+        .unwrap()
+        .id;
+    for _ in 0..3 {
+        core.checks.run_due().await.unwrap();
+        clock.advance(time::Duration::minutes(1));
+    }
+    let row = core
+        .checks
+        .overview(HistoryRange::Hour)
+        .await
+        .unwrap()
+        .rows
+        .into_iter()
+        .find(|r| r.check.id == check)
+        .unwrap();
+    assert_eq!(row.status, CheckStatus::Unknown, "{:?}", row.last);
+    assert_eq!(server.stats().refused_sign_ins, 1, "no lockout from the checks either");
+}
+
+#[tokio::test]
 async fn service_checks_read_windows_services_on_one_kept_sign_in() {
     let password = new_password();
     let server = WinrmTestServer::start(FakeWinrm::HttpsBasic, "alice", &password)
@@ -613,8 +783,11 @@ async fn service_checks_read_windows_services_on_one_kept_sign_in() {
     assert_eq!(up.last.unwrap().detail, "Spooler is Running");
     let down = row(sql).await;
     assert_eq!(down.last.unwrap().result, RunResult::Down);
-    let unknown = row(gone).await;
-    assert_eq!(unknown.status, CheckStatus::Unknown, "{:?}", unknown.last);
+    // A service the host doesn't have is down, so the check-down alert fires.
+    let missing = row(gone).await;
+    let last = missing.last.unwrap();
+    assert_eq!(last.result, RunResult::Down, "{last:?}");
+    assert!(last.detail.contains("missing"), "{last:?}");
     assert_eq!(server.stats().sign_ins, 1, "one sign-in for six runs");
     assert_eq!(
         server

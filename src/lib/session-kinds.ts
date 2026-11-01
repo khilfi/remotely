@@ -241,7 +241,7 @@ export const WINRM_TRANSPORTS: { value: WinrmOptions["transport"]; label: string
 export const WINRM_SIGN_INS: { value: WinrmOptions["signIn"]; label: string; short: string }[] = [
   { value: "ntlm", label: "User and password (NTLM)", short: "NTLM" },
   { value: "basic", label: "User and password (Basic, HTTPS only)", short: "Basic" },
-  { value: "windows", label: "My Windows sign-in (Kerberos)", short: "my Windows sign-in" },
+  { value: "windows", label: "My Windows sign-in (Kerberos only)", short: "my Windows sign-in" },
 ];
 
 export const WINRM_CERTIFICATES: { value: WinrmOptions["certificate"]; label: string }[] = [
@@ -250,11 +250,20 @@ export const WINRM_CERTIFICATES: { value: WinrmOptions["certificate"]; label: st
 ];
 
 /** What a WinRM session's fields refuse, or null (the core checks again). */
-export function winrmProblem(o: WinrmOptions): string | null {
+export function winrmProblem(o: WinrmOptions, host = ""): string | null {
   if (o.signIn === "basic" && o.transport === "http") {
     return "Basic sends the password as it is, so it needs HTTPS.";
   }
+  if (o.signIn === "windows" && looksLikeIpAddress(host)) {
+    return "My Windows sign-in is Kerberos, which needs the host's name, not its IP address.";
+  }
   return null;
+}
+
+/** An IPv4 address, or something IPv6-shaped (the core checks it properly). */
+function looksLikeIpAddress(text: string): boolean {
+  const t = text.trim().replace(/^\[(.*)\]$/, "$1");
+  return /^\d{1,3}(\.\d{1,3}){3}$/.test(t) || (t.includes(":") && /^[0-9a-fA-F:.]+$/.test(t));
 }
 
 /** The port after WinRM's transport changes: the other default when the port was one of them, else what was typed. */

@@ -672,6 +672,8 @@ async fn read_windows(
         let session = connect_windows(shared, tuning, spec).await?;
         host.conn = Some(Arc::clone(&session).exec());
         host.winrm = Some(session);
+        // Review F4 #12: a new connection may follow a restart or a long gap: its first round gives no rates.
+        host.previous = None;
     }
     let Some(session) = host.winrm.clone() else {
         return Err(Failure::new(GuestState::Error, "no connection"));
@@ -689,6 +691,17 @@ async fn read_windows(
         Ok(Ok(text)) => text,
         Ok(Err(err)) => {
             host.disconnect().await;
+            // Review F4 #2: a sign-in refused on a later connection of the session (a new one per idle gap) parks it too.
+            if let Some(reason) = ParkReason::of(&err) {
+                let parked = Parked {
+                    reason,
+                    message: login_guard::parked_message(&Failure::from_error(&err).message),
+                };
+                shared
+                    .guard
+                    .park(spec.id, ParkScope::Login, &spec.login_key(), parked.clone());
+                return Err(Failure::parked(&parked));
+            }
             return Err(Failure::from_error(&err));
         }
         Err(_) => {
@@ -710,6 +723,15 @@ async fn read_windows(
             GuestState::NoData,
             "the host answered, but its CIM classes gave nothing: guest metrics need Windows with PowerShell 5.1",
         ));
+    }
+    // Review F4 #12: an uptime that went back is a restart: the CPU counter started again while its timestamp (the
+    // system time) didn't, so the round before can't make rates.
+    if host
+        .previous
+        .as_ref()
+        .is_some_and(|(before, _)| matches!((before.uptime_secs, reading.uptime_secs), (Some(b), Some(n)) if n < b))
+    {
+        host.previous = None;
     }
     let rates = procfs::rates(host.previous.as_ref().map(|(r, t)| (r, *t)), &reading, at);
     let sample = MetricSample {

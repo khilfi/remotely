@@ -106,6 +106,24 @@ pub fn fingerprint(der: &[u8]) -> String {
     )
 }
 
+/// RFC 5929's `tls-server-end-point` channel binding for a certificate: the label, then the certificate's hash with
+/// its signature's hash function (SHA-256 for MD5, SHA-1 and SHA-256 signatures, and when it can't be read).
+pub fn tls_server_end_point(der: &[u8]) -> Vec<u8> {
+    let algorithm = crate::toolbox::x509::parse(der)
+        .map(|info| info.signature_algorithm)
+        .unwrap_or_default();
+    let hash: Vec<u8> = if algorithm.contains("SHA-512") {
+        sha2::Sha512::digest(der).to_vec()
+    } else if algorithm.contains("SHA-384") {
+        sha2::Sha384::digest(der).to_vec()
+    } else {
+        sha2::Sha256::digest(der).to_vec()
+    };
+    let mut out = b"tls-server-end-point:".to_vec();
+    out.extend_from_slice(&hash);
+    out
+}
+
 /// One signed-in HTTP/1.1 connection.
 pub struct Connection {
     send: hyper::client::conn::http1::SendRequest<Full<Bytes>>,
@@ -222,7 +240,7 @@ impl Connection {
                 "Basic sends the password as it is, so Remotely uses it over HTTPS only.".into(),
             ));
         }
-        let (stream, peer) = open_stream(endpoint, accepted).await?;
+        let (stream, peer, leaf) = open_stream(endpoint, accepted).await?;
         let (send, conn) = hyper::client::conn::http1::Builder::new()
             .max_buf_size(256 * 1024)
             .handshake(TokioIo::new(stream))
@@ -239,11 +257,25 @@ impl Connection {
         };
         match sign_in {
             SignIn::Basic { header } => {
+                // Review F4 #2: checked now, with one empty POST, so a wrong password shows (and parks) at the sign-in
+                // rather than on every read.
+                let timeout = endpoint.connect_timeout.saturating_mul(2);
+                let raw = connection
+                    .exchange(endpoint, Vec::new(), None, Some(header.as_str()), timeout)
+                    .await?;
+                if raw.status == StatusCode::UNAUTHORIZED {
+                    return Err(CoreError::AuthFailed(format!(
+                        "{} refused the user name or password",
+                        endpoint.address()
+                    )));
+                }
                 connection.basic = Some(header.clone());
             }
             SignIn::Sspi { package, credentials } => {
+                // Over HTTPS the sign-in is bound to this TLS channel (Extended Protection).
+                let channel = leaf.as_deref().map(tls_server_end_point);
                 let context = connection
-                    .negotiate(endpoint, *package, Arc::clone(credentials))
+                    .negotiate(endpoint, *package, Arc::clone(credentials), channel)
                     .await?;
                 if !endpoint.https {
                     connection.seal = Some(context);
@@ -253,23 +285,47 @@ impl Connection {
         Ok((connection, peer))
     }
 
-    /// The SSPI sign-in on this connection (empty POSTs), giving the context.
+    /// The SSPI sign-in on this connection (empty POSTs), giving the context. The host's answer other than a 401 only
+    /// counts once the context is complete; the Windows sign-in (Kerberos only) never sends an NTLM token and needs the
+    /// host to prove itself (mutual authentication).
     async fn negotiate(
         &mut self,
         endpoint: &Endpoint,
         package: Package,
         credentials: Arc<sspi::Credentials>,
+        channel: Option<Vec<u8>>,
     ) -> Result<sspi::Context> {
         let spn = sspi::spn(&endpoint.host);
         let timeout = endpoint.connect_timeout.saturating_mul(2);
+        let kerberos = package == Package::KerberosOnly;
+        let place = endpoint.address();
+        let kerberos_failed = |why: String| {
+            CoreError::AuthFailed(format!(
+                "Kerberos couldn't sign in to {place} ({why}). For a host outside your domain, or reached by its address, sign in with NTLM and a password from the vault"
+            ))
+        };
+        let check = |step: &sspi::Step| -> Result<()> {
+            if kerberos && sspi::is_ntlm(&step.token) {
+                return Err(kerberos_failed(
+                    "Windows offered NTLM, which this sign-in never sends".into(),
+                ));
+            }
+            Ok(())
+        };
         // Kerberos may ask a domain controller: never on the runtime's own threads.
-        let (mut context, mut step) = tokio::task::spawn_blocking(move || {
-            let mut context = sspi::Context::new(credentials, &spn);
+        let first = tokio::task::spawn_blocking(move || {
+            let mut context = sspi::Context::new(credentials, &spn, channel.as_deref());
             let step = context.step(None);
             step.map(|s| (context, s))
         })
         .await
-        .map_err(|_| CoreError::Winrm("Windows' sign-in stopped".into()))??;
+        .map_err(|_| CoreError::Winrm("Windows' sign-in stopped".into()))?;
+        let (mut context, mut step) = match first {
+            Ok(started) => started,
+            Err(err) if kerberos => return Err(kerberos_failed(err.to_string())),
+            Err(err) => return Err(err),
+        };
+        check(&step)?;
         for _ in 0..MAX_SIGN_IN_ROUNDS {
             let header = format!(
                 "Negotiate {}",
@@ -283,6 +339,9 @@ impl Connection {
                 let Some(token) = token.filter(|_| !step.complete) else {
                     return Err(refused(endpoint, package, &raw.challenges));
                 };
+                if kerberos && sspi::is_ntlm(&token) {
+                    return Err(kerberos_failed("the host answered with NTLM".into()));
+                }
                 let (back, next) = tokio::task::spawn_blocking(move || {
                     let next = context.step(Some(&token));
                     (context, next)
@@ -290,11 +349,16 @@ impl Connection {
                 .await
                 .map_err(|_| CoreError::Winrm("Windows' sign-in stopped".into()))?;
                 context = back;
-                step = next?;
+                step = match next {
+                    Ok(step) => step,
+                    Err(err) if kerberos => return Err(kerberos_failed(err.to_string())),
+                    Err(err) => return Err(err),
+                };
+                check(&step)?;
                 continue;
             }
-            // Signed in (WinRM answers the empty POST once it has checked the sign-in). Negotiate may send a last token
-            // that proves the host (Kerberos' mutual authentication).
+            // The host took the sign-in (WinRM answers the empty POST once it has checked it). Negotiate may send a last
+            // token that proves the host (Kerberos' mutual authentication).
             if let (Some(token), false) = (token, step.complete) {
                 let (back, last) = tokio::task::spawn_blocking(move || {
                     let last = context.step(Some(&token));
@@ -303,13 +367,20 @@ impl Connection {
                 .await
                 .map_err(|_| CoreError::Winrm("Windows' sign-in stopped".into()))?;
                 context = back;
-                last?;
+                step = last?;
+            }
+            if !step.complete {
+                return Err(CoreError::AuthFailed(format!(
+                    "{place} answered before the sign-in was complete, so Remotely didn't trust it"
+                )));
+            }
+            if kerberos && !step.mutual {
+                return Err(kerberos_failed("the host didn't prove who it is".into()));
             }
             return Ok(context);
         }
         Err(CoreError::AuthFailed(format!(
-            "{} kept asking for more of the sign-in, so Remotely stopped",
-            endpoint.address()
+            "{place} kept asking for more of the sign-in, so Remotely stopped"
         )))
     }
 
@@ -408,7 +479,7 @@ fn refused(endpoint: &Endpoint, package: Package, challenges: &[String]) -> Core
             endpoint.address(),
             match package {
                 Package::Ntlm => "NTLM",
-                Package::Negotiate => "Kerberos or NTLM",
+                Package::KerberosOnly => "Kerberos",
             },
             offers.join(", ")
         ));
@@ -417,7 +488,11 @@ fn refused(endpoint: &Endpoint, package: Package, challenges: &[String]) -> Core
 }
 
 /// TCP, then TLS with the certificate checked, for HTTPS.
-async fn open_stream(endpoint: &Endpoint, accepted: &Mutex<Option<String>>) -> Result<(BoxedStream, Option<IpAddr>)> {
+/// The leaf certificate's DER comes back over HTTPS, for channel binding.
+async fn open_stream(
+    endpoint: &Endpoint,
+    accepted: &Mutex<Option<String>>,
+) -> Result<(BoxedStream, Option<IpAddr>, Option<Vec<u8>>)> {
     let host = endpoint.host.trim_start_matches('[').trim_end_matches(']');
     let place = endpoint.address();
     let tcp = match tokio::time::timeout(
@@ -443,12 +518,13 @@ async fn open_stream(endpoint: &Endpoint, accepted: &Mutex<Option<String>>) -> R
     let peer = tcp.peer_addr().ok().map(|a| a.ip());
     let _ = tcp.set_nodelay(true);
     if !endpoint.https {
-        return Ok((Box::new(tcp), peer));
+        return Ok((Box::new(tcp), peer, None));
     }
     let name = crate::toolbox::certs::server_name(host)?;
     let (tls, chain) = crate::toolbox::certs::tls_connect(Box::new(tcp), name, endpoint.connect_timeout).await?;
     check_certificate(endpoint, &chain, accepted).await?;
-    Ok((Box::new(tls), peer))
+    let leaf = chain.first().cloned();
+    Ok((Box::new(tls), peer, leaf))
 }
 
 /// The session's rule for the host's certificate, before anything is sent: Windows trusts it for the host's name,
@@ -514,6 +590,8 @@ pub struct Client {
     permits: Semaphore,
     accepted: Mutex<Option<String>>,
     peer: Mutex<Option<IpAddr>>,
+    /// Shells made on the host and not deleted yet, so closing deletes what still runs.
+    live: Mutex<std::collections::HashSet<String>>,
 }
 
 impl Client {
@@ -526,6 +604,7 @@ impl Client {
             permits: Semaphore::new(MAX_CONNECTIONS),
             accepted: Mutex::default(),
             peer: Mutex::default(),
+            live: Mutex::default(),
         }
     }
 
@@ -582,6 +661,52 @@ impl Client {
     pub fn close(&self) {
         self.permits.close();
         locks::lock(&self.idle).clear();
+    }
+
+    /// A shell made on the host.
+    pub(super) fn shell_opened(&self, id: &str) {
+        locks::lock(&self.live).insert(id.to_owned());
+    }
+
+    /// The shells not deleted yet.
+    pub fn live_shells(&self) -> Vec<String> {
+        locks::lock(&self.live).iter().cloned().collect()
+    }
+
+    /// Deletes a shell on the host (and what runs in it), once, within 10 s. Also after [`Client::close`]: then on a
+    /// connection of its own, outside the limit on connections, so a closing session leaves nothing running.
+    pub async fn delete_shell(&self, id: &str) {
+        if !locks::lock(&self.live).remove(id) {
+            return;
+        }
+        let header = super::soap::Header {
+            to: &self.endpoint.url(),
+            action: super::soap::ACTION_DELETE,
+            shell_id: Some(id),
+            options: &[],
+            timeout_secs: 10,
+        };
+        let xml = super::soap::envelope(&header, "");
+        let deleted = if self.is_closed() {
+            self.post_unlimited(&xml, Duration::from_secs(10)).await
+        } else {
+            self.post(&xml, Duration::from_secs(10)).await
+        };
+        if let Err(err) = deleted {
+            tracing::debug!(error = %err, "winrm: a shell could not be deleted; the host drops it when it idles");
+        }
+    }
+
+    /// One message on a connection of its own, whatever the limit: only for cleaning up after [`Client::close`].
+    async fn post_unlimited(&self, xml: &str, timeout: Duration) -> Result<Answered> {
+        let (mut connection, _) =
+            tokio::time::timeout(timeout, Connection::open(&self.endpoint, &self.sign_in, &self.accepted))
+                .await
+                .map_err(|_| CoreError::Timeout {
+                    command: "deleting a shell".into(),
+                    seconds: timeout.as_secs(),
+                })??;
+        connection.post(&self.endpoint, xml, timeout).await
     }
 
     pub fn is_closed(&self) -> bool {
