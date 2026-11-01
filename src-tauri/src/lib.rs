@@ -21,6 +21,7 @@ mod schedules;
 mod stacks;
 mod terminal;
 mod terminal_rules;
+mod toolbox;
 mod tunnels;
 pub mod updater;
 mod vm_insight;
@@ -93,6 +94,8 @@ pub fn run() {
         .plugin(tauri_plugin_notification::init())
         .manage(diagnostics::LogsFolder(log_dir.clone()))
         .manage(PageLoads::default())
+        // FD-09: the toolbox's runs going on, so the UI can stop one.
+        .manage(toolbox::ToolRuns::default())
         .setup(move |app| {
             // Tauri turns a setup error into a panic, so a failed start is explained here and ends here.
             if let Err(err) = start(app, setup_logs.as_deref()) {
@@ -155,6 +158,13 @@ fn page_loaded<R: Runtime>(webview: &Webview<R>, payload: &PageLoadPayload<'_>) 
     let loads = webview.state::<PageLoads>().0.fetch_add(1, Ordering::SeqCst);
     if loads == 0 {
         return;
+    }
+    // FD-09: the old page's toolbox runs (a ping of 1000 requests, say) stop with it.
+    if let Some(runs) = webview.try_state::<toolbox::ToolRuns>() {
+        let stopped = runs.cancel_all();
+        if stopped > 0 {
+            tracing::info!(stopped, "the window reloaded; stopped its toolbox runs");
+        }
     }
     let Some(state) = webview.try_state::<AppState>() else {
         return;
@@ -746,6 +756,15 @@ fn commands() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         workspaces::change_id_rules,
         workspaces::change_id_rules_set,
         workspaces::transfer_commit_new_workspace,
+        // FD-09 the toolbox.
+        toolbox::toolbox_ping,
+        toolbox::toolbox_trace,
+        toolbox::toolbox_dns,
+        toolbox::toolbox_ports,
+        toolbox::toolbox_certificate,
+        toolbox::toolbox_certificate_file,
+        toolbox::toolbox_cancel,
+        toolbox::toolbox_wake_options,
     ]
 }
 

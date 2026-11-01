@@ -23,6 +23,7 @@ use remotely_core::sessions::kinds::{
 use remotely_core::sessions::{FolderDefaults, SessionAuth, SessionInput, SessionKind};
 use remotely_core::store::AuditEntry;
 use remotely_core::terminal::{PaneKind, TerminalEvent, TerminalHandle, TerminalStatus, TerminalTuning, WindowState};
+use remotely_core::toolbox::ProbeTarget;
 use remotely_core::vault::{SecretKind, SecretString};
 use remotely_core::{Core, CoreError};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -694,6 +695,25 @@ async fn only_ssh_sessions_log_in_with_the_vault_jump_or_reach_ssh_features() {
     ));
     assert!(matches!(
         core.metrics.set_watched(&ctx, telnet.id, true).await.unwrap_err(),
+        CoreError::WrongSessionKind { .. }
+    ));
+    // The toolbox probes every kind's own host and port, but a serial session's host is a COM port.
+    let route = core
+        .toolbox
+        .route(&ctx, &ProbeTarget::Session { session_id: telnet.id })
+        .await
+        .unwrap();
+    assert_eq!((route.host.as_str(), route.port), ("sw01.example.com", Some(23)));
+    let serial = create(
+        &core,
+        input("console", "COM2", 1, SessionKind::Serial(SerialOptions::default())),
+    )
+    .await;
+    assert!(matches!(
+        core.toolbox
+            .route(&ctx, &ProbeTarget::Session { session_id: serial })
+            .await
+            .unwrap_err(),
         CoreError::WrongSessionKind { .. }
     ));
 

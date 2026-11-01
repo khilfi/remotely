@@ -48,6 +48,8 @@ pub struct Setup {
     pub containers: Arc<dyn ContainerEngines>,
     /// CV-01 to CV-03: the conversion tools, without qemu-img unless a test installs it ([`FakeDiskTools::with_qemu_img`]).
     pub disk_tools: Arc<FakeDiskTools>,
+    /// FD-09: the toolbox's probes: a [`FakeNetworkTools`] that sends nothing, unless a test gives its own.
+    pub network_tools: Arc<dyn remotely_core::adapters::net_tools::NetworkTools>,
     /// FD-02: the fakes' VMs are listed (refreshed into the workspace) before the test starts, unless
     /// [`Setup::unlisted`].
     pub listed: bool,
@@ -70,8 +72,16 @@ impl Setup {
             network: Arc::new(FakeNetwork::default()),
             containers: Arc::new(FakeContainers::default()),
             disk_tools: Arc::new(FakeDiskTools::new()),
+            network_tools: Arc::new(remotely_core::fakes::FakeNetworkTools::new()),
             listed: true,
         }
+    }
+
+    /// FD-09: other probes, e.g. a [`FakeNetworkTools`] with routes and ports, or the real ones for servers on
+    /// 127.0.0.1.
+    pub fn with_network_tools(mut self, tools: Arc<dyn remotely_core::adapters::net_tools::NetworkTools>) -> Self {
+        self.network_tools = tools;
+        self
     }
 
     /// CT-01, CT-02: other container engines, e.g. [`FakeContainers`] with hosts.
@@ -154,6 +164,7 @@ impl Setup {
             network: self.network,
             containers: self.containers,
             disk_tools: self.disk_tools,
+            network_tools: self.network_tools,
         };
         let core = Core::assemble(store, ctx, adapters, JobLimits::default())
             .await

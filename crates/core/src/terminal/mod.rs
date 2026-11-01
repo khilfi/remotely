@@ -2043,6 +2043,15 @@ impl ExecSession for ScrubbedCommands {
     }
 
     async fn close(&self) {}
+
+    // FD-09: the toolbox's checks of a host behind this terminal's host go through its connection.
+    async fn open_direct(
+        &self,
+        host: &str,
+        port: u16,
+    ) -> std::result::Result<crate::adapters::net_tools::BoxedStream, crate::adapters::net_tools::ConnectFailure> {
+        self.inner.open_direct(host, port).await
+    }
 }
 
 fn scrub(text: &str, secrets: &[SecretString]) -> String {

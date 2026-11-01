@@ -62,6 +62,7 @@ import { RowMenu } from "@/components/RowMenu";
 import { SessionDialog } from "@/components/SessionDialog";
 import { TransferImportDialog } from "@/components/TransferImportDialog";
 import { SessionVmLink } from "@/components/VmLinkControls";
+import { ToolboxMenu } from "@/components/toolbox/ToolboxMenu";
 import { ReasonLine } from "@/components/WhyDisabled";
 import {
   api,
@@ -628,6 +629,9 @@ export function SessionsPage({ vault, onVaultChanged, onOpenVault, onConnect, ac
                                 Host details…
                               </DropdownMenuItem>
                               <DropdownMenuItem onSelect={() => void duplicate(s)}>Duplicate</DropdownMenuItem>
+                              {kindOf(s).protocol !== "serial" && (
+                                <ToolboxMenu target={{ kind: "session", sessionId: s.id, label: s.name }} />
+                              )}
                               <DropdownMenuSub>
                                 <DropdownMenuSubTrigger>Move to</DropdownMenuSubTrigger>
                                 <DropdownMenuSubContent>

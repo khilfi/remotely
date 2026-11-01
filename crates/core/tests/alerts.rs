@@ -356,6 +356,7 @@ async fn editing_or_deleting_a_rule_resolves_its_alerts_and_a_restart_closes_the
             network: Arc::clone(&setup.network),
             containers: Arc::clone(&setup.containers),
             disk_tools: Arc::clone(&setup.disk_tools) as _,
+            network_tools: Arc::clone(&setup.network_tools) as _,
         }
     };
     let core = Core::assemble(store.clone(), ctx, adapters(&setup), Default::default())

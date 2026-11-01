@@ -311,7 +311,16 @@ export type Command =
   /** CV-03: a conversion. Never submitted by the UI: `convertSubmit` builds it in the core after a save dialog. */
   | { type: "imageConvert"; targets: TargetRef[]; spec: Record<string, unknown> }
   /** VM-17, CV-02: an export. Never submitted by the UI: `exportSubmit` builds it in the core after a folder dialog. */
-  | { type: "vmExport"; targets: TargetRef[]; spec: Record<string, unknown> };
+  | { type: "vmExport"; targets: TargetRef[]; spec: Record<string, unknown> }
+  /** FD-09: a Wake-on-LAN magic packet. One target: the session or VM it wakes, or the app for a MAC typed alone. */
+  | { type: "wakeOnLan"; targets: TargetRef[]; wake: WakeSpec };
+
+/** FD-09: what a wake-up sends, and where (crates/core/src/toolbox/wake.rs). */
+export interface WakeSpec {
+  mac: string;
+  destination: { kind: "adapter"; address: string } | { kind: "address"; address: string };
+  port: number;
+}
 
 /** VM-11: what a network adapter is attached to. */
 export type NicNetwork =
@@ -916,6 +925,8 @@ export type ActionKind =
   | "vmExport"
   /** CV-03: convert a disk image (writes a new file). */
   | "imageConvert"
+  /** FD-09: send a Wake-on-LAN magic packet. */
+  | "wakeOnLan"
   | "appUpdate";
 
 export interface TierRule {

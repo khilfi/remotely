@@ -1,6 +1,7 @@
 // UX-08: the page registry and where every page id and page shortcut leads. The sidebar shows three groups (Machines,
 // Remote, Overview) with Vault and Settings at the bottom, and Ctrl+1 to Ctrl+9 follow the sidebar's order (Settings
-// keeps Ctrl+,). PageHeader takes each page's title from here, so a title always matches the sidebar.
+// keeps Ctrl+,). A page added once the digits ran out (FD-09's Toolbox) has none: it opens from the palette, its rows'
+// links and the sidebar. PageHeader takes each page's title from here, so a title always matches the sidebar.
 //
 // Pages that became part of another page keep their id, so links, notifications and the palette still reach them:
 // Snapshots (QL-14) is a view of Virtual machines, Image tools the Templates page's Disk images tab, the Map a Dashboard
@@ -15,6 +16,7 @@ export type PageId =
   | "sessions"
   | "terminal"
   | "containers"
+  | "toolbox"
   | "dashboard"
   | "activity"
   | "vault"
@@ -28,7 +30,8 @@ export interface PageInfo {
   label: string;
   /** Its sidebar group; null for Vault and Settings, at the bottom. */
   group: NavGroupId | null;
-  shortcut: string;
+  /** None once the digits are taken: such a page opens from the palette and from links. */
+  shortcut?: string;
 }
 
 export const NAV_GROUPS: readonly { id: NavGroupId; label: string }[] = [
@@ -45,6 +48,8 @@ export const PAGES: readonly PageInfo[] = [
   { id: "sessions", label: "Sessions", group: "remote", shortcut: "Ctrl+4" },
   { id: "terminal", label: "Terminal", group: "remote", shortcut: "Ctrl+5" },
   { id: "containers", label: "Containers", group: "remote", shortcut: "Ctrl+6" },
+  // FD-09: no digit is free; it opens from Ctrl+K and from session and VM rows.
+  { id: "toolbox", label: "Toolbox", group: "remote" },
   { id: "dashboard", label: "Dashboard", group: "overview", shortcut: "Ctrl+7" },
   { id: "activity", label: "Activity", group: "overview", shortcut: "Ctrl+8" },
   { id: "vault", label: "Vault", group: null, shortcut: "Ctrl+9" },
@@ -89,7 +94,7 @@ export function sidebarGroups(): { group: { id: NavGroupId; label: string } | nu
 /** What Ctrl+<key> opens: a page (on a tab, for a moved one), or nothing. */
 export function shortcutTarget(key: string): NavTarget {
   const shortcut = `Ctrl+${key}`;
-  const page = PAGES.find((p) => p.shortcut === shortcut);
+  const page = PAGES.find((p) => p.shortcut !== undefined && p.shortcut === shortcut);
   if (page) return { page: page.id };
   const moved = (Object.keys(MOVED_PAGES) as MovedPage[]).find((m) => movedShortcut(m) === shortcut);
   if (moved) return { page: MOVED_PAGES[moved].home, tab: MOVED_PAGES[moved].tab };

@@ -31,6 +31,7 @@ const EVERY: AppLink[] = [
   { kind: "map" },
   { kind: "schedule", scheduleId: "s-1" },
   { kind: "hostNetworks" },
+  { kind: "toolbox", tool: "ports", target: { kind: "session", sessionId: "s-1", label: "web01" } },
 ];
 
 test("every kind of link is one, and has words for its button", () => {
@@ -51,6 +52,8 @@ test("values that aren't links this version can open are refused", () => {
     { kind: "container", engine: "docker", containerId: "abc" },
     { kind: "container", host: { kind: "session" }, engine: "docker", containerId: "abc" },
     { kind: "catalog", tab: "deploy" },
+    { kind: "toolbox", tool: "scan" },
+    { kind: "toolbox" },
     { kind: "toString" },
   ];
   for (const value of refused) assert.equal(isAppLink(value), false, JSON.stringify(value));

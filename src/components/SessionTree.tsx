@@ -63,6 +63,7 @@ import { formatWhen } from "@/lib/format";
 import { sessionAddress } from "@/lib/terminal-session";
 import { kindLabel } from "@/lib/session-kinds";
 import { cn } from "@/lib/utils";
+import { ToolboxMenu } from "@/components/toolbox/ToolboxMenu";
 
 const GROUPING_KEY = "remotely.terminal.treeGrouping";
 const OPEN_KEY = "remotely.terminal.treeOpen";
@@ -520,6 +521,9 @@ function SessionRow({
           Copy the address
         </DropdownMenuItem>
         {onHostDetails && ssh && <DropdownMenuItem onSelect={onHostDetails}>Host details…</DropdownMenuItem>}
+        {session.kind?.protocol !== "serial" && (
+          <ToolboxMenu target={{ kind: "session", sessionId: session.id, label: session.name }} />
+        )}
       </RowMenu>
     </div>
   );

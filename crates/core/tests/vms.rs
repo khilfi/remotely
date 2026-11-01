@@ -572,6 +572,7 @@ async fn the_power_on_limit_is_a_saved_setting() {
             network: Arc::new(FakeNetwork::default()),
             containers: Arc::new(remotely_core::fakes::FakeContainers::default()),
             disk_tools: Arc::new(remotely_core::fakes::FakeDiskTools::new()),
+            network_tools: Arc::new(remotely_core::fakes::FakeNetworkTools::new()),
         },
         JobLimits::default(),
     )

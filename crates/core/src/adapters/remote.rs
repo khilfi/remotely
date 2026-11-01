@@ -282,6 +282,42 @@ pub trait ExecSession: Send + Sync {
     /// The connection dropped (or was closed); connect again for the next command.
     fn is_closed(&self) -> bool;
     async fn close(&self);
+
+    /// FD-09: a TCP connection the host opens to `host:port` (an SSH direct-tcpip channel), for the toolbox's port
+    /// and certificate checks of a host behind it (SS-07). Nothing runs on the host. A connection that can't open
+    /// one says so.
+    async fn open_direct(
+        &self,
+        _host: &str,
+        _port: u16,
+    ) -> std::result::Result<crate::adapters::net_tools::BoxedStream, crate::adapters::net_tools::ConnectFailure> {
+        Err(crate::adapters::net_tools::ConnectFailure::Other(
+            "this connection can't reach another host".into(),
+        ))
+    }
+}
+
+/// FD-09: a direct-tcpip channel from the host at the far end of `handle` to `host:port`, as a stream.
+async fn open_direct_channel(
+    handle: &client::Handle<Handler>,
+    host: &str,
+    port: u16,
+) -> std::result::Result<crate::adapters::net_tools::BoxedStream, crate::adapters::net_tools::ConnectFailure> {
+    use crate::adapters::net_tools::ConnectFailure;
+    if handle.is_closed() {
+        return Err(ConnectFailure::Other(
+            "the connection to the jump host is closed".into(),
+        ));
+    }
+    match handle
+        .channel_open_direct_tcpip(dial_host(host), u32::from(port), "127.0.0.1", 0)
+        .await
+    {
+        Ok(channel) => Ok(Box::new(channel.into_stream())),
+        // sshd's own connect failed: refused there, or no route from there. It doesn't say which.
+        Err(russh::Error::ChannelOpenFailure(russh::ChannelOpenFailure::ConnectFailed)) => Err(ConnectFailure::Refused),
+        Err(err) => Err(ConnectFailure::Other(forward::open_failure(&err))),
+    }
 }
 
 /// How a command ended (BX-02). The output has had the run's secrets scrubbed.
@@ -721,6 +757,14 @@ impl ExecSession for RusshSession {
 
     async fn close(&self) {
         self.connected.close().await;
+    }
+
+    async fn open_direct(
+        &self,
+        host: &str,
+        port: u16,
+    ) -> std::result::Result<crate::adapters::net_tools::BoxedStream, crate::adapters::net_tools::ConnectFailure> {
+        open_direct_channel(&self.connected.handle, host, port).await
     }
 }
 
@@ -1881,6 +1925,14 @@ impl ExecSession for ShellCommands {
     }
 
     async fn close(&self) {}
+
+    async fn open_direct(
+        &self,
+        host: &str,
+        port: u16,
+    ) -> std::result::Result<crate::adapters::net_tools::BoxedStream, crate::adapters::net_tools::ConnectFailure> {
+        open_direct_channel(&self.handle, host, port).await
+    }
 }
 
 /// Why a connection ended. SS-07: a jump host that dropped takes the connections behind it along,

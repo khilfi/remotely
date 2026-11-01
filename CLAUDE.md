@@ -157,7 +157,13 @@ crates/core/          remotely-core: all app logic
                       again while VirtualBox says another client holds the VM's lock), updater.rs, github.rs (FD-14
                       GitHub Releases API without a token or with the optional update token, public download links,
                       rate-limit backoff), network.rs (DNS for QL-01 auto-linking and QL-03 host name and IP, QL-04
-                      TCP probe), containers/ (CT-01, CT-02: the ContainerEngine and ContainerEngines traits; cli.rs
+                      TCP probe), net_tools.rs (FD-09 the toolbox's NetworkTools trait, behind `Adapters.network_tools`:
+                      ICMP echo with a TTL (IcmpSendEcho2, Icmp6SendEcho2), DnsQueryEx with Windows' resolver or a
+                      chosen server, a TCP connect, a chain's trust check (CertGetCertificateChain with only what this
+                      PC has: no root, intermediate or revocation download), GetAdaptersAddresses, and the Wake-on-LAN
+                      datagram; the Windows calls in net_tools/win.rs; remote.rs's ExecSession::open_direct, a
+                      direct-tcpip stream from a host, for checks behind a jump host), containers/ (CT-01, CT-02: the
+                      ContainerEngine and ContainerEngines traits; cli.rs
                       the docker and podman CLIs over a kept SSH connection's exec channels, with sudo from the vault
                       (ExecSession::run_sudo) or NOPASSWD, and docker.exe on this PC, found like vmrun, its output
                       streamed through exec_output's OutputCollector (A9: capped, never buffered whole); parse.rs both
@@ -448,6 +454,23 @@ crates/core/          remotely-core: all app logic
                       policy engine (read-only additions in policy/commands.rs, writing forms in commands/writes.rs);
                       QL-13 each entry's manual page (manual.rs: Manual, MANUAL_HOSTS, `checked` refuses any other
                       address; opening one is not audited and the read-only lock allows it)
+    toolbox/          FD-09 (Core.toolbox; reads only: no bus, no audit, not stopped by the read-only lock): mod.rs
+                      Toolbox (ProbeTarget: a typed host, a session, a VM's guest IP; Route with the session's own jump
+                      host; each probe callable on its own with a cancel token and ProbeProgress as it goes, which F2's
+                      health checks reuse), icmp.rs (ping, at most 1,000 requests a second apart; trace route, 30 hops,
+                      3 requests each, names only when asked; both refuse a session behind a jump host and say why),
+                      dns.rs (A to CAA, PTR's arpa name, which server answered), ports.rs (at most MAX_PORTS, 100, a
+                      run; banners of 256 bytes without control or Cf characters), certs.rs (a rustls handshake with
+                      SNI that keeps any chain, its signature still checked, then the trust check and the name; a
+                      `.crt`, `.cer` or `.pem` file after untrusted::path_refusal, 1 MB), x509.rs (a bounds-checked DER
+                      reader: names in RFC 4514's order, alternative names, key, signature, fingerprints, RFC 6125 name
+                      match), jump.rs (SS-07: an open terminal's connection to the jump host, else a kept one through
+                      login_guard's parks and caps, closed by a sweep after 2 minutes idle (never while a check holds
+                      it), on a vault lock and a workspace switch; every ExecSession wrapper forwards open_direct, the
+                      terminal's ScrubbedCommands included), wake.rs
+                      (WakeSpec: MAC, an adapter's subnet broadcast or a typed address, port 9; the magic packet;
+                      Command::WakeOnLan is Low, Medium on Prod, audited; one target: the session, the VM, or
+                      TargetRef::App named "MAC ..." for a MAC typed alone)
     reachability.rs   QL-04 background TCP checks of the sessions the tree shows (reads only; each shows in the host's
                       sshd log): every 5 minutes by default, a host that is down less often (next_check_after: doubling
                       up to 30 minutes), none for a host with an open connection (OpenConnections: connected terminals,
@@ -537,6 +560,9 @@ crates/core/          remotely-core: all app logic
                       and raw bytes kept; a dropped connection resets), also in dev_ssh_server
     fakes/github_server.rs  FD-14 fake GitHub API, github.com download links and release storage on 127.0.0.1
                       (private or public, rate limits), throwaway update-signing key
+    fakes/net_tools.rs  FD-09 FakeNetworkTools: echoes along routes the test sets, DNS answers from a table, ports that
+                      refuse, stay silent, send a banner or pass on to a server on 127.0.0.1, a set trust verdict, and
+                      datagrams recorded, never sent
     fakes/stack_clock.rs  VM-08 FakeStackClock: a stack job's readiness waits and delays move fake time at once,
                       run `at` hooks (a port opening, a tool failing) and record each sleep
     fakes/host_networks.rs  VM-11 the fakes' vmnets and forwards (as_admin, with_forwards_in_conf_only) and VirtualBox's
@@ -552,8 +578,10 @@ crates/core/          remotely-core: all app logic
                       host_networks.rs: VM-11; vm_insight.rs: VM-25; waste.rs: VM-16, VM-14; schedules.rs: VM-14,
                       VM-27 on a FakeClock, no sleeping; stacks.rs: VM-08 and VM-26 on the fakes and FakeStackClock;
                       conversion.rs: CV-01 to CV-03, VM-17; workspaces.rs: FD-02 isolation of every service and
-                      switching; change_ids.rs: AP-08; consoles.rs: SS-12 RDP, VNC, Telnet, serial and tunnel tabs);
-                      opt-in workstation_it.rs, virtualbox_it.rs and
+                      switching; change_ids.rs: AP-08; toolbox.rs: FD-09 on FakeNetworkTools, a TLS server with an
+                      rcgen certificate made at run time, jump hosts through the test SSH server, Wake-on-LAN to
+                      127.0.0.1; consoles.rs: SS-12 RDP, VNC, Telnet, serial and tunnel tabs); opt-in
+                      workstation_it.rs, virtualbox_it.rs and
                       conversion_it.rs (the real conversion tools on small images in the temp folder)
 src-tauri/            Tauri 2 shell: window, IPC commands (ipc.rs), terminal bridge, MultiExec (multiexec.rs; groups.rs
                       QL-19 saved MultiExec groups; terminal_rules.rs QL-17 rules), command
@@ -588,7 +616,9 @@ src-tauri/            Tauri 2 shell: window, IPC commands (ipc.rs), terminal bri
                       file dialog, Inspect, Convert's options and its save dialog, Verify with `convert://verify`
                       progress, Export's options and folder dialog, Import's analysis, check and submit, QEMU's page
                       after checked_qemu_site; Settings' qemu-img path in ipc.rs); FD-02, AP-08 workspaces.rs (the
-                      switcher's commands, Unassigned VMs, the change ID rule, FD-07 import into a new workspace); lib.rs
+                      switcher's commands, Unassigned VMs, the change ID rule, FD-07 import into a new workspace); FD-09
+                      toolbox.rs (each tool's run under an id the UI chose, `toolbox://progress` events, toolbox_cancel,
+                      the certificate file dialog, Wake up's adapters and MACs); lib.rs
                       and schedules.rs pass job and schedule events to the window only for the shown workspace
 src/                  React + TypeScript UI
   components/ui/      shadcn/ui components (generated)
@@ -639,12 +669,17 @@ src/                  React + TypeScript UI
                       its sticky Save bar); the Vault page's Unlocking card holds the Windows-login switch and warning;
                       UX-01 to UX-13 (0.6.0), the shared pieces every page uses ("UI rules" under Conventions):
                       PageHeader, HelpTip, Term, SelectionBar, RowMenu, EmptyState, Tip and ShowTipsAgainButton,
-                      RefreshButton)
+                      RefreshButton; FD-09 toolbox/: the Toolbox's tabs (ProbeTools: Ping, Trace route, DNS lookup,
+                      Check ports; CertificateTool, SubnetTool, WakeTool), TargetField and ToolboxMenu, the "Toolbox"
+                      submenu of session rows and the palette's VM and session views, and ToolboxIconMenu in the VM
+                      details panel's header; no recent inputs are offered while presenting, since a native dropdown
+                      is out of the masker's reach)
   pages/              one file per page (bulk execution is in TerminalPage: Type in all tabs (MultiExec) and Compare
                       hosts; QL-14 VmsPage
                       is VMs and snapshots, with the selection's bulk snapshot actions and the details panel;
                       UX-08 the sidebar's order and shortcuts are lib/navigation.ts's: Machines (VMs Ctrl+1, Templates
-                      Ctrl+2, Schedules Ctrl+3), Remote (Sessions Ctrl+4, Terminal Ctrl+5, Containers Ctrl+6),
+                      Ctrl+2, Schedules Ctrl+3), Remote (Sessions Ctrl+4, Terminal Ctrl+5, Containers Ctrl+6, and
+                      FD-09's ToolboxPage, which has no digit and opens from Ctrl+K, rows and `toolbox` links),
                       Overview (Dashboard Ctrl+7, Activity Ctrl+8), then Vault Ctrl+9 and Settings Ctrl+,;
                       TemplatesPage: VM-19 to VM-21 sizes, images and launch
                       templates, Deploy on a template's row; the VMs page's Deploy, and Clone for the selection,
@@ -744,7 +779,11 @@ src/                  React + TypeScript UI
                       notifications.ts and notifications-store.ts (QL-25 entries per source, JobNotes, grouping),
                       navigation-api.ts,
                       density.ts (QL-24 `--spacing` and `--radius` through `data-density`), shortcuts.ts (QL-24 every
-                      shortcut), first-run.ts (QL-23); pure helpers with
+                      shortcut), first-run.ts (QL-23); FD-09 toolbox.ts (the tools, row targets, the last 20 inputs
+                      per tool and workspace in local storage, every access in try/catch, result wording),
+                      toolbox-api.ts (wrappers
+                      and types), subnet.ts (the subnet calculator, IPv4 and IPv6 with BigInt) and
+                      hooks/use-probe-run.ts (a run's id, progress and Stop); pure helpers with
                       *.test.ts
                       next to them (Node's test runner: `npm test`)
 ```
