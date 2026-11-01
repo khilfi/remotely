@@ -448,7 +448,7 @@ fn yes_no(value: Option<bool>) -> Cell {
     value.map_or(Cell::Empty, Cell::yes_no)
 }
 
-/// VM-11's networks as rows. `Err` when the report couldn't be read at all.
+/// VM-11's networks as rows; a report that can't be read at all is a note, and the sheet stays empty.
 async fn network_sheet(networks: &HostNetworks, ctx: &Context, notes: &mut Vec<String>) -> Sheet {
     let mut sheet = Sheet::new("networks", "Networks", &NETWORK_COLUMNS);
     let report = match networks.report(ctx).await {
