@@ -478,14 +478,19 @@ crates/core/          remotely-core: all app logic
                       Change::HealthChecks; runs are reads, not audited): spec.rs CheckSpec (ping, tcp, http,
                       certificate, dns, service), CheckInput and its checks (30 s to 1 h, timeout, failures before down;
                       check_unit: a systemd unit by a strict pattern), probe.rs one run with F1's probes (up, down, or
-                      unknown when Remotely couldn't check: vault locked, login parked or capped; hold_for),
+                      unknown when Remotely couldn't check: vault locked, login parked or capped; hold_for; Backoffs:
+                      a host or jump host that couldn't be reached waits 1 minute doubling to 15 before the next login
+                      try, and the runs between are skipped: nothing kept, the status stays, waiting_until shown),
                       http.rs a GET with hyper over Reach's stream (direct or a jump host's channel, never a proxy;
                       headers 64 KB, body 256 KB read only to find text, 5 redirects to http(s) only; HTTPS checked by
                       Windows' trust and the name unless allowed), service.rs the ServiceReader trait (F4 adds Windows
-                      services) and SystemdOverSsh (`systemctl is-active 'unit'` on the session's connection),
-                      mod.rs Checks: the runner (tick each second on a Clock for the shown workspace only, 8 at once;
-                      leave() on a switch), history and sparkline buckets, CheckReadings for MO-07, overview, summary
-                      and CheckEvent for the UI; results kept with metrics.historyRetention and pruned with MO-06
+                      services; check_service_name by the session's kind) and SystemdOverSsh (`systemctl is-active
+                      'unit'` on the session's connection), mod.rs Checks: the runner (tick each second on a Clock for
+                      the shown workspace only, 8 at once; leave() on a switch, which loads nothing of the workspace
+                      left until another is shown, resume() when the switch fails), history and sparkline buckets,
+                      CheckReadings for MO-07 (unknown after down stays down), overview, attention (the widget's read,
+                      no history), summary and CheckEvent for the UI; results kept with metrics.historyRetention and
+                      pruned with MO-06; store/checks.rs check_uptime: uptime over any range for one workspace (F6)
     reachability.rs   QL-04 background TCP checks of the sessions the tree shows (reads only; each shows in the host's
                       sshd log): every 5 minutes by default, a host that is down less often (next_check_after: doubling
                       up to 30 minutes), none for a host with an open connection (OpenConnections: connected terminals,

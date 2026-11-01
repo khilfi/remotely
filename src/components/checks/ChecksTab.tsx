@@ -19,7 +19,7 @@ import { CheckHistorySheet } from "@/components/checks/CheckHistorySheet";
 import { CheckStatusBadge, Sparkline } from "@/components/checks/CheckBits";
 import { errorMessage } from "@/lib/api";
 import { checksApi, type CheckInput, type CheckRow, type ChecksOverview, type HealthCheck } from "@/lib/checks-api";
-import { agoText, everyText, newCheckInput, specText, tookText, uptimeText } from "@/lib/checks";
+import { agoText, everyText, newCheckInput, specText, tookText, uptimeText, waitText, withResult } from "@/lib/checks";
 import type { HistoryRange } from "@/lib/dashboard-api";
 import { probeTarget, type ToolTarget } from "@/lib/toolbox";
 
@@ -42,6 +42,9 @@ interface Props {
 
 type Editing = { kind: "new"; input: CheckInput } | { kind: "edit"; check: HealthCheck } | null;
 
+/** The longest the sparklines and uptime wait to be read again while runs come in. */
+const FULL_READ_MS = 30_000;
+
 function summaryLine(o: ChecksOverview): string {
   const s = o.summary;
   const parts = [
@@ -63,7 +66,9 @@ export function ChecksTab({ active, range, onRangeChange, request, addRequest }:
   const [now, setNow] = useState(() => Date.now());
   const readOnly = useReadOnlyReason();
 
-  // Read while the tab shows, again (at most once a second) after each run or change.
+  // Read while the tab shows. A run's result updates its row at once (no history read); the whole overview, with the
+  // sparklines and uptime, is read again at most every FULL_READ_MS, or a second after a check is added, changed or
+  // deleted.
   useEffect(() => {
     if (!active) return;
     let stopped = false;
@@ -80,12 +85,20 @@ export function ChecksTab({ active, range, onRangeChange, request, addRequest }:
         },
       );
     void read();
-    const unlisten = checksApi.onEvent(() => {
+    const readSoon = (wait: number) => {
       if (timer !== undefined) return;
       timer = window.setTimeout(() => {
         timer = undefined;
         void read();
-      }, 1000);
+      }, wait);
+    };
+    const unlisten = checksApi.onEvent((event) => {
+      if (event.kind === "changed") {
+        readSoon(1000);
+        return;
+      }
+      setOverview((o) => (o ? withResult(o, event) : o));
+      readSoon(FULL_READ_MS);
     });
     // "3 min ago" moves on between runs.
     const tick = window.setInterval(() => setNow(Date.now()), 30_000);
@@ -176,6 +189,9 @@ export function ChecksTab({ active, range, onRangeChange, request, addRequest }:
                   <TableRow key={row.check.id} className="cursor-pointer" onClick={() => setHistoryOf(row.check.id)}>
                     <TableCell>
                       <CheckStatusBadge status={row.status} />
+                      {waitText(row.waitingUntil, now) && (
+                        <div className="mt-1 text-xs text-muted-foreground">{waitText(row.waitingUntil, now)}</div>
+                      )}
                     </TableCell>
                     <TableCell className="max-w-56">
                       <div className="truncate font-medium">{row.check.name}</div>

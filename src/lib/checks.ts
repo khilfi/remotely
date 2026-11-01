@@ -3,6 +3,7 @@
 // status bar's text and a sparkline's path.
 
 import type {
+  CheckEvent,
   CheckInput,
   CheckKind,
   CheckResult,
@@ -10,6 +11,7 @@ import type {
   CheckSpec,
   CheckStatus,
   CheckSummary,
+  ChecksOverview,
 } from "./checks-api.ts";
 import type { ProbeTarget } from "./toolbox-api.ts";
 
@@ -256,6 +258,36 @@ export function agoText(at: number, now: number): string {
   const hours = Math.round(mins / 60);
   if (hours < 48) return `${hours} h ago`;
   return `${Math.round(hours / 24)} d ago`;
+}
+
+/** "next try in 3 min", while a check waits for its unreachable host; null otherwise. */
+export function waitText(until: number | null, now: number): string | null {
+  if (until === null || until <= now) return null;
+  const mins = Math.ceil((until - now) / 60_000);
+  return mins <= 1 ? "next try within a minute" : `next try in ${mins} min`;
+}
+
+/**
+ * The overview with one run's result in it, without reading the history again: the row's status, failed runs and last
+ * result, and the counts. Its sparkline and uptime catch up at the next full read. The overview as it was for any other
+ * event (a change reads it all again).
+ */
+export function withResult(overview: ChecksOverview, event: CheckEvent): ChecksOverview {
+  if (event.kind !== "result") return overview;
+  return {
+    summary: event.summary,
+    rows: overview.rows.map((row) =>
+      row.check.id === event.checkId
+        ? {
+            ...row,
+            status: event.status,
+            failures: event.failures,
+            last: event.result,
+            waitingUntil: event.result.result === "up" ? null : row.waitingUntil,
+          }
+        : row,
+    ),
+  };
 }
 
 /** Down and failing checks need a look; then the ones Remotely can't check. */

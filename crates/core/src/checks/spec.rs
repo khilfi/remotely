@@ -343,7 +343,12 @@ pub fn checked(mut input: CheckInput) -> Result<CheckInput> {
             if !matches!(target, ProbeTarget::Session { .. }) {
                 return invalid("A service check reads a session's host: choose a session.");
             }
-            *unit = check_unit(unit)?;
+            // The name's own rules depend on the session's kind (systemd's for SSH; F4 adds Windows services'), so
+            // they are checked once the session is known: service::check_service_name.
+            *unit = clean_line(unit);
+            if unit.is_empty() || unit.chars().count() > MAX_UNIT {
+                return invalid("Type the service's name.");
+            }
         }
     }
     Ok(input)

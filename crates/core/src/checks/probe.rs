@@ -6,8 +6,15 @@
 //! A run is **up**, **down** (the probe failed: no answer, refused, a wrong status, an expired certificate...) or
 //! **unknown** (Remotely couldn't check: the vault is locked, a login is parked or capped, the session went), so a
 //! locked vault doesn't make every service check down.
+//!
+//! **Backoff.** A login to a host (a service check's own, or a jump host) that can't be reached isn't parked by the
+//! login guard (the host may come back), yet each attempt counts against its hourly cap, shared with the dashboard and
+//! the Containers page. So after a failed connection the checks wait before trying that host again ([`Backoffs`]:
+//! 1 minute, doubling to 15), and the runs in between are skipped: nothing is kept, the check stays down (or
+//! failing), and its row says when the next try is.
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use uuid::Uuid;
@@ -19,7 +26,7 @@ use super::RunResult;
 use crate::adapters::net_tools::{DnsFailure, DnsQuery, Echo, EchoRequest, NetworkTools, RecordType};
 use crate::domain::Context;
 use crate::error::CoreError;
-use crate::toolbox::{certs, icmp, millis, CertRequest, ProbeTarget, Route, Toolbox};
+use crate::toolbox::{certs, icmp, millis, CertRequest, ProbeTarget, Reach, Route, Toolbox};
 
 /// The longest detail a run keeps.
 pub const MAX_DETAIL: usize = 300;
@@ -30,6 +37,46 @@ pub const HOLD_UP_TO_SECS: u64 = 600;
 
 /// How much longer than the time between runs a held connection stays.
 pub const HOLD_GRACE: Duration = Duration::from_secs(30);
+
+/// The first wait after a host couldn't be reached, doubled after each failed try up to [`BACKOFF_MAX`]: a check
+/// every 30 seconds then tries at most 8 logins in the first hour and 4 an hour after that.
+pub const BACKOFF_MIN: Duration = Duration::from_secs(60);
+pub const BACKOFF_MAX: Duration = Duration::from_secs(15 * 60);
+
+/// Hosts whose connection failed, and when a check may log in to them again (Unix ms on the checks' clock).
+#[derive(Debug, Default)]
+pub struct Backoffs {
+    hosts: Mutex<HashMap<Uuid, (u32, i64)>>,
+}
+
+impl Backoffs {
+    /// When the session's host may be tried again, while that is still to come.
+    pub fn waiting(&self, session: Uuid, now: i64) -> Option<i64> {
+        crate::locks::lock(&self.hosts)
+            .get(&session)
+            .map(|(_, until)| *until)
+            .filter(|until| *until > now)
+    }
+
+    /// A connection failed: the next try waits longer. Returns when it may be.
+    pub fn failed(&self, session: Uuid, now: i64) -> i64 {
+        let mut hosts = crate::locks::lock(&self.hosts);
+        let failures = hosts.get(&session).map_or(0, |(n, _)| *n).saturating_add(1);
+        let wait = crate::metrics::guest::backoff(failures, BACKOFF_MIN, BACKOFF_MAX);
+        let until = now.saturating_add(i64::try_from(wait.as_millis()).unwrap_or(i64::MAX));
+        hosts.insert(session, (failures, until));
+        until
+    }
+
+    /// It connected: no more waiting.
+    pub fn cleared(&self, session: Uuid) {
+        crate::locks::lock(&self.hosts).remove(&session);
+    }
+
+    pub fn clear_all(&self) {
+        crate::locks::lock(&self.hosts).clear();
+    }
+}
 
 /// How long a check's kept connection is held after a run: until its next run, for a check that runs often.
 pub fn hold_for(interval_secs: u64) -> Option<Duration> {
@@ -45,6 +92,10 @@ pub struct Probed {
     pub cert_days: Option<i64>,
     /// The session whose kept connection the run used (a jump host's, or a service check's own).
     pub held: Option<Uuid>,
+    /// Its host couldn't be reached: no login is tried before then (Unix ms).
+    pub waiting_until: Option<i64>,
+    /// Not run: its host is backed off. Nothing is kept and the status stays.
+    pub skipped: bool,
 }
 
 impl Probed {
@@ -67,7 +118,23 @@ impl Probed {
             detail: one_line(&detail.into()),
             cert_days: None,
             held: None,
+            waiting_until: None,
+            skipped: false,
         }
+    }
+
+    /// Not run, its host waiting until `until`.
+    pub(super) fn skipped(until: i64) -> Self {
+        Self {
+            skipped: true,
+            waiting_until: Some(until),
+            ..Self::new(RunResult::Unknown, None, "")
+        }
+    }
+
+    fn waiting(mut self, until: i64) -> Self {
+        self.waiting_until = Some(until);
+        self
     }
 
     fn with_days(mut self, days: Option<i64>) -> Self {
@@ -133,11 +200,25 @@ fn failed(err: &CoreError) -> Probed {
     }
 }
 
+/// A connection to the host itself failed (no answer, refused, the handshake broke, its key isn't trusted yet): worth
+/// backing off. Not a parked or capped login, a locked vault or a session gone (the login guard and the vault handle
+/// those), nor a command that ran and failed.
+fn connect_failure(err: &CoreError) -> bool {
+    !remotely_could_not(err)
+        && !matches!(
+            err,
+            CoreError::CommandTimedOut { .. } | CoreError::InvalidInput(_) | CoreError::CancelledRemote
+        )
+}
+
 /// Runs checks with the toolbox's probes.
 pub(super) struct Prober {
     pub toolbox: Toolbox,
     pub tools: Arc<dyn NetworkTools>,
     pub services: Arc<dyn ServiceReader>,
+    pub backoffs: Arc<Backoffs>,
+    /// When the run started (Unix ms, the checks' clock).
+    pub now: i64,
 }
 
 impl Prober {
@@ -166,7 +247,7 @@ impl Prober {
                 self.dns(&route, *record_type, server.as_deref(), expect.as_deref(), timeout)
                     .await
             }
-            CheckSpec::Tcp { port } => match self.toolbox.reach_held(ctx, &route, hold).await {
+            CheckSpec::Tcp { port } => match self.reach(ctx, &route, hold).await {
                 Ok(reach) => {
                     let started = Instant::now();
                     match reach.open(*port, timeout).await {
@@ -186,7 +267,7 @@ impl Prober {
                         Err(failure) => Probed::down(None, format!("port {port}: {}", failure.describe())),
                     }
                 }
-                Err(err) => failed(&err),
+                Err(probed) => *probed,
             },
             CheckSpec::Http {
                 https,
@@ -197,7 +278,7 @@ impl Prober {
                 body_contains,
                 follow_redirects,
                 allow_invalid_cert,
-            } => match self.toolbox.reach_held(ctx, &route, hold).await {
+            } => match self.reach(ctx, &route, hold).await {
                 Ok(reach) => {
                     let ask = HttpAsk {
                         host: route.host.clone(),
@@ -211,13 +292,13 @@ impl Prober {
                     };
                     http::check(&self.toolbox, self.tools.as_ref(), reach, ask, timeout).await
                 }
-                Err(err) => failed(&err),
+                Err(probed) => *probed,
             },
             CheckSpec::Certificate {
                 port,
                 server_name,
                 allow_untrusted,
-            } => match self.toolbox.reach_held(ctx, &route, hold).await {
+            } => match self.reach(ctx, &route, hold).await {
                 Ok(reach) => {
                     let request = CertRequest {
                         target: check.target.clone(),
@@ -227,11 +308,38 @@ impl Prober {
                     };
                     self.certificate(&route, &reach, &request, *allow_untrusted).await
                 }
-                Err(err) => failed(&err),
+                Err(probed) => *probed,
             },
             CheckSpec::Service { .. } => Probed::unknown("a service check needs a session"),
         };
         probed.held(held)
+    }
+
+    /// How a connecting probe reaches its host. Through a jump host that couldn't be reached lately, nothing is tried
+    /// (the run is skipped) until its backoff ends; a failed connection to it starts or lengthens the backoff.
+    async fn reach(&self, ctx: &Context, route: &Route, hold: Option<Duration>) -> Result<Reach, Box<Probed>> {
+        let jump = route.via.as_ref();
+        if let Some(until) = jump.and_then(|j| self.backoffs.waiting(j.session_id, self.now)) {
+            return Err(Box::new(Probed::skipped(until)));
+        }
+        match self.toolbox.reach_held(ctx, route, hold).await {
+            Ok(reach) => {
+                if let Some(jump) = jump {
+                    self.backoffs.cleared(jump.session_id);
+                }
+                Ok(reach)
+            }
+            Err(err) => match jump {
+                Some(jump) if connect_failure(&err) => {
+                    let until = self.backoffs.failed(jump.session_id, self.now);
+                    Err(Box::new(
+                        Probed::down(None, format!("the jump host '{}' can't be reached: {err}", jump.name))
+                            .waiting(until),
+                    ))
+                }
+                _ => Err(Box::new(failed(&err))),
+            },
+        }
     }
 
     async fn ping(&self, route: &Route, timeout: Duration) -> Probed {
@@ -382,6 +490,9 @@ impl Prober {
         timeout: Duration,
         hold: Option<Duration>,
     ) -> Probed {
+        if let Some(until) = self.backoffs.waiting(session_id, self.now) {
+            return Probed::skipped(until);
+        }
         let read = self
             .services
             .read(ServiceRequest {
@@ -393,10 +504,17 @@ impl Prober {
             })
             .await;
         let held = hold.map(|_| session_id);
+        if read.is_ok() {
+            self.backoffs.cleared(session_id);
+        }
         match read {
             Ok(state) if state.running => Probed::up(state.took_ms, format!("{unit} is {}", state.state)),
             Ok(state) => Probed::down(Some(state.took_ms), format!("{unit} is {}", state.state)),
             Err(CoreError::InvalidInput(why)) => Probed::unknown(why),
+            Err(err) if connect_failure(&err) => {
+                let until = self.backoffs.failed(session_id, self.now);
+                Probed::down(None, format!("the host can't be reached: {err}")).waiting(until)
+            }
             Err(err) => failed(&err),
         }
         .held(held)
@@ -425,6 +543,41 @@ mod tests {
         assert!(long.ends_with('…'));
         assert!(!one_line("token=ghp_abcdefghijklmnopqrstuvwxyz0123456789")
             .contains("ghp_abcdefghijklmnopqrstuvwxyz0123456789"));
+    }
+
+    #[test]
+    fn an_unreachable_host_waits_longer_after_each_failed_try_up_to_15_minutes() {
+        let backoffs = Backoffs::default();
+        let host = Uuid::new_v4();
+        assert_eq!(backoffs.waiting(host, 0), None);
+        let mut waits = Vec::new();
+        let mut now = 0;
+        for _ in 0..7 {
+            let until = backoffs.failed(host, now);
+            waits.push((until - now) / 1000);
+            assert_eq!(backoffs.waiting(host, now), Some(until));
+            assert_eq!(
+                backoffs.waiting(host, until),
+                None,
+                "the try at the end of the wait goes ahead"
+            );
+            now = until;
+        }
+        assert_eq!(waits, [60, 120, 240, 480, 900, 900, 900]);
+        backoffs.cleared(host);
+        assert_eq!(backoffs.failed(host, 0), 60_000, "a host that answered starts over");
+    }
+
+    #[test]
+    fn only_a_failed_connection_backs_off() {
+        assert!(connect_failure(&CoreError::Ssh("connection reset".into())));
+        assert!(connect_failure(&CoreError::Network("no route".into())));
+        assert!(!connect_failure(&CoreError::VaultLocked));
+        assert!(!connect_failure(&CoreError::LoginsCapped {
+            message: "capped".into(),
+            wait_secs: 60
+        }));
+        assert!(!connect_failure(&CoreError::CommandTimedOut { seconds: 5 }));
     }
 
     #[test]

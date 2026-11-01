@@ -20,6 +20,7 @@ use super::spec::check_unit;
 use crate::adapters::remote::sh_quote;
 use crate::domain::Context;
 use crate::error::{CoreError, Result};
+use crate::sessions::SessionKind;
 use crate::toolbox::Toolbox;
 
 /// What `systemctl is-active` may print, at most (it prints one word).
@@ -46,10 +47,27 @@ pub struct ServiceState {
     pub took_ms: u64,
 }
 
-/// Reads a service's state on a session's host.
+/// Reads a service's state on a session's host. The checks hold one reader ([`super::Checks::set_service_reader`]
+/// replaces it): F4 wraps [`SystemdOverSsh`] and its Windows reader in one that picks by the session's kind.
 #[async_trait]
 pub trait ServiceReader: Send + Sync {
     async fn read(&self, request: ServiceRequest<'_>) -> Result<ServiceState>;
+}
+
+/// A service's name as a check on a session of `kind` may take it. SSH sessions read systemd units, so the name
+/// follows [`check_unit`]'s pattern. Other kinds have no service check yet.
+///
+/// **F4 (WinRM):** add the WinRM kind here with Windows service names' own rule (`MSSQL$SQLEXPRESS` has a `$`, and
+/// display names have spaces), and quote it for PowerShell where the reader builds its command.
+pub fn check_service_name(kind: &SessionKind, session: &str, name: &str) -> Result<String> {
+    if kind.is_ssh() {
+        return check_unit(name);
+    }
+    Err(CoreError::WrongSessionKind {
+        session: session.to_owned(),
+        kind: kind.label(),
+        needs: "a service check reads a systemd unit over SSH".into(),
+    })
 }
 
 /// The command a systemd check runs: the unit checked and quoted as one word.
@@ -139,6 +157,18 @@ mod tests {
                 "{script} must rate as a read"
             );
         }
+    }
+
+    #[test]
+    fn a_service_name_follows_the_sessions_kind() {
+        use crate::sessions::kinds::RdpOptions;
+        let ssh = SessionKind::default();
+        assert_eq!(check_service_name(&ssh, "app01", "nginx").unwrap(), "nginx");
+        // A Windows service's name isn't a systemd unit: F4 adds the WinRM kind's own rule here.
+        assert!(check_service_name(&ssh, "app01", "MSSQL$SQLEXPRESS").is_err());
+        let rdp = SessionKind::Rdp(RdpOptions::default());
+        let refused = check_service_name(&rdp, "win01", "Spooler").unwrap_err().to_string();
+        assert!(refused.contains("over SSH"), "{refused}");
     }
 
     #[test]

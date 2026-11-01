@@ -568,6 +568,7 @@ fn commands() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         dashboard::alert_rules,
         checks::checks_overview,
         checks::checks_summary,
+        checks::checks_attention,
         checks::check_history,
         checks::check_create,
         checks::check_update,

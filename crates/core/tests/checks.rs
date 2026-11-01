@@ -9,6 +9,7 @@ mod common;
 
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -332,8 +333,9 @@ async fn a_restart_picks_up_where_the_history_left_off_and_old_results_are_prune
     core.checks.run_due().await.unwrap();
     assert_eq!(row(&core, id).await.status, CheckStatus::Down);
 
-    // Another core on the same checks (a restart) reads the state from the history.
+    // As after a restart: nothing in memory, so the state comes back from the history.
     core.checks.leave().await;
+    core.checks.resume();
     assert_eq!(row(&core, id).await.status, CheckStatus::Down, "from the history");
     assert_eq!(
         row(&core, id).await.failures,
@@ -756,6 +758,60 @@ async fn https_and_certificate_checks_use_windows_trust_and_the_name_and_warn_be
 /// A test SSH server with host facts, its saved and trusted session on the app's vault, and a core on the real russh
 /// adapter.
 async fn ssh_lab(tools: Arc<FakeNetworkTools>) -> (Core, Arc<FakeClock>, TestSshServer, Uuid) {
+    let (core, clock, server, session, _) = ssh_lab_at(tools, false).await;
+    (core, clock, server, session)
+}
+
+/// A TCP front on 127.0.0.1 to a server: it counts every connection made to it (each a login try), and while
+/// "unreachable" it drops them at once, as a host that went away would.
+struct Front {
+    port: u16,
+    tries: Arc<AtomicUsize>,
+    unreachable: Arc<AtomicBool>,
+}
+
+impl Front {
+    async fn to(server_port: u16) -> Self {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let tries = Arc::new(AtomicUsize::new(0));
+        let unreachable = Arc::new(AtomicBool::new(false));
+        let (counted, cut) = (Arc::clone(&tries), Arc::clone(&unreachable));
+        tokio::spawn(async move {
+            while let Ok((mut inbound, _)) = listener.accept().await {
+                counted.fetch_add(1, Ordering::SeqCst);
+                if cut.load(Ordering::SeqCst) {
+                    drop(inbound);
+                    continue;
+                }
+                tokio::spawn(async move {
+                    if let Ok(mut outbound) = tokio::net::TcpStream::connect(("127.0.0.1", server_port)).await {
+                        let _ = tokio::io::copy_bidirectional(&mut inbound, &mut outbound).await;
+                    }
+                });
+            }
+        });
+        Self {
+            port,
+            tries,
+            unreachable,
+        }
+    }
+
+    fn tries(&self) -> usize {
+        self.tries.load(Ordering::SeqCst)
+    }
+
+    fn set_unreachable(&self, on: bool) {
+        self.unreachable.store(on, Ordering::SeqCst);
+    }
+}
+
+/// The same, with the session saved behind a Front to the server when `front`.
+async fn ssh_lab_at(
+    tools: Arc<FakeNetworkTools>,
+    front: bool,
+) -> (Core, Arc<FakeClock>, TestSshServer, Uuid, Option<Front>) {
     let password = format!("pw-{}", Uuid::new_v4().simple());
     let server = TestSshServer::start()
         .await
@@ -780,7 +836,13 @@ async fn ssh_lab(tools: Arc<FakeNetworkTools>) -> (Core, Arc<FakeClock>, TestSsh
         .await
         .unwrap()
         .id;
-    let mut input = session_input("app01", "127.0.0.1", server.port(), None);
+    let front = if front {
+        Some(Front::to(server.port()).await)
+    } else {
+        None
+    };
+    let port = front.as_ref().map_or_else(|| server.port(), |f| f.port);
+    let mut input = session_input("app01", "127.0.0.1", port, None);
     input.auth = SessionAuth::Password {
         password_id: Some(secret),
     };
@@ -790,7 +852,7 @@ async fn ssh_lab(tools: Arc<FakeNetworkTools>) -> (Core, Arc<FakeClock>, TestSsh
             &core.ctx(),
             &HostKey {
                 host: "127.0.0.1".into(),
-                port: server.port(),
+                port,
                 key_type: "ssh-ed25519".into(),
                 fingerprint: server.host_key_fingerprint(),
             },
@@ -798,7 +860,7 @@ async fn ssh_lab(tools: Arc<FakeNetworkTools>) -> (Core, Arc<FakeClock>, TestSsh
         )
         .await
         .unwrap();
-    (core, clock, server, session.id)
+    (core, clock, server, session.id, front)
 }
 
 #[tokio::test]
@@ -848,6 +910,125 @@ async fn service_checks_read_systemd_on_one_held_login_and_let_it_go() {
     let locked = row(&core, nginx).await;
     assert_eq!(locked.status, CheckStatus::Unknown, "{:?}", locked.last);
     assert!(locked.last.unwrap().detail.contains("couldn't check"));
+}
+
+// Review: a host that can't be reached isn't parked, yet each login try counts against its hourly cap (shared with
+// the dashboard). The checks back off it: 1 minute, then 2, 4... and the runs in between try nothing, keep nothing,
+// and leave the check down.
+#[tokio::test]
+async fn an_unreachable_host_is_backed_off_and_the_check_stays_down_meanwhile() {
+    let (core, clock, _server, session, front) = ssh_lab_at(Arc::new(FakeNetworkTools::new()), true).await;
+    let front = front.unwrap();
+    let mut every_30s = check(
+        "nginx",
+        ProbeTarget::Session { session_id: session },
+        CheckSpec::Service { unit: "nginx".into() },
+    );
+    every_30s.interval_secs = 30;
+    let id = core.checks.create(every_30s).await.unwrap().id;
+    let step = || clock.advance(time::Duration::seconds(30));
+
+    front.set_unreachable(true);
+    core.checks.run_due().await.unwrap();
+    assert_eq!(front.tries(), 1);
+    let first = row(&core, id).await;
+    assert_eq!(first.status, CheckStatus::Failing);
+    assert!(first.last.unwrap().detail.contains("can't be reached"));
+    assert!(first.waiting_until.is_some(), "it waits a minute");
+    // 30 s on: skipped. No login, nothing kept, still failing.
+    step();
+    assert_eq!(core.checks.run_due().await.unwrap(), 1);
+    assert_eq!(front.tries(), 1, "no login while it waits");
+    assert_eq!(row(&core, id).await.status, CheckStatus::Failing);
+    // A minute on: tried again, down, and now it waits 2 minutes.
+    step();
+    core.checks.run_due().await.unwrap();
+    assert_eq!(front.tries(), 2);
+    assert_eq!(row(&core, id).await.status, CheckStatus::Down);
+    for _ in 0..3 {
+        step();
+        core.checks.run_due().await.unwrap();
+        assert_eq!(front.tries(), 2, "waiting 2 minutes");
+        assert_eq!(core.checks.summary().down, 1, "down and waiting is still down");
+    }
+    let history = core.checks.history(id, HistoryRange::Hour).await.unwrap();
+    assert_eq!(history.results.len(), 2, "skipped runs keep nothing");
+
+    // Back: the next try after the wait logs in, and the check is up.
+    front.set_unreachable(false);
+    step();
+    core.checks.run_due().await.unwrap();
+    assert_eq!(front.tries(), 3);
+    let up = row(&core, id).await;
+    assert_eq!(up.status, CheckStatus::Up, "{:?}", up.last);
+    assert_eq!(up.waiting_until, None);
+}
+
+// Review: a tick while a workspace switch is under way (the old one is still shown until the switch is done) must not
+// load and run the old workspace's checks again.
+#[tokio::test]
+async fn a_tick_during_a_switch_runs_nothing_of_the_workspace_left() {
+    let tools = Arc::new(FakeNetworkTools::new().with_port("192.0.2.10", 443, FakePort::Banner(Vec::new())));
+    let (core, clock) = lab(Arc::clone(&tools), FakeNetwork::default()).await;
+    core.checks
+        .create(check("web", address("192.0.2.10"), CheckSpec::Tcp { port: 443 }))
+        .await
+        .unwrap();
+    assert_eq!(core.checks.run_due().await.unwrap(), 1);
+    clock.advance(time::Duration::minutes(10));
+    let mut events = core.checks.subscribe();
+    let connects = tools.connects().len();
+    core.checks.leave().await;
+    assert_eq!(core.checks.run_due().await.unwrap(), 0, "the overdue check doesn't run");
+    assert_eq!(core.checks.summary().total, 0);
+    assert!(core.checks.overview(HistoryRange::Hour).await.unwrap().rows.is_empty());
+    assert!(events.try_recv().is_err(), "no event with the old workspace's counts");
+    assert_eq!(tools.connects().len(), connects);
+    // A switch that failed: the workspace still shown runs its checks again.
+    core.checks.resume();
+    assert_eq!(core.checks.run_due().await.unwrap(), 1);
+}
+
+#[tokio::test]
+async fn uptime_over_any_range_is_read_for_one_workspace() {
+    let tools = Arc::new(FakeNetworkTools::new().with_port("192.0.2.10", 443, FakePort::Banner(Vec::new())));
+    let (core, clock) = lab(Arc::clone(&tools), FakeNetwork::default()).await;
+    let id = core
+        .checks
+        .create(check("web", address("192.0.2.10"), CheckSpec::Tcp { port: 443 }))
+        .await
+        .unwrap()
+        .id;
+    let from = now_ms(&clock);
+    for open in [true, true, false, true] {
+        let behaviour = if open {
+            FakePort::Banner(Vec::new())
+        } else {
+            FakePort::Refused
+        };
+        tools.set_port("192.0.2.10", 443, behaviour);
+        core.checks.run_due().await.unwrap();
+        clock.advance(time::Duration::minutes(1));
+    }
+    let all = core
+        .store
+        .check_uptime(&core.ctx(), from, now_ms(&clock))
+        .await
+        .unwrap();
+    assert_eq!(all.len(), 1);
+    assert_eq!(all[0].check_id, id);
+    assert_eq!((all[0].up, all[0].down, all[0].unknown), (3, 1, 0));
+    assert_eq!(all[0].uptime, Some(75.0));
+    // The first two minutes only.
+    let early = core
+        .store
+        .check_uptime(&core.ctx(), from, from + 120_000)
+        .await
+        .unwrap();
+    assert_eq!(early[0].uptime, Some(100.0));
+    assert_eq!(early[0].up, 2);
+    let none = core.store.check_uptime(&core.ctx(), 0, 1).await.unwrap();
+    assert_eq!(none[0].uptime, None);
 }
 
 #[tokio::test]

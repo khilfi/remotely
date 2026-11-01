@@ -20,6 +20,8 @@ import {
   summaryText,
   tookText,
   uptimeText,
+  waitText,
+  withResult,
 } from "./checks.ts";
 import type { CheckInput, CheckRow, CheckStatus } from "./checks-api.ts";
 
@@ -132,6 +134,37 @@ test("the widget lists down first, then failing, then what can't be checked", ()
     look.map((r) => r.check.name),
     ["c", "d", "b"],
   );
+});
+
+test("a check waiting for its host says when it tries next", () => {
+  assert.equal(waitText(null, 0), null);
+  assert.equal(waitText(1_000, 2_000), null, "the wait is over");
+  assert.equal(waitText(60_000, 10_000), "next try within a minute");
+  assert.equal(waitText(10 * 60_000, 0), "next try in 10 min");
+});
+
+test("a run's result updates its row and the counts without reading the history again", () => {
+  const row = {
+    check: { id: "a", name: "web" },
+    status: "up",
+    failures: 0,
+    last: null,
+    uptime: 100,
+    spark: [{ at: 0, ms: 5, up: 1, down: 0 }],
+    waitingUntil: 99,
+  } as unknown as CheckRow;
+  const other = { ...row, check: { ...row.check, id: "b" } } as CheckRow;
+  const summary = { total: 2, up: 1, failing: 0, down: 1, unknown: 0, paused: 0, pending: 0 };
+  const overview = { rows: [row, other], summary: { ...summary, up: 2, down: 0 } };
+  const result = { at: 1, result: "down", tookMs: null, detail: "refused", certDays: null } as const;
+  const next = withResult(overview, { kind: "result", checkId: "a", result, status: "down", failures: 2, summary });
+  assert.equal(next.rows[0].status, "down");
+  assert.equal(next.rows[0].failures, 2);
+  assert.equal(next.rows[0].last?.detail, "refused");
+  assert.equal(next.rows[0].uptime, 100, "the history catches up later");
+  assert.equal(next.rows[1], other);
+  assert.deepEqual(next.summary, summary);
+  assert.equal(withResult(overview, { kind: "changed", summary }), overview);
 });
 
 test("a sparkline puts the slowest run at the top and skips buckets without a time", () => {

@@ -179,6 +179,17 @@ pub struct CheckRow {
     /// Percent of the runs over the range that passed (unknown runs left out); none without runs.
     pub uptime: Option<f64>,
     pub spark: Vec<SparkPoint>,
+    /// Its host (or jump host) couldn't be reached: no login is tried before then (Unix ms), the status stays.
+    pub waiting_until: Option<i64>,
+}
+
+/// The status bar's and the widget's read: the counts and the checks that need a look, without their history.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChecksAttention {
+    pub summary: CheckSummary,
+    /// Down, then failing, then those Remotely can't check; no uptime or sparkline.
+    pub rows: Vec<CheckRow>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -233,6 +244,8 @@ struct Live {
     last: Option<CheckResult>,
     /// The session whose kept connection its last run used.
     held: Option<Uuid>,
+    /// Its host couldn't be reached: runs before then are skipped (Unix ms).
+    waiting_until: Option<i64>,
 }
 
 #[derive(Default)]
@@ -242,6 +255,9 @@ struct Board {
     cancel: CancellationToken,
     live: HashMap<Uuid, Live>,
     rev: u64,
+    /// FD-02: the workspace [`Checks::leave`] left. Its checks aren't loaded again while it is still the one shown
+    /// (the switch is under way), until another one is shown or [`Checks::resume`].
+    left: Option<Context>,
 }
 
 struct Inner {
@@ -258,6 +274,8 @@ struct Inner {
     tx: broadcast::Sender<CheckEvent>,
     /// A failing tick is logged once, not every second.
     failing: Mutex<bool>,
+    /// Hosts (and jump hosts) that couldn't be reached, and when a check may try to log in to them again.
+    backoffs: Arc<probe::Backoffs>,
 }
 
 /// MO-08's checks. Cloning gives another handle to the same service.
@@ -283,6 +301,7 @@ impl Checks {
                 limit: Arc::new(Semaphore::new(AT_ONCE)),
                 tx,
                 failing: Mutex::new(false),
+                backoffs: Arc::new(probe::Backoffs::default()),
             }),
         }
     }
@@ -437,14 +456,8 @@ impl Checks {
                 match &input.spec {
                     // SS-12: an SSH session only (the store refuses other kinds too); F4 adds WinRM sessions'
                     // Windows services.
-                    CheckSpec::Service { .. } => {
-                        if !session.kind.is_ssh() {
-                            return Err(CoreError::WrongSessionKind {
-                                session: session.name.clone(),
-                                kind: session.kind.label(),
-                                needs: "a service check reads a systemd unit over SSH".into(),
-                            });
-                        }
+                    CheckSpec::Service { unit } => {
+                        service::check_service_name(&session.kind, &session.name, unit)?;
                         self.inner
                             .store
                             .session_spec(ctx, *session_id)
@@ -612,6 +625,8 @@ impl Checks {
                     toolbox: this.inner.toolbox.clone(),
                     tools: Arc::clone(&this.inner.tools),
                     services: Arc::clone(&locks::read(&this.inner.services)),
+                    backoffs: Arc::clone(&this.inner.backoffs),
+                    now,
                 };
                 let guard = Duration::from_secs(check.timeout_secs) + RUN_SLACK;
                 let probed = tokio::select! {
@@ -654,28 +669,45 @@ impl Checks {
         Ok(n)
     }
 
-    /// FD-02: the checks stop following any workspace (another one is about to be shown, or the app closes): runs in
-    /// flight are cancelled, the holds on kept connections end. The next tick loads the workspace shown.
+    /// FD-02: the checks stop following the workspace shown (another one is about to be shown, or the app closes):
+    /// runs in flight are cancelled, the holds on kept connections end, and backoffs are forgotten. Until another
+    /// workspace is shown, its checks are not loaded again: a tick while the switch is under way (the old one still
+    /// shown) runs nothing. [`Checks::resume`] undoes that when the switch fails.
     pub async fn leave(&self) {
         let _loading = self.inner.loading.lock().await;
+        let shown = self.ctx();
         {
             let mut board = locks::lock(&self.inner.board);
             board.cancel.cancel();
             board.cancel = CancellationToken::new();
             board.ctx = None;
             board.live.clear();
+            board.left = Some(shown);
         }
+        self.inner.backoffs.clear_all();
         self.inner.toolbox.release_holds(&HashSet::new()).await;
     }
 
-    /// Loads `ctx`'s checks when the runner follows another workspace (or none yet).
+    /// FD-02: a switch that [`Checks::leave`] began didn't happen: the workspace still shown runs its checks again.
+    pub fn resume(&self) {
+        locks::lock(&self.inner.board).left = None;
+    }
+
+    /// Loads `ctx`'s checks when the runner follows another workspace (or none yet), unless `ctx` is the one
+    /// [`Checks::leave`] just left.
     async fn follow(&self, ctx: Context) -> Result<()> {
-        if locks::lock(&self.inner.board).ctx == Some(ctx) {
-            return Ok(());
+        {
+            let board = locks::lock(&self.inner.board);
+            if board.ctx == Some(ctx) || board.left == Some(ctx) {
+                return Ok(());
+            }
         }
         let _loading = self.inner.loading.lock().await;
-        if locks::lock(&self.inner.board).ctx == Some(ctx) {
-            return Ok(());
+        {
+            let board = locks::lock(&self.inner.board);
+            if board.ctx == Some(ctx) || board.left == Some(ctx) {
+                return Ok(());
+            }
         }
         let now = self.now_ms();
         let checks = self.inner.store.list_checks(&ctx).await?;
@@ -693,6 +725,7 @@ impl Checks {
             board.ctx = Some(ctx);
             board.live = live;
             board.rev = rev;
+            board.left = None;
         }
         self.inner.toolbox.release_holds(&HashSet::new()).await;
         self.changed();
@@ -735,6 +768,7 @@ impl Checks {
             status,
             last,
             held: None,
+            waiting_until: None,
         })
     }
 
@@ -787,6 +821,7 @@ impl Checks {
                             failures: 0,
                             last: None,
                             held: None,
+                            waiting_until: None,
                         }
                     }
                 };
@@ -801,11 +836,20 @@ impl Checks {
     }
 
     /// Keeps a run's result and moves the check's status on, unless the check changed, went or the workspace switched
-    /// while it ran.
+    /// while it ran. A run skipped while its host is backed off keeps nothing and changes nothing but the wait.
     async fn record(&self, ctx: Context, id: Uuid, rev: u64, at: i64, probed: Probed) {
         let current = {
-            let board = locks::lock(&self.inner.board);
-            board.ctx == Some(ctx) && board.live.get(&id).is_some_and(|l| l.rev == rev)
+            let mut board = locks::lock(&self.inner.board);
+            let here = board.ctx == Some(ctx);
+            match board.live.get_mut(&id).filter(|l| here && l.rev == rev) {
+                Some(live) if probed.skipped => {
+                    live.running = false;
+                    live.waiting_until = probed.waiting_until;
+                    return;
+                }
+                Some(_) => true,
+                None => false,
+            }
         };
         if !current {
             return;
@@ -838,6 +882,7 @@ impl Checks {
                 live.status,
             );
             live.held = probed.held;
+            live.waiting_until = probed.waiting_until;
             live.last = Some(result.clone());
             let (status, failures) = (live.status, live.failures);
             CheckEvent::Result {
@@ -865,6 +910,43 @@ impl Checks {
             return CheckSummary::default();
         }
         summarize(&board)
+    }
+
+    /// The status bar's and the widget's read: the counts, and the checks that need a look (down, failing, can't check)
+    /// as they stand, without reading their history.
+    pub async fn attention(&self) -> Result<ChecksAttention> {
+        let ctx = self.ctx();
+        self.follow(ctx).await?;
+        let rank = |s: CheckStatus| match s {
+            CheckStatus::Down => 0,
+            CheckStatus::Failing => 1,
+            CheckStatus::Unknown => 2,
+            _ => 3,
+        };
+        let mut rows: Vec<CheckRow> = {
+            let board = locks::lock(&self.inner.board);
+            if board.ctx != Some(ctx) {
+                return Ok(ChecksAttention {
+                    summary: CheckSummary::default(),
+                    rows: Vec::new(),
+                });
+            }
+            board
+                .live
+                .values()
+                .filter(|l| rank(l.status) < 3)
+                .map(bare_row)
+                .collect()
+        };
+        rows.sort_by(|a, b| {
+            rank(a.status)
+                .cmp(&rank(b.status))
+                .then(a.check.name.to_lowercase().cmp(&b.check.name.to_lowercase()))
+        });
+        Ok(ChecksAttention {
+            summary: self.summary(),
+            rows,
+        })
     }
 
     /// The Checks tab: every check with its status, last result, uptime and a sparkline of its time over `range`.
@@ -924,11 +1006,6 @@ impl Checks {
             .check_buckets(ctx, live.check.id, since, bucket)
             .await?;
         Ok(CheckRow {
-            check: live.check.clone(),
-            target: live.target.clone(),
-            status: live.status,
-            failures: live.failures,
-            last: live.last.clone(),
             uptime: uptime(&buckets),
             spark: buckets
                 .iter()
@@ -939,7 +1016,22 @@ impl Checks {
                     down: b.down,
                 })
                 .collect(),
+            ..bare_row(live)
         })
+    }
+}
+
+/// A check as it stands, without its history (no uptime, no sparkline).
+fn bare_row(live: &Live) -> CheckRow {
+    CheckRow {
+        check: live.check.clone(),
+        target: live.target.clone(),
+        status: live.status,
+        failures: live.failures,
+        last: live.last.clone(),
+        uptime: None,
+        spark: Vec::new(),
+        waiting_until: live.waiting_until,
     }
 }
 
@@ -954,12 +1046,14 @@ fn same_runs(a: &HealthCheck, b: &HealthCheck) -> bool {
 }
 
 /// A run's result moves the status on: up, failing until it failed `allowed` runs in a row, then down. A run that
-/// couldn't check says so.
-fn status_after(result: RunResult, failures: u32, allowed: u32, _before: CheckStatus) -> CheckStatus {
+/// couldn't check says so, but a check that was down or failing stays so (its host is still unreached: a login parked
+/// or capped after it went down is no news), so the down count and the down alert hold.
+fn status_after(result: RunResult, failures: u32, allowed: u32, before: CheckStatus) -> CheckStatus {
     match result {
         RunResult::Up => CheckStatus::Up,
         RunResult::Down if failures >= allowed => CheckStatus::Down,
         RunResult::Down => CheckStatus::Failing,
+        RunResult::Unknown if matches!(before, CheckStatus::Down | CheckStatus::Failing) => before,
         RunResult::Unknown => CheckStatus::Unknown,
     }
 }
@@ -1073,8 +1167,17 @@ mod tests {
         );
         assert_eq!(status_after(RunResult::Down, 1, 1, CheckStatus::Up), CheckStatus::Down);
         assert_eq!(
-            status_after(RunResult::Unknown, 5, 2, CheckStatus::Down),
+            status_after(RunResult::Unknown, 0, 2, CheckStatus::Up),
             CheckStatus::Unknown
+        );
+        // A login parked or capped after the host went down keeps it down (and its alert firing).
+        assert_eq!(
+            status_after(RunResult::Unknown, 5, 2, CheckStatus::Down),
+            CheckStatus::Down
+        );
+        assert_eq!(
+            status_after(RunResult::Unknown, 1, 2, CheckStatus::Failing),
+            CheckStatus::Failing
         );
     }
 

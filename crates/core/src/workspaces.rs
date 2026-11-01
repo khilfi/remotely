@@ -449,7 +449,8 @@ impl crate::Core {
             .await;
         self.containers.close_all().await;
         self.host_details.close_all().await;
-        // MO-08: the old workspace's checks stop (runs in flight cancelled); the new one's load at the next tick.
+        // MO-08: the old workspace's checks stop (runs in flight cancelled) and aren't loaded again while it is still the
+        // one shown (a tick until `current.set` below); the new one's load at the next tick after it.
         self.checks.leave().await;
         // FD-09: the toolbox's kept connections to jump hosts.
         self.toolbox.close_all().await;
@@ -457,16 +458,25 @@ impl crate::Core {
         self.transfer.closer().close();
         self.bindings.vault_locked();
         self.terminals.forget_logins();
-        self.history.switch_to(new).await?;
-        self.alerts.switch_to(new).await?;
-        let detail = format!(
-            "closed {} and cancelled {}",
-            plural(terminals, "terminal", "terminals"),
-            plural(approvals, "waiting approval", "waiting approvals")
-        );
-        self.workspaces
-            .audit(&old, "workspace_left", "Switched to another workspace", Some(&detail))
-            .await?;
+        let left = async {
+            self.history.switch_to(new).await?;
+            self.alerts.switch_to(new).await?;
+            let detail = format!(
+                "closed {} and cancelled {}",
+                plural(terminals, "terminal", "terminals"),
+                plural(approvals, "waiting approval", "waiting approvals")
+            );
+            self.workspaces
+                .audit(&old, "workspace_left", "Switched to another workspace", Some(&detail))
+                .await
+                .map(drop)
+        }
+        .await;
+        if let Err(err) = left {
+            // The old workspace is still the one shown: its checks run again.
+            self.checks.resume();
+            return Err(err);
+        }
 
         self.current.set(new);
         self.store

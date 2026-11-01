@@ -92,6 +92,14 @@ export interface CheckRow {
   last: CheckResult | null;
   uptime: number | null;
   spark: SparkPoint[];
+  /** Its host (or jump host) couldn't be reached: no login is tried before then (Unix ms); the status stays. */
+  waitingUntil: number | null;
+}
+
+/** The widget's read: the counts and the checks that need a look, without their history. */
+export interface ChecksAttention {
+  summary: CheckSummary;
+  rows: CheckRow[];
 }
 
 export interface ChecksOverview {
@@ -118,6 +126,8 @@ export type CheckEvent =
 export const checksApi = {
   overview: (range: HistoryRange) => invoke<ChecksOverview>("checks_overview", { range }),
   summary: () => invoke<CheckSummary>("checks_summary"),
+  /** Cheap: no history is read. */
+  attention: () => invoke<ChecksAttention>("checks_attention"),
   history: (id: string, range: HistoryRange) => invoke<CheckHistory>("check_history", { id, range }),
   /** Audited; refused while presenting with the read-only lock. */
   create: (input: CheckInput) => invoke<HealthCheck>("check_create", { input }),

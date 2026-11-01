@@ -1,25 +1,30 @@
 // MO-08 on MO-16's grid: how many health checks are up, failing and down, and the ones that need a look (down first),
-// each opening its history on the Checks tab. Read when the dashboard shows and after each run, never while hidden.
+// each opening its history on the Checks tab. Read when the dashboard shows and after runs (at most once a second),
+// never while hidden; the read is the cheap one, without any history.
 
 import { useEffect, useState } from "react";
 import { CheckCircle2Icon, HeartPulseIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { CheckStatusBadge } from "@/components/checks/CheckBits";
-import { checksApi, type ChecksOverview } from "@/lib/checks-api";
-import { needingLook } from "@/lib/checks";
+import { checksApi, type ChecksAttention } from "@/lib/checks-api";
+import { waitText } from "@/lib/checks";
 import { requestLink } from "@/lib/links";
 
 export function ChecksWidget({ live }: { live: boolean }) {
-  const [overview, setOverview] = useState<ChecksOverview | null>(null);
+  const [overview, setOverview] = useState<ChecksAttention | null>(null);
+  /** When the last read landed: "next try in" counts from it. */
+  const [now, setNow] = useState(() => Date.now());
 
   useEffect(() => {
     if (!live) return;
     let stopped = false;
     let timer: number | undefined;
     const read = () =>
-      checksApi.overview("24h").then(
+      checksApi.attention().then(
         (o) => {
-          if (!stopped) setOverview(o);
+          if (stopped) return;
+          setOverview(o);
+          setNow(Date.now());
         },
         () => undefined,
       );
@@ -51,7 +56,7 @@ export function ChecksWidget({ live }: { live: boolean }) {
       </div>
     );
   }
-  const look = needingLook(overview.rows);
+  const look = overview.rows;
   return (
     <div className="flex h-full min-h-0 flex-col gap-2">
       <div className="flex flex-wrap gap-x-4 gap-y-1 text-sm">
@@ -88,6 +93,9 @@ export function ChecksWidget({ live }: { live: boolean }) {
                 <span className="min-w-0 flex-1">
                   <span className="block truncate font-medium">{row.check.name}</span>
                   {row.last && <span className="block truncate text-xs text-muted-foreground">{row.last.detail}</span>}
+                  {waitText(row.waitingUntil, now) && (
+                    <span className="block text-xs text-muted-foreground">{waitText(row.waitingUntil, now)}</span>
+                  )}
                 </span>
               </button>
             </li>

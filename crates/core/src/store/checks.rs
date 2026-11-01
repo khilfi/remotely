@@ -89,7 +89,55 @@ pub struct ResultBucket {
     pub avg_ms: Option<f64>,
 }
 
+/// MO-08, for F6's inventory and handover pack: a check's runs between two times, and its uptime.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CheckUptime {
+    pub check_id: Uuid,
+    pub name: String,
+    pub up: u64,
+    pub down: u64,
+    /// Runs Remotely couldn't make (left out of the uptime).
+    pub unknown: u64,
+    /// Percent of the runs that passed; none without runs.
+    pub uptime: Option<f64>,
+}
+
 impl Store {
+    /// MO-08: each check of `ctx`'s workspace with its runs from `from` up to `to` (Unix ms, `to` not included) and
+    /// its uptime over them, by name. Any range the history still holds (`metrics.historyRetention`), for any
+    /// workspace: an export reads the workspace it exports, shown or not (rule 8).
+    pub async fn check_uptime(&self, ctx: &Context, from: i64, to: i64) -> Result<Vec<CheckUptime>> {
+        let mut out = Vec::new();
+        for check in self.list_checks(ctx).await? {
+            let row = sqlx::query(
+                "SELECT SUM(result = 'up') AS up, SUM(result = 'down') AS down, SUM(result = 'unknown') AS unknown
+                 FROM health_check_results WHERE check_id = ? AND workspace_id = ? AND at >= ? AND at < ?",
+            )
+            .bind(check.id.to_string())
+            .bind(ctx.workspace_id.to_string())
+            .bind(from)
+            .bind(to)
+            .fetch_one(&self.pool)
+            .await?;
+            let count = |column: &str| -> Result<u64> {
+                Ok(u64::try_from(row.try_get::<Option<i64>, _>(column)?.unwrap_or(0)).unwrap_or(0))
+            };
+            let (up, down, unknown) = (count("up")?, count("down")?, count("unknown")?);
+            #[allow(clippy::cast_precision_loss)]
+            let uptime = (up + down > 0).then(|| up as f64 * 100.0 / (up + down) as f64);
+            out.push(CheckUptime {
+                check_id: check.id,
+                name: check.name,
+                up,
+                down,
+                unknown,
+                uptime,
+            });
+        }
+        Ok(out)
+    }
+
     /// MO-08: the workspace's checks by name.
     pub async fn list_checks(&self, ctx: &Context) -> Result<Vec<HealthCheck>> {
         let rows = sqlx::query(concat!(

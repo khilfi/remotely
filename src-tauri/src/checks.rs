@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 
-use remotely_core::checks::{CheckHistory, CheckInput, CheckSummary, ChecksOverview, HealthCheck};
+use remotely_core::checks::{CheckHistory, CheckInput, CheckSummary, ChecksAttention, ChecksOverview, HealthCheck};
 use remotely_core::metrics::history::HistoryRange;
 use remotely_core::Core;
 use tauri::{App, Emitter, State};
@@ -47,6 +47,12 @@ pub async fn checks_overview(state: State<'_, AppState>, range: HistoryRange) ->
 #[tauri::command]
 pub fn checks_summary(state: State<'_, AppState>) -> CheckSummary {
     state.core.checks.summary()
+}
+
+/// The widget's read: the counts and the checks that need a look, without their history (cheap).
+#[tauri::command]
+pub async fn checks_attention(state: State<'_, AppState>) -> IpcResult<ChecksAttention> {
+    Ok(state.core.checks.attention().await?)
 }
 
 /// A check's history sheet.
