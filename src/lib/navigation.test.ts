@@ -25,7 +25,7 @@ test("the sidebar has Machines, Remote and Overview, then Vault and Settings at 
   const groups = sidebarGroups().map((g) => [g.group?.label ?? "bottom", g.pages.map((p) => p.label)]);
   assert.deepEqual(groups, [
     ["Machines", ["Virtual machines", "Templates", "Schedules"]],
-    ["Remote", ["Sessions", "Terminal", "Containers"]],
+    ["Remote", ["Sessions", "Terminal", "Containers", "Toolbox"]],
     ["Overview", ["Dashboard", "Activity"]],
     ["bottom", ["Vault", "Settings"]],
   ]);
@@ -33,13 +33,17 @@ test("the sidebar has Machines, Remote and Overview, then Vault and Settings at 
 
 test("page shortcuts follow the sidebar's order, Settings keeps Ctrl+,", () => {
   const order = sidebarGroups().flatMap((g) => g.pages);
+  // FD-09: the Toolbox came after the digits ran out; it opens from the palette and from rows.
   assert.deepEqual(
     order.map((p) => p.shortcut),
-    ["Ctrl+1", "Ctrl+2", "Ctrl+3", "Ctrl+4", "Ctrl+5", "Ctrl+6", "Ctrl+7", "Ctrl+8", "Ctrl+9", "Ctrl+,"],
+    ["Ctrl+1", "Ctrl+2", "Ctrl+3", "Ctrl+4", "Ctrl+5", "Ctrl+6", undefined, "Ctrl+7", "Ctrl+8", "Ctrl+9", "Ctrl+,"],
   );
-  for (const page of PAGES) assert.deepEqual(shortcutTarget(page.shortcut.slice(5)), { page: page.id }, page.id);
+  for (const page of PAGES) {
+    if (page.shortcut) assert.deepEqual(shortcutTarget(page.shortcut.slice(5)), { page: page.id }, page.id);
+  }
+  assert.deepEqual(navTarget("toolbox"), { page: "toolbox" });
   const all = [
-    ...PAGES.map((p) => p.shortcut),
+    ...PAGES.flatMap((p) => (p.shortcut ? [p.shortcut] : [])),
     ...movedPageEntries().flatMap((m) => (m.shortcut ? [m.shortcut] : [])),
     ...Object.keys(OLD_SHORTCUTS),
   ];

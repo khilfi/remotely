@@ -524,6 +524,14 @@ impl ExecSession for Tracked {
     async fn close(&self) {
         self.0.close().await;
     }
+
+    async fn open_direct(
+        &self,
+        host: &str,
+        port: u16,
+    ) -> std::result::Result<crate::adapters::net_tools::BoxedStream, crate::adapters::net_tools::ConnectFailure> {
+        self.0.open_direct(host, port).await
+    }
 }
 
 #[cfg(test)]

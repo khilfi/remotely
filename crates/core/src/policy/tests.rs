@@ -3555,6 +3555,7 @@ fn every_command() -> Vec<(Command, Vec<Target>)> {
     .chain(super::vm_settings_tests::every_vm_settings_command())
     .chain(super::stack_tests::every_stack_command())
     .chain(super::host_networks_tests::every_host_network_command())
+    .chain([super::wake_tests::wake_on_lan()])
     .collect()
 }
 

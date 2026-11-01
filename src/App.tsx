@@ -68,6 +68,7 @@ import {
   SunIcon,
   TerminalIcon,
   TextSearchIcon,
+  WrenchIcon,
   type LucideIcon,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -154,6 +155,8 @@ import { SessionsPage } from "@/pages/SessionsPage";
 import { SettingsPage } from "@/pages/SettingsPage";
 import { TemplatesPage, type TemplatesTab } from "@/pages/TemplatesPage";
 import { TerminalPage } from "@/pages/TerminalPage";
+import { ToolboxPage, type ToolboxRequest } from "@/pages/ToolboxPage";
+import { TOOLBOX_TOOLS, type ToolboxTool } from "@/lib/toolbox";
 import { VaultPage } from "@/pages/VaultPage";
 import { VmsPage, type VmPageRequest, type VmPanel } from "@/pages/VmsPage";
 import {
@@ -183,6 +186,17 @@ import type { VmView } from "@/lib/vm-snapshots";
 import type { ScheduleAsk } from "@/components/VmSchedulesTab";
 import { WorkspaceSwitcher } from "@/components/WorkspaceSwitcher";
 
+/** FD-09: what finds each Toolbox tab in the palette. */
+const TOOLBOX_KEYWORDS: Record<ToolboxTool, string> = {
+  ping: "ping icmp echo reachable latency network",
+  trace: "traceroute tracert trace route hops path network",
+  dns: "dns lookup nslookup dig resolve record mx txt ptr srv soa caa",
+  ports: "port check tcp open closed banner telnet nc network",
+  certificate: "certificate tls ssl https cert expiry chain x509 pem crt",
+  subnet: "subnet cidr calculator mask netmask broadcast ipv4 ipv6 split",
+  wake: "wake on lan wol magic packet power on mac",
+};
+
 /** Each page's sidebar icon; the pages themselves, in order, are lib/navigation.ts's PAGES. */
 const PAGE_ICONS: Record<PageId, LucideIcon> = {
   vms: ServerIcon,
@@ -191,6 +205,7 @@ const PAGE_ICONS: Record<PageId, LucideIcon> = {
   sessions: ListTreeIcon,
   terminal: TerminalIcon,
   containers: ContainerIcon,
+  toolbox: WrenchIcon,
   dashboard: LayoutDashboardIcon,
   activity: HistoryIcon,
   vault: KeyRoundIcon,
@@ -222,6 +237,7 @@ const Templates = memo(TemplatesPage);
 const Schedules = memo(SchedulesPage);
 const Dashboard = memo(DashboardPage);
 const Containers = memo(ContainersPage);
+const Toolbox = memo(ToolboxPage);
 const Sessions = memo(SessionsPage);
 const Terminal = memo(TerminalPage);
 const Vault = memo(VaultPage);
@@ -283,6 +299,8 @@ export default function App() {
   const [jobFocus, setJobFocus] = useState<{ jobId: string; n: number } | null>(null);
   const [settingsFocus, setSettingsFocus] = useState<{ section: string; n: number } | null>(null);
   const [containerRequest, setContainerRequest] = useState<ContainerRequest | null>(null);
+  // FD-09: a Toolbox tool, with the session, VM or host a row handed it.
+  const [toolboxRequest, setToolboxRequest] = useState<ToolboxRequest | null>(null);
   // QL-25, QL-24, QL-23: the notification centre, the shortcut sheet and the first-run wizard.
   const [centreOpen, setCentreOpen] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
@@ -705,6 +723,10 @@ export default function App() {
         case "note":
           setNoteTarget({ kind: link.noteKind, key: link.key, title: link.title });
           break;
+        case "toolbox":
+          setToolboxRequest((prev) => ({ tool: link.tool, target: link.target, n: (prev?.n ?? 0) + 1 }));
+          setPage("toolbox");
+          break;
       }
     },
     [go, openVms, openSchedules, openVmsPanel],
@@ -790,6 +812,14 @@ export default function App() {
       keywords: "vmnet nat network port forward forwarding host-only natnetwork virtualbox workstation",
       run: () => openVmsPanel("networks"),
     },
+    // FD-09: each Toolbox tab.
+    ...TOOLBOX_TOOLS.map((t): PaletteAction => ({
+      id: `toolbox-${t.id}`,
+      label: `Toolbox: ${t.label}`,
+      icon: WrenchIcon,
+      keywords: TOOLBOX_KEYWORDS[t.id],
+      run: () => openLink({ kind: "toolbox", tool: t.id }),
+    })),
     {
       id: "waste-finder",
       label: "Waste finder: idle VMs, suspended VMs, snapshot chains, unused files",
@@ -1245,6 +1275,11 @@ export default function App() {
                   onOpenSettings={show.settings}
                   refreshKey={containerJobs + containerSettings}
                 />
+              </ErrorBoundary>
+            </section>
+            <section hidden={page !== "toolbox"}>
+              <ErrorBoundary name="Toolbox">
+                <Toolbox active={page === "toolbox"} request={toolboxRequest} onSubmitted={submitted} />
               </ErrorBoundary>
             </section>
             <section hidden={page !== "sessions"}>

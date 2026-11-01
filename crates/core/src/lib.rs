@@ -49,6 +49,8 @@
 //!     adapters::host_networks; changing a forward is a command on the bus. vm_insight (VM-25): a VM's logs and
 //!     timeline; waste (VM-16, VM-14): the waste finder's report. Reads only
 //!   notifications (QL-25): the notification centre's history, in memory and redacted
+//!   toolbox (FD-09): ping, trace route, DNS, port checks and certificates from this PC (behind a jump host, ports and
+//!     certificates from it) ──► adapters::net_tools; reads only. Wake-on-LAN is a command on the bus
 //! ```
 //!
 //! Only [`command_bus::CommandBus`] can enqueue jobs, and adapters are only reachable through the job
@@ -100,6 +102,7 @@ pub mod stacks;
 pub mod stars;
 pub mod store;
 pub mod terminal;
+pub mod toolbox;
 pub mod transfer;
 pub mod trash;
 pub mod untrusted;
@@ -119,6 +122,7 @@ use adapters::containers::cli::{validate_docker_path, CliEngines};
 use adapters::containers::ContainerEngines;
 use adapters::host_counters::{HostCounters, WindowsCounters};
 use adapters::hypervisor::Hypervisors;
+use adapters::net_tools::{NetworkTools, SystemNetworkTools};
 use adapters::network::{NetworkAdapter, SystemNetwork};
 use adapters::remote::{RemoteAdapter, RusshAdapter};
 use adapters::updater::UpdaterAdapter;
@@ -195,6 +199,9 @@ pub struct Adapters {
     pub containers: Arc<dyn ContainerEngines>,
     /// CV-01 to CV-03, VM-17: the disk conversion tools (qemu-img when installed; the hypervisors' own).
     pub disk_tools: Arc<dyn adapters::disk_tools::DiskTools>,
+    /// FD-09: the toolbox's probes from this PC (ICMP, DNS, TCP, a chain's trust check, adapters) and the
+    /// Wake-on-LAN datagram.
+    pub network_tools: Arc<dyn NetworkTools>,
 }
 
 /// AP-05: what an audit export wrote.
@@ -316,6 +323,9 @@ pub struct Core {
     pub trash: trash::Trash,
     /// MO-13, MO-14: OS and specs of VMs and SSH hosts, and an SSH host's admin details. Reads only.
     pub host_details: HostDetails,
+    /// FD-09: ping, trace route, DNS, port checks and the certificate viewer (reads), and Wake-on-LAN's options;
+    /// sending a magic packet goes through [`Core::bus`].
+    pub toolbox: toolbox::Toolbox,
     /// MO-02, CT-01: parks refused background logins and caps them per host per hour.
     pub login_guard: LoginGuard,
     /// FD-03: presentation mode and its read-only lock (saved; the lock is shared through the store).
@@ -353,6 +363,7 @@ struct LockParts {
     guest: std::sync::Weak<Metrics>,
     containers: Containers,
     host_details: HostDetails,
+    toolbox: toolbox::Toolbox,
     terminals: Terminals,
     transfer_closed: transfer::Closer,
     bindings: SecretBindings,
@@ -365,6 +376,7 @@ impl LockParts {
         let file_closed = self.transfer_closed.close();
         self.containers.close_all().await;
         self.host_details.close_all().await;
+        self.toolbox.close_all().await;
         if let Some(metrics) = self.guest.upgrade() {
             metrics.guest().close_all().await;
         }
@@ -420,6 +432,7 @@ impl Core {
                 network: Arc::new(SystemNetwork),
                 containers: Arc::new(CliEngines::new(docker.as_deref())),
                 disk_tools: Arc::new(adapters::disk_tools::LocalDiskTools::new(qemu_img)),
+                network_tools: Arc::new(SystemNetworkTools),
             },
             JobLimits::default(),
         )
@@ -526,6 +539,18 @@ impl Core {
             remote: Arc::clone(&adapters.remote),
             known_hosts: Arc::clone(&known_hosts),
         });
+        // FD-09: the toolbox's reads; a session behind a jump host is reached over its jump host's connection.
+        let toolbox = toolbox::Toolbox::new(toolbox::ToolboxParts {
+            store: store.clone(),
+            tools: Arc::clone(&adapters.network_tools),
+            network: Arc::clone(&adapters.network),
+            remote: Arc::clone(&adapters.remote),
+            vault: Arc::clone(&adapters.vault),
+            known_hosts: Arc::clone(&known_hosts),
+            login_guard: login_guard.clone(),
+            terminals: terminals.clone(),
+            host_details: host_details.clone(),
+        });
         let jobs = JobRunner::new(
             store.clone(),
             hypervisors.clone(),
@@ -538,6 +563,8 @@ impl Core {
         );
         // CT-01, CT-02: container changes go from the job runner to the containers service.
         jobs.set_containers(Arc::new(containers.clone()));
+        // FD-09: Wake-on-LAN's magic packet leaves through the job runner.
+        jobs.set_network_tools(Arc::clone(&adapters.network_tools));
         // MO-06: a prune compacts the file only while no job runs.
         history.set_jobs(Arc::clone(&jobs));
         // VM-11: network targets and port forward previews.
@@ -695,6 +722,7 @@ impl Core {
                 .with_bindings(bindings.clone())
                 .with_terminal_rules(terminal_rules.clone()),
             host_details,
+            toolbox,
             login_guard,
             presentation,
             store,
@@ -721,6 +749,7 @@ impl Core {
             guest: Arc::downgrade(&self.metrics),
             containers: self.containers.clone(),
             host_details: self.host_details.clone(),
+            toolbox: self.toolbox.clone(),
             terminals: self.terminals.clone(),
             transfer_closed: self.transfer.closer(),
             bindings: self.bindings.clone(),

@@ -4,6 +4,7 @@
 // as plain JSON, so `isAppLink` checks them before they are opened. Tested in links.test.ts.
 
 import type { ContainerHost, EngineKind } from "./api.ts";
+import { isToolboxTool, type ToolboxTool, type ToolTarget } from "./toolbox.ts";
 import type { VmView } from "./vm-snapshots.ts";
 
 /** The tabs of the Templates page (VM-19 to VM-21). */
@@ -41,7 +42,9 @@ export type AppLink =
   /** VM-11: the Virtual machines page's host networks. */
   | { kind: "hostNetworks" }
   /** FD-06: the note of a session, VM or folder, in its sheet. */
-  | { kind: "note"; noteKind: "session" | "vm" | "folder"; key: string; title?: string };
+  | { kind: "note"; noteKind: "session" | "vm" | "folder"; key: string; title?: string }
+  /** FD-09: a tool of the Toolbox, with a session, VM or host filled in. */
+  | { kind: "toolbox"; tool: ToolboxTool; target?: ToolTarget };
 
 export type AppLinkKind = AppLink["kind"];
 
@@ -62,6 +65,7 @@ const KINDS: Record<AppLinkKind, readonly string[]> = {
   schedule: ["scheduleId"],
   hostNetworks: [],
   note: ["noteKind", "key"],
+  toolbox: ["tool"],
 };
 
 /** A value (from the core, say) is a link this version can open: a known kind with its text fields. */
@@ -78,6 +82,7 @@ export function isAppLink(value: unknown): value is AppLink {
   }
   if (kind === "note" && !["session", "vm", "folder"].includes(link.noteKind as string)) return false;
   if (kind === "catalog" && !["sizes", "images", "templates"].includes(link.tab as string)) return false;
+  if (kind === "toolbox" && !isToolboxTool(link.tool)) return false;
   return true;
 }
 
@@ -140,5 +145,7 @@ export function linkLabel(link: AppLink): string {
       return "Show the host networks";
     case "note":
       return "Show the note";
+    case "toolbox":
+      return "Open the toolbox";
   }
 }
