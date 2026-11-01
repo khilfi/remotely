@@ -775,6 +775,20 @@ impl Command {
         }
     }
 
+    /// Review C1: the scripts the policy engine rates, each run on its own. A support bundle runs one command per item
+    /// on the host, so each item is rated separately: joined, one item could hide another inside its comment or
+    /// here-string (`["<#", "Stop-Service a", "#>"]` reads as a block comment) and that item would still run. A run's
+    /// script and a MultiExec line run as one, so each is a single script.
+    pub fn rated_scripts_for(&self, kind: ScriptKind) -> Vec<std::borrow::Cow<'_, str>> {
+        match self {
+            Command::SupportBundle { spec, .. } => match kind {
+                ScriptKind::Posix => spec.commands().map(std::borrow::Cow::from).collect(),
+                ScriptKind::PowerShell => spec.windows_commands().map(std::borrow::Cow::from).collect(),
+            },
+            _ => self.rated_script_for(kind).into_iter().collect(),
+        }
+    }
+
     /// BX-07: the vault password sudo gets, when the command runs with sudo and one was chosen (a run's or a support
     /// bundle's). `None`: no sudo, or each session's own login password.
     pub fn sudo_password_id(&self) -> Option<SecretId> {
@@ -1115,8 +1129,10 @@ pub struct ApprovalRequest {
 pub struct BundleDetails {
     /// The presets' names.
     pub presets: Vec<String>,
-    /// Files read over SFTP as the login user.
+    /// Files read over SFTP as the login user (Linux hosts).
     pub files: Vec<String>,
+    /// Review C3: files read by PowerShell as the sign-in user (Windows hosts).
+    pub windows_files: Vec<String>,
     /// Where the zip is saved.
     pub output: String,
     pub limits: crate::support_bundle::BundleLimits,
@@ -1134,6 +1150,7 @@ impl BundleDetails {
                 .map(|id| crate::support_bundle::presets::preset(*id).label.to_owned())
                 .collect(),
             files: spec.files().map(str::to_owned).collect(),
+            windows_files: spec.windows_files().map(str::to_owned).collect(),
             output: spec.output.clone(),
             limits: crate::support_bundle::LIMITS,
         }))
@@ -1821,6 +1838,18 @@ impl CommandBus {
     /// BX-06: the tier, steps and matched dangerous-command rules the command would get now. Targets
     /// may be empty while the user is still choosing them.
     pub async fn preview(&self, ctx: &Context, command: &Command) -> Result<CommandPreview> {
+        // A5: cap the size of each script to be rated before anything parses it, so a huge paste can't be parsed in a
+        // preview (submit runs the full `validate`, which also checks submit-time details such as the output path).
+        for kind in [ScriptKind::Posix, ScriptKind::PowerShell] {
+            for script in command.rated_scripts_for(kind) {
+                if script.len() > MAX_SCRIPT_BYTES {
+                    return Err(CoreError::InvalidInput(format!(
+                        "A script can be at most {} KB.",
+                        MAX_SCRIPT_BYTES / 1024
+                    )));
+                }
+            }
+        }
         let targets = self.resolve_targets(ctx, command).await?;
         self.note_signed_in(command).await;
         let mut decision = self.decide(ctx, command, &targets).await?;
@@ -1849,12 +1878,12 @@ impl CommandBus {
         let policy = locks::read(&self.policy);
         let mut out: Vec<DangerousMatch> = Vec::new();
         for kind in kinds {
-            let Some(script) = command.rated_script_for(kind) else {
-                continue;
-            };
-            for found in policy.dangerous_details_as(&script, kind) {
-                if !out.iter().any(|m| m.rule == found.rule) {
-                    out.push(found);
+            // Review C1: a support bundle's items each run on their own, so each is checked on its own.
+            for script in command.rated_scripts_for(kind) {
+                for found in policy.dangerous_details_as(&script, kind) {
+                    if !out.iter().any(|m| m.rule == found.rule) {
+                        out.push(found);
+                    }
                 }
             }
         }

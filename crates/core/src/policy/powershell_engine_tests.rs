@@ -203,7 +203,7 @@ fn a_windows_bundle_rates_its_own_commands_by_the_powershell_rules() {
     assert!(decision
         .reasons
         .iter()
-        .any(|r| r.contains("Windows commands are rated together")));
+        .any(|r| r.contains("Windows commands are each rated")));
     // A Windows custom command that changes something rates the bundle Medium.
     let mut changed = windows_items.clone();
     changed.push(BundleItem::command("Restart-Service Spooler"));
@@ -214,6 +214,30 @@ fn a_windows_bundle_rates_its_own_commands_by_the_powershell_rules() {
     let decision = engine.evaluate_on(&files, &hosts[1..], &[PowerShell]);
     assert_eq!(decision.tier, Tier::Low);
     assert!(decision.reasons.iter().any(|r| r.contains("read by PowerShell")));
+
+    // Review C1: a bundle runs one command per item, so each is rated on its own. Joined, these three items read as a
+    // block comment that hides the command that changes something, so they would rate Low; item by item, that command
+    // is seen and the bundle is Medium.
+    assert_eq!(
+        engine.classify_script_as("<#\nStop-Service Spooler\n#>", PowerShell),
+        crate::policy::ActionKind::ExecReadOnly,
+        "joined, the block comment hides it"
+    );
+    let hidden = vec![
+        BundleItem::command("<#"),
+        BundleItem::command("Stop-Service Spooler"),
+        BundleItem::command("#>"),
+    ];
+    let decision = engine.evaluate_on(&bundle(Vec::new(), hidden), &hosts[1..], &[PowerShell]);
+    assert_eq!(decision.tier, Tier::Medium, "{:?}", decision.reasons);
+    // A Linux bundle's items are rated one by one too (a here-string split can't hide a command).
+    let linux_hidden = vec![
+        BundleItem::command("cat <<'EOF'"),
+        BundleItem::command("systemctl stop nginx"),
+        BundleItem::command("EOF"),
+    ];
+    let decision = engine.evaluate_on(&bundle(linux_hidden, Vec::new()), &hosts[..1], &[Posix]);
+    assert!(decision.tier >= Tier::Medium, "{:?}", decision.reasons);
 }
 
 #[test]

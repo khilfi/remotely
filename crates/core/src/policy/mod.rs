@@ -1322,16 +1322,15 @@ impl PolicyEngine {
                 }
                 rated => rated,
             },
-            // FD-04: its commands, rated together as a Compare hosts run's script; its files are read as the login user,
-            // which only reads, so a bundle of files alone is read-only. BX-13: a Windows host's commands are its own.
-            Command::SupportBundle { spec, .. } => {
-                let script = spec.rated_script_for(kind);
-                if script.trim().is_empty() {
-                    ActionKind::ExecReadOnly
-                } else {
-                    self.classify_script_as(&script, kind)
-                }
-            }
+            // FD-04: its commands; its files are read as the login user, which only reads, so a bundle of files alone is
+            // read-only. BX-13: a Windows host's commands are its own. Review C1: each item runs on its own on the host,
+            // so each is rated on its own and the highest counts (joined, one could hide another).
+            Command::SupportBundle { .. } => command
+                .rated_scripts_for(kind)
+                .iter()
+                .map(|script| self.classify_script_as(script, kind))
+                .max_by_key(|action| exec_rank(*action))
+                .unwrap_or(ActionKind::ExecReadOnly),
             _ => self.classify_action(command),
         }
     }
@@ -1530,7 +1529,8 @@ impl PolicyEngine {
             if commands > 0 {
                 what.push(match commands {
                     1 => "its 1 command is rated as a Compare hosts run".to_owned(),
-                    n => format!("its {n} commands are rated together as a Compare hosts run"),
+                    // Review C1: each item runs on its own, so each is rated on its own and the highest counts.
+                    n => format!("its {n} commands are each rated as a Compare hosts run"),
                 });
             }
             if files > 0 {
@@ -1545,7 +1545,7 @@ impl PolicyEngine {
             if windows_commands > 0 {
                 what.push(match windows_commands {
                     1 => "its 1 Windows command is rated by the PowerShell rules".to_owned(),
-                    n => format!("its {n} Windows commands are rated together by the PowerShell rules"),
+                    n => format!("its {n} Windows commands are each rated by the PowerShell rules"),
                 });
             }
             if windows_files > 0 {
@@ -1585,34 +1585,34 @@ impl PolicyEngine {
         let mut hits: Vec<String> = Vec::new();
         let mut found_actions = Vec::new();
         for lang in if scripted { langs.clone() } else { Vec::new() } {
-            let Some(script) = command.rated_script_for(lang) else {
-                continue;
-            };
-            let script = script.as_ref();
-            for hit in self.dangerous_matches_as(script, lang) {
-                if !hits.contains(&hit) {
-                    hits.push(hit);
+            // Review C1: a support bundle's items each run on their own, so each is rated on its own here too.
+            for script in command.rated_scripts_for(lang) {
+                let script = script.as_ref();
+                for hit in self.dangerous_matches_as(script, lang) {
+                    if !hits.contains(&hit) {
+                        hits.push(hit);
+                    }
                 }
-            }
-            let shell_commands = match lang {
-                ScriptKind::Posix => commands::shell_commands(script),
-                // BX-13: a PowerShell command as words, so `docker volume prune` on a Windows host is found too.
-                ScriptKind::PowerShell => powershell::commands(script)
-                    .into_iter()
-                    .map(|c| commands::ShellCommand {
-                        at: c.at,
-                        words: std::iter::once(c.name)
-                            .chain(c.args.into_iter().map(|a| a.text))
-                            .collect(),
-                    })
-                    .collect(),
-            };
-            for found in commands::container_actions(&shell_commands) {
-                if !found_actions
-                    .iter()
-                    .any(|f: &commands::ContainerAction| f.what == found.what)
-                {
-                    found_actions.push(found);
+                let shell_commands = match lang {
+                    ScriptKind::Posix => commands::shell_commands(script),
+                    // BX-13: a PowerShell command as words, so `docker volume prune` on a Windows host is found too.
+                    ScriptKind::PowerShell => powershell::commands(script)
+                        .into_iter()
+                        .map(|c| commands::ShellCommand {
+                            at: c.at,
+                            words: std::iter::once(c.name)
+                                .chain(c.args.into_iter().map(|a| a.text))
+                                .collect(),
+                        })
+                        .collect(),
+                };
+                for found in commands::container_actions(&shell_commands) {
+                    if !found_actions
+                        .iter()
+                        .any(|f: &commands::ContainerAction| f.what == found.what)
+                    {
+                        found_actions.push(found);
+                    }
                 }
             }
         }

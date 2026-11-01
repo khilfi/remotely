@@ -164,6 +164,12 @@ impl SupportBundles {
             (false, true) => (Vec::new(), windows_items),
             _ => (items, windows_items),
         };
+        // Review D1: keep only the presets whose host kind has a picked host, so the summary, audit and manifest never
+        // name a preset of a kind nobody picked.
+        presets.retain(|id| match presets::preset(*id).host_kind {
+            HostKind::Linux => linux > 0,
+            HostKind::Windows => windows > 0,
+        });
         let spec = BundleSpec {
             items,
             windows_items,
