@@ -313,7 +313,9 @@ export type Command =
   /** VM-17, CV-02: an export. Never submitted by the UI: `exportSubmit` builds it in the core after a folder dialog. */
   | { type: "vmExport"; targets: TargetRef[]; spec: Record<string, unknown> }
   /** FD-09: a Wake-on-LAN magic packet. One target: the session or VM it wakes, or the app for a MAC typed alone. */
-  | { type: "wakeOnLan"; targets: TargetRef[]; wake: WakeSpec };
+  | { type: "wakeOnLan"; targets: TargetRef[]; wake: WakeSpec }
+  /** FD-09: the file server. Never submitted by the UI: `fileServerApi.start` builds it in the core after its checks. */
+  | { type: "fileServer"; targets: TargetRef[]; spec: Record<string, unknown> };
 
 /** FD-09: what a wake-up sends, and where (crates/core/src/toolbox/wake.rs). */
 export interface WakeSpec {
@@ -927,6 +929,9 @@ export type ActionKind =
   | "imageConvert"
   /** FD-09: send a Wake-on-LAN magic packet. */
   | "wakeOnLan"
+  /** FD-09: run the file server, serving only, or accepting uploads. */
+  | "fileServer"
+  | "fileServerUploads"
   | "appUpdate";
 
 export interface TierRule {

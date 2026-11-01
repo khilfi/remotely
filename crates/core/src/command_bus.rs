@@ -199,6 +199,14 @@ pub enum Command {
         targets: Vec<TargetRef>,
         wake: crate::toolbox::WakeSpec,
     },
+    /// FD-09: the quick file server, TFTP and HTTP from one file or folder on one address of this PC, for a time
+    /// limit ([`crate::toolbox::file_server`]). The job runs as long as the server. Medium serving, High accepting
+    /// uploads. The one target is this app ([`TargetRef::App`]). Never built by the UI: the file server service
+    /// checks the paths, the upload folder and the address first.
+    FileServer {
+        targets: Vec<TargetRef>,
+        spec: Box<crate::toolbox::file_server::FileServerSpec>,
+    },
 }
 
 /// CT-01, CT-02: what a [`Command::Container`] does.
@@ -632,6 +640,8 @@ impl Command {
             // CV-03, VM-17: the new files' place comes from a save or folder dialog.
             Command::ImageConvert { .. } => "Conversions start from Image tools, which asks where the new image goes.",
             Command::VmExport { .. } => "Exports start from a VM's Export, which asks for the folder.",
+            // FD-09: the folders and the address are checked against this PC before the command is built.
+            Command::FileServer { .. } => "The file server starts from the Toolbox's File server tab.",
             _ => return Ok(()),
         };
         Err(CoreError::InvalidInput(refused.into()))
@@ -719,6 +729,15 @@ impl Command {
                 crate::toolbox::WakeSpec::check_targets(targets)?;
                 wake.validate()
             }
+            Command::FileServer { targets, spec } => {
+                spec.validate()?;
+                if *targets != spec.targets() {
+                    return Err(CoreError::InvalidInput(
+                        "The file server's one target is this PC.".into(),
+                    ));
+                }
+                Ok(())
+            }
             _ => Ok(()),
         }
     }
@@ -761,12 +780,13 @@ impl Command {
             // SS-10: a line belongs to the moment it was typed; pressing Enter again later could run it
             // after something else. SS-07: a tunnel belongs to its terminal. VM-24: an added VM is its file.
             // VM-11: a forward belongs to its network or VM.
-            // FD-09: a wake-up is for its one machine.
+            // FD-09: a wake-up is for its one machine; a file server runs once, for its time.
             Command::AppUpdate { .. }
             | Command::TerminalLine { .. }
             | Command::OpenTunnel { .. }
             | Command::HostNetwork { .. }
             | Command::WakeOnLan { .. }
+            | Command::FileServer { .. }
             | Command::VmLifecycle {
                 op: VmLifecycleOp::Register { .. },
                 ..
@@ -794,6 +814,7 @@ impl Command {
             | Command::Deploy { targets, .. }
             | Command::HostNetwork { targets, .. }
             | Command::WakeOnLan { targets, .. }
+            | Command::FileServer { targets, .. }
             | Command::Stack { targets, .. } => targets,
             Command::ImageConvert { targets, .. } | Command::VmExport { targets, .. } => targets,
             Command::AppUpdate { .. } => APP_TARGET,
@@ -824,6 +845,7 @@ impl Command {
             Command::ImageConvert { .. } => "imageConvert",
             Command::VmExport { .. } => "vmExport",
             Command::WakeOnLan { .. } => "wakeOnLan",
+            Command::FileServer { .. } => "fileServer",
         }
     }
 
@@ -958,6 +980,7 @@ impl Command {
             Command::ImageConvert { spec, .. } => spec.summary(),
             Command::VmExport { spec, .. } => spec.summary(),
             Command::WakeOnLan { wake, .. } => wake.summary(),
+            Command::FileServer { spec, .. } => spec.summary(),
         }
     }
 }
@@ -1989,6 +2012,19 @@ impl CommandBus {
                     targets.push(Target {
                         target: TargetRef::App,
                         name: format!("MAC {mac}"),
+                        environment: Environment::None,
+                        protected: false,
+                    });
+                }
+                // FD-09: the file server runs on this PC, at the address it listens on.
+                TargetRef::App if matches!(command, Command::FileServer { .. }) => {
+                    let address = match command {
+                        Command::FileServer { spec, .. } => spec.address.to_string(),
+                        _ => String::new(),
+                    };
+                    targets.push(Target {
+                        target: TargetRef::App,
+                        name: format!("this PC ({address})"),
                         environment: Environment::None,
                         protected: false,
                     });

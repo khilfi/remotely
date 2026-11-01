@@ -11,6 +11,7 @@ mod dashboard;
 pub mod data_dirs;
 mod deploy;
 pub mod diagnostics;
+mod file_server;
 mod files;
 mod groups;
 mod host_details;
@@ -180,6 +181,7 @@ fn page_loaded<R: Runtime>(webview: &Webview<R>, payload: &PageLoadPayload<'_>) 
         tracing::warn!(
             terminals = released.terminals,
             approvals = released.approvals,
+            file_servers = released.file_servers,
             "the window reloaded; closed what it had open"
         );
     });
@@ -311,6 +313,9 @@ fn forward_events(app: &App, core: &Arc<Core>) {
                 }
             }
         });
+
+        // FD-09: the file server's start, requests and stop -> UI (the shown workspace's).
+        file_server::forward(app.handle(), core);
 
         // SS-04: vault status -> UI, so the idle lock shows at once.
         let mut vault_status = core.vault.watch();
@@ -761,6 +766,12 @@ fn commands() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         toolbox::toolbox_certificate_file,
         toolbox::toolbox_cancel,
         toolbox::toolbox_wake_options,
+        // FD-09 the quick file server.
+        file_server::file_server_options,
+        file_server::file_server_status,
+        file_server::file_server_pick,
+        file_server::file_server_start,
+        file_server::file_server_stop,
     ]
 }
 

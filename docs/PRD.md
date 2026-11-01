@@ -172,6 +172,9 @@ Toolbox (0.7.0, FD-09, `docs/plan-0.7.md` "Approval tiers"). The tools run from 
 | Ping, trace route, DNS lookup, port check (up to 100 ports a run), view a certificate, the subnet calculator | Not a command: no tier, not audited (reads), allowed by the read-only lock |
 | Wake-on-LAN: one magic packet for a session's, a VM's or a typed MAC | Low |
 | Wake-on-LAN for a session or VM labelled Prod | Medium |
+| Run the quick file server (TFTP and HTTP from one file or folder, on one address of this PC, for a time limit), serving only | Medium |
+| Run the quick file server accepting uploads (into one empty folder, capped, never replacing a file) | High |
+| Stop the file server (Stop, its time limit, a workspace switch, the vault locking, a window reload, Remotely closing) | Not a command: the job ends, audited |
 
 | ID | Requirement | Phase |
 | --- | --- | --- |

@@ -118,7 +118,8 @@ crates/core/          remotely-core: all app logic
                       clock), Purge now, audited journal_purged; secure_delete, a WAL checkpoint and VACUUM after a big
                       purge; the read-only lock refuses the setting and Purge now, never the schedule
     save_guard.rs     No save path writes into a Git working tree (audit CSV, Compare and MultiExec exports, saved
-                      output, session logs, downloads, FD-07 exports); write_atomically (a `.part` file, renamed)
+                      output, session logs, downloads, FD-07 exports, FD-09's upload folder); write_atomically (a
+                      `.part` file, renamed)
     adapters/         vmware.rs (VM-23 also the .vmx's backup, atomic write and restore, vdiskmanager and vmware.exe
                       found beside vmrun, vmrun_change; VM-21 ovftool found like vmrun, Workstation's default VM
                       folder), vmx_file.rs (VM-23 a .vmx as its lines: unknown keys, order,
@@ -448,7 +449,26 @@ crates/core/          remotely-core: all app logic
                       terminal's ScrubbedCommands included), wake.rs
                       (WakeSpec: MAC, an adapter's subnet broadcast or a typed address, port 9; the magic packet;
                       Command::WakeOnLan is Low, Medium on Prod, audited; one target: the session, the VM, or
-                      TargetRef::App named "MAC ..." for a MAC typed alone)
+                      TargetRef::App named "MAC ..." for a MAC typed alone), file_server/ (F9: Command::FileServer,
+                      Medium serving, High with uploads (ActionKind::FileServer, FileServerUploads), target
+                      TargetRef::App named "this PC (<address>)"; never built by the UI: Core.file_server's
+                      FileServers::submit checks the root, the empty upload folder (save_guard) and that the address is
+                      this PC's; the job runs as long as the server, its output the request log, its end note the
+                      uploads; Runner serves for the job runner, one at a time, and stops on Stop, the time limit (30
+                      minutes by default, 8 hours at most), the job's cancel, a workspace switch (open_user_jobs leaves
+                      it out, switch_workspace stops it), a vault lock, release_ui and Core::shutdown; the last choices
+                      are `fileServer.last`, per workspace): paths.rs (a request as text: `.` `..` `\` `//`, drives,
+                      `:` (streams), trailing dots and spaces, control and Cf characters, device names, one
+                      percent-decoding and nothing still encoded; an upload name is one part, Cf to `_`), served.rs
+                      (each part looked up without following links or junctions; a file served only when its handle's
+                      final path is under the root; folder listings), tftp.rs (RFC 1350, blksize and tsize; a socket
+                      per transfer connected to the client; resent only on timeout; at most 65,535 blocks, so no
+                      wraparound; transfers capped in all and per client), http.rs (httparse: GET, HEAD, PUT with a
+                      Content-Length, Expect: 100-continue; the head within its timeout, 16 KB, 32 headers, a 4 KB
+                      target; one request a connection; nosniff, attachments, an escaped listing with a CSP),
+                      uploads.rs (create_new in the folder, never a replace; caps per file and in all; a part deleted;
+                      the Mark of the Web through terminal::files::mark_downloaded), log.rs (the last 500 requests,
+                      totals of all)
     reachability.rs   QL-04 background TCP checks of the sessions the tree shows (reads only; each shows in the host's
                       sshd log): every 5 minutes by default, a host that is down less often (next_check_after: doubling
                       up to 30 minutes), none for a host with an open connection (OpenConnections: connected terminals,
@@ -554,7 +574,10 @@ crates/core/          remotely-core: all app logic
                       conversion.rs: CV-01 to CV-03, VM-17; workspaces.rs: FD-02 isolation of every service and
                       switching; change_ids.rs: AP-08; toolbox.rs: FD-09 on FakeNetworkTools, a TLS server with an
                       rcgen certificate made at run time, jump hosts through the test SSH server, Wake-on-LAN to
-                      127.0.0.1); opt-in workstation_it.rs, virtualbox_it.rs and
+                      127.0.0.1; file_server.rs: FD-09 TFTP and HTTP on 127.0.0.1 with port 0 and the test's own
+                      clients, folders made in the temp folder: every traversal form on both protocols, links,
+                      junctions and streams, uploads and their caps, slow and flooding clients, every stop path giving
+                      the ports back); opt-in workstation_it.rs, virtualbox_it.rs and
                       conversion_it.rs (the real conversion tools on small images in the temp folder)
 src-tauri/            Tauri 2 shell: window, IPC commands (ipc.rs), terminal bridge, MultiExec (multiexec.rs; groups.rs
                       QL-19 saved MultiExec groups; terminal_rules.rs QL-17 rules), command
@@ -591,7 +614,8 @@ src-tauri/            Tauri 2 shell: window, IPC commands (ipc.rs), terminal bri
                       after checked_qemu_site; Settings' qemu-img path in ipc.rs); FD-02, AP-08 workspaces.rs (the
                       switcher's commands, Unassigned VMs, the change ID rule, FD-07 import into a new workspace); FD-09
                       toolbox.rs (each tool's run under an id the UI chose, `toolbox://progress` events, toolbox_cancel,
-                      the certificate file dialog, Wake up's adapters and MACs); lib.rs
+                      the certificate file dialog, Wake up's adapters and MACs), file_server.rs (the File server tab's
+                      options, file and folder dialogs, start, Stop and status, `fileserver://event`); lib.rs
                       and schedules.rs pass job and schedule events to the window only for the shown workspace
 src/                  React + TypeScript UI
   components/ui/      shadcn/ui components (generated)
@@ -642,7 +666,8 @@ src/                  React + TypeScript UI
                       UX-01 to UX-13 (0.6.0), the shared pieces every page uses ("UI rules" under Conventions):
                       PageHeader, HelpTip, Term, SelectionBar, RowMenu, EmptyState, Tip and ShowTipsAgainButton,
                       RefreshButton; FD-09 toolbox/: the Toolbox's tabs (ProbeTools: Ping, Trace route, DNS lookup,
-                      Check ports; CertificateTool, SubnetTool, WakeTool), TargetField and ToolboxMenu, the "Toolbox"
+                      Check ports; CertificateTool, SubnetTool, WakeTool, FileServerTool: the form, the running server
+                      and its requests), TargetField and ToolboxMenu, the "Toolbox"
                       submenu of session rows and the palette's VM and session views, and ToolboxIconMenu in the VM
                       details panel's header; no recent inputs are offered while presenting, since a native dropdown
                       is out of the masker's reach)
@@ -751,7 +776,8 @@ src/                  React + TypeScript UI
                       shortcut), first-run.ts (QL-23); FD-09 toolbox.ts (the tools, row targets, the last 20 inputs
                       per tool and workspace in local storage, every access in try/catch, result wording),
                       toolbox-api.ts (wrappers
-                      and types), subnet.ts (the subnet calculator, IPv4 and IPv6 with BigInt) and
+                      and types), subnet.ts (the subnet calculator, IPv4 and IPv6 with BigInt), file-server.ts and
+                      file-server-api.ts (the File server tab's form, checks and wording; wrappers and types) and
                       hooks/use-probe-run.ts (a run's id, progress and Stop); pure helpers with
                       *.test.ts
                       next to them (Node's test runner: `npm test`)

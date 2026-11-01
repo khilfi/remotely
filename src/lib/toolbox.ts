@@ -13,9 +13,9 @@ import type {
   TraceHop,
 } from "./toolbox-api.ts";
 
-export type ToolboxTool = "ping" | "trace" | "dns" | "ports" | "certificate" | "subnet" | "wake";
+export type ToolboxTool = "ping" | "trace" | "dns" | "ports" | "certificate" | "subnet" | "wake" | "fileServer";
 
-/** The tabs, in order. F9 adds the file server after these. */
+/** The tabs, in order. */
 export const TOOLBOX_TOOLS: readonly { id: ToolboxTool; label: string }[] = [
   { id: "ping", label: "Ping" },
   { id: "trace", label: "Trace route" },
@@ -24,6 +24,7 @@ export const TOOLBOX_TOOLS: readonly { id: ToolboxTool; label: string }[] = [
   { id: "certificate", label: "Certificate" },
   { id: "subnet", label: "Subnet calculator" },
   { id: "wake", label: "Wake up" },
+  { id: "fileServer", label: "File server" },
 ];
 
 export function isToolboxTool(value: unknown): value is ToolboxTool {

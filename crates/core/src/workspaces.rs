@@ -381,6 +381,8 @@ pub struct SwitchPreview {
     pub multiexec: bool,
     /// Approvals waiting for an answer; they are cancelled.
     pub approvals: usize,
+    /// FD-09: the file server runs (or waits to start); it stops.
+    pub file_server: bool,
 }
 
 impl crate::Core {
@@ -393,6 +395,7 @@ impl crate::Core {
             terminals: self.terminals.open_count(),
             multiexec: self.multiexec.status().await.map(|s| s.on).unwrap_or(false),
             approvals: self.bus.pending_approvals().len(),
+            file_server: !self.jobs.file_server_jobs(Some(self.ctx().workspace_id)).is_empty(),
         })
     }
 
@@ -400,7 +403,8 @@ impl crate::Core {
     ///
     /// * it is refused while jobs started from the old workspace's UI are open (a schedule's runs go on);
     /// * MultiExec stops, every terminal closes with its tunnels, session log and transfers (each audited in the
-    ///   old workspace), and approvals still waiting are cancelled;
+    ///   old workspace), approvals still waiting are cancelled, and FD-09's file server stops (its job ends in the
+    ///   old workspace, audited);
     /// * the dashboard's, the Containers page's and host details' kept connections close, the guest polling and the
     ///   readings in memory are dropped, an opened FD-07 file closes, and a vault password given in the last
     ///   minutes no longer covers the next step (AP-06);
@@ -441,6 +445,9 @@ impl crate::Core {
         if let Err(err) = self.multiexec.stop().await {
             tracing::warn!(error = %err, "MultiExec did not stop cleanly when the workspace was switched");
         }
+        let open = self.jobs.file_server_jobs(Some(old.workspace_id));
+        self.stop_file_servers(&open, crate::toolbox::file_server::StopReason::WorkspaceSwitched)
+            .await;
         let terminals = self.terminals.open_count();
         self.terminals.close_all().await;
         let approvals = self
