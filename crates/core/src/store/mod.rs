@@ -6,6 +6,9 @@
 mod alerts;
 mod audit;
 mod catalog;
+mod checks;
+#[cfg(test)]
+mod checks_upgrade_tests;
 mod containers;
 mod favourites;
 mod forwards;
@@ -53,6 +56,7 @@ use crate::presentation::ReadOnlyLock;
 
 pub use audit::{chain_start, AuditEntry, ChainCheck, NewAuditEntry, GENESIS_HASH};
 pub(crate) use catalog::{NewImage, TemplateRow};
+pub use checks::{CheckUptime, ResultBucket};
 pub(crate) use favourites::{FavouriteFields, FavouriteRow};
 pub use host_specs::StoredSpecs;
 pub use inventory::{DiscoveredVm, VmRecord};

@@ -4,6 +4,12 @@
 //! missing secret parks the jump host, and every login counts against the hourly cap. A kept connection closes once
 //! it was idle for [`KEPT_IDLE`] (a sweep looks every [`SWEEP_EVERY`], so QL-04 checks the jump host again soon after),
 //! when the vault locks and when the workspace switches; one a check is still using stays.
+//!
+//! MO-08: a health check that runs every few minutes would log in on each run once the idle time passed, and use up
+//! the hourly cap. So a check's use may **hold** the connection past the idle time, until its next run is due
+//! ([`JumpConnections::connection_held`]); the checks service lets go of every hold no active check needs any more
+//! ([`JumpConnections::release_holds`]: a check paused, deleted or edited, or the workspace switched), and the idle
+//! time applies again from there. The same goes for a session's own connection that a service check reads on.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -46,6 +52,8 @@ struct Kept {
     connection: Option<Arc<dyn ExecSession>>,
     spec_key: String,
     used: Option<Instant>,
+    /// MO-08: a health check holds it open until then (its next run), whatever the idle time.
+    held_until: Option<Instant>,
 }
 
 pub(super) struct JumpConnections {
@@ -93,8 +101,14 @@ impl JumpConnections {
             .count()
     }
 
-    /// A connection to the jump host `jump_id`: an open terminal's, or the toolbox's own.
-    pub(super) async fn connection(&self, ctx: &Context, jump_id: Uuid) -> Result<Arc<dyn ExecSession>> {
+    /// A connection to the session `jump_id` (a jump host, or MO-08's service check's own host): an open terminal's,
+    /// or the toolbox's own. A kept one is held open for `hold` after this use (MO-08's checks), until released.
+    pub(super) async fn connection_held(
+        &self,
+        ctx: &Context,
+        jump_id: Uuid,
+        hold: Option<Duration>,
+    ) -> Result<Arc<dyn ExecSession>> {
         self.close_idle().await;
         if let Some(exec) = self.parts.terminals.commands_for(jump_id) {
             return Ok(exec);
@@ -117,10 +131,28 @@ impl JumpConnections {
             kept.connection = Some(self.connect(ctx, &spec).await?);
             kept.spec_key = key;
         }
-        kept.used = Some(Instant::now());
+        let now = Instant::now();
+        kept.used = Some(now);
+        if let Some(hold) = hold {
+            let until = now + hold;
+            kept.held_until = Some(kept.held_until.map_or(until, |held| held.max(until)));
+        }
         kept.connection
             .clone()
             .ok_or_else(|| CoreError::Ssh("no connection".into()))
+    }
+
+    /// MO-08: every hold on a kept connection to a session not in `keep` ends; the idle time applies again.
+    pub(super) async fn release_holds(&self, keep: &std::collections::HashSet<Uuid>) {
+        let slots: Vec<(Uuid, Arc<tokio::sync::Mutex<Kept>>)> = locks::lock(&self.kept)
+            .iter()
+            .filter(|(id, _)| !keep.contains(*id))
+            .map(|(id, s)| (*id, Arc::clone(s)))
+            .collect();
+        for (_, slot) in slots {
+            slot.lock().await.held_until = None;
+        }
+        self.wake.notify_one();
     }
 
     pub(super) async fn close_all(&self) {
@@ -144,9 +176,10 @@ impl JumpConnections {
             let Ok(mut kept) = slot.try_lock() else {
                 continue;
             };
-            // A check running now holds a clone of the connection.
+            // A check running now holds a clone of the connection; a health check may hold it until its next run.
             let in_use = kept.connection.as_ref().is_some_and(|c| Arc::strong_count(c) > 1);
-            if !in_use && kept.used.is_none_or(|used| used.elapsed() >= idle) {
+            let held = kept.held_until.is_some_and(|until| Instant::now() < until);
+            if !in_use && !held && kept.used.is_none_or(|used| used.elapsed() >= idle) {
                 if let Some(connection) = kept.connection.take() {
                     connection.close().await;
                 }

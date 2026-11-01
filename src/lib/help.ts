@@ -102,7 +102,7 @@ export const HELP = {
     title: "Dashboard",
     body: [
       "Live CPU, memory, disk and network for this PC, its running VMs and the hosts you watch over SSH, with alerts and history.",
-      "The Map tab shows how VMs, networks, sessions and jump hosts connect.",
+      "The Checks tab runs health checks on a schedule; the Map tab shows how VMs, networks, sessions and jump hosts connect.",
     ],
   },
   "page.map": {
@@ -515,6 +515,21 @@ export const HELP = {
     body: [
       "Set the folder, port, user, login, jump host or environment of every selected session at once, and add or remove tags. Fields left as they are stay as each session has them.",
       "You see each session before and after first. If a login would send a vault password somewhere new, the vault password is asked once. Only SSH sessions take a login, and Telnet and serial take no jump host, so they keep theirs.",
+    ],
+  },
+  checks: {
+    title: "Health checks",
+    body: [
+      "Each check runs from this PC on its schedule, for the workspace shown: a ping, a TCP port, a web page, a certificate, a DNS name, or a service over SSH. A session behind a jump host is checked through it, on one kept connection.",
+      "A check is down after as many failed runs in a row as it allows; an alert rule tells you. Results are kept as long as the dashboard history.",
+    ],
+    link: { label: "Open the history setting", to: setting("history") },
+  },
+  checkTiming: {
+    title: "Timing",
+    body: [
+      "A check runs every 30 seconds to 1 hour, and waits up to its timeout for an answer. One failed run makes it Failing; as many failed runs in a row as you allow make it Down.",
+      "A run Remotely can't make, say with the vault locked, counts as neither.",
     ],
   },
   workspaces: {

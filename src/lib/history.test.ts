@@ -181,7 +181,7 @@ test("Settings says how long the history is kept, what it holds and what a prune
     at: "2026-10-25T08:00:00Z",
     retention: "days7" as const,
     before: "2026-10-18T08:00:00Z",
-    removed: { minutes: 1440, series: 1, alerts: 2 },
+    removed: { minutes: 1440, series: 1, alerts: 2, checkResults: 0 },
     compacted: false,
   };
   assert.equal(
@@ -189,8 +189,12 @@ test("Settings says how long the history is kept, what it holds and what a prune
     "Removed 1440 one-minute readings and 2 resolved alerts. 1 series no longer reporting went with them.",
   );
   assert.equal(
-    pruneSummary({ ...report, removed: { minutes: 0, series: 0, alerts: 0 } }),
+    pruneSummary({ ...report, removed: { minutes: 0, series: 0, alerts: 0, checkResults: 0 } }),
     "Nothing was old enough to remove.",
+  );
+  assert.equal(
+    pruneSummary({ ...report, removed: { minutes: 60, series: 0, alerts: 0, checkResults: 30 } }),
+    "Removed 60 one-minute readings and 30 health check results.",
   );
 });
 

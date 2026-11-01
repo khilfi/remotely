@@ -37,8 +37,11 @@
 //! Nothing here touches a VM or a remote host, so it skips the command bus, like the session library.
 //!
 //! QL-19: saved MultiExec groups go along with their member sessions ([`groups`]).
+//!
+//! MO-08: health check definitions go along with their sessions ([`checks`]); their results stay on this PC.
 
 mod catalog;
+mod checks;
 pub mod file;
 mod groups;
 mod stacks;
@@ -122,6 +125,9 @@ struct Payload {
     /// QL-19 saved MultiExec groups, by name. Files from before 0.5.0 have none.
     #[serde(default)]
     groups: Vec<groups::GroupEntry>,
+    /// MO-08 health check definitions, by name. Files from before 0.7.0 have none.
+    #[serde(default)]
+    checks: Vec<checks::CheckEntry>,
     /// VM-19 to VM-21. Files from before 0.5.0 have none.
     #[serde(default)]
     catalog: catalog::CatalogEntries,
@@ -429,6 +435,8 @@ pub struct ExportReport {
     pub folder_defaults: usize,
     /// QL-19 saved MultiExec groups.
     pub groups: usize,
+    /// MO-08 health checks.
+    pub checks: usize,
     /// VM-19 to VM-21: own sizes, images and launch templates.
     pub catalog: CatalogCounts,
     /// FD-06: notes of sessions, folders and VMs.
@@ -520,6 +528,8 @@ pub struct TransferPreview {
     pub folder_defaults: Vec<PreviewItem>,
     /// QL-19 saved MultiExec groups.
     pub groups: Vec<PreviewItem>,
+    /// MO-08 health checks.
+    pub checks: Vec<PreviewItem>,
     /// VM-19 to VM-21: sizes, images and launch templates.
     pub catalog: CatalogPreview,
     pub warnings: Vec<String>,
@@ -549,6 +559,9 @@ pub struct TransferCommit {
     /// QL-19 saved MultiExec groups.
     #[serde(default)]
     pub groups: Vec<ItemChoice>,
+    /// MO-08 health checks.
+    #[serde(default)]
+    pub checks: Vec<ItemChoice>,
     /// VM-19 to VM-21.
     #[serde(default)]
     pub catalog: CatalogChoices,
@@ -617,6 +630,8 @@ pub struct TransferReport {
     pub favourites: Counts,
     /// QL-19 saved MultiExec groups.
     pub groups: Counts,
+    /// MO-08 health checks.
+    pub checks: Counts,
     /// VM-19 to VM-21.
     pub catalog: CatalogReport,
     /// SS-07: port forwards saved with the imported sessions.
@@ -1238,6 +1253,9 @@ struct Decided {
     /// QL-19.
     group_rows: Vec<RowPlan<Uuid>>,
     group_actions: Vec<ItemAction>,
+    /// MO-08.
+    check_rows: Vec<RowPlan<Uuid>>,
+    check_actions: Vec<ItemAction>,
     catalog: catalog::CatalogDecided,
 }
 
@@ -1273,6 +1291,8 @@ pub struct Transfer {
     opened: Arc<Mutex<Option<Opened>>>,
     /// SS-04, AP-06: imported sessions that use passwords already here ask for the master password.
     bindings: Option<SecretBindings>,
+    /// MO-08: imported health checks are saved through it (checked, audited, and run at once).
+    checks: Option<crate::checks::Checks>,
 }
 
 impl Transfer {
@@ -1284,7 +1304,14 @@ impl Transfer {
             chosen: Arc::default(),
             opened: Arc::default(),
             bindings: None,
+            checks: None,
         }
+    }
+
+    /// MO-08: the health checks service, which saves imported checks.
+    pub fn with_checks(mut self, checks: crate::checks::Checks) -> Self {
+        self.checks = Some(checks);
+        self
     }
 
     pub fn with_bindings(mut self, bindings: SecretBindings) -> Self {
@@ -1539,6 +1566,8 @@ impl Transfer {
                 .collect(),
             // QL-19.
             groups: groups::entries(&self.store, ctx).await?,
+            // MO-08.
+            checks: checks::entries(&self.store, ctx).await?,
             catalog: catalog::export(&self.store, ctx).await?,
         };
         let report = ExportReport {
@@ -1553,6 +1582,7 @@ impl Transfer {
             container_hosts: payload.sessions.iter().filter(|s| !s.containers.is_empty()).count(),
             folder_defaults: payload.folders.iter().filter(|f| !f.defaults.is_empty()).count(),
             groups: payload.groups.len(),
+            checks: payload.checks.len(),
             catalog: payload.catalog.counts(),
             notes: payload.sessions.iter().filter(|s| s.note.is_some()).count()
                 + payload.folders.iter().filter(|f| f.note.is_some()).count()
@@ -1571,7 +1601,7 @@ impl Transfer {
             format!("{} (labels only, no values)", plural(report.secrets, "vault secret"))
         };
         let detail = format!(
-            "{}, {}, {}, {secrets}, {}, {}, {}, {}, {}, {}, to {}",
+            "{}, {}, {}, {secrets}, {}, {}, {}, {}, {}, {}, {}, to {}",
             plural(report.sessions, "session"),
             plural(report.folders, "folder"),
             plural(report.known_hosts, "known host key"),
@@ -1579,6 +1609,7 @@ impl Transfer {
             plural(report.forwards, "port forward"),
             plural(report.container_hosts, "container host"),
             plural(report.groups, "MultiExec group"),
+            checks::count_text(report.checks),
             report.catalog.describe(),
             plural(report.notes, "note"),
             report.path
@@ -1903,6 +1934,13 @@ impl Transfer {
             let rows = groups::plan(payload, &groups::here(&self.store, ctx).await?, &mapped, &ids_here);
             groups::preview(payload, rows, &local.sessions, &mapped)
         };
+        // MO-08: checks by name, their sessions as the default choices would leave them.
+        let checks = {
+            let mapped = groups::matched_here(payload, &plan_sessions(payload, &local));
+            let ids_here: HashSet<Uuid> = local.sessions.iter().map(|s| s.id).collect();
+            let rows = checks::plan(&self.store, ctx, payload, &mapped, &ids_here).await?;
+            checks::preview(payload, rows, &local.sessions)
+        };
 
         let folder_defaults = plan_folder_defaults(payload, &local)
             .into_iter()
@@ -1957,6 +1995,7 @@ impl Transfer {
             favourites,
             folder_defaults,
             groups,
+            checks,
             catalog,
             warnings,
         })
@@ -2033,6 +2072,8 @@ impl Transfer {
             folder_actions,
             group_rows,
             group_actions,
+            check_rows,
+            check_actions,
             catalog: catalog_decided,
         } = decided;
         let mut report = TransferReport::default();
@@ -2420,6 +2461,20 @@ impl Transfer {
                 }),
             }
         }
+        // 8. MO-08 health checks, each saved and audited by the checks service, on the sessions they became here.
+        checks::commit(
+            ctx,
+            &self.store,
+            self.checks.as_ref(),
+            &payload,
+            (&check_rows, &check_actions),
+            checks::Landed {
+                imported: &session_map,
+                here_before: &here_before,
+            },
+            &mut report,
+        )
+        .await?;
 
         let mut detail = format!(
             "from {}: sessions {}; folders {} added; folder defaults {}; known host keys {}; vault secrets {}; favourite commands {}",
@@ -2436,6 +2491,9 @@ impl Transfer {
         }
         if !payload.groups.is_empty() {
             detail.push_str(&format!("; MultiExec groups {}", report.groups.describe()));
+        }
+        if !payload.checks.is_empty() {
+            detail.push_str(&format!("; health checks {}", report.checks.describe()));
         }
         if report.forwards > 0 {
             detail.push_str(&format!(
@@ -2535,6 +2593,13 @@ impl Transfer {
         for row in &group_rows {
             group_actions.push(row.action(&group_choices, &payload.groups[row.index].name)?);
         }
+        // MO-08.
+        let check_rows = checks::plan(&self.store, ctx, payload, &mapped, &ids_here).await?;
+        let check_choices = chosen(&request.checks);
+        let mut check_actions = Vec::with_capacity(check_rows.len());
+        for row in &check_rows {
+            check_actions.push(row.action(&check_choices, &payload.checks[row.index].name)?);
+        }
         let catalog = catalog::decide(&payload.catalog, &local.catalog, &request.catalog)?;
         if secret_actions.iter().any(|a| *a != ItemAction::Skip) {
             match local.vault {
@@ -2557,6 +2622,8 @@ impl Transfer {
             folder_actions,
             group_rows,
             group_actions,
+            check_rows,
+            check_actions,
             catalog,
         })
     }

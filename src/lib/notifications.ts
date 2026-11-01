@@ -60,7 +60,12 @@ export function entryLink(entry: AppNotification): AppLink | null {
 export function fromAlertEvent(event: AlertEvent): NotificationInput | null {
   if (event.kind === "acknowledged") return null;
   const alert: Alert = event.alert;
-  const group = `alert:${alert.ruleId}:${alert.target.kind}:${alert.target.key}`;
+  // MO-08: one rule's alerts on every check are one line, so a lost network (every check down at once, then up) is
+  // one line that opens to show them, not one per check.
+  const group =
+    alert.target.kind === "check"
+      ? `alert:${alert.ruleId}:check:${event.kind}`
+      : `alert:${alert.ruleId}:${alert.target.kind}:${alert.target.key}`;
   if (event.kind === "resolved") {
     return {
       source: "alert",

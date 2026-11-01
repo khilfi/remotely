@@ -53,6 +53,8 @@
 //!     bus, which the job runner carries out on each host's kept connection (SFTP for files)
 //!   toolbox (FD-09): ping, trace route, DNS, port checks and certificates from this PC (behind a jump host, ports and
 //!     certificates from it) ──► adapters::net_tools; reads only. Wake-on-LAN is a command on the bus
+//!   checks (MO-08): health checks run on a schedule with the toolbox's probes for the shown workspace, their
+//!     results in a history pruned with MO-06's, their state read by MO-07's rules each round; edits audited
 //! ```
 //!
 //! Only [`command_bus::CommandBus`] can enqueue jobs, and adapters are only reachable through the job
@@ -64,6 +66,7 @@ pub mod bulk;
 pub mod capacity;
 pub mod capacity_plan;
 pub mod catalog;
+pub mod checks;
 pub mod command_bus;
 pub mod containers;
 pub mod convert;
@@ -329,6 +332,8 @@ pub struct Core {
     /// FD-09: ping, trace route, DNS, port checks and the certificate viewer (reads), and Wake-on-LAN's options;
     /// sending a magic packet goes through [`Core::bus`].
     pub toolbox: toolbox::Toolbox,
+    /// MO-08: health checks, their history and state; the shell starts the runner ([`checks::Checks::run`]).
+    pub checks: checks::Checks,
     /// MO-02, CT-01: parks refused background logins and caps them per host per hour.
     pub login_guard: LoginGuard,
     /// FD-03: presentation mode and its read-only lock (saved; the lock is shared through the store).
@@ -557,6 +562,13 @@ impl Core {
             terminals: terminals.clone(),
             host_details: host_details.clone(),
         });
+        // MO-08: health checks run the toolbox's probes for the shown workspace; each round's alert rules read them.
+        let checks = checks::Checks::new(checks::ChecksParts {
+            store: store.clone(),
+            current: current.clone(),
+            toolbox: toolbox.clone(),
+        });
+        alerts.set_checks(Arc::new(checks.clone()));
         let jobs = JobRunner::new(
             store.clone(),
             hypervisors.clone(),
@@ -710,7 +722,8 @@ impl Core {
             keys,
             transfer: Transfer::new(store.clone())
                 .with_policy(bus.policy())
-                .with_bindings(bindings.clone()),
+                .with_bindings(bindings.clone())
+                .with_checks(checks.clone()),
             bulk: BulkRuns::new(store.clone()).with_terminals(terminals.clone()),
             retention,
             containers,
@@ -733,6 +746,7 @@ impl Core {
                 .with_terminal_rules(terminal_rules.clone()),
             host_details,
             toolbox,
+            checks,
             login_guard,
             presentation,
             store,

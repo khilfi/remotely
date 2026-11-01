@@ -23,6 +23,7 @@ import {
   EyeIcon,
   EyeOffIcon,
   GaugeIcon,
+  HeartPulseIcon,
   InfoIcon,
   MonitorIcon,
   PauseIcon,
@@ -335,6 +336,16 @@ export function CommandPalette({
             <Icon /> {label}
           </CommandItem>
         ))}
+        {/* MO-08: a health check on the VM or session, in the Dashboard's Checks tab. */}
+        <CommandItem
+          value="toolbox add a health check"
+          onSelect={() => {
+            close();
+            onOpenLink({ kind: "checks", add: target });
+          }}
+        >
+          <HeartPulseIcon /> Add a check
+        </CommandItem>
       </CommandGroup>
     );
   }

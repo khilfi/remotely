@@ -58,7 +58,7 @@ export const PAGES: readonly PageInfo[] = [
 
 /** The tabs pages gained in 0.6.0, by their home page. */
 export type TemplatesHomeTab = "disks";
-export type DashboardTab = "metrics" | "map";
+export type DashboardTab = "metrics" | "checks" | "map";
 export type VaultTab = "secrets" | "knownHosts";
 
 /** Pages that are now a tab or view of another page, with their 0.5.0 shortcut when no page has taken it since. */

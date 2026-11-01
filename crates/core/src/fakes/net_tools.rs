@@ -114,6 +114,29 @@ impl FakeNetworkTools {
         self
     }
 
+    /// MO-08: a connection to `ip:port` does this from now on (a service going down and up between runs).
+    pub fn set_port(&self, ip: &str, port: u16, behaviour: FakePort) {
+        if let Ok(ip) = ip.parse() {
+            locks::lock(&self.ports).insert(SocketAddr::new(ip, port), behaviour);
+        }
+    }
+
+    /// MO-08: what the trust check says from now on.
+    pub fn set_verdict(&self, verdict: TrustVerdict) {
+        *locks::lock(&self.verdict) = Some(verdict);
+    }
+
+    /// Echoes to `to` get no answer from now on, or answer again.
+    pub fn set_silent(&self, to: &str, silent: bool) {
+        if let Ok(ip) = to.parse::<IpAddr>() {
+            let mut list = locks::lock(&self.silent);
+            list.retain(|a| *a != ip);
+            if silent {
+                list.push(ip);
+            }
+        }
+    }
+
     /// An adapter of this PC: up, not loopback, with one address.
     pub fn with_adapter(self, name: &str, address: &str, prefix: u8, dns: &[&str]) -> Self {
         let adapter = LocalAdapter {

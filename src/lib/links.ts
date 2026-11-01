@@ -44,7 +44,9 @@ export type AppLink =
   /** FD-06: the note of a session, VM or folder, in its sheet. */
   | { kind: "note"; noteKind: "session" | "vm" | "folder"; key: string; title?: string }
   /** FD-09: a tool of the Toolbox, with a session, VM or host filled in. */
-  | { kind: "toolbox"; tool: ToolboxTool; target?: ToolTarget };
+  | { kind: "toolbox"; tool: ToolboxTool; target?: ToolTarget }
+  /** MO-08: the Dashboard's Checks tab: a check's history, or a new check on a session, VM or host. */
+  | { kind: "checks"; checkId?: string; add?: ToolTarget };
 
 export type AppLinkKind = AppLink["kind"];
 
@@ -66,6 +68,7 @@ const KINDS: Record<AppLinkKind, readonly string[]> = {
   hostNetworks: [],
   note: ["noteKind", "key"],
   toolbox: ["tool"],
+  checks: [],
 };
 
 /** A value (from the core, say) is a link this version can open: a known kind with its text fields. */
@@ -147,5 +150,7 @@ export function linkLabel(link: AppLink): string {
       return "Show the note";
     case "toolbox":
       return "Open the toolbox";
+    case "checks":
+      return link.add ? "Add a check" : link.checkId ? "Show the check" : "Show the checks";
   }
 }

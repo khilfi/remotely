@@ -134,11 +134,13 @@ pub enum Change {
     /// QL-27: restoring from the trash, deleting from it for good, and emptying it. (Deleting an item moves it to the
     /// trash, refused by its own kind of edit.)
     Trash,
+    /// MO-08: adding, changing, pausing and deleting health checks. (Their runs only read, so they go on.)
+    HealthChecks,
 }
 
 impl Change {
     /// Every kind of edit, for tests.
-    pub const ALL: [Change; 24] = [
+    pub const ALL: [Change; 25] = [
         Change::Sessions,
         Change::VmLabels,
         Change::VmLinks,
@@ -163,6 +165,7 @@ impl Change {
         Change::Workspaces,
         Change::Notes,
         Change::Trash,
+        Change::HealthChecks,
     ];
 
     pub fn label(self) -> &'static str {
@@ -191,6 +194,7 @@ impl Change {
             Change::Workspaces => "Change or switch workspaces",
             Change::Notes => "Edit notes",
             Change::Trash => "Restore or delete items in the trash",
+            Change::HealthChecks => "Add, change, pause or delete health checks",
         }
     }
 }

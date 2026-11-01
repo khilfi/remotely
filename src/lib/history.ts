@@ -232,9 +232,12 @@ export function historySizeText(size: HistorySize): string {
 /** One sentence for the last prune. */
 export function pruneSummary(report: HistoryPruneReport): string {
   const { minutes, series, alerts } = report.removed;
-  if (minutes === 0 && series === 0 && alerts === 0) return "Nothing was old enough to remove.";
+  // MO-08: health check results, pruned with the history (an older core's report has none).
+  const checks = report.removed.checkResults ?? 0;
+  if (minutes === 0 && series === 0 && alerts === 0 && checks === 0) return "Nothing was old enough to remove.";
   const parts = [`${minutes} one-minute ${minutes === 1 ? "reading" : "readings"}`];
   if (alerts > 0) parts.push(`${alerts} resolved ${alerts === 1 ? "alert" : "alerts"}`);
+  if (checks > 0) parts.push(`${checks} health check ${checks === 1 ? "result" : "results"}`);
   const gone = series > 0 ? ` ${series} series no longer reporting went with them.` : "";
   return `Removed ${parts.join(" and ")}.${gone}${report.compacted ? " The database file was compacted." : ""}`;
 }

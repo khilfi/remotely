@@ -215,6 +215,7 @@ async fn try_commit(
                 folder_defaults: vec![],
                 favourites: vec![],
                 groups: vec![],
+                checks: vec![],
                 sessions: choices(sessions),
                 known_hosts: vec![],
                 secrets: vec![],
@@ -246,6 +247,7 @@ async fn commit_keeping(
                 folder_defaults: vec![],
                 favourites: vec![],
                 groups: vec![],
+                checks: vec![],
                 sessions: vec![],
                 known_hosts: vec![],
                 secrets: vec![],
@@ -641,6 +643,7 @@ async fn a_closed_preview_can_not_be_imported() {
                 folder_defaults: vec![],
                 favourites: vec![],
                 groups: vec![],
+                checks: vec![],
                 sessions: vec![],
                 known_hosts: vec![],
                 secrets: vec![],
@@ -866,6 +869,7 @@ async fn a_second_import_finds_what_is_there_and_the_user_decides_each_conflict(
                 folder_defaults: vec![],
                 favourites: vec![],
                 groups: vec![],
+                checks: vec![],
                 sessions: vec![],
                 known_hosts: vec![ItemChoice {
                     index: host_row.index,
@@ -899,6 +903,7 @@ async fn a_second_import_finds_what_is_there_and_the_user_decides_each_conflict(
                 folder_defaults: vec![],
                 favourites: vec![],
                 groups: vec![],
+                checks: vec![],
                 sessions: vec![
                     ItemChoice {
                         index: index_of(&preview, "web01"),
@@ -1095,6 +1100,7 @@ async fn secrets_wait_for_an_unlocked_vault_but_sessions_import_either_way() {
                 folder_defaults: vec![],
                 favourites: vec![],
                 groups: vec![],
+                checks: vec![],
                 sessions: vec![],
                 known_hosts: vec![],
                 secrets: vec![ItemChoice {

@@ -139,6 +139,7 @@ test("every event the core writes has plain words, and none is a code", () => {
     "audit_exported",
     "alert_acknowledged",
     "alert_rule_changed",
+    "check_changed",
     "dashboard_layout_changed",
     "multiexec_group_changed",
     "favourite_changed",

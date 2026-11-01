@@ -45,7 +45,7 @@ export interface HistoryPruneReport {
   at: string;
   retention: HistoryRetention;
   before: string;
-  removed: { minutes: number; series: number; alerts: number };
+  removed: { minutes: number; series: number; alerts: number; /** MO-08. */ checkResults: number };
   compacted: boolean;
 }
 
@@ -57,7 +57,8 @@ export interface HistoryInfo {
 
 // ---- MO-07: alerts ----
 
-export type AlertMetric = "cpu" | "memory" | "disk" | "swap" | "unreachable" | "stopped";
+export type AlertMetric =
+  "cpu" | "memory" | "disk" | "swap" | "unreachable" | "stopped" | "checkDown" | "checkSlow" | "certExpiring";
 export type Severity = "warning" | "critical";
 
 export type AlertScope =
@@ -66,7 +67,9 @@ export type AlertScope =
   | { kind: "tag"; tag: string }
   | { kind: "host"; sessionId: string }
   | { kind: "allHosts" }
-  | { kind: "thisPc" };
+  | { kind: "thisPc" }
+  | { kind: "allChecks" }
+  | { kind: "check"; checkId: string };
 
 export type AlertScopeKind = AlertScope["kind"];
 
@@ -74,7 +77,7 @@ export interface AlertRuleInput {
   name: string;
   metric: AlertMetric;
   scope: AlertScope;
-  /** Percent; null for unreachable and stopped. */
+  /** Percent; milliseconds for a slow check; days left for an expiring certificate; null for states. */
   threshold: number | null;
   forSecs: number;
   severity: Severity;
@@ -89,7 +92,7 @@ export interface AlertRule extends AlertRuleInput {
   updatedAt: string;
 }
 
-export type AlertTargetKind = "vm" | "session" | "thisPc";
+export type AlertTargetKind = "vm" | "session" | "thisPc" | "check";
 
 export interface AlertTarget {
   kind: AlertTargetKind;
@@ -138,6 +141,7 @@ export type WidgetKind =
   | { kind: "capacity" }
   | { kind: "thisPcMemory" }
   | { kind: "alerts" }
+  | { kind: "checks" }
   | { kind: "services"; sessionId?: string | null }
   | {
       kind: "chart";

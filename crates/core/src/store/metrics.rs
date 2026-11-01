@@ -20,11 +20,13 @@ pub struct HistoryPruned {
     pub series: u64,
     /// Resolved alerts.
     pub alerts: u64,
+    /// MO-08: health check results.
+    pub check_results: u64,
 }
 
 impl HistoryPruned {
     pub fn removed_any(&self) -> bool {
-        self.minutes > 0 || self.series > 0 || self.alerts > 0
+        self.minutes > 0 || self.series > 0 || self.alerts > 0 || self.check_results > 0
     }
 }
 
@@ -235,6 +237,20 @@ impl Store {
                 .execute(&self.pool)
                 .await?
                 .rows_affected();
+        // MO-08: health check results, by check (the table's key), before the same time.
+        let before_ms = before_minute.saturating_mul(60_000);
+        let checks: Vec<String> = sqlx::query_scalar("SELECT id FROM health_checks WHERE workspace_id = ?")
+            .bind(&ws)
+            .fetch_all(&self.pool)
+            .await?;
+        for id in checks {
+            pruned.check_results += sqlx::query("DELETE FROM health_check_results WHERE check_id = ? AND at < ?")
+                .bind(id)
+                .bind(before_ms)
+                .execute(&self.pool)
+                .await?
+                .rows_affected();
+        }
         Ok(pruned)
     }
 

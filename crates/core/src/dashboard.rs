@@ -1,9 +1,9 @@
 //! MO-16: the dashboard's layout: which widgets it shows, in what order and at what size, saved per workspace.
 //!
 //! Widgets sit on a grid of [`GRID_COLUMNS`] columns, in order, each [`Widget::w`] columns wide and
-//! [`Widget::h`] rows tall: the overview grid, host capacity, this PC's memory and the alert list (one of each
-//! at most), the services of a chosen SSH host (MO-14, read on the dashboard's kept connection) and charts of
-//! a chosen VM, host or this PC. The layout is a setting (`dashboard.layout`, per workspace, set aside by
+//! [`Widget::h`] rows tall: the overview grid, host capacity, this PC's memory, the alert list and MO-08's health
+//! checks (one of each at most), the services of a chosen SSH host (MO-14, read on the dashboard's kept connection)
+//! and charts of a chosen VM, host or this PC. The layout is a setting (`dashboard.layout`, per workspace, set aside by
 //! QL-15's repair when this version can't read it); null or missing means the default. Saving and resetting it
 //! are audited and refused by the FD-03 read-only lock; the editor saves once, when the owner is done.
 
@@ -77,6 +77,8 @@ pub enum WidgetKind {
     ThisPcMemory,
     /// MO-07: firing alerts and the history.
     Alerts,
+    /// MO-08: the health checks: how many are up, failing and down, and the ones that need a look.
+    Checks,
     /// MO-14: a watched SSH host's running and failed services. `None` until one is chosen.
     Services {
         #[serde(default)]
@@ -104,6 +106,7 @@ impl WidgetKind {
             WidgetKind::Capacity => "capacity".into(),
             WidgetKind::ThisPcMemory => "this PC's memory".into(),
             WidgetKind::Alerts => "alerts".into(),
+            WidgetKind::Checks => "health checks".into(),
             WidgetKind::Services { session_id } => match session_id {
                 Some(_) => "services of a host".into(),
                 None => "services (no host chosen)".into(),
@@ -128,6 +131,7 @@ impl WidgetKind {
             WidgetKind::Capacity => Some("capacity"),
             WidgetKind::ThisPcMemory => Some("this PC's memory"),
             WidgetKind::Alerts => Some("alert list"),
+            WidgetKind::Checks => Some("health checks"),
             WidgetKind::Services { .. } | WidgetKind::Chart { .. } => None,
         }
     }

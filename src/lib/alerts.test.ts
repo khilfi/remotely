@@ -111,3 +111,29 @@ test("a round's alerts make one notification", () => {
   assert.match(text?.body ?? "", /^a: CPU at 97%/);
   assert.match(text?.body ?? "", /and 2 more$/);
 });
+
+test("MO-08: rules on checks have their own scopes, units and words", () => {
+  assert.equal(scopeAllows("allChecks", "checkDown"), true);
+  assert.equal(scopeAllows("allChecks", "cpu"), false);
+  assert.equal(scopeAllows("allVms", "certExpiring"), false);
+  assert.equal(scopeAllows("check", "checkSlow"), true);
+  const slow = { ...newRuleInput(), name: "slow", metric: "checkSlow" as const, scope: { kind: "allChecks" as const } };
+  assert.equal(ruleProblem({ ...slow, threshold: 500 }), null);
+  assert.match(ruleProblem({ ...slow, threshold: 0 })!, /600,000 ms/);
+  const expiring = { ...slow, metric: "certExpiring" as const, threshold: 400 };
+  assert.match(ruleProblem(expiring)!, /1 to 365/);
+  assert.equal(ruleProblem({ ...expiring, threshold: 14 }), null);
+  assert.match(ruleProblem({ ...slow, scope: { kind: "check" as const, checkId: "" }, threshold: 500 })!, /check/);
+  assert.equal(conditionText({ metric: "checkDown", threshold: null, forSecs: 0 }), "Down");
+  assert.equal(
+    conditionText({ metric: "checkSlow", threshold: 500, forSecs: 60 }),
+    "Check slow above 500 ms for 1 minute",
+  );
+  assert.equal(
+    conditionText({ metric: "certExpiring", threshold: 14, forSecs: 0 }),
+    "Certificate expiring in under 14 days",
+  );
+  assert.equal(scopeText({ kind: "check", checkId: "c1" }, { check: () => "web" }), "the check web");
+  assert.equal(scopeOfKind("check", { kind: "allVms" }).kind, "check");
+  assert.equal(cleanRuleInput({ ...slow, metric: "checkDown", threshold: 5 }).threshold, null);
+});
