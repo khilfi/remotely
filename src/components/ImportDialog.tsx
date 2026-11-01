@@ -51,6 +51,7 @@ import {
 } from "@/lib/api";
 import { flattenFolders, folderPath } from "@/lib/folders";
 import { plural } from "@/lib/format";
+import { kindAddress, kindLabel } from "@/lib/session-kinds";
 import { cn } from "@/lib/utils";
 
 interface Props {
@@ -123,6 +124,8 @@ const TOP = "top";
 
 function address(row: ImportRow) {
   const c = row.candidate;
+  // SS-12: another kind says so, with its own port or (serial) its COM port and line.
+  if (c.kind && c.kind.protocol !== "ssh") return `${kindAddress(c)} (${kindLabel(c.kind.protocol)})`;
   const host = c.host.includes(":") ? `[${c.host}]` : c.host;
   return `${c.username ? `${c.username}@` : ""}${host}${c.port === 22 ? "" : `:${c.port}`}`;
 }

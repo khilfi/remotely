@@ -25,7 +25,8 @@ use remotely_core::fakes::{FakeNetwork, FakeNetworkTools, FakeVmware};
 use remotely_core::known_hosts::HostKey;
 use remotely_core::metrics::history::HistoryRange;
 use remotely_core::presentation::Presentation;
-use remotely_core::sessions::{SessionAuth, SessionInput};
+use remotely_core::sessions::kinds::RdpOptions;
+use remotely_core::sessions::{SessionAuth, SessionInput, SessionKind};
 use remotely_core::toolbox::ProbeTarget;
 use remotely_core::transfer::{ExportRequest, ItemAction, TransferCommit};
 use remotely_core::vault::{SecretKind, SecretString};
@@ -80,6 +81,7 @@ fn session_input(name: &str, host: &str, port: u16, jump: Option<Uuid>) -> Sessi
         color: None,
         tags: vec![],
         vm_id: None,
+        kind: Default::default(),
     }
 }
 
@@ -175,6 +177,30 @@ async fn checks_are_checked_audited_and_refused_by_the_read_only_lock() {
         .await
         .is_err());
 
+    // SS-12: a service check reads a systemd unit over SSH; other checks take any kind of session.
+    let mut rdp = session_input("win01", "win01.test", 3389, None);
+    rdp.kind = SessionKind::Rdp(RdpOptions::default());
+    let rdp = core.sessions.create(&core.ctx(), rdp).await.unwrap();
+    let refused = core
+        .checks
+        .create(check(
+            "spooler",
+            ProbeTarget::Session { session_id: rdp.id },
+            CheckSpec::Service { unit: "nginx".into() },
+        ))
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(refused.contains("over SSH"), "{refused}");
+    core.checks
+        .create(check(
+            "rdp port",
+            ProbeTarget::Session { session_id: rdp.id },
+            CheckSpec::Tcp { port: 3389 },
+        ))
+        .await
+        .unwrap();
+
     // While presenting with the lock, edits are refused; runs (reads) go on.
     core.presentation
         .set(Presentation {
@@ -190,7 +216,7 @@ async fn checks_are_checked_audited_and_refused_by_the_read_only_lock() {
         .is_err());
     assert!(core.checks.set_paused(made.id, true).await.is_err());
     assert!(core.checks.delete(made.id).await.is_err());
-    assert_eq!(core.checks.run_due().await.unwrap(), 1, "a run only reads");
+    assert_eq!(core.checks.run_due().await.unwrap(), 2, "a run only reads");
     core.presentation
         .set(Presentation {
             enabled: false,
@@ -205,7 +231,7 @@ async fn checks_are_checked_audited_and_refused_by_the_read_only_lock() {
     let audit = core.store.recent_audit(&core.ctx(), 2).await.unwrap();
     assert_eq!(audit[0].action, "Deleted a health check");
     assert_eq!(audit[1].action, "Paused a health check");
-    assert!(core.checks.list().await.unwrap().is_empty());
+    assert_eq!(core.checks.list().await.unwrap().len(), 1, "the RDP port check stays");
 }
 
 // ---- Runs, history and alerts ------------------------------------------------------------------------------------

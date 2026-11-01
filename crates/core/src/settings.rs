@@ -27,23 +27,25 @@ use crate::presentation::PRESENTATION_KEY;
 use crate::retention::{Retention, RETENTION_KEY};
 use crate::schedules::{ChainLimits, CHAIN_LIMITS_KEY};
 use crate::store::{self, NewAuditEntry, Store};
+use crate::terminal::console::VNC_VIEWER_PATH_KEY;
 use crate::terminal::{TerminalSettings, TERMINAL_SETTINGS_KEY};
 use crate::updates::{UPDATE_TOKEN_EXPIRES_KEY, UPDATE_TOKEN_KEY};
 use crate::vault::SecretId;
 use crate::vm_settings::ADDED_VMS_KEY;
 use crate::workspaces::CURRENT_WORKSPACE_KEY;
 
-/// FD-02: this PC's settings, the same in every workspace: where the tools are and which VMs the PC has, how many
-/// jobs it runs at once, update checks, how long the journal and the dashboard's history are kept, the terminal and
-/// presentation settings, the approval rules (one safety policy for the one user), the snapshot chain warnings, and
-/// which workspace was shown last.
-pub const MACHINE_KEYS: [&str; 21] = [
+/// FD-02: this PC's settings, the same in every workspace: where the tools are (SS-12: the VNC viewer too) and which
+/// VMs the PC has, how many jobs it runs at once, update checks, how long the journal and the dashboard's history are
+/// kept, the terminal and presentation settings, the approval rules (one safety policy for the one user), the
+/// snapshot chain warnings, and which workspace was shown last.
+pub const MACHINE_KEYS: [&str; 22] = [
     store::POLICY_RULES_KEY,
     store::VMRUN_PATH_KEY,
     store::OVFTOOL_PATH_KEY,
     store::VBOXMANAGE_PATH_KEY,
     store::QEMU_IMG_PATH_KEY,
     DOCKER_PATH_KEY,
+    VNC_VIEWER_PATH_KEY,
     store::SCAN_FOLDERS_KEY,
     ADDED_VMS_KEY,
     store::POWER_ON_LIMIT_KEY,

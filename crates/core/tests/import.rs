@@ -12,7 +12,8 @@ use remotely_core::fakes::ssh_server::{generate_key, private_key_text};
 use remotely_core::fakes::FakeVmware;
 use remotely_core::import::{self, ImportRequest, ImportSource, RowStatus};
 use remotely_core::policy::{ActionKind, Tier};
-use remotely_core::sessions::{SessionAuth, SessionFilter, SessionInput};
+use remotely_core::sessions::kinds::{FlowControl, LineEnding, SerialOptions, TelnetOptions};
+use remotely_core::sessions::{SessionAuth, SessionFilter, SessionInput, SessionKind};
 use remotely_core::{Core, CoreError};
 
 async fn core() -> Core {
@@ -36,6 +37,7 @@ fn existing(name: &str, host: &str, user: &str) -> SessionInput {
         color: None,
         tags: vec![],
         vm_id: None,
+        kind: Default::default(),
     }
 }
 
@@ -60,7 +62,7 @@ const PUTTY_REG: &str = r#"Windows Registry Editor Version 5.00
 
 [HKEY_CURRENT_USER\Software\SimonTatham\PuTTY\Sessions\router]
 "HostName"="192.0.2.1"
-"Protocol"="telnet"
+"Protocol"="rlogin"
 
 [HKEY_CURRENT_USER\Software\SimonTatham\PuTTY\Sessions\jump]
 "HostName"="192.0.2.20"
@@ -94,7 +96,8 @@ async fn a_putty_list_previews_with_duplicates_and_conflicts_then_imports_the_pi
         .await
         .unwrap();
     assert_eq!(preview.skipped.len(), 1, "{:?}", preview.skipped);
-    assert!(preview.skipped[0].reason.contains("telnet"));
+    // SS-12: Telnet and serial sessions come in as their kinds; rlogin is still left out.
+    assert!(preview.skipped[0].reason.contains("rlogin"));
     let row = |name: &str| preview.rows.iter().find(|r| r.candidate.name == name).unwrap();
     assert!(matches!(&row("web01").status, RowStatus::NameConflict { rename_to, .. } if rename_to == "web01 (2)"));
     assert!(row("web01").selected);
@@ -557,15 +560,48 @@ async fn the_putty_sample_imports_as_its_guide_says() {
             "web01 | alice@web01.example.com:22 |  |  | None | password | - | - | -",
             r"db01 (Customer A) | bob@192.0.2.20:2222 |  |  | None | key C:\Users\alice\.ssh\db01.ppk | - | alice@bastion.example.org | uptime",
             "bastion | alice@bastion.example.org:22 |  |  | None | password | - | - | -",
+            "switch01 | switch01.test:23 |  |  | None | password | - | - | -",
+            "console01 | COM3:1 |  |  | None | password | - | - | -",
         ],
         "Default Settings is no session"
     );
+    // SS-12: Telnet and serial sessions come in as their kinds, with their settings.
+    let kinds: Vec<&str> = preview.rows.iter().map(|r| r.candidate.kind.protocol()).collect();
+    assert_eq!(kinds, ["ssh", "ssh", "ssh", "telnet", "serial"]);
+    assert_eq!(
+        preview.rows[3].candidate.kind,
+        SessionKind::Telnet(TelnetOptions {
+            line_ending: LineEnding::CrLf
+        })
+    );
+    assert!(matches!(
+        preview.rows[4].candidate.kind,
+        SessionKind::Serial(SerialOptions {
+            speed: 115_200,
+            data_bits: 8,
+            flow_control: FlowControl::None,
+            ..
+        })
+    ));
     let skipped: Vec<(&str, &str)> = preview
         .skipped
         .iter()
         .map(|s| (s.name.as_str(), s.reason.as_str()))
         .collect();
-    assert_eq!(skipped, [("switch01", "telnet session: only SSH is imported")]);
+    assert_eq!(
+        skipped,
+        [(
+            "old01",
+            "rlogin session: only SSH, Telnet and serial sessions are imported"
+        )]
+    );
+    let sessions = core
+        .sessions
+        .list(&core.ctx(), &SessionFilter::default())
+        .await
+        .unwrap();
+    let console = sessions.iter().find(|s| s.name == "console01").unwrap();
+    assert_eq!((console.protocol.as_str(), console.host.as_str()), ("serial", "COM3"));
 }
 
 #[tokio::test]
@@ -583,11 +619,21 @@ async fn the_mobaxterm_sample_imports_as_its_guide_says() {
             format!(
                 r"db01 | bob@192.0.2.20:2222 | Customer A/DB |  | None | key {home}\.ssh\id_ed25519 | - | alice@bastion.example.org | sudo -i; uptime"
             ),
+            "rdp01 | alice@198.51.100.30:3389 | Customer A/DB |  | None | password | - | - | -".to_owned(),
+            "switch01 | switch01.test:23 | Customer A/Network |  | None | password | - | - | -".to_owned(),
+            "vnc01 | 198.51.100.31:5901 | Customer A/Network |  | None | password | - | - | -".to_owned(),
+            "console01 | COM3:1 | Customer A/Network |  | None | password | - | - | -".to_owned(),
         ]
     );
+    // SS-12: Telnet, RDP, VNC and serial sessions come in as their kinds.
+    let kinds: Vec<&str> = preview.rows.iter().map(|r| r.candidate.kind.protocol()).collect();
+    assert_eq!(kinds, ["ssh", "ssh", "ssh", "rdp", "telnet", "vnc", "serial"]);
     assert_eq!(preview.skipped.len(), 1);
-    assert_eq!(preview.skipped[0].name, "rdp01");
-    assert_eq!(preview.skipped[0].reason, "not an SSH session (MobaXterm type 4)");
+    assert_eq!(preview.skipped[0].name, "ftp01");
+    assert_eq!(
+        preview.skipped[0].reason,
+        "not an SSH, Telnet, RDP, VNC or serial session (MobaXterm type 6)"
+    );
 }
 
 #[tokio::test]

@@ -996,6 +996,41 @@ impl Core {
         Ok(in_use)
     }
 
+    /// SS-12: the VNC viewer in use (the path saved in Settings, `REMOTELY_VNC_VIEWER`, or a viewer's default
+    /// folder), or `None` when none was found.
+    pub async fn vnc_viewer_path(&self) -> Result<Option<PathBuf>> {
+        self.terminals.vnc_viewer(&self.ctx()).await
+    }
+
+    /// SS-12: the VNC viewer path saved in Settings, if any.
+    pub async fn saved_vnc_viewer_path(&self) -> Result<Option<PathBuf>> {
+        self.terminals.saved_vnc_viewer(&self.ctx()).await
+    }
+
+    /// SS-12: saves the VNC viewer's path (`None` = find it: `REMOTELY_VNC_VIEWER`, then the viewers' default
+    /// folders). The path must be an existing viewer `.exe` on this PC. Audited, since it decides which program a VNC
+    /// session starts.
+    pub async fn set_vnc_viewer_path(&self, path: Option<PathBuf>) -> Result<Option<PathBuf>> {
+        self.store.read_only().check(Change::Settings)?;
+        if let Some(path) = &path {
+            adapters::launcher::validate_vnc_viewer_path(path)?;
+        }
+        let as_text = path.as_ref().map(|p| p.display().to_string());
+        self.store
+            .put_setting(&self.ctx(), terminal::console::VNC_VIEWER_PATH_KEY, &as_text)
+            .await?;
+        let in_use = self.vnc_viewer_path().await?;
+        let detail = format!(
+            "saved: {}; in use: {}",
+            as_text.as_deref().unwrap_or("find automatically"),
+            in_use
+                .as_ref()
+                .map_or_else(|| "not found".to_owned(), |p| p.display().to_string())
+        );
+        self.audit_setting("Set the VNC viewer path", &detail).await?;
+        Ok(in_use)
+    }
+
     /// VM-18: path of the VBoxManage.exe in use, or `None` when VirtualBox was not found.
     pub fn vboxmanage_path(&self) -> Option<PathBuf> {
         self.virtualbox.tool_path()

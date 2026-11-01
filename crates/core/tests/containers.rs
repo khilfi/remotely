@@ -53,6 +53,7 @@ fn input(name: &str, env: Environment, auth: SessionAuth) -> SessionInput {
         color: None,
         tags: vec![],
         vm_id: None,
+        kind: Default::default(),
     }
 }
 

@@ -119,6 +119,7 @@ fn remotely_could_not(err: &CoreError) -> bool {
             | CoreError::UnknownTarget(_)
             | CoreError::NotInWorkspace(_)
             | CoreError::VmUnassigned(_)
+            | CoreError::WrongSessionKind { .. }
             | CoreError::Cancelled
             | CoreError::Db(_)
     )

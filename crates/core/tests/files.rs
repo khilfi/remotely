@@ -113,6 +113,7 @@ async fn fake(files: FakeFiles, environment: Environment) -> (Fake, Uuid) {
                 color: None,
                 tags: vec![],
                 vm_id: None,
+                kind: Default::default(),
             },
         )
         .await
@@ -635,6 +636,7 @@ async fn ssh_session(core: &Core, server: &TestSshServer, password: &str, startu
                 color: None,
                 tags: vec![],
                 vm_id: None,
+                kind: Default::default(),
             },
         )
         .await
@@ -1213,6 +1215,7 @@ async fn hook_session(
                 color: None,
                 tags: vec![],
                 vm_id: None,
+                kind: Default::default(),
             },
         )
         .await

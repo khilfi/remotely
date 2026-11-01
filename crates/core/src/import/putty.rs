@@ -1,11 +1,14 @@
 //! PuTTY sessions (SS-02), from the live registry or a regedit `.reg` export.
 //!
 //! PuTTY keeps each saved session under `HKCU\Software\SimonTatham\PuTTY\Sessions\<name>`, with the
-//! name percent-encoded (`%20` is a space). Only SSH sessions are imported. PuTTY never stores
+//! name percent-encoded (`%20` is a space). SSH sessions are imported, and (SS-12) Telnet and serial ones as those
+//! kinds; rlogin and raw ones are left out. PuTTY never stores
 //! passwords; its proxy password is not read.
 
 use super::text::utf8_or_ansi;
 use super::{finish, split_address, Candidate, CandidateAuth, Parsed, Skipped};
+use crate::sessions::kinds::{FlowControl, LineEnding, Parity, SerialOptions, StopBits, TelnetOptions};
+use crate::sessions::SessionKind;
 
 /// PuTTY's template for new sessions. Not a session, so it is left out without a mention.
 const DEFAULT_SETTINGS: &str = "Default Settings";
@@ -40,6 +43,22 @@ pub struct PuttyValues {
     pub proxy_port: Option<u32>,
     /// `ProxyUsername`.
     pub proxy_username: Option<String>,
+    /// SS-12 `TelnetRet`: 1 (the default) sends Telnet's new line (CR LF) for Enter, 0 a CR.
+    pub telnet_ret: Option<u32>,
+    /// SS-12 `LocalEcho`: 0 auto, 1 on, 2 off.
+    pub local_echo: Option<u32>,
+    /// SS-12 `SerialLine`: `COM1`.
+    pub serial_line: Option<String>,
+    /// SS-12 `SerialSpeed`, in bits per second.
+    pub serial_speed: Option<u32>,
+    /// SS-12 `SerialDataBits`.
+    pub serial_data_bits: Option<u32>,
+    /// SS-12 `SerialStopHalfbits`: 2 is one stop bit, 3 one and a half, 4 two.
+    pub serial_stop_halfbits: Option<u32>,
+    /// SS-12 `SerialParity`: 0 none, 1 odd, 2 even, 3 mark, 4 space.
+    pub serial_parity: Option<u32>,
+    /// SS-12 `SerialFlowControl`: 0 none, 1 XON/XOFF, 2 RTS/CTS, 3 DSR/DTR.
+    pub serial_flow_control: Option<u32>,
 }
 
 /// A session key name as PuTTY shows it: every `%XX` decoded (UTF-8, or the ANSI code page).
@@ -73,9 +92,17 @@ pub fn candidate(key_name: &str, values: &PuttyValues) -> Result<Candidate, Skip
     if name == DEFAULT_SETTINGS {
         return Err(skip("PuTTY's default settings, not a session".into()));
     }
-    let protocol = value(&values.protocol).unwrap_or("ssh");
-    if !protocol.eq_ignore_ascii_case("ssh") {
-        return Err(skip(format!("{protocol} session: only SSH is imported")));
+    let protocol = value(&values.protocol).unwrap_or("ssh").to_ascii_lowercase();
+    match protocol.as_str() {
+        "ssh" => {}
+        // SS-12: Telnet and serial sessions come in as those kinds.
+        "telnet" => return telnet(name, values),
+        "serial" => return serial(name, values),
+        other => {
+            return Err(skip(format!(
+                "{other} session: only SSH, Telnet and serial sessions are imported"
+            )))
+        }
     }
     // PuTTY reads `user@host` in the host name (the last @) and that user wins over UserName. It
     // trims a `:port` off rather than using it.
@@ -114,6 +141,84 @@ pub fn candidate(key_name: &str, values: &PuttyValues) -> Result<Candidate, Skip
         },
         _ => c.notes.push("PuTTY's proxy setting was not imported".into()),
     }
+    finish(c)
+}
+
+/// SS-12: a PuTTY Telnet session: its host, port (23 when none) and what Enter sends.
+fn telnet(name: String, values: &PuttyValues) -> Result<Candidate, Skipped> {
+    let skip = |reason: String| Skipped::new(name.clone(), reason);
+    let address = split_address(value(&values.host_name).unwrap_or(""));
+    if address.host.is_empty() {
+        return Err(skip("no host name".into()));
+    }
+    let port = match values.port {
+        None => 23,
+        Some(port) => u16::try_from(port)
+            .ok()
+            .filter(|p| *p != 0)
+            .ok_or_else(|| skip(format!("port {port} is not valid")))?,
+    };
+    let mut c = Candidate::new(name.clone(), address.host);
+    c.port = port;
+    c.username = address.user.or_else(|| value(&values.user_name).map(str::to_owned));
+    c.kind = SessionKind::Telnet(TelnetOptions {
+        line_ending: if values.telnet_ret == Some(0) {
+            LineEnding::Cr
+        } else {
+            LineEnding::CrLf
+        },
+    });
+    if values.proxy_method.unwrap_or(0) != 0 {
+        c.notes.push("PuTTY's proxy setting was not imported".into());
+    }
+    finish(c)
+}
+
+/// SS-12: a PuTTY serial session: its COM port and line settings.
+fn serial(name: String, values: &PuttyValues) -> Result<Candidate, Skipped> {
+    let skip = |reason: String| Skipped::new(name.clone(), reason);
+    let line = value(&values.serial_line).ok_or_else(|| skip("no serial line".into()))?;
+    let defaults = SerialOptions::default();
+    let mut notes = Vec::new();
+    let parity = match values.serial_parity.unwrap_or(0) {
+        0 => Parity::None,
+        1 => Parity::Odd,
+        2 => Parity::Even,
+        3 => Parity::Mark,
+        4 => Parity::Space,
+        other => {
+            notes.push(format!(
+                "PuTTY's parity {other} is not one Remotely knows, so it has none"
+            ));
+            Parity::None
+        }
+    };
+    let stop_bits = match values.serial_stop_halfbits.unwrap_or(2) {
+        3 => StopBits::OnePointFive,
+        4 => StopBits::Two,
+        _ => StopBits::One,
+    };
+    let flow_control = match values.serial_flow_control.unwrap_or(1) {
+        0 => FlowControl::None,
+        2 => FlowControl::RtsCts,
+        3 => FlowControl::DsrDtr,
+        _ => FlowControl::XonXoff,
+    };
+    let options = SerialOptions {
+        speed: values.serial_speed.unwrap_or(defaults.speed),
+        data_bits: values
+            .serial_data_bits
+            .and_then(|b| u8::try_from(b).ok())
+            .unwrap_or(defaults.data_bits),
+        parity,
+        stop_bits,
+        flow_control,
+        line_ending: LineEnding::Cr,
+        local_echo: values.local_echo == Some(1),
+    };
+    let mut c = Candidate::new(name, line);
+    c.kind = SessionKind::Serial(options);
+    c.notes.extend(notes);
     finish(c)
 }
 
@@ -284,6 +389,14 @@ fn apply(values: &mut PuttyValues, name: &str, data: RegData) {
         "proxyhost" => values.proxy_host = text,
         "proxyport" => values.proxy_port = dword,
         "proxyusername" => values.proxy_username = text,
+        "telnetret" => values.telnet_ret = dword,
+        "localecho" => values.local_echo = dword,
+        "serialline" => values.serial_line = text,
+        "serialspeed" => values.serial_speed = dword,
+        "serialdatabits" => values.serial_data_bits = dword,
+        "serialstophalfbits" => values.serial_stop_halfbits = dword,
+        "serialparity" => values.serial_parity = dword,
+        "serialflowcontrol" => values.serial_flow_control = dword,
         _ => {}
     }
 }
@@ -332,6 +445,14 @@ pub fn read_registry() -> std::io::Result<Parsed> {
             proxy_host: text("ProxyHost"),
             proxy_port: dword("ProxyPort"),
             proxy_username: text("ProxyUsername"),
+            telnet_ret: dword("TelnetRet"),
+            local_echo: dword("LocalEcho"),
+            serial_line: text("SerialLine"),
+            serial_speed: dword("SerialSpeed"),
+            serial_data_bits: dword("SerialDataBits"),
+            serial_stop_halfbits: dword("SerialStopHalfbits"),
+            serial_parity: dword("SerialParity"),
+            serial_flow_control: dword("SerialFlowControl"),
         };
         parsed.push(candidate(&key_name, &values));
     }
@@ -419,11 +540,14 @@ mod tests {
 
     #[test]
     fn other_protocols_defaults_and_bad_entries_are_skipped() {
-        let mut telnet = values("192.0.2.20");
-        telnet.protocol = Some("telnet".into());
-        let skipped = candidate("switch%2001", &telnet).unwrap_err();
+        let mut rlogin = values("192.0.2.20");
+        rlogin.protocol = Some("rlogin".into());
+        let skipped = candidate("switch%2001", &rlogin).unwrap_err();
         assert_eq!(skipped.name, "switch 01");
-        assert_eq!(skipped.reason, "telnet session: only SSH is imported");
+        assert_eq!(
+            skipped.reason,
+            "rlogin session: only SSH, Telnet and serial sessions are imported"
+        );
 
         let mut no_protocol = values("web01.example.com");
         no_protocol.protocol = None;
@@ -530,7 +654,7 @@ mod tests {
         let parsed = parse_reg(REG);
         assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
         let names: Vec<_> = parsed.candidates.iter().map(|c| c.name.as_str()).collect();
-        assert_eq!(names, ["web 01", "DB Lab", "bad port"]);
+        assert_eq!(names, ["web 01", "DB Lab", "switch", "bad port"]);
 
         let web = &parsed.candidates[0];
         assert_eq!(web.host, "web01.example.com");
@@ -548,12 +672,63 @@ mod tests {
         assert_eq!(db.username.as_deref(), Some("bob"));
         assert_eq!(db.jump.as_deref(), Some("bastion.example.org"));
 
-        // A wrongly typed port counts as missing.
-        assert_eq!(parsed.candidates[2].port, 22);
+        // SS-12: a Telnet session comes in as one, on Telnet's port.
+        let switch = &parsed.candidates[2];
+        assert_eq!((switch.host.as_str(), switch.port), ("192.0.2.40", 23));
+        assert_eq!(switch.kind, SessionKind::Telnet(TelnetOptions::default()));
 
-        assert_eq!(parsed.skipped.len(), 1);
-        assert_eq!(parsed.skipped[0].name, "switch");
-        assert_eq!(parsed.skipped[0].reason, "telnet session: only SSH is imported");
+        // A wrongly typed port counts as missing.
+        assert_eq!(parsed.candidates[3].port, 22);
+        assert!(parsed.skipped.is_empty(), "{:?}", parsed.skipped);
+    }
+
+    #[test]
+    fn serial_sessions_bring_their_line_settings() {
+        let v = PuttyValues {
+            protocol: Some("serial".into()),
+            serial_line: Some("com4".into()),
+            serial_speed: Some(115_200),
+            serial_data_bits: Some(7),
+            serial_parity: Some(2),
+            serial_stop_halfbits: Some(4),
+            serial_flow_control: Some(2),
+            local_echo: Some(1),
+            ..Default::default()
+        };
+        let c = candidate("console", &v).unwrap();
+        assert_eq!(c.host, "COM4");
+        assert_eq!(
+            c.kind,
+            SessionKind::Serial(SerialOptions {
+                speed: 115_200,
+                data_bits: 7,
+                parity: Parity::Even,
+                stop_bits: StopBits::Two,
+                flow_control: FlowControl::RtsCts,
+                line_ending: LineEnding::Cr,
+                local_echo: true,
+            })
+        );
+        // PuTTY's own default flow control is XON/XOFF.
+        let plain = PuttyValues {
+            protocol: Some("serial".into()),
+            serial_line: Some("COM1".into()),
+            ..Default::default()
+        };
+        assert!(matches!(
+            candidate("plain", &plain).unwrap().kind,
+            SessionKind::Serial(SerialOptions {
+                flow_control: FlowControl::XonXoff,
+                speed: 9600,
+                ..
+            })
+        ));
+        let bad = PuttyValues {
+            protocol: Some("serial".into()),
+            serial_line: Some("/dev/ttyS0".into()),
+            ..Default::default()
+        };
+        assert!(candidate("bad", &bad).is_err());
     }
 
     #[test]

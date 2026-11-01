@@ -110,6 +110,7 @@ fn session_input(name: &str, host: &str, port: u16, auth: SessionAuth) -> Sessio
         color: None,
         tags: vec![],
         vm_id: None,
+        kind: Default::default(),
     }
 }
 

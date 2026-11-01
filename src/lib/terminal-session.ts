@@ -68,15 +68,19 @@ import {
   type HostKey,
   type KnownHost,
   type QuickConnectRequest,
+  type SessionKind,
   type SessionRecord,
   type TerminalAlert,
   type TerminalEvent,
   type TerminalRule,
   type TerminalStatus,
+  type PaneKind,
   type TunnelInfo,
   type TunnelStart,
+  type WindowState,
 } from "@/lib/api";
 import { compileRules, rulesKey, type CompiledRule } from "@/lib/highlight-rules";
+import { kindAddress } from "@/lib/session-kinds";
 import { pasteHasLineBreak, pastePreview, sanitizePaste, type PastePreview } from "@/lib/paste";
 import { Highlighter } from "@/lib/terminal-highlights";
 import { InputOrigin } from "@/lib/terminal-input";
@@ -151,6 +155,10 @@ export interface PaneSnapshot {
   folder: FolderInfo | null;
   /** SS-07: the session's tunnels and their state, once the core has said. */
   tunnels: TunnelInfo[] | null;
+  /** SS-12: what the pane is for. */
+  paneKind: PaneKind;
+  /** SS-12: a tunnel tab's window, once the core says. */
+  window: WindowState | null;
 }
 
 /** QL-05 settings a pane applies live. */
@@ -238,8 +246,12 @@ export function factsTitle(facts: HostFacts | null): string | null {
   return hostname ?? ip;
 }
 
-/** `alice@web01.example.com:2222`; the port only when it is not 22. */
-export function sessionAddress(s: Pick<SessionRecord, "username" | "host" | "port">) {
+/**
+ * `alice@web01.example.com:2222`; the port only when it is not 22. SS-12: another kind's own port always shows
+ * (`win01:3389`), and a serial session is its COM port and line (`COM3 · 9600 8N1`).
+ */
+export function sessionAddress(s: Pick<SessionRecord, "username" | "host" | "port"> & { kind?: SessionKind }) {
+  if (s.kind && s.kind.protocol !== "ssh") return kindAddress(s);
   return `${s.username ? `${s.username}@` : ""}${s.host}${s.port === 22 ? "" : `:${s.port}`}`;
 }
 
@@ -337,6 +349,8 @@ export class PaneSession {
       searchResults: null,
       folder: null,
       tunnels: null,
+      paneKind: "ssh",
+      window: null,
     };
     this.element = document.createElement("div");
     this.element.className = "relative h-full w-full";
@@ -717,6 +731,22 @@ export class PaneSession {
     return this.snapshot.sessionId;
   }
 
+  /** SS-12: SSH, Telnet, serial, or a tunnel tab for a remote desktop or VNC window. */
+  get kind(): PaneKind {
+    return this.snapshot.paneKind;
+  }
+
+  /** SS-12: what the pane is for, known from its session before it opens. */
+  setKind(kind: PaneKind) {
+    if (kind !== this.snapshot.paneKind) this.update({ paneKind: kind });
+  }
+
+  /** SS-12: Send Break on a serial line (Telnet: IAC BRK); `confirmed` after asking, for a Prod or protected session. */
+  sendBreak(confirmed = false) {
+    if (this.coreId) return api.terminalSendBreak(this.coreId, confirmed);
+    return Promise.resolve();
+  }
+
   /** The shell is up, so typed or pasted text reaches it. */
   get connected() {
     return this.coreId !== null && this.snapshot.status.state === "connected";
@@ -773,6 +803,9 @@ export class PaneSession {
         break;
       case "alert":
         this.onAlert?.(event.alert);
+        break;
+      case "window":
+        this.update({ window: event.window });
         break;
     }
   };

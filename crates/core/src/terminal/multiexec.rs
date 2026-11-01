@@ -989,6 +989,18 @@ impl MultiExec {
         self.shared.bus.read_only().check(Change::MultiExec)?;
         let mut seen = HashSet::new();
         let targets: Vec<Uuid> = targets.into_iter().filter(|id| seen.insert(*id)).collect();
+        // SS-12: Type in all tabs is for shells: a Telnet or serial pane (network gear) never joins.
+        for id in &targets {
+            if let Some(info) = self.shared.terminals.pane_info(*id) {
+                if !info.kind.joins_multiexec() {
+                    return Err(CoreError::InvalidInput(format!(
+                        "{} is a {} tab, and typing in all tabs is for SSH shells only.",
+                        info.name,
+                        info.kind.label()
+                    )));
+                }
+            }
+        }
         let mut state = self.shared.state.lock().await;
         state.on = true;
         if let Some(current) = &mut state.current {

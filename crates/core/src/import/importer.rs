@@ -668,6 +668,7 @@ impl Importer {
             color: c.color,
             tags: c.tags.clone(),
             vm_id: None,
+            kind: c.kind,
         };
         match sessions
             .import(ctx, input, source.imported_from(), source.label())

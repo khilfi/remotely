@@ -82,6 +82,9 @@ winreg = "0.56"
 # DPAPI for the vault key (SS-04) and reverse DNS for a session's host name (QL-03). 0.62 is the version
 # Tauri already pulls in.
 windows = { version = "0.62", features = [
+    # SS-12: serial consoles (COM ports through CreateFileW, SetCommState, SetCommBreak; ReadFile and WriteFile).
+    "Win32_Devices_Communication",
+    "Win32_System_IO",
     "Wdk_System_SystemInformation",
     "Wdk_System_Threading",
     "Win32_Foundation",

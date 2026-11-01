@@ -98,7 +98,14 @@ export function CheckDialog({ start, onClose, onSaved }: Props) {
     timeoutSecs: whole(timeout),
     failuresBeforeDown: whole(failures),
   };
-  const problem = checkProblem(candidate);
+  // SS-12: a service check reads a systemd unit over SSH, so only SSH sessions are offered for it.
+  const sshOnly = input.spec.kind === "service";
+  const offered = sshOnly ? sessions.filter((s) => s.kind.protocol === "ssh") : sessions;
+  const chosen = input.target.kind === "session" ? input.target.sessionId : null;
+  const notSsh = sshOnly && chosen !== null && sessions.some((s) => s.id === chosen && s.kind.protocol !== "ssh");
+  const problem =
+    checkProblem(candidate) ??
+    (notSsh ? "A service check reads a systemd unit over SSH: choose an SSH session." : null);
   const set = (change: Partial<CheckInput>) => setInput((old) => ({ ...old, ...change }));
   const setSpec = (next: CheckSpec) => setInput((old) => ({ ...old, spec: next }));
 
@@ -113,7 +120,7 @@ export function CheckDialog({ start, onClose, onSaved }: Props) {
       kind === "address"
         ? { kind, host: "" }
         : kind === "session"
-          ? { kind, sessionId: sessions[0]?.id ?? "" }
+          ? { kind, sessionId: (input.spec.kind === "service" ? offered : sessions)[0]?.id ?? "" }
           : { kind, vmKey: vms[0]?.vmxPath ?? "" };
     const usable = kindTakes(input.spec.kind, kind) ? input.spec : defaultSpec("tcp");
     if (usable !== input.spec) setPort(portOf(usable));
@@ -191,7 +198,7 @@ export function CheckDialog({ start, onClose, onSaved }: Props) {
                     <SelectValue placeholder="Choose a session" />
                   </SelectTrigger>
                   <SelectContent>
-                    {sessions.map((s) => (
+                    {offered.map((s) => (
                       <SelectItem key={s.id} value={s.id}>
                         {s.name}
                       </SelectItem>

@@ -435,8 +435,16 @@ impl Checks {
                     .await?
                     .ok_or_else(|| CoreError::InvalidInput("Choose a saved session for the check.".into()))?;
                 match &input.spec {
-                    // An SSH session only (the store refuses other kinds); F4 adds WinRM sessions' Windows services.
+                    // SS-12: an SSH session only (the store refuses other kinds too); F4 adds WinRM sessions'
+                    // Windows services.
                     CheckSpec::Service { .. } => {
+                        if !session.kind.is_ssh() {
+                            return Err(CoreError::WrongSessionKind {
+                                session: session.name.clone(),
+                                kind: session.kind.label(),
+                                needs: "a service check reads a systemd unit over SSH".into(),
+                            });
+                        }
                         self.inner
                             .store
                             .session_spec(ctx, *session_id)

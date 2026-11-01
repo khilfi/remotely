@@ -85,6 +85,7 @@ fn session(name: &str, host: &str) -> SessionInput {
         color: None,
         tags: vec![],
         vm_id: None,
+        kind: Default::default(),
     }
 }
 
@@ -948,7 +949,7 @@ async fn an_export_says_format_2_only_when_it_uses_folder_defaults() {
     core.sessions.update(ctx, s.id, from_folder).await.unwrap();
     assert_eq!(
         format_of(&export(&core, &dir).await),
-        u64::from(remotely_core::transfer::FORMAT_VERSION)
+        u64::from(remotely_core::transfer::FORMAT_VERSION_FOLDERS)
     );
     // So does a folder with defaults.
     let mut own = get(&core, s.id).await.input();

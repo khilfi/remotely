@@ -17,20 +17,22 @@ const settings = {
   qemuImgPathInUse: null,
   dockerPathSaved: null,
   dockerPathInUse: null,
+  vncViewerPathSaved: null,
+  vncViewerPathInUse: "C:\\Program Files\\TigerVNC\\vncviewer.exe",
 } as unknown as Settings;
 
 test("the tools table has one row per tool, the editable ones and vdiskmanager beside vmrun", () => {
   const rows = toolRows(settings, "C:\\Program Files\\VMware\\VMware Workstation\\vmware-vdiskmanager.exe");
   assert.deepEqual(
     rows.map((r) => r.id),
-    ["vmrun", "vdiskmanager", "ovftool", "vboxmanage", "qemuImg", "docker"],
+    ["vmrun", "vdiskmanager", "ovftool", "vboxmanage", "qemuImg", "docker", "vncViewer"],
   );
   assert.equal(rows.find((r) => r.id === "vdiskmanager")?.editable, false);
   assert.ok(rows.filter((r) => r.id !== "vdiskmanager").every((r) => r.editable));
   // Links to the old cards open their rows.
   assert.deepEqual(
     rows.filter((r) => r.section).map((r) => r.section),
-    ["vmware", "virtualbox", "qemu-img", "docker"],
+    ["vmware", "virtualbox", "qemu-img", "docker", "vnc-viewer"],
   );
 });
 
@@ -43,6 +45,7 @@ test("each tool's status is a few words", () => {
   assert.equal(status("docker"), "Not installed");
   assert.equal(status("ovftool"), "Not found");
   assert.equal(status("vdiskmanager"), "Not found");
+  assert.equal(status("vncViewer"), "Found");
 });
 
 const DEFAULTS: PolicyRules = {
