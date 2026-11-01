@@ -57,7 +57,11 @@ use uuid::Uuid;
 
 use super::activity::{is_secret_prompt, FinishedHow};
 use super::record::{RecordLimits, RecordedResults, Recorder, Recordings};
-use super::Terminals;
+use super::{PaneKind, Terminals};
+use crate::adapters::winrm::console::{self, ConsoleView};
+use powershell::PsLine;
+
+mod powershell;
 use crate::bulk::{GroupOptions, HostOutput, OutputDiff, RecordedRun};
 use crate::command_bus::{ApprovalAnswers, ApprovalRequest, Command, CommandBus, SubmitOutcome};
 use crate::domain::TargetRef;
@@ -863,6 +867,26 @@ struct Current {
     mode: LineMode,
     to: Vec<Uuid>,
     left_out: Vec<LeftOut>,
+    /// BX-13: the tabs are PowerShell tabs.
+    powershell: bool,
+}
+
+/// BX-13: Ctrl+C went to the tabs: a PowerShell console drops the statement it held open.
+fn forget_open(state: &mut State) {
+    state.ps_open.clear();
+    state.ps_open_unreliable = false;
+}
+
+/// A line about to be held: where it goes, what is rated, and the keys that run it.
+struct HeldLine {
+    from: Uuid,
+    to: Vec<Uuid>,
+    script: String,
+    unreliable: bool,
+    keys: Vec<u8>,
+    after: Vec<u8>,
+    leaves_text: bool,
+    run: RunKey,
 }
 
 /// A line whose Enter waits.
@@ -890,6 +914,12 @@ struct State {
     current: Option<Current>,
     held: Option<Held>,
     queued: Vec<u8>,
+    /// BX-13: the line on PowerShell tabs, as their console follows it.
+    ps: PsLine,
+    /// BX-13: the lines of a statement the PowerShell tabs hold open (`>> `), sent with the line that closes it.
+    ps_open: Vec<String>,
+    /// BX-13: one of those lines was unreliable.
+    ps_open_unreliable: bool,
 }
 
 struct Shared {
@@ -920,6 +950,9 @@ struct Seen {
     password: bool,
     alternate: bool,
     dirty: bool,
+    /// BX-13: what the tab is, and a PowerShell tab's console (at its prompt or running).
+    kind: PaneKind,
+    console: Option<ConsoleView>,
 }
 
 impl MultiExec {
@@ -989,19 +1022,35 @@ impl MultiExec {
         self.shared.bus.read_only().check(Change::MultiExec)?;
         let mut seen = HashSet::new();
         let targets: Vec<Uuid> = targets.into_iter().filter(|id| seen.insert(*id)).collect();
-        // SS-12: Type in all tabs is for shells: a Telnet or serial pane (network gear) never joins.
+        // SS-12: Type in all tabs is for shells: a Telnet or serial pane (network gear) never joins. BX-13: PowerShell
+        // tabs do, but never with SSH tabs: a shell and the PowerShell console read the same keys differently (a
+        // bracketed paste's line breaks, Ctrl+V, Ctrl+W, Esc then Enter), so one line can't be rated for both.
+        let mut kinds = HashSet::new();
         for id in &targets {
             if let Some(info) = self.shared.terminals.pane_info(*id) {
                 if !info.kind.joins_multiexec() {
                     return Err(CoreError::InvalidInput(format!(
-                        "{} is a {} tab, and typing in all tabs is for SSH shells only.",
+                        "{} is a {} tab, and typing in all tabs is for SSH and PowerShell tabs only.",
                         info.name,
                         info.kind.label()
                     )));
                 }
+                kinds.insert(info.kind);
             }
         }
+        if kinds.len() > 1 {
+            return Err(CoreError::InvalidInput(
+                "Type in all tabs goes to SSH tabs or to PowerShell tabs, not both at once: a shell and PowerShell read \
+                 the same keys differently."
+                    .into(),
+            ));
+        }
         let mut state = self.shared.state.lock().await;
+        // A change of kind starts afresh: an open statement belongs to the PowerShell tabs it was typed into.
+        if !kinds.contains(&PaneKind::Powershell) {
+            state.ps_open.clear();
+            state.ps_open_unreliable = false;
+        }
         state.on = true;
         if let Some(current) = &mut state.current {
             let dropped: Vec<Uuid> = current.to.iter().filter(|id| !targets.contains(id)).copied().collect();
@@ -1077,6 +1126,13 @@ impl MultiExec {
                 Some(s) if reason.is_none() && s.password => {
                     Some("at a password prompt: keys pass straight through, never logged".to_owned())
                 }
+                // BX-13: a PowerShell tab running a statement takes a typed line as its input (`Read-Host`), and may run
+                // it as the next statement.
+                Some(s) if reason.is_none() && s.console.is_some_and(|c| !c.at_prompt) => Some(
+                    "a statement is running: a line typed goes to it as input, rated first (type a password it asks \
+                     for in this tab on its own)"
+                        .to_owned(),
+                ),
                 _ => None,
             };
             targets.push(TargetState {
@@ -1149,6 +1205,7 @@ impl MultiExec {
         if let Some(held) = state.held.take() {
             state.queued.clear();
             self.interrupt(&held.to).await;
+            forget_open(&mut state);
             self.shared.recorder.discard(held.id);
             self.done(&held, false, None);
         }
@@ -1202,6 +1259,7 @@ impl MultiExec {
             });
         if status == JobStatus::Cancelled {
             self.interrupt(&held.to).await;
+            forget_open(&mut state);
             self.done(&held, false, Some(status));
             return Ok(());
         }
@@ -1229,14 +1287,20 @@ impl MultiExec {
             .target(&self.shared.workspace.get(), id)
             .await
             .ok();
+        // BX-13: a PowerShell tab is connected once its console is up. Keys pass straight through only at a password
+        // or code prompt it shows, as for SSH: while a statement runs, a line typed goes to it as input, and PowerShell
+        // runs it as the next statement if nothing reads it, so it is rated like any line.
+        let powershell = info.kind == PaneKind::Powershell;
         Some(Seen {
             id,
             name: target.as_ref().map_or_else(|| info.name.clone(), |t| t.name.clone()),
-            connected: info.screen.connected,
+            connected: info.screen.connected && (!powershell || info.console.is_some()),
             protected: target.is_some_and(|t| t.protected),
             password: info.screen.at_secret_prompt(),
             alternate: info.screen.alternate,
             dirty: info.dirty,
+            kind: info.kind,
+            console: info.console,
         })
     }
 
@@ -1285,12 +1349,20 @@ impl MultiExec {
                 }
             }
         }
+        let powershell = from.kind == PaneKind::Powershell;
         state.buffer.clear();
+        state.ps.clear();
         if mode == LineMode::Command && dirty {
             // Text was typed on some line outside MultiExec: what the shells hold is not known.
             state.buffer.mark_unreliable();
+            state.ps.mark_unreliable();
         }
-        Current { mode, to, left_out }
+        Current {
+            mode,
+            to,
+            left_out,
+            powershell,
+        }
     }
 
     async fn send(&self, to: &[Uuid], bytes: &[u8], left_out: &mut Vec<LeftOut>) -> Vec<Uuid> {
@@ -1389,7 +1461,12 @@ impl MultiExec {
                     while at < data.len() {
                         let byte = data[at];
                         at += 1;
-                        end = state.buffer.feed(byte, &mut out);
+                        // BX-13: PowerShell tabs' console edits the line its own way.
+                        end = if current.powershell {
+                            state.ps.feed(byte, &mut out)
+                        } else {
+                            state.buffer.feed(byte, &mut out)
+                        };
                         if end != Step::Key {
                             break;
                         }
@@ -1399,9 +1476,15 @@ impl MultiExec {
                     match end {
                         Step::Key => {}
                         Step::Interrupt => {
-                            // The shells drop the line; the next keys start a new one.
+                            // The shells drop the line; the next keys start a new one. The PowerShell console drops a
+                            // statement left open too.
                             state.current = None;
                             state.buffer.clear();
+                            state.ps.clear();
+                            if current.powershell {
+                                state.ps_open.clear();
+                                state.ps_open_unreliable = false;
+                            }
                             for id in &current.to {
                                 self.shared.terminals.set_dirty(*id, false);
                             }
@@ -1413,6 +1496,11 @@ impl MultiExec {
                                 reached,
                                 left_out,
                             });
+                        }
+                        Step::Run(run) if current.powershell => {
+                            return self
+                                .enter_powershell(state, from, &current, run, &data[at..], reached, left_out)
+                                .await;
                         }
                         Step::Run(run) => {
                             return self
@@ -1501,7 +1589,144 @@ impl MultiExec {
             }
             return Box::pin(self.process(state, from, after)).await;
         }
+        let line = HeldLine {
+            from,
+            to,
+            script,
+            unreliable,
+            keys,
+            after,
+            leaves_text,
+            run,
+        };
+        self.hold(state, line, reached, left_out).await
+    }
 
+    /// BX-13: Enter on a PowerShell tabs' line (see `powershell`'s module comment). The pasted lines that follow at
+    /// once go with it; what their console sends is worked out with its own function. A line that only adds to a
+    /// statement left open (or an empty one) runs nothing: it goes at once, unrated. Otherwise the line held and
+    /// rated is every line from the statement's first: the policy engine rates each statement the console sends.
+    #[allow(clippy::too_many_arguments)]
+    async fn enter_powershell(
+        &self,
+        state: &mut State,
+        from: Uuid,
+        current: &Current,
+        run: RunKey,
+        rest: &[u8],
+        reached: Vec<Uuid>,
+        left_out: Vec<LeftOut>,
+    ) -> Result<InputOutcome> {
+        let mut lines = vec![state.ps.text().to_owned()];
+        let mut unreliable = state.ps.unreliable();
+        state.ps.clear();
+        state.current = None;
+        let to = current.to.clone();
+        if to.is_empty() {
+            return Ok(InputOutcome::Typed {
+                mode: LineMode::Command,
+                reached,
+                left_out,
+            });
+        }
+        // The LF of a CR LF is part of this Enter, as the console reads it.
+        let skip = usize::from(run == RunKey::Enter(b'\r') && rest.first() == Some(&b'\n'));
+        let paste = powershell::paste_lines(&rest[skip..]);
+        let after = rest[skip + paste.len..].to_vec();
+        lines.extend(paste.lines.iter().cloned());
+        let mut keys = run.keys();
+        for pasted in &paste.lines {
+            keys.extend_from_slice(pasted.as_bytes());
+            keys.push(b'\r');
+        }
+        // Every tab's console must be at its prompt holding the statement MultiExec followed. One running a statement
+        // takes the line as input (and PowerShell may run it as the next statement); one may have dropped an open
+        // statement with a Ctrl+C typed into it alone. When they don't agree, what each runs isn't known: nothing goes
+        // unrated, the line is unreliable (at least "other"), and what is rated is every line MultiExec followed.
+        let agree = self.consoles_hold(&to, state.ps_open.len()).await;
+        unreliable |= !agree;
+        let (sent, held) = console::statements(&state.ps_open, &lines);
+        let open_before = std::mem::replace(&mut state.ps_open, held);
+        unreliable |= state.ps_open_unreliable;
+        if sent.is_empty() && agree {
+            // The console holds the lines (`>> `), or an empty line asks for a fresh prompt: nothing runs yet. The
+            // statement is rated whole once a line closes it.
+            state.ps_open_unreliable = unreliable && !state.ps_open.is_empty();
+            let mut left_out = left_out;
+            let reached = self.send(&to, &keys, &mut left_out).await;
+            if after.is_empty() {
+                return Ok(InputOutcome::Typed {
+                    mode: LineMode::Command,
+                    reached,
+                    left_out,
+                });
+            }
+            return Box::pin(self.process(state, from, after)).await;
+        }
+        // Lines still open after this Enter are rated now too (they can't be read yet: at least "other"), and again
+        // with the line that closes them.
+        state.ps_open_unreliable = unreliable && !state.ps_open.is_empty();
+        let script = open_before
+            .into_iter()
+            .chain(lines)
+            .collect::<Vec<_>>()
+            .join("\n")
+            .trim_end()
+            .to_owned();
+        let line = HeldLine {
+            from,
+            to,
+            script,
+            unreliable,
+            keys,
+            after,
+            leaves_text: false,
+            run,
+        };
+        self.hold(state, line, reached, left_out).await
+    }
+
+    /// BX-13: whether every PowerShell tab's console is at its prompt holding `open` lines of a statement, as MultiExec
+    /// followed them. A console takes the keys sent to it a moment later, so it is asked again for a little while.
+    async fn consoles_hold(&self, to: &[Uuid], open: usize) -> bool {
+        const TRIES: u32 = 50;
+        for attempt in 0..TRIES {
+            let all = to.iter().all(|id| {
+                self.shared
+                    .terminals
+                    .pane_info(*id)
+                    .and_then(|info| info.console)
+                    .is_some_and(|c| c.at_prompt && c.open_lines == open)
+            });
+            if all {
+                return true;
+            }
+            if attempt + 1 < TRIES {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        }
+        false
+    }
+
+    /// A line whose run key waits: recorded in each terminal (QL-12), sent to the bus as a
+    /// [`Command::TerminalLine`], and held until its job sends the keys (or its approval).
+    async fn hold(
+        &self,
+        state: &mut State,
+        line: HeldLine,
+        reached: Vec<Uuid>,
+        left_out: Vec<LeftOut>,
+    ) -> Result<InputOutcome> {
+        let HeldLine {
+            from,
+            to,
+            script,
+            unreliable,
+            keys,
+            after,
+            leaves_text,
+            run,
+        } = line;
         let line_id = Uuid::new_v4();
         // QL-12: each terminal gets its recording before anything can send the Enter (a Low line's
         // job may run before `submit` returns), through its input, so it comes first.
@@ -1531,9 +1756,11 @@ impl MultiExec {
         let outcome = match self.shared.bus.submit(&self.shared.workspace.get(), command).await {
             Ok(outcome) => outcome,
             Err(err) => {
-                // Nothing will press Enter: clear the line the terminals hold, so it can't run later.
+                // Nothing will press Enter: clear the line the terminals hold, so it can't run later (a PowerShell
+                // console drops a statement left open with it).
                 self.shared.recorder.discard(line_id);
                 self.interrupt(&to).await;
+                forget_open(state);
                 return Err(err);
             }
         };

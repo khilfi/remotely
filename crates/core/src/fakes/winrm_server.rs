@@ -90,6 +90,8 @@ struct Shared {
     shells: Mutex<HashMap<String, Commands>>,
     services: Mutex<HashMap<String, String>>,
     stats: Mutex<WinrmStats>,
+    /// BX-13: files a support bundle's read finds, by path (letter case aside).
+    files: Mutex<HashMap<String, Vec<u8>>>,
     round: AtomicU64,
     refusing: AtomicBool,
     drop_all: broadcast::Sender<()>,
@@ -140,6 +142,7 @@ impl WinrmTestServer {
                 .collect(),
             ),
             stats: Mutex::default(),
+            files: Mutex::default(),
             round: AtomicU64::new(0),
             refusing: AtomicBool::new(false),
             drop_all,
@@ -207,6 +210,11 @@ impl WinrmTestServer {
                 services.remove(&name.to_ascii_lowercase());
             }
         }
+    }
+
+    /// BX-13: a file on the "host", for a support bundle's Windows file read.
+    pub fn set_file(&self, path: &str, bytes: &[u8]) {
+        locks::lock(&self.shared.files).insert(path.to_ascii_lowercase(), bytes.to_vec());
     }
 
     /// Spoils the answers after the sign-in over HTTP from now on.
@@ -767,6 +775,8 @@ enum Skip {
     Read,
     /// The service read: its `Get-Service` line names the service, its `if` line answers.
     Service(Option<String>),
+    /// BX-13: a support bundle's file read: its next line names the file.
+    File,
 }
 
 /// What a wrapped statement still has to do once a `Read-Host` has its line or a sleep is over.
@@ -980,6 +990,48 @@ impl Proc {
                 }
                 return;
             }
+            Skip::File => {
+                self.skip = Skip::No;
+                self.failed_last = false;
+                let path = t.split("-LiteralPath '").nth(1).map(|rest| {
+                    // The single-quoted path, its doubled quotes undone.
+                    let mut path = String::new();
+                    let mut chars = rest.chars().peekable();
+                    while let Some(c) = chars.next() {
+                        if c == '\'' {
+                            if chars.peek() == Some(&'\'') {
+                                chars.next();
+                            } else {
+                                break;
+                            }
+                        }
+                        path.push(c);
+                    }
+                    path
+                });
+                let file = path
+                    .as_deref()
+                    .and_then(|p| locks::lock(&shared.files).get(&p.to_ascii_lowercase()).cloned());
+                match file {
+                    Some(bytes) => {
+                        let limit = t
+                            .split("[int64]$f.Length, [int64]")
+                            .nth(1)
+                            .and_then(|r| r.split(')').next())
+                            .and_then(|n| n.parse::<usize>().ok())
+                            .unwrap_or(usize::MAX);
+                        let kept = &bytes[..bytes.len().min(limit)];
+                        self.print(&format!("{}\r\n{}\r\n", bytes.len(), b64(kept)));
+                    }
+                    None => {
+                        let shown = path.unwrap_or_default();
+                        self.error(&format!(
+                            "Get-Item : Cannot find path '{shown}' because it does not exist."
+                        ));
+                    }
+                }
+                return;
+            }
             Skip::No => {}
         }
         // The console's statement line: its lines, then the prompt marker after them.
@@ -1027,6 +1079,10 @@ impl Proc {
             self.skip = Skip::Service(None);
             return;
         }
+        if t == crate::support_bundle::collect::READ_FILE_MARKER {
+            self.skip = Skip::File;
+            return;
+        }
         if t.starts_with('#') {
             return;
         }
@@ -1048,6 +1104,31 @@ impl Proc {
         match word.to_ascii_lowercase().as_str() {
             "exit" => self.end(rest.parse().unwrap_or(0)),
             "hostname" => self.print("WIN01\r\n"),
+            "whoami" => self.print("win01\\alice\r\n"),
+            // BX-13: the Windows support bundle presets' reads (their first word), with sample answers.
+            "get-computerinfo" => self.print(
+                "\r\nWindowsProductName : Windows Server 2022 Datacenter\r\nOsVersion          : 10.0.20348\r\n\
+                 CsDomain           : example.com\r\n\r\n",
+            ),
+            "get-hotfix" => self.print(
+                "\r\nSource Description HotFixID  InstalledOn\r\nWIN01  Update      KB5034439 1/9/2026\r\n\r\n",
+            ),
+            "get-service" => self.print(
+                "\r\nStatus  Name    DisplayName\r\nRunning Spooler Print Spooler\r\nRunning WinRM   Windows Remote \
+                 Management (WS-Management)\r\n\r\n",
+            ),
+            "get-winevent" => self.print(
+                "\r\nTimeCreated      : 11/1/2026 9:58:00 AM\r\nLogName          : System\r\nProviderName     : Service \
+                 Control Manager\r\nId               : 7031\r\nLevelDisplayName : Error\r\nMessage          : The example \
+                 service terminated unexpectedly.\r\n\r\n",
+            ),
+            "ipconfig" => self.print(
+                "\r\nWindows IP Configuration\r\n\r\n   Host Name . . . . . . . . . . . . : WIN01\r\n   IPv4 Address. . . . \
+                 . . . . . . . : 192.0.2.10(Preferred)\r\n",
+            ),
+            "get-nettcpconnection" => {
+                self.print("\r\nLocalAddress LocalPort OwningProcess\r\n0.0.0.0      5986      4\r\n\r\n")
+            }
             "get-date" => self.print("\r\nSunday, November 1, 2026 10:00:00 AM\r\n\r\n"),
             "write-output" | "echo" => self.print(&format!("{unquoted}\r\n")),
             "set-location" | "cd" => self.location = unquoted.to_owned(),

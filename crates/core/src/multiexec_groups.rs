@@ -232,13 +232,19 @@ impl MultiExecGroups {
                 if missing == 1 { "is" } else { "are" }
             )));
         }
-        // SS-12: a group is for typing in all its tabs, which SSH sessions only do.
-        if let Some(other) = members
-            .iter()
-            .filter_map(|id| sessions.get(id))
-            .find(|s| !s.kind.is_ssh())
-        {
-            other.require_ssh("a saved group's tabs are SSH terminals")?;
+        // SS-12: a group is for typing in all its tabs, which SSH sessions do, and (BX-13) WinRM sessions in their
+        // PowerShell tabs. Typing goes to one kind of tab at a time (their consoles read keys differently), so a group
+        // is all SSH or all WinRM.
+        let picked: Vec<&SessionRecord> = members.iter().filter_map(|id| sessions.get(id)).collect();
+        if let Some(other) = picked.iter().find(|s| !s.kind.is_ssh() && !s.kind.is_winrm()) {
+            other.require_ssh("a saved group's tabs are SSH or PowerShell terminals")?;
+        }
+        if picked.iter().any(|s| s.kind.is_ssh()) && picked.iter().any(|s| s.kind.is_winrm()) {
+            return Err(CoreError::InvalidInput(
+                "A group holds SSH sessions or WinRM sessions, not both: typing goes to SSH tabs or to PowerShell tabs \
+                 at a time."
+                    .into(),
+            ));
         }
         Ok((name, members, groups, sessions))
     }

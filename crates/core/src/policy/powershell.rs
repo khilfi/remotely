@@ -530,18 +530,46 @@ pub(crate) fn squeeze(entry: &str) -> String {
     entry.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// BX-13: true when the parser read every part of the script, every command it runs is on the read-only list, and
-/// none of them is a form that writes. A script of expressions only (`$PSVersionTable`) reads too.
+/// BX-13: the parts of a script the rules read: the whole of it, then each statement PowerShell runs it as. Over
+/// WinRM a script goes to `powershell -Command -`, which reads it a line at a time, as the PowerShell console does: a
+/// statement goes once it closes, or when an empty line ends it, so `"x` + an empty line + `Stop-Service a` + `"` is
+/// three statements (the second runs), not one string. Each part with where it starts.
+fn parts(script: &str) -> Vec<(usize, String)> {
+    let mut starts = Vec::new();
+    let mut lines = Vec::new();
+    let mut at = 0;
+    for piece in script.split('\n') {
+        starts.push(at);
+        lines.push(piece.strip_suffix('\r').unwrap_or(piece));
+        at += piece.len() + 1;
+    }
+    let (sent, held_from) = crate::adapters::winrm::console::statement_ranges(0, &lines);
+    let mut out = vec![(0, script.to_owned())];
+    let ranges = sent
+        .into_iter()
+        .chain((held_from < lines.len()).then_some(held_from..lines.len()));
+    for range in ranges {
+        let text = lines[range.clone()].join("\n");
+        // A script of one statement is read once.
+        if !text.trim().is_empty() && text.trim() != script.trim() {
+            out.push((starts[range.start], text));
+        }
+    }
+    out
+}
+
+/// BX-13: true when the parser read every part of the script (the whole of it and each statement PowerShell runs it
+/// as), every command it runs is on the read-only list, and none of them is a form that writes. A script of
+/// expressions only (`$PSVersionTable`) reads too.
 pub(crate) fn is_read_only(script: &str, read_only: &[String]) -> bool {
     if script.trim().is_empty() {
         return false;
     }
-    let parsed = parse::parse(script);
-    if !parsed.unreadable.is_empty() {
-        return false;
-    }
     let entries: Vec<(String, Vec<String>)> = read_only.iter().filter_map(|e| entry_key(e)).collect();
-    parsed.commands.iter().all(|command| command_reads(command, &entries))
+    parts(script).iter().all(|(_, part)| {
+        let parsed = parse::parse(part);
+        parsed.unreadable.is_empty() && parsed.commands.iter().all(|command| command_reads(command, &entries))
+    })
 }
 
 fn command_reads(command: &PsCommand, entries: &[(String, Vec<String>)]) -> bool {
@@ -698,7 +726,19 @@ fn foreach_writes(command: &PsCommand) -> bool {
     false
 }
 
-/// BX-13: every command the script runs, as the dangerous-command rules see them.
+/// BX-13: every command the script runs, as the dangerous-command rules see them: in the whole of it and in each
+/// statement PowerShell runs it as ([`parts`]), each at its place in the script.
 pub(crate) fn commands(script: &str) -> Vec<PsCommand> {
-    parse::parse(script).commands
+    let mut out = Vec::new();
+    for (i, (start, part)) in parts(script).into_iter().enumerate() {
+        out.extend(parse::parse(&part).commands.into_iter().map(|mut c| {
+            // A statement's commands are placed at its first line (its lines lost their CRs, so offsets inside it
+            // aren't the script's).
+            if i > 0 {
+                c.at = start;
+            }
+            c
+        }));
+    }
+    out
 }

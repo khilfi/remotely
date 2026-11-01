@@ -188,22 +188,23 @@ impl WinrmHost {
     }
 }
 
-/// The PowerShell that reads at most `limit` bytes of `path`: its size on one line, then the bytes in base64.
+/// The marker line a file read starts with (a comment to PowerShell), so the test server knows it.
+pub const READ_FILE_MARKER: &str = "# remotely:read-file";
+
+/// The PowerShell that reads at most `limit` bytes of `path`: its size on one line, then the bytes in base64. One
+/// statement on one line, so `-Command -`, which reads a line at a time, runs it whole; the path is a single-quoted
+/// string nothing in it can end.
 pub(crate) fn windows_read_script(path: &str, limit: u64) -> String {
     let path = crate::adapters::winrm::console::single_quoted(path);
     format!(
-        "$ErrorActionPreference = 'Stop'\n\
-         $i = Get-Item -LiteralPath {path} -Force\n\
-         if ($i.PSIsContainer) {{ throw 'it is a folder' }}\n\
-         $f = [System.IO.File]::Open($i.FullName, 'Open', 'Read', 'ReadWrite')\n\
-         try {{\n\
-         $n = [Math]::Min([int64]$f.Length, [int64]{limit})\n\
-         $b = New-Object byte[] $n\n\
-         $r = 0\n\
-         while ($r -lt $n) {{ $k = $f.Read($b, $r, $n - $r); if ($k -le 0) {{ break }}; $r += $k }}\n\
-         [Console]::Out.WriteLine([string]$i.Length)\n\
-         [Console]::Out.WriteLine([Convert]::ToBase64String($b, 0, $r))\n\
-         }} finally {{ $f.Close() }}\n"
+        "{READ_FILE_MARKER}\n\
+         $ErrorActionPreference = 'Stop'; $i = Get-Item -LiteralPath {path} -Force; \
+         if ($i.PSIsContainer) {{ throw 'it is a folder' }}; \
+         $f = [System.IO.File]::Open($i.FullName, 'Open', 'Read', 'ReadWrite'); \
+         try {{ $n = [Math]::Min([int64]$f.Length, [int64]{limit}); $b = New-Object byte[] $n; $r = 0; \
+         while ($r -lt $n) {{ $k = $f.Read($b, $r, $n - $r); if ($k -le 0) {{ break }}; $r += $k }}; \
+         [Console]::Out.WriteLine([string]$i.Length); [Console]::Out.WriteLine([Convert]::ToBase64String($b, 0, $r)) }} \
+         finally {{ $f.Close() }}\n"
     )
 }
 

@@ -46,6 +46,99 @@ const MARKER: &[u8] = b"\x1b]7790;";
 pub struct ConsoleShell {
     pub input: mpsc::Sender<ShellInput>,
     pub output: mpsc::Receiver<ShellOutput>,
+    /// BX-13: where the console is now, for Type in all tabs.
+    pub status: Arc<ConsoleStatus>,
+}
+
+/// BX-13: what Type in all tabs needs to know of a console: whether it is at its prompt (a line typed is a statement)
+/// or a statement runs (a line typed is that statement's input, `Read-Host`), and how many lines of a statement left
+/// open it holds (`>> `). Published by the [`Editor`] after every key and every output, so it is never a guess from
+/// what the screen shows.
+#[derive(Debug, Default)]
+pub struct ConsoleStatus {
+    /// 0 starting, 1 at the prompt, 2 running.
+    phase: std::sync::atomic::AtomicU8,
+    open: std::sync::atomic::AtomicUsize,
+}
+
+/// BX-13: a console's status at one moment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConsoleView {
+    /// At the prompt (or the `>> ` of a statement left open): a line typed is a statement.
+    pub at_prompt: bool,
+    /// Lines of a statement left open.
+    pub open_lines: usize,
+}
+
+impl ConsoleStatus {
+    pub fn view(&self) -> ConsoleView {
+        use std::sync::atomic::Ordering;
+        ConsoleView {
+            at_prompt: self.phase.load(Ordering::SeqCst) == 1,
+            open_lines: self.open.load(Ordering::SeqCst),
+        }
+    }
+
+    fn publish(&self, state: State, open: usize) {
+        use std::sync::atomic::Ordering;
+        let phase = match state {
+            State::Starting => 0,
+            State::Idle => 1,
+            State::Running => 2,
+        };
+        self.phase.store(phase, Ordering::SeqCst);
+        self.open.store(open, Ordering::SeqCst);
+    }
+}
+
+/// BX-13: whether the console sends a statement once its last line is in: an empty line at the prompt (a fresh
+/// prompt, nothing runs), a statement that closes, or an empty line ending one left open. The console's [`Editor`]
+/// and Type in all tabs ([`statements`]) decide it here, so they never differ.
+pub fn statement_ends(open: &[String], syntax: &Syntax, empty_alone: bool) -> bool {
+    empty_alone || syntax.complete() || open.last().is_some_and(|l| l.trim().is_empty())
+}
+
+/// BX-13: what the console does with `lines` typed at its prompt, one Enter each, with `open` the lines of a statement
+/// it holds already: the statements it sends, in order, each its lines, and the lines it still holds after them. An
+/// empty line at the prompt sends no statement.
+pub fn statements(open: &[String], lines: &[String]) -> (Vec<Vec<String>>, Vec<String>) {
+    let all: Vec<&str> = open.iter().chain(lines).map(String::as_str).collect();
+    let (sent, held_from) = statement_ranges(open.len(), &all);
+    let take = |range: std::ops::Range<usize>| all[range].iter().map(|l| (*l).to_owned()).collect::<Vec<_>>();
+    let sent = sent.into_iter().map(take).collect();
+    (sent, take(held_from..all.len()))
+}
+
+/// BX-13: the same as line numbers: of `all` (a statement's first `open` lines held already, then the lines typed),
+/// the ranges the console sends as statements, and where the lines it still holds start. `-Command -` reads a
+/// script's lines the same way, which the PowerShell rules rate it by.
+pub fn statement_ranges(open: usize, all: &[&str]) -> (Vec<std::ops::Range<usize>>, usize) {
+    let mut held: Vec<String> = Vec::new();
+    let mut start = 0;
+    let mut syntax = Syntax::default();
+    let mut sent = Vec::new();
+    for (i, line) in all.iter().enumerate() {
+        if held.is_empty() {
+            start = i;
+        }
+        syntax.feed(line);
+        held.push((*line).to_owned());
+        if i < open {
+            // The lines held already: still open.
+            continue;
+        }
+        let empty_alone = line.trim().is_empty() && held.len() == 1;
+        if !statement_ends(&held, &syntax, empty_alone) {
+            continue;
+        }
+        held.clear();
+        syntax = Syntax::default();
+        if !empty_alone {
+            sent.push(start..i + 1);
+        }
+    }
+    let held_from = if held.is_empty() { all.len() } else { start };
+    (sent, held_from)
 }
 
 /// The expression that prints the prompt marker: a string written through PowerShell's own output, so it comes after
@@ -109,10 +202,12 @@ pub async fn start(
     let (output_tx, output_rx) = mpsc::channel(256);
     let (received_tx, received_rx) = mpsc::channel(16);
     tokio::spawn(receive_loop(Arc::clone(&shell), command.clone(), received_tx));
+    let editor = Editor::new(nonce);
+    let status = Arc::clone(&editor.status);
     let console = Console {
         shell,
         command,
-        editor: Editor::new(nonce),
+        editor,
         output: output_tx,
         secret_prompt,
         _permit: permit,
@@ -121,6 +216,7 @@ pub async fn start(
     Ok(ConsoleShell {
         input: input_tx,
         output: output_rx,
+        status,
     })
 }
 
@@ -290,6 +386,8 @@ pub struct Editor {
     at_line_start: bool,
     last_output_cr: bool,
     folder: String,
+    /// BX-13: where it is, for Type in all tabs.
+    status: Arc<ConsoleStatus>,
 }
 
 impl Editor {
@@ -314,7 +412,17 @@ impl Editor {
             at_line_start: true,
             last_output_cr: false,
             folder: String::new(),
+            status: Arc::new(ConsoleStatus::default()),
         }
+    }
+
+    /// BX-13: the status Type in all tabs reads.
+    pub fn status(&self) -> Arc<ConsoleStatus> {
+        Arc::clone(&self.status)
+    }
+
+    fn publish(&self) {
+        self.status.publish(self.state, self.open.len());
     }
 
     fn prompt(&self) -> String {
@@ -336,6 +444,7 @@ impl Editor {
             out.push(Action::Send(format!("{text}\r\n")));
             self.line.clear();
         }
+        self.publish();
         out
     }
 
@@ -445,6 +554,7 @@ impl Editor {
         if !shown.is_empty() {
             out.push(Action::Show(shown));
         }
+        self.publish();
         merge_shows(out)
     }
 
@@ -515,7 +625,7 @@ impl Editor {
                 let empty_alone = line.trim().is_empty() && self.open.is_empty();
                 self.syntax.feed(&line);
                 self.open.push(line);
-                if !empty_alone && !self.syntax.complete() && !self.open.last().is_some_and(|l| l.trim().is_empty()) {
+                if !statement_ends(&self.open, &self.syntax, empty_alone) {
                     shown.extend_from_slice(b">> ");
                     return;
                 }
@@ -593,6 +703,7 @@ impl Editor {
             self.at_line_start = byte == b'\n';
             at += 1;
         }
+        self.publish();
         out
     }
 
@@ -659,6 +770,7 @@ impl Editor {
             shown.extend_from_slice(self.line.as_bytes());
         }
         out.push(Action::Show(shown));
+        self.publish();
         merge_shows(out)
     }
 }
@@ -989,6 +1101,33 @@ mod tests {
         assert_eq!(single_quoted("$x `n \"y\""), "'$x `n \"y\"'");
         let line = statement_line(&["'); Stop-Computer; ('".to_owned()], "n1");
         assert!(line.contains("Create('''); Stop-Computer; (''')"), "{line}");
+    }
+
+    #[test]
+    fn statements_say_what_the_console_sends_for_typed_lines() {
+        let lines = |l: &[&str]| l.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+        // One line that closes: one statement.
+        assert_eq!(statements(&[], &lines(&["Get-Date"])), (vec![lines(&["Get-Date"])], vec![]));
+        // An open one is held, then sent whole with the line that closes it.
+        let (none, held) = statements(&[], &lines(&["foreach ($i in 1..3) {"]));
+        assert!(none.is_empty());
+        assert_eq!(held, lines(&["foreach ($i in 1..3) {"]));
+        let (sent_all, held) = statements(&held, &lines(&["  $i", "}", "hostname"]));
+        assert_eq!(sent_all, vec![lines(&["foreach ($i in 1..3) {", "  $i", "}"]), lines(&["hostname"])]);
+        assert!(held.is_empty());
+        // An empty line at the prompt sends nothing; one inside an open statement ends it.
+        assert_eq!(statements(&[], &lines(&[""])), (vec![], vec![]));
+        let (split, _) = statements(&[], &lines(&["\"x", "", "Stop-Service a", "\""]));
+        assert_eq!(split, vec![lines(&["\"x", ""]), lines(&["Stop-Service a"])]);
+        // The Editor decides the same: the open function goes with its next line, as one statement.
+        let mut editor = Editor::new("n1".into());
+        editor.output(b"\x1b]7790;n1;C:\\\x07\r\n");
+        assert!(editor.status().view().at_prompt);
+        editor.keys(b"function f {\r", false);
+        assert_eq!(editor.status().view().open_lines, 1);
+        let sent_now = editor.keys(b"1 }\r", false);
+        assert!(sent(&sent_now)[0].contains("Create('function f {' + \"`n\" + '1 }')"));
+        assert!(!editor.status().view().at_prompt, "a statement runs");
     }
 
     #[test]

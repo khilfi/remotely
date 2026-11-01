@@ -29,7 +29,7 @@ fn flagged(script: &str, rule: &str) -> bool {
 }
 
 fn names(script: &str) -> Vec<String> {
-    commands(script).into_iter().map(|c| c.name).collect()
+    parse(script).commands.into_iter().map(|c| c.name).collect()
 }
 
 fn unreadable(script: &str) -> Vec<String> {
@@ -598,6 +598,24 @@ fn the_rules_see_nested_commands_and_aliases() {
     let hits = dangerous(&format!("powershell -EncodedCommand {encoded}"));
     assert!(hits.contains(&"Remove-Item -Recurse / rd /s".to_owned()), "{hits:?}");
     assert!(hits.contains(&"powershell -EncodedCommand".to_owned()), "{hits:?}");
+}
+
+#[test]
+fn a_script_is_rated_as_the_statements_powershell_runs_it_as() {
+    // PowerShell reads a script a line at a time: an empty line ends a statement left open, so this is three
+    // statements, and the second runs. Read as one string, it would look like a read.
+    let trick = "\"x\n\nRestart-Service Spooler\n\"";
+    assert!(!read_only(trick));
+    let trick = "@'\n\nStop-Computer\n'@";
+    assert!(!read_only(trick));
+    assert!(names(trick).is_empty(), "as one script it is a here-string");
+    let lines: Vec<String> = commands(trick).iter().map(PsCommand::line).collect();
+    assert!(lines.iter().any(|l| l.starts_with("Stop-Computer")), "{lines:?}");
+    assert!(flagged(trick, "Stop-Computer / Restart-Computer"));
+    // A statement over several lines that closes is one statement: still a read.
+    assert!(read_only("Get-Service |\n  Where-Object Status -eq 'Running' |\n  Select-Object Name"));
+    assert!(read_only("foreach ($s in Get-Service) {\n  $s.Name\n}"));
+    assert!(read_only("Get-Date\r\nhostname\r\n"));
 }
 
 #[test]

@@ -651,6 +651,9 @@ pub struct PaneInfo {
     pub dirty: bool,
     /// SS-12: SSH, Telnet, serial or a tunnel tab; only SSH panes join MultiExec and Compare.
     pub kind: PaneKind,
+    /// BX-13: a connected PowerShell pane's console: at its prompt or running a statement, and the lines of a statement
+    /// it holds open. `None` for other panes, and before a PowerShell pane first connects.
+    pub console: Option<crate::adapters::winrm::console::ConsoleView>,
 }
 
 /// What the job runner does in open terminals: SS-10 sends a MultiExec line's held Enter, SS-08
@@ -751,6 +754,8 @@ struct Control {
     connection: std::sync::atomic::AtomicU64,
     /// SS-12: the connection on which the vault password was given for typing into a Telnet pane (0: none).
     clear_text_confirmed: std::sync::atomic::AtomicU64,
+    /// BX-13: a PowerShell pane's console status (at its prompt or running), while connected.
+    console: Mutex<Option<Arc<crate::adapters::winrm::console::ConsoleStatus>>>,
 }
 
 /// SS-12: what a new pane is for, with what that kind needs.
@@ -1340,6 +1345,7 @@ impl Terminals {
             serial_port: pane.kind.serial_port,
             connection: std::sync::atomic::AtomicU64::new(0),
             clear_text_confirmed: std::sync::atomic::AtomicU64::new(0),
+            console: Mutex::new(None),
         });
         audit(
             &self.inner.store,
@@ -1398,6 +1404,7 @@ impl Terminals {
     /// What MultiExec and the command bus need to know about an open pane; `None` once it has closed.
     pub fn pane_info(&self, id: Uuid) -> Option<PaneInfo> {
         let control = self.control(id)?;
+        let console = locks::lock(&control.console).as_ref().map(|status| status.view());
         Some(PaneInfo {
             session_id: control.session_id(),
             name: match control.target {
@@ -1407,6 +1414,7 @@ impl Terminals {
             screen: control.screen(),
             dirty: control.dirty.load(Ordering::SeqCst),
             kind: control.kind,
+            console,
         })
     }
 
@@ -2820,6 +2828,7 @@ impl Pane {
             ))
             .await;
         }
+        *locks::lock(&self.control.console) = Some(Arc::clone(&console.status));
         let mut handle = console::console_handle(console.input, console.output, peer_ip);
         // MO-13: the host's facts on this connection, beside the console.
         handle.commands = Some(session.exec());
