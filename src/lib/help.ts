@@ -230,6 +230,20 @@ export const HELP = {
       "Password prompts and keys sent to full-screen programs are not recorded, and secrets are scrubbed. Recordings stay in memory until Type in all tabs is turned off.",
     ],
   },
+  "winrm.signIn": {
+    title: "Signing in to WinRM",
+    body: [
+      "NTLM signs in with the session's user and a vault password through Windows' own NTLM, for workgroup hosts and domain hosts that allow it; over HTTP every message is encrypted. Basic sends them in each request, so it needs HTTPS and a host that allows it.",
+      "My Windows sign-in uses your account on this PC (Kerberos), for hosts in a trusted domain; no password is stored. Remotely changes nothing on this PC, such as TrustedHosts.",
+    ],
+  },
+  "winrm.certificate": {
+    title: "The host's HTTPS certificate",
+    body: [
+      "Trusted by Windows: the certificate must chain to a root this PC trusts and name the session's host.",
+      "By its fingerprint: a certificate Windows doesn't trust, such as a self-signed one, is shown the first time with its fingerprint, like an SSH host key. Once you trust it, a different one blocks the connection. Trusted certificates are listed on the Vault page's Known hosts tab.",
+    ],
+  },
   vmLink: {
     title: "VM it reaches",
     body: [

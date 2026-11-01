@@ -1216,13 +1216,27 @@ export interface SerialOptions {
   localEcho: boolean;
 }
 
+/** F4: WinRM over HTTPS (5986), or HTTP (5985) with every message sealed by the sign-in. */
+export type WinrmTransport = "https" | "http";
+/** F4: the session's user and vault password (NTLM, or Basic over HTTPS only), or this PC's Windows sign-in (Kerberos). */
+export type WinrmSignIn = "ntlm" | "basic" | "windows";
+/** F4: Windows must trust the HTTPS certificate, or one it doesn't is trusted per host by its fingerprint. */
+export type WinrmCertificate = "windows" | "fingerprint";
+
+export interface WinrmOptions {
+  transport: WinrmTransport;
+  signIn: WinrmSignIn;
+  certificate: WinrmCertificate;
+}
+
 /** SS-12: what a session opens, with its kind's own fields. */
 export type SessionKind =
   | { protocol: "ssh" }
   | ({ protocol: "rdp" } & RdpOptions)
   | ({ protocol: "vnc" } & VncOptions)
   | ({ protocol: "telnet" } & TelnetOptions)
-  | ({ protocol: "serial" } & SerialOptions);
+  | ({ protocol: "serial" } & SerialOptions)
+  | ({ protocol: "winrm" } & WinrmOptions);
 
 export type SessionProtocol = SessionKind["protocol"];
 
@@ -1244,7 +1258,7 @@ export interface WindowOpened {
 }
 
 /** SS-12: what a terminal pane is for. */
-export type PaneKind = "ssh" | "telnet" | "serial" | "tunnel";
+export type PaneKind = "ssh" | "telnet" | "serial" | "tunnel" | "powershell";
 
 /** QL-16: the folder a value comes from. */
 export interface FromFolder {
@@ -2872,6 +2886,41 @@ export interface HostSpecs {
   filesystems: Filesystem[];
   virtualization: string | null;
   uptimeSecs: number | null;
+  /** F4: what only a Windows host says; null for Linux hosts. */
+  windows?: WindowsInfo | null;
+  /** F4: a Windows host's network adapters with MACs and addresses. */
+  adapters?: NetAdapter[];
+  /** F4: a Windows host's listening TCP ports. */
+  listening?: WindowsListeningPort[];
+}
+
+/** F4: MO-13 for Windows hosts. */
+export interface WindowsInfo {
+  edition: string | null;
+  displayVersion: string | null;
+  build: string | null;
+  domain: string | null;
+  partOfDomain: boolean | null;
+  workgroup: string | null;
+  manufacturer: string | null;
+  model: string | null;
+  lastBoot: string | null;
+}
+
+export interface NetAdapter {
+  name: string;
+  mac: string | null;
+  addresses: string[];
+  gateways: string[];
+  dnsServers: string[];
+  dhcp: boolean | null;
+}
+
+export interface WindowsListeningPort {
+  port: number;
+  address: string;
+  pid: number | null;
+  process: string | null;
 }
 
 export type CollectedBy = "terminal" | "dashboard" | "refresh";

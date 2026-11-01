@@ -9,8 +9,9 @@
 // folded line says what is set inside); under Environment, one line says which environment applies and where from (a
 // Prod VM the session reaches makes it Prod). Taking Prod away, by the environment or by unlinking a Prod VM, asks first.
 // SS-12: the kind comes first (SSH, remote desktop, VNC, Telnet, serial), and each kind's own fields go under Advanced
-// (kind-fields in SessionKindFields). Only SSH logs in with a login of the app's; RDP's mstsc and the VNC viewer ask
-// for the password themselves, and Telnet and serial log in at the prompt. A serial session's host is its COM port.
+// (kind-fields in SessionKindFields). Only SSH and WinRM log in with a login of the app's (WinRM: a user and a vault
+// password, or this PC's Windows sign-in); RDP's mstsc and the VNC viewer ask for the password themselves, and Telnet
+// and serial log in at the prompt. A serial session's host is its COM port. SSH and WinRM sessions may be linked to a VM.
 
 import { useEffect, useMemo, useState } from "react";
 import { ChevronRightIcon, PlusIcon } from "lucide-react";
@@ -57,9 +58,13 @@ import {
   kindSummary,
   KINDS,
   portAfterKindChange,
+  logsInWithVault,
   rdpProblem,
+  readsGuest,
   serialProblem,
   takesJumpHost,
+  winrmPortAfterTransport,
+  winrmProblem,
 } from "@/lib/session-kinds";
 import { SessionKindFields, SerialPortField } from "./SessionKindFields";
 import { HelpTip } from "@/components/HelpTip";
@@ -145,6 +150,10 @@ export function SessionDialog({
   const [kind, setKind] = useState<SessionKind>(session ? kindOf(session) : defaultKind("ssh"));
   const protocol = kind.protocol;
   const ssh = protocol === "ssh";
+  /** F4: WinRM signs in with a user and a vault password, unless it uses this PC's Windows sign-in. */
+  const winrmVault = protocol === "winrm" && logsInWithVault(kind);
+  /** SSH and WinRM sessions may be linked to the VM they reach (its guest metrics and facts). */
+  const guest = readsGuest(kind);
   const [name, setName] = useState(session?.name ?? "");
   const [folder, setFolder] = useState<string>(session ? (session.folderId ?? NONE) : (folderId ?? NONE));
   const [host, setHost] = useState(session?.host ?? "");
@@ -238,7 +247,13 @@ export function SessionDialog({
   const portOk = Number.isInteger(portNumber) && portNumber >= 1 && portNumber <= 65535;
   /** SS-12: what the kind's own fields refuse, if anything. */
   const kindIssue =
-    kind.protocol === "serial" ? serialProblem(kind) : kind.protocol === "rdp" ? rdpProblem(kind) : null;
+    kind.protocol === "serial"
+      ? serialProblem(kind)
+      : kind.protocol === "rdp"
+        ? rdpProblem(kind)
+        : kind.protocol === "winrm"
+          ? winrmProblem(kind)
+          : null;
   /** What saving waits for: the kind's fields right, and an SSH session's forwards loaded and right. */
   const savable = kindIssue === null && (!ssh || (forwards !== null && forwardsProblem(forwards) === null));
   /** SS-12: picks a kind, keeping the fields of the one it had; the port follows unless one was typed. */
@@ -305,7 +320,7 @@ export function SessionDialog({
   const summary = advancedSummary({
     kind: kindSummary(kind),
     jumpHost: takesJumpHost(kind) && chain ? (chain.names[chain.names.length - 1] ?? null) : null,
-    vm: !ssh || vm === NONE ? null : (vms.find((v) => v.id === vm)?.displayName ?? "not listed"),
+    vm: !guest || vm === NONE ? null : (vms.find((v) => v.id === vm)?.displayName ?? "not listed"),
     startupCommand: ssh && startup.trim() !== "",
     promptHook: !ssh || hook === NONE ? null : hook === "on",
     portForwards: ssh ? (forwards?.length ?? 0) : 0,
@@ -351,8 +366,11 @@ export function SessionDialog({
       folderId: folder === NONE ? null : folder,
       host,
       port: portNumber,
-      username: protocol === "vnc" || protocol === "serial" ? null : username.trim() || null,
-      auth: ssh ? auth() : { method: "password", passwordId: null },
+      username:
+        protocol === "vnc" || protocol === "serial" || (protocol === "winrm" && !winrmVault)
+          ? null
+          : username.trim() || null,
+      auth: ssh ? auth() : { method: "password", passwordId: winrmVault && password !== NONE ? password : null },
       jumpSessionId: !jumps || jump === NONE || jump === DIRECT ? null : jump,
       jumpDirect: !jumps || jump === DIRECT,
       startupCommand: ssh ? startup.trim() || null : null,
@@ -361,7 +379,7 @@ export function SessionDialog({
       environment,
       color,
       tags: tagList,
-      vmId: !ssh || vm === NONE ? null : vm,
+      vmId: !guest || vm === NONE ? null : vm,
       kind,
     };
     // SS-04, AP-06: a vault password sent to a host where no saved session sends it yet asks for the vault password.
@@ -525,7 +543,7 @@ export function SessionDialog({
             )}
 
             <div className="grid gap-4 sm:grid-cols-2">
-              {protocol !== "vnc" && protocol !== "serial" && (
+              {protocol !== "vnc" && protocol !== "serial" && !(protocol === "winrm" && !winrmVault) && (
                 <div className="grid content-start gap-2">
                   <Label htmlFor="session-user">User</Label>
                   <Input
@@ -563,6 +581,13 @@ export function SessionDialog({
                 </Select>
               </div>
             </div>
+
+            {winrmVault && (
+              <div className="grid gap-2">
+                <Label htmlFor="session-password">Password from the vault</Label>
+                {secretPicker("password", password, setPassword, "None: ask when connecting")}
+              </div>
+            )}
 
             {ssh && (
               <div className="grid gap-2">
@@ -669,7 +694,19 @@ export function SessionDialog({
                 </button>
               </CollapsibleTrigger>
               <CollapsibleContent className="grid gap-4 border-t p-3">
-                {!ssh && <SessionKindFields kind={kind} onChange={setKind} problem={kindIssue} />}
+                {!ssh && (
+                  <SessionKindFields
+                    kind={kind}
+                    onChange={(next) => {
+                      // F4: the port follows HTTPS and HTTP unless one was typed.
+                      if (next.protocol === "winrm" && kind.protocol === "winrm" && next.transport !== kind.transport) {
+                        setPort(winrmPortAfterTransport(port, next.transport));
+                      }
+                      setKind(next);
+                    }}
+                    problem={kindIssue}
+                  />
+                )}
                 {takesJumpHost(kind) && (
                   <div className="grid gap-2">
                     <Label htmlFor="session-jump">
@@ -717,7 +754,7 @@ export function SessionDialog({
                   </div>
                 )}
 
-                {ssh && (
+                {guest && (
                   <>
                     <div className="grid gap-2">
                       <Label htmlFor="session-vm" className="flex items-center gap-1">
@@ -745,7 +782,11 @@ export function SessionDialog({
                       </Select>
                       {linkNote() && <p className="text-xs text-muted-foreground">{linkNote()}</p>}
                     </div>
+                  </>
+                )}
 
+                {ssh && (
+                  <>
                     <div className="grid gap-2">
                       <Label htmlFor="session-startup">Startup command</Label>
                       <Textarea

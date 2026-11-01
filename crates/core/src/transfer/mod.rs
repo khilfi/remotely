@@ -134,6 +134,38 @@ struct Payload {
     /// FD-06: VMs' notes, by the VM's key. Files from before 0.7.0 have none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     vm_notes: Vec<VmNoteEntry>,
+    /// SS-12: sessions of a kind this version doesn't open (a newer version's), by name, left out when the file was
+    /// read ([`without_unknown_kinds`]) so the rest of the file still imports.
+    #[serde(skip)]
+    left_out: Vec<String>,
+}
+
+/// SS-12: the file's sessions without those of a kind this version doesn't open (a newer version's), whose names it
+/// gives (at most 200, cleaned for the preview), so one such session doesn't fail the whole file.
+fn without_unknown_kinds(mut value: serde_json::Value) -> (serde_json::Value, Vec<String>) {
+    let mut left_out = Vec::new();
+    if let Some(sessions) = value.get_mut("sessions").and_then(serde_json::Value::as_array_mut) {
+        sessions.retain(|s| {
+            let protocol = s
+                .get("kind")
+                .and_then(|k| k.get("protocol"))
+                .and_then(serde_json::Value::as_str);
+            let known = protocol.is_none_or(|p| SessionKind::PROTOCOLS.contains(&p));
+            if !known && left_out.len() < 200 {
+                let name: String = s
+                    .get("name")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("a session")
+                    .chars()
+                    .filter(|c| !c.is_control() && !crate::untrusted::is_format_char(*c))
+                    .take(100)
+                    .collect();
+                left_out.push(name);
+            }
+            known
+        });
+    }
+    (value, left_out)
 }
 
 /// FD-06: a note that travels with its session or folder. Files from before 0.7.0 have none.
@@ -1544,6 +1576,7 @@ impl Transfer {
                 .collect(),
             sessions: entries,
             vm_notes,
+            left_out: Vec::new(),
             known_hosts: known_hosts
                 .iter()
                 .map(|k| KnownHostEntry {
@@ -1645,12 +1678,16 @@ impl Transfer {
         }
         let bytes = tokio::fs::read(path).await?;
         let plain = blocking(move || file::open(&bytes, &passphrase)).await?;
-        let payload: Payload = serde_json::from_slice(&plain).map_err(|_| {
+        let damaged = || {
             CoreError::InvalidInput(
                 "The file opened, but what it holds is damaged or from an incompatible version of Remotely.".into(),
             )
-        })?;
+        };
+        let value: serde_json::Value = serde_json::from_slice(&plain).map_err(|_| damaged())?;
         drop(plain);
+        let (value, left_out) = without_unknown_kinds(value);
+        let mut payload: Payload = serde_json::from_value(value).map_err(|_| damaged())?;
+        payload.left_out = left_out;
         let preview = self.preview(ctx, Uuid::new_v4(), path, &payload, vault).await?;
         *locks::lock(&self.opened) = Some(Opened {
             id: preview.id,
@@ -1960,6 +1997,17 @@ impl Transfer {
 
         let secret_values = payload.secrets.iter().any(|s| s.value.is_some());
         let mut warnings = Vec::new();
+        if !payload.left_out.is_empty() {
+            warnings.push(format!(
+                "Left out, as only a newer version of Remotely opens their kind: {}.",
+                payload
+                    .left_out
+                    .iter()
+                    .map(|n| format!("'{n}'"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
         if secret_values {
             match local.vault {
                 VaultStatus::Unlocked => {}
@@ -2944,6 +2992,33 @@ mod tests {
                 line_ending: crate::sessions::kinds::LineEnding::Cr
             })
         );
+    }
+
+    #[test]
+    fn a_session_of_a_newer_kind_is_left_out_and_the_rest_imports() {
+        // F4: WinRM sessions travel in format 3 with their fields.
+        let winrm = r#"{"id":"7d1f0f0e-63f8-4a5b-9f3a-2f9d8f1d2c3b","name":"win01","host":"win01.example.com",
+            "port":5985,"auth":{"method":"password"},"kind":{"protocol":"winrm","transport":"http","signIn":"ntlm"}}"#;
+        let entry: SessionEntry = serde_json::from_str(winrm).unwrap();
+        assert!(entry.kind.is_winrm());
+        // A kind no version of this one knows is left out by name, not the whole file. (A JSON escape for U+202E.)
+        let rtl = ["\\", "u202e"].concat();
+        let file = format!(
+            r#"{{"exportedAt":"2026-11-01T00:00:00Z","sessions":[{winrm},
+            {{"id":"8d1f0f0e-63f8-4a5b-9f3a-2f9d8f1d2c3b","name":"x{rtl}01","host":"x01.example.com","port":6000,
+              "auth":{{"method":"agent"}},"kind":{{"protocol":"x11","display":2}}}}]}}"#
+        );
+        let value: serde_json::Value = serde_json::from_str(&file).unwrap();
+        assert!(
+            serde_json::from_value::<Payload>(value.clone()).is_err(),
+            "strictly, it fails"
+        );
+        let (value, left_out) = without_unknown_kinds(value);
+        let payload: Payload = serde_json::from_value(value).unwrap();
+        assert_eq!(payload.sessions.len(), 1);
+        assert_eq!(left_out, vec!["x01".to_owned()]);
+        // Format 3 for a WinRM session, which 0.6.x refuses rather than import as SSH.
+        assert_eq!(payload.format_version(), file::FORMAT_VERSION);
     }
 
     #[test]

@@ -33,6 +33,8 @@ function keyType(name: string) {
   switch (name) {
     case "ssh-ed25519":
       return "Ed25519";
+    case "tls-certificate":
+      return "HTTPS certificate (WinRM)";
     case "ssh-rsa":
     case "rsa-sha2-256":
     case "rsa-sha2-512":

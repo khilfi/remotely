@@ -98,14 +98,20 @@ export function CheckDialog({ start, onClose, onSaved }: Props) {
     timeoutSecs: whole(timeout),
     failuresBeforeDown: whole(failures),
   };
-  // SS-12: a service check reads a systemd unit over SSH, so only SSH sessions are offered for it.
-  const sshOnly = input.spec.kind === "service";
-  const offered = sshOnly ? sessions.filter((s) => s.kind.protocol === "ssh") : sessions;
+  // SS-12, F4: a service check reads a systemd unit over SSH or a Windows service over WinRM, so only those sessions are
+  // offered for it.
+  const serviceOnly = input.spec.kind === "service";
+  const servesChecks = (s: SessionRecord) => s.kind.protocol === "ssh" || s.kind.protocol === "winrm";
+  const offered = serviceOnly ? sessions.filter(servesChecks) : sessions;
   const chosen = input.target.kind === "session" ? input.target.sessionId : null;
-  const notSsh = sshOnly && chosen !== null && sessions.some((s) => s.id === chosen && s.kind.protocol !== "ssh");
+  const chosenSession = chosen === null ? undefined : sessions.find((s) => s.id === chosen);
+  const windowsService = chosenSession?.kind.protocol === "winrm";
+  const notServed = serviceOnly && chosenSession !== undefined && !servesChecks(chosenSession);
   const problem =
-    checkProblem(candidate) ??
-    (notSsh ? "A service check reads a systemd unit over SSH: choose an SSH session." : null);
+    checkProblem(candidate, windowsService) ??
+    (notServed
+      ? "A service check reads a systemd unit over SSH or a Windows service over WinRM: choose such a session."
+      : null);
   const set = (change: Partial<CheckInput>) => setInput((old) => ({ ...old, ...change }));
   const setSpec = (next: CheckSpec) => setInput((old) => ({ ...old, spec: next }));
 
@@ -242,7 +248,7 @@ export function CheckDialog({ start, onClose, onSaved }: Props) {
             </Select>
             <p className="text-xs text-muted-foreground">{KINDS.find((k) => k.value === input.spec.kind)?.hint}</p>
           </Field>
-          <KindFields spec={input.spec} port={port} setPort={setPort} setSpec={setSpec}>
+          <KindFields spec={input.spec} port={port} setPort={setPort} setSpec={setSpec} windowsService={windowsService}>
             {input.spec.kind === "http" && (
               <div className="grid grid-cols-2 gap-3">
                 <Field id="check-status-min" label="Status from">
@@ -363,12 +369,15 @@ function KindFields({
   port,
   setPort,
   setSpec,
+  windowsService,
   children,
 }: {
   spec: CheckSpec;
   port: string;
   setPort: (port: string) => void;
   setSpec: (spec: CheckSpec) => void;
+  /** F4: the session is a WinRM one: the service is a Windows service. */
+  windowsService: boolean;
   children?: ReactNode;
 }) {
   const portField = (placeholder?: string) => (
@@ -498,12 +507,12 @@ function KindFields({
       );
     case "service":
       return (
-        <Field id="check-unit" label="systemd unit">
+        <Field id="check-unit" label={windowsService ? "Windows service" : "systemd unit"}>
           <Input
             id="check-unit"
             spellCheck={false}
             value={spec.unit}
-            placeholder="nginx.service"
+            placeholder={windowsService ? "Spooler" : "nginx.service"}
             onChange={(e) => setSpec({ ...spec, unit: e.target.value })}
           />
         </Field>

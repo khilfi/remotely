@@ -52,6 +52,12 @@
 //! Telnet (SS-12): a router-style console (`fakes::telnet_server`) on the port after the web page, logging alice in
 //! with the same password (`show version`, `show clock`, `echo <text>`, `exit`), for a Telnet session: the "Clear
 //! text" tab, reconnects, and "Type vault password", which asks for the vault password on each connection.
+//!
+//! WinRM (F4): a fake Windows host (`fakes::winrm_server`) on the next two ports: HTTPS with Basic (a certificate made
+//! at start, so choose "trust by its fingerprint" in the session), then HTTP with NTLM, every message sealed (Windows'
+//! own NTLM signs in from this PC). alice and the same password. Its PowerShell console knows `hostname`, `Get-Date`,
+//! `Set-Location`, `Read-Host`, `Start-Sleep` (Ctrl+C ends it) and `exit`; watching it on the dashboard shows
+//! moving Windows guest metrics, its Host details show Windows facts, and a service check on Spooler is up.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -65,7 +71,7 @@ use remotely_core::adapters::containers::EngineKind;
 use remotely_core::fakes::containers::Fixture;
 use remotely_core::fakes::ssh_server::host::HostFixture;
 use remotely_core::fakes::ssh_server::{SudoMode, TestSshServer};
-use remotely_core::fakes::TelnetTestServer;
+use remotely_core::fakes::{FakeWinrm, TelnetTestServer, WinrmTestServer};
 use remotely_core::metrics::procfs::samples;
 
 /// SS-08: a log file of a few hundred KB, so a download shows its progress.
@@ -201,6 +207,18 @@ async fn main() {
             telnet.port()
         ),
         Err(err) => println!("Telnet:      not started ({err})"),
+    }
+    // F4: a fake WinRM host on the next two ports.
+    let https = WinrmTestServer::start_on(port + count + 2, FakeWinrm::HttpsBasic, "alice", &password).await;
+    let http = WinrmTestServer::start_on(port + count + 3, FakeWinrm::HttpNtlm, "alice", &password).await;
+    match (&https, &http) {
+        (Ok(https), Ok(http)) => println!(
+            "WinRM:       HTTPS with Basic on 127.0.0.1:{} (trust its certificate by fingerprint: {}), HTTP with NTLM on 127.0.0.1:{} (alice, the same password)",
+            https.port(),
+            https.fingerprint().unwrap_or_default(),
+            http.port()
+        ),
+        _ => println!("WinRM:       not started"),
     }
     println!("Stop with Ctrl+C.");
     // Runs until the process is stopped; the servers go with it.

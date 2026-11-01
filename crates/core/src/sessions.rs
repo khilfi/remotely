@@ -2166,9 +2166,9 @@ impl SessionLibrary {
     async fn describe(&self, ctx: &Context, s: &SessionRecord) -> Result<String> {
         let (folders, sessions) = self.names(ctx).await?;
         let mut parts = vec![s.address()];
-        // SS-12: what it opens; only SSH logs in with a login of the app's.
+        // SS-12: what it opens; only SSH and WinRM log in with a login of the app's.
         parts.extend(s.kind.describe());
-        if s.kind.is_ssh() {
+        if s.kind.logs_in_with_vault() {
             parts.push(s.auth.describe());
         }
         if s.environment != Environment::None {

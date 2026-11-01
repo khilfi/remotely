@@ -17,7 +17,11 @@ import {
   PARITY_CHOICES,
   SERIAL_SPEEDS,
   STOP_BIT_CHOICES,
+  WINRM_CERTIFICATES,
+  WINRM_SIGN_INS,
+  WINRM_TRANSPORTS,
 } from "@/lib/session-kinds";
+import { HelpTip } from "@/components/HelpTip";
 
 function Check({
   id,
@@ -176,6 +180,73 @@ export function SessionKindFields({
       );
     case "telnet":
       return <LineEndingField value={kind.lineEnding} onChange={(lineEnding) => onChange({ ...kind, lineEnding })} />;
+    case "winrm":
+      return (
+        <div className="grid gap-3">
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div className="grid content-start gap-2">
+              <Label htmlFor="winrm-transport">Connection</Label>
+              <Select
+                value={kind.transport}
+                onValueChange={(v) => onChange({ ...kind, transport: v as typeof kind.transport })}
+              >
+                <SelectTrigger id="winrm-transport">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {WINRM_TRANSPORTS.map((t) => (
+                    <SelectItem key={t.value} value={t.value}>
+                      {t.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+            <div className="grid content-start gap-2">
+              <Label htmlFor="winrm-sign-in" className="flex items-center gap-1">
+                Sign in with
+                <HelpTip topic="winrm.signIn" />
+              </Label>
+              <Select value={kind.signIn} onValueChange={(v) => onChange({ ...kind, signIn: v as typeof kind.signIn })}>
+                <SelectTrigger id="winrm-sign-in">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {WINRM_SIGN_INS.map((s) => (
+                    <SelectItem key={s.value} value={s.value}>
+                      {s.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+          </div>
+          {kind.transport === "https" && (
+            <div className="grid content-start gap-2">
+              <Label htmlFor="winrm-certificate" className="flex items-center gap-1">
+                HTTPS certificate
+                <HelpTip topic="winrm.certificate" />
+              </Label>
+              <Select
+                value={kind.certificate}
+                onValueChange={(v) => onChange({ ...kind, certificate: v as typeof kind.certificate })}
+              >
+                <SelectTrigger id="winrm-certificate" className="sm:w-1/2">
+                  <SelectValue />
+                </SelectTrigger>
+                <SelectContent>
+                  {WINRM_CERTIFICATES.map((c) => (
+                    <SelectItem key={c.value} value={c.value}>
+                      {c.label}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+          )}
+          {problemLine}
+        </div>
+      );
     case "serial":
       return (
         <div className="grid gap-3">
