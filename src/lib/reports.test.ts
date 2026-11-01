@@ -6,6 +6,7 @@ import { test } from "node:test";
 import {
   ansibleReason,
   ansibleSavedText,
+  busyText,
   dayRange,
   daysFromActivity,
   dayStart,
@@ -58,6 +59,19 @@ test("buttons say why they are off", () => {
   assert.equal(ansibleReason({ hosts: 3, busy: false }), null);
   assert.match(ansibleReason({ hosts: 0, busy: false }) ?? "", /No SSH session/);
   assert.equal(ansibleReason({ hosts: null, busy: false }), "Reading the sessions…");
+  // A preview that failed says why, never "Reading…" for ever.
+  assert.equal(ansibleReason({ hosts: null, busy: false, problem: "The store is busy." }), "The store is busy.");
+  assert.equal(ansibleReason({ hosts: 3, busy: false, problem: null }), null);
+  assert.equal(handoverReason({ range, preparedBy: "", busy: false, problem: "No counts." }), "No counts.");
+});
+
+test("a busy export says how many hosts are read", () => {
+  const saving = "Saving…";
+  assert.equal(busyText({ reading: false, progress: null, saving }), saving);
+  assert.equal(busyText({ reading: true, progress: null, saving }), "Reading hosts…");
+  assert.equal(busyText({ reading: true, progress: { done: 3, total: 12 }, saving }), "Reading hosts: 3 of 12…");
+  assert.equal(busyText({ reading: true, progress: { done: 12, total: 12 }, saving }), saving, "then it writes");
+  assert.equal(busyText({ reading: true, progress: { done: 0, total: 0 }, saving }), "Reading hosts…");
 });
 
 test("what the toasts say", () => {

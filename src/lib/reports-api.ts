@@ -2,7 +2,7 @@
 // core sends and the IPC wrappers. Each export opens its save dialog in the shell (never a path from here), reads the
 // shown workspace only, and is audited by the core; the read-only lock allows them, as it allows other exports.
 
-import { invoke, type TargetPicks } from "@/lib/api";
+import { invoke, listen, type TargetPicks } from "@/lib/api";
 
 export interface ReportsOverview {
   workspace: string;
@@ -102,15 +102,29 @@ export interface HandoverExport extends Saved {
   read: ReadSummary | null;
 }
 
+/** How far "Read reachable hosts again first" got: hosts done (read or not) of those asked. */
+export interface ReadProgress {
+  done: number;
+  total: number;
+}
+
 export const reportsApi = {
   overview: () => invoke<ReportsOverview>("reports_overview"),
-  /** Opens the save dialog, then writes the workbook; null when the dialog was closed. */
-  exportInventory: (options: InventoryOptions, utcOffsetMinutes: number) =>
-    invoke<InventoryExport | null>("inventory_export", { request: { ...options, utcOffsetMinutes } }),
+  /**
+   * Opens the save dialog, then writes the workbook, as run `run` (for `cancel` and `onProgress`); null when the
+   * dialog was closed.
+   */
+  exportInventory: (run: string, options: InventoryOptions, utcOffsetMinutes: number) =>
+    invoke<InventoryExport | null>("inventory_export", { run, request: { ...options, utcOffsetMinutes } }),
   ansiblePreview: (request: AnsibleRequest) => invoke<AnsiblePreview>("ansible_preview", { request }),
   exportAnsible: (request: AnsibleRequest, utcOffsetMinutes: number) =>
     invoke<AnsibleExport | null>("ansible_export", { request, utcOffsetMinutes }),
   handoverPreview: (request: HandoverRequest) => invoke<HandoverPreview>("handover_preview", { request }),
-  exportHandover: (request: HandoverRequest) => invoke<HandoverExport | null>("handover_export", { request }),
+  exportHandover: (run: string, request: HandoverRequest) =>
+    invoke<HandoverExport | null>("handover_export", { run, request }),
+  /** Stops an export's host reads; nothing is written. */
+  cancel: (run: string) => invoke<boolean>("reports_cancel", { run }),
+  onProgress: (handler: (event: ReadProgress & { run: string }) => void) =>
+    listen<ReadProgress & { run: string }>("reports://progress", (e) => handler(e.payload)),
   showFile: (savedId: string) => invoke<void>("reports_show_file", { savedId }),
 };

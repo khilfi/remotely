@@ -1,7 +1,8 @@
 // FD-08: the handover pack. The dates (from the Activity page's filter when opened there), who prepared it, and what
 // to add: the outputs of what ran, a fresh read of the hosts, their installed packages. The count line says what the
 // dates hold. Save opens the shell's save dialog; the core writes the zip (one page, the workbook, a CSV per table)
-// and audits it.
+// and audits it. While the hosts are read the button counts them, and Cancel or closing the dialog stops the reads
+// with nothing written.
 
 import { useEffect, useState } from "react";
 import { FolderOpenIcon, PackageCheckIcon } from "lucide-react";
@@ -20,6 +21,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { HelpTip } from "@/components/HelpTip";
 import { WhyDisabled } from "@/components/WhyDisabled";
+import { useExportRun } from "@/hooks/use-export-run";
 import { errorMessage } from "@/lib/api";
 import {
   reportsApi,
@@ -29,6 +31,7 @@ import {
   type ReportsOverview,
 } from "@/lib/reports-api";
 import {
+  busyText,
   dayRange,
   handoverCountText,
   handoverReason,
@@ -54,7 +57,9 @@ export function HandoverPackDialog({ from: initialFrom, to: initialTo, onClose }
   const [readAgain, setReadAgain] = useState(false);
   const [packages, setPackages] = useState(false);
   const [preview, setPreview] = useState<{ key: string; preview: HandoverPreview } | null>(null);
-  const [busy, setBusy] = useState(false);
+  const [previewError, setPreviewError] = useState<{ key: string; message: string } | null>(null);
+  const exporting = useExportRun();
+  const busy = exporting.busy;
   const [error, setError] = useState<string | null>(null);
   const [done, setDone] = useState<HandoverExport | null>(null);
 
@@ -64,6 +69,7 @@ export function HandoverPackDialog({ from: initialFrom, to: initialTo, onClose }
       (o) => {
         if (stale) return;
         setOverview(o);
+        setError(null);
         setPreparedBy((p) => p ?? o.preparedBy ?? "");
       },
       (err) => !stale && setError(errorMessage(err)),
@@ -73,6 +79,8 @@ export function HandoverPackDialog({ from: initialFrom, to: initialTo, onClose }
     };
   }, []);
 
+  const noSsh = overview?.sshSessions === 0;
+  const reading = readAgain && !noSsh;
   const range = dayRange(from, to);
   const request: HandoverRequest | null =
     "problem" in range
@@ -83,10 +91,12 @@ export function HandoverPackDialog({ from: initialFrom, to: initialTo, onClose }
           utcOffsetMinutes: utcOffsetMinutes(),
           preparedBy: (preparedBy ?? "").trim(),
           includeOutputs: outputs,
-          inventory: { readAgain, updates: false, packages: readAgain && packages },
+          inventory: { readAgain: reading, updates: false, packages: reading && packages },
         };
   const rangeKey = "problem" in range ? null : `${range.fromMs}-${range.toMs}`;
   const shown = preview && preview.key === rangeKey ? preview.preview : null;
+  // Only these dates' failure counts: dates read since then clear it.
+  const countProblem = previewError && previewError.key === rangeKey ? previewError.message : null;
 
   // What the dates hold.
   useEffect(() => {
@@ -105,7 +115,7 @@ export function HandoverPackDialog({ from: initialFrom, to: initialTo, onClose }
         })
         .then(
           (p) => !stale && setPreview({ key: rangeKey, preview: p }),
-          (err) => !stale && setError(errorMessage(err)),
+          (err) => !stale && setPreviewError({ key: rangeKey, message: errorMessage(err) }),
         );
     }, 250);
     return () => {
@@ -116,18 +126,16 @@ export function HandoverPackDialog({ from: initialFrom, to: initialTo, onClose }
 
   async function save() {
     if (!request) return;
-    setBusy(true);
     setError(null);
     try {
-      const report = await reportsApi.exportHandover(request);
+      const report = await exporting.run((run) => reportsApi.exportHandover(run, request));
+      // Also after a late Cancel: the pack was written by then, so it says so.
       if (report) {
         setDone(report);
         toast.success(handoverSavedText(report));
       }
     } catch (err) {
       setError(errorMessage(err));
-    } finally {
-      setBusy(false);
     }
   }
 
@@ -140,10 +148,11 @@ export function HandoverPackDialog({ from: initialFrom, to: initialTo, onClose }
     }
   }
 
-  const reason = handoverReason({ range, preparedBy: preparedBy ?? "", busy });
+  const reason = handoverReason({ range, preparedBy: preparedBy ?? "", busy, problem: countProblem });
 
   return (
-    <Dialog open onOpenChange={(open) => !open && !busy && onClose()}>
+    // Closing while the hosts are read stops them (useExportRun); nothing is written.
+    <Dialog open onOpenChange={(open) => !open && onClose()}>
       <DialogContent className="sm:max-w-lg">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
@@ -205,7 +214,7 @@ export function HandoverPackDialog({ from: initialFrom, to: initialTo, onClose }
                 ? range.problem
                 : shown
                   ? `${handoverCountText(shown.jobs, shown.otherChanges, shown.notes)} go in.`
-                  : "Counting…"}
+                  : (countProblem ?? "Counting…")}
             </p>
             <div className="grid gap-1.5">
               <Label htmlFor="handover-by">Prepared by</Label>
@@ -224,23 +233,27 @@ export function HandoverPackDialog({ from: initialFrom, to: initialTo, onClose }
                   Add the outputs of what ran
                 </Label>
               </div>
-              <div className="flex items-center gap-3">
+              <div className="flex items-start gap-3">
                 <Checkbox
                   id="handover-read-again"
-                  checked={readAgain}
-                  disabled={overview?.sshSessions === 0}
+                  className="mt-0.5"
+                  checked={reading}
+                  disabled={noSsh}
                   onCheckedChange={(v) => setReadAgain(v === true)}
                 />
-                <Label htmlFor="handover-read-again" className="font-normal">
-                  Read reachable hosts again first
-                  <HelpTip topic="reports.readAgain" />
-                </Label>
+                <div className="grid min-w-0 gap-0.5">
+                  <Label htmlFor="handover-read-again" className="font-normal">
+                    Read reachable hosts again first
+                    <HelpTip topic="reports.readAgain" />
+                  </Label>
+                  {noSsh && <p className="text-xs text-muted-foreground">No SSH sessions to read.</p>}
+                </div>
               </div>
               <div className="flex items-center gap-3 pl-7">
                 <Checkbox
                   id="handover-packages"
-                  checked={readAgain && packages}
-                  disabled={!readAgain}
+                  checked={reading && packages}
+                  disabled={!reading}
                   onCheckedChange={(v) => setPackages(v === true)}
                 />
                 <Label htmlFor="handover-packages" className="font-normal">
@@ -267,12 +280,12 @@ export function HandoverPackDialog({ from: initialFrom, to: initialTo, onClose }
             </>
           ) : (
             <>
-              <Button variant="outline" onClick={onClose} disabled={busy}>
+              <Button variant="outline" onClick={onClose}>
                 Cancel
               </Button>
               <WhyDisabled reason={reason}>
                 <Button onClick={() => void save()} disabled={reason !== null}>
-                  {busy ? "Making the pack…" : "Save…"}
+                  {busy ? busyText({ reading, progress: exporting.progress, saving: "Making the pack…" }) : "Save…"}
                 </Button>
               </WhyDisabled>
             </>

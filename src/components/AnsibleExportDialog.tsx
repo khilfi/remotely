@@ -22,6 +22,7 @@ import { BulkTargetPicker } from "@/components/BulkTargetPicker";
 import { HelpTip } from "@/components/HelpTip";
 import { WhyDisabled } from "@/components/WhyDisabled";
 import { api, errorMessage, type ResolvedTargets, type TargetPicks } from "@/lib/api";
+import { plural } from "@/lib/format";
 import {
   reportsApi,
   type AnsibleExport,
@@ -62,6 +63,8 @@ export function AnsibleExportDialog({ sessionIds, onOpenSessions, onClose }: Pro
   const [format, setFormat] = useState<AnsibleFormat>("yaml");
   const [groupBy, setGroupBy] = useState<GroupBy>({ folder: true, tag: true, environment: true, workspace: false });
   const [preview, setPreview] = useState<{ key: string; preview: AnsiblePreview } | null>(null);
+  // A read's failure, for the picks or request it was for: one read for other picks since then clears it.
+  const [readError, setReadError] = useState<{ key: string; message: string } | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [done, setDone] = useState<AnsibleExport | null>(null);
@@ -80,7 +83,7 @@ export function AnsibleExportDialog({ sessionIds, onOpenSessions, onClose }: Pro
     let stale = false;
     api.bulkTargets(parsed).then(
       (r) => !stale && setResolved({ key: picksKey, targets: r }),
-      (err) => !stale && setError(errorMessage(err)),
+      (err) => !stale && setReadError({ key: `picks:${picksKey}`, message: errorMessage(err) }),
     );
     return () => {
       stale = true;
@@ -94,7 +97,7 @@ export function AnsibleExportDialog({ sessionIds, onOpenSessions, onClose }: Pro
     const timer = window.setTimeout(() => {
       reportsApi.ansiblePreview(parsed).then(
         (p) => !stale && setPreview({ key: requestKey, preview: p }),
-        (err) => !stale && setError(errorMessage(err)),
+        (err) => !stale && setReadError({ key: `preview:${requestKey}`, message: errorMessage(err) }),
       );
     }, 200);
     return () => {
@@ -102,6 +105,9 @@ export function AnsibleExportDialog({ sessionIds, onOpenSessions, onClose }: Pro
       window.clearTimeout(timer);
     };
   }, [requestKey]);
+
+  const previewProblem = readError?.key === `preview:${requestKey}` ? readError.message : null;
+  const picksProblem = readError?.key === `picks:${picksKey}` ? readError.message : null;
 
   async function save() {
     setBusy(true);
@@ -128,7 +134,7 @@ export function AnsibleExportDialog({ sessionIds, onOpenSessions, onClose }: Pro
     }
   }
 
-  const reason = ansibleReason({ hosts: shown ? shown.hosts : null, busy });
+  const reason = ansibleReason({ hosts: shown ? shown.hosts : null, busy, problem: previewProblem });
 
   return (
     <Dialog open onOpenChange={(open) => !open && !busy && onClose()}>
@@ -140,9 +146,7 @@ export function AnsibleExportDialog({ sessionIds, onOpenSessions, onClose }: Pro
             <HelpTip topic="reports.ansible" />
           </DialogTitle>
           <DialogDescription>
-            {all
-              ? "Nothing picked: every SSH session of this workspace goes in."
-              : "The picked hosts, with their address, port, user and jump hosts. No secret goes in."}
+            Each host with its address, port, user and jump hosts. No secret goes in.
           </DialogDescription>
         </DialogHeader>
 
@@ -161,11 +165,17 @@ export function AnsibleExportDialog({ sessionIds, onOpenSessions, onClose }: Pro
           <div className="grid max-h-[60vh] gap-4 overflow-y-auto pr-1">
             <BulkTargetPicker
               active
+              purpose="export"
               picks={picks}
               onPicksChange={setPicks}
               resolved={resolvedNow}
               onOpenSessions={onOpenSessions}
             />
+            {picksProblem && (
+              <p className="text-sm break-words text-destructive" role="alert">
+                {picksProblem}
+              </p>
+            )}
             <div className="flex flex-wrap items-center gap-x-6 gap-y-3">
               <div className="flex items-center gap-3">
                 <span className="text-sm font-medium">Format</span>
@@ -202,7 +212,7 @@ export function AnsibleExportDialog({ sessionIds, onOpenSessions, onClose }: Pro
             </div>
             <div className="grid gap-1.5">
               <span className="text-sm font-medium">
-                {shown ? `Preview: ${shown.hosts} hosts in ${shown.groups} groups` : "Preview"}
+                {shown ? `Preview: ${plural(shown.hosts, "host")} in ${plural(shown.groups, "group")}` : "Preview"}
               </span>
               <pre className="max-h-64 overflow-auto rounded-md border bg-muted/40 p-3 font-mono text-xs whitespace-pre">
                 {shown?.text ?? ""}

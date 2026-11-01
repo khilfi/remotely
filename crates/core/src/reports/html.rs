@@ -6,11 +6,11 @@
 use base64::Engine;
 use sha2::{Digest, Sha256};
 
-use super::table::{Cell, Sheet};
+use super::table::{is_not_xml, Cell, Sheet};
 use crate::untrusted::is_format_char;
 
-/// `&`, `<`, `>`, `"` and `'` as entities; control and invisible format characters left out (a tab or line break
-/// stays, as a space would read).
+/// `&`, `<`, `>`, `"` and `'` as entities; control, invisible format and non-XML characters left out (a tab or line
+/// break stays, as a space would read), so the text is also valid in the topology's SVG.
 pub fn escape(text: &str) -> String {
     let mut out = String::with_capacity(text.len() + 16);
     for c in text.chars() {
@@ -21,7 +21,7 @@ pub fn escape(text: &str) -> String {
             '"' => out.push_str("&quot;"),
             '\'' => out.push_str("&#39;"),
             '\n' | '\t' => out.push(c),
-            c if c.is_control() || is_format_char(c) => {}
+            c if c.is_control() || is_format_char(c) || is_not_xml(c) => {}
             c => out.push(c),
         }
     }
@@ -141,6 +141,7 @@ mod tests {
         );
         assert_eq!(escape("a\u{202E}b\u{0}c"), "abc");
         assert_eq!(escape("line\nbreak"), "line\nbreak");
+        assert_eq!(escape("x\u{FFFE}y\u{FFFF}"), "xy", "not XML: the SVG would not open");
     }
 
     #[test]

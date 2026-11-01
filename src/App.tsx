@@ -1279,7 +1279,6 @@ export default function App() {
                   onDeploy={openDeployBlank}
                   onImport={openImport}
                   onExport={openExport}
-                  onExportInventory={openInventory}
                   onOpenSettings={show.settings}
                   onActions={openPalette}
                   request={vmRequest}

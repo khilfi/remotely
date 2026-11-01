@@ -594,22 +594,31 @@ crates/core/          remotely-core: all app logic
                       FD-07's and the audit log's exports; each audited `data_exported`; one workspace each, the ctx
                       the shell passes; the path from the shell's save dialog, save_guard::refuse_repository, written
                       through a `.part`): table.rs one Sheet and Cell model for Excel, CSV (export::push_row, A10) and
-                      HTML, every text through `clean` (redact_secrets, no control or Cf characters, capped by
-                      character); inventory.rs FD-05 the sheets (VMs with MO-13's stored hardware, hosts: every session,
-                      an SSH host's facts, ports, updates; VM-11's networks; MO-08's checks with 24 h and 7 day uptime;
-                      packages), "Read again first" through HostDetails::inventory_read, READS_AT_ONCE (4),
-                      HOST_READ_LIMIT; xlsx.rs rust_xlsxwriter, text always `write_string`, never a formula; ansible.rs
+                      HTML, every text through `clean` (control, Cf and non-XML characters out and every line break,
+                      U+2028 and U+2029 too, a space, then redact_secrets, so a zero-width space can't hide a secret,
+                      then capped at MAX_CELL_UNITS UTF-16 units, as Excel counts); inventory.rs FD-05 the sheets (VMs
+                      with MO-13's stored hardware, hosts: every session, an SSH host's facts, ports, updates; VM-11's
+                      networks, rule 8: only those a VM of the workspace is on and only forwards to its VMs' addresses,
+                      the rest counted in a note; MO-08's checks with 24 h and 7 day uptime; packages), "Read again
+                      first" through HostDetails::inventory_read, READS_AT_ONCE (4), HOST_READ_LIMIT, ReadControl (the
+                      window's cancel, waiting reads included, then Cancelled and no file; ReadProgress per host done);
+                      xlsx.rs rust_xlsxwriter, text always `write_string`, never a formula; ansible.rs
                       BX-12 YAML and INI from BX-01's targets (none picked: every SSH session), groups by folder
-                      (nested), tag, environment, workspace, and `protected`; names made valid, YAML keys and strings
+                      (nested), tag, environment, workspace, and `protected` (LinkedVm: Compare hosts' rule, a session
+                      whose VM is protected or Prod is too); names made valid, YAML keys and strings
                       double-quoted, Jinja markers `!unsafe` (INI leaves such a value out), hosts and users ssh could
                       read as options refused, ProxyJump in ansible_ssh_common_args; F4's WinRM hook is
                       `connection_vars`; activity.rs FD-08 the Activity page's grouping (jobs with their approvals and
                       entries; other changes, this PC's own events left out); topology.rs QL-21's graph and layered
                       layout ported, drawn as plain SVG (rect, path, text); html.rs escape, the page with its CSP (only
                       the style's hash and data: images); pack.rs index.html (cover, inventory, the diagram as an
-                      `<img>` of a data: SVG, what was done with outputs only when chosen and capped, uptime from
-                      Store::check_uptime, Notes::for_handover) and the zip (index.html, inventory.xlsx, a CSV per
-                      table) through AtomicFile; mod.rs Reports, ReportClock (times in the window's offset), file names
+                      `<img>` of a data: SVG, what was done with outputs only when chosen and capped, each target's read
+                      one at a time only while under the cap, uptime from Store::check_uptime, Notes::for_handover) and
+                      the zip (index.html, inventory.xlsx, a CSV per table) through AtomicFile; mod.rs Reports,
+                      ReportClock (times in the window's offset), file names (`remotely-<what>-<workspace>-<date>`,
+                      without the workspace while presenting: the save dialog is out of the masker's reach). FD-06
+                      notes in the pack: notes/render.rs LinkMode::Static redacts each block's text as it reads
+                      (`redact_runs`: `**Password:** x`, `Pass**word**: x`, a key whose value starts the next block)
     multiexec_groups.rs QL-19 saved MultiExec groups (Core.groups): named sets of saved sessions in order (1 to 60
                       characters, 1 to 100 sessions, 200 groups); audited multiexec_group_changed with the member
                       sessions as targets, refused by the read-only lock (Change::MultiExecGroups); a deleted session
@@ -762,7 +771,9 @@ src-tauri/            Tauri 2 shell: window, IPC commands (ipc.rs), terminal bri
                       switcher's commands, Unassigned VMs, the change ID rule, FD-07 import into a new workspace); FD-04
                       support_bundle.rs (presets, the tier preview, the zip's save dialog in Downloads, Show folder by
                       job id); FD-05, BX-12, FD-08 reports.rs (each export's save dialog in Documents, chosen_path,
-                      Show in folder by the id the export returned, SavedReports); FD-09 toolbox.rs (each tool's run
+                      Show in folder by the id the export returned, SavedReports; the inventory's and the pack's host
+                      reads under an id the UI chose in toolbox.rs's ToolRuns, so a reload stops them, reports_cancel,
+                      `reports://progress`); FD-09 toolbox.rs (each tool's run
                       under an id the UI chose, `toolbox://progress` events,
                       toolbox_cancel, the certificate file dialog, Wake up's adapters and MACs), file_server.rs (the File
                       server tab's options, file and folder dialogs, start, Stop and status, `fileserver://event`);
@@ -813,10 +824,12 @@ src/                  React + TypeScript UI
                       VmSchedulesTab (a VM's Schedules tab and chain), ApprovalDialog's StandingSummary; FD-04
                       SupportBundleDialog (hosts, presets, commands and files, options; then BulkResultsView's bundle
                       mode with Show folder; the Sessions page's "⋯" and Ctrl+K open it) and ApprovalDialog's
-                      BundleSummary; 0.7.0 F6 InventoryExportDialog (FD-05; the Sessions and VMs pages' "⋯", Ctrl+K),
-                      AnsibleExportDialog (BX-12; BulkTargetPicker, YAML or INI, groups, the file's preview; the
-                      Sessions page's "⋯" and selection bar, Ctrl+K), HandoverPackDialog (FD-08; the Activity page's
-                      "⋯" on its date filter's days, Ctrl+K on the last 30); FD-02
+                      BundleSummary; 0.7.0 F6 InventoryExportDialog (FD-05; the Sessions page's "⋯", beside the other
+                      exports, and Ctrl+K), AnsibleExportDialog (BX-12; BulkTargetPicker with purpose "export", YAML or
+                      INI, groups, the file's preview; the Sessions page's "⋯" and selection bar, Ctrl+K),
+                      HandoverPackDialog (FD-08; the Activity page's "⋯" on its date filter's days, Ctrl+K on the last
+                      30); the inventory's and the pack's Cancel, or closing them, stops their host reads
+                      (hooks/use-export-run.ts, with the count of hosts done); FD-02
                       WorkspaceSwitcher (the top bar's menu, the switch, edit and manage dialogs; the window loads again
                       after a switch), UnassignedVmsSheet; AP-08 ChangeIdSetting (ChangeIdCard.tsx, a row of the
                       approval rules' card) and the approval dialog's one reason or change ID field; UX-10 Settings:

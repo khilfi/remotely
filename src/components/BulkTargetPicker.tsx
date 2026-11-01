@@ -5,7 +5,8 @@
 // Tools without SSH (VM-09) comes in a later version. A4, H11: a VM linked only automatically (by the
 // address its guest reports, which a hostile guest can make up) is reached once the user confirms the link.
 // SS-12: only SSH sessions are listed, since both pickers' runs (a key push, a support bundle) go over SSH; the
-// core leaves out any other kind a tag brings in, saying so.
+// core leaves out any other kind a tag brings in, saying so. F6's Ansible inventory picks with `purpose="export"`:
+// nothing runs, so protected hosts are counted (they go in, in their own group) and nothing picked is every session.
 
 import { useEffect, useMemo, useState } from "react";
 import {
@@ -48,6 +49,11 @@ interface Props {
   /** The hosts the picks reach, as the core resolved them. */
   resolved: ResolvedTargets | null;
   onOpenSessions: () => void;
+  /**
+   * What the hosts are for: commands run on them (the default: protected hosts are skipped), or an export (F6's
+   * Ansible inventory: protected hosts go in, in their own group, and nothing picked is every SSH session).
+   */
+  purpose?: "run" | "export";
 }
 
 type Kind = "sessionIds" | "vmPaths" | "tags" | "filterIds";
@@ -66,7 +72,8 @@ function sessionAddress(s: SessionRecord) {
   return `${s.username ? `${s.username}@` : ""}${s.host}:${s.port}`;
 }
 
-export function BulkTargetPicker({ active, picks, onPicksChange, resolved, onOpenSessions }: Props) {
+export function BulkTargetPicker({ active, picks, onPicksChange, resolved, onOpenSessions, purpose = "run" }: Props) {
+  const exporting = purpose === "export";
   const [allSessions, setSessions] = useState<SessionRecord[]>([]);
   const sessions = useMemo(() => allSessions.filter((s) => kindOf(s).protocol === "ssh"), [allSessions]);
   const otherKinds = allSessions.length - sessions.length;
@@ -300,10 +307,16 @@ export function BulkTargetPicker({ active, picks, onPicksChange, resolved, onOpe
       )}
 
       <div className="flex flex-wrap items-center gap-2 text-sm">
-        <span className="font-medium">{plural(hosts.length - skipped.length, "host")}</span>
+        {exporting && !anyPicked ? (
+          <span className="text-muted-foreground">Nothing picked, so every SSH session goes in</span>
+        ) : (
+          <span className="font-medium">
+            {plural(exporting ? hosts.length : hosts.length - skipped.length, "host")}
+          </span>
+        )}
         {skipped.length > 0 && (
           <Badge variant="outline" className="font-normal">
-            {skipped.length} protected, skipped
+            {exporting ? `${skipped.length} protected` : `${skipped.length} protected, skipped`}
           </Badge>
         )}
         {prod.length > 0 && (
@@ -322,10 +335,13 @@ export function BulkTargetPicker({ active, picks, onPicksChange, resolved, onOpe
         <Alert>
           <TriangleAlertIcon className="text-tier-medium" />
           <AlertTitle>
-            {plural(without.length, "VM")} can&apos;t run commands yet: {without.map((v) => v.name).join(", ")}
+            {plural(without.length, "VM")} {exporting ? "left out" : "can't run commands yet"}:{" "}
+            {without.map((v) => v.name).join(", ")}
           </AlertTitle>
           <AlertDescription>
-            Commands reach a VM over SSH, through a session linked to it: edit a session and choose the VM it reaches.
+            {exporting
+              ? "A VM goes in through a session linked to it: edit a session and choose the VM it reaches."
+              : "Commands reach a VM over SSH, through a session linked to it: edit a session and choose the VM it reaches."}
           </AlertDescription>
           <AlertAction>
             <Button size="sm" variant="outline" onClick={onOpenSessions}>
@@ -337,7 +353,10 @@ export function BulkTargetPicker({ active, picks, onPicksChange, resolved, onOpe
       {unconfirmed.length > 0 && (
         <Alert>
           <LinkIcon className="text-tier-medium" />
-          <AlertTitle>{plural(unconfirmed.length, "VM")} linked only automatically, so not reached yet</AlertTitle>
+          <AlertTitle>
+            {plural(unconfirmed.length, "VM")} linked only automatically, so {exporting ? "left out" : "not reached"}{" "}
+            yet
+          </AlertTitle>
           <AlertDescription>
             <p>
               These links follow the IP address each guest reports about itself, and a guest can report any address,

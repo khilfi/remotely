@@ -192,7 +192,7 @@ async fn a_bundle_from_two_hosts_is_one_zip_with_a_folder_each_and_a_manifest() 
     let web01 = session(&core, "web01", one.port(), &pw1, Environment::Lab).await;
     let web02 = session(&core, "web02", two.port(), &pw2, Environment::Lab).await;
     let folder = temp_folder("bundle");
-    let output = folder.join(core.bundles.default_file_name(&core.ctx()).await.unwrap());
+    let output = folder.join(core.bundles.default_file_name(&core.ctx(), false).await.unwrap());
     assert!(output
         .file_name()
         .unwrap()

@@ -4,13 +4,14 @@
 //! time, through [`HostDetails::inventory_read`] (the login guard's parks and caps), and keeps what was stored for a host
 //! that can't be read. Reads only: nothing here changes a host or a VM.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use super::table::{clean, col, Cell, Column, Sheet};
@@ -20,7 +21,7 @@ use crate::adapters::hypervisor::Hypervisor;
 use crate::adapters::vm_hardware::VmHardware;
 use crate::checks::RunResult;
 use crate::domain::{Context, Environment, PowerState};
-use crate::error::Result;
+use crate::error::{CoreError, Result};
 use crate::host_details::admin::{ListeningPort, UpdatesReport};
 use crate::host_details::linux::HostSpecs;
 use crate::host_details::packages::PackagesReport;
@@ -53,6 +54,48 @@ impl InventoryOptions {
 pub const READS_AT_ONCE: usize = 4;
 /// One host's reads, all together, at most (a dnf metadata refresh included).
 pub const HOST_READ_LIMIT: Duration = Duration::from_secs(240);
+
+/// How far "Read again first" got: hosts done (read or not) of those asked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReadProgress {
+    pub done: usize,
+    pub total: usize,
+}
+
+/// Stops and follows an export's host reads: the dialog's Cancel (or the window reloading) cancels `cancel`, which
+/// ends every read at once, waiting ones included, and the export makes no file; `progress` hears of each host done.
+#[derive(Clone, Default)]
+pub struct ReadControl {
+    pub cancel: CancellationToken,
+    progress: Option<Arc<dyn Fn(ReadProgress) + Send + Sync>>,
+}
+
+impl ReadControl {
+    pub fn new(cancel: CancellationToken) -> Self {
+        Self { cancel, progress: None }
+    }
+
+    pub fn with_progress(mut self, progress: impl Fn(ReadProgress) + Send + Sync + 'static) -> Self {
+        self.progress = Some(Arc::new(progress));
+        self
+    }
+
+    fn report(&self, progress: ReadProgress) {
+        if let Some(report) = &self.progress {
+            report(progress);
+        }
+    }
+
+    /// `Cancelled` once the export was cancelled.
+    pub fn check(&self) -> Result<()> {
+        if self.cancel.is_cancelled() {
+            Err(CoreError::Cancelled)
+        } else {
+            Ok(())
+        }
+    }
+}
 
 /// How the reads went.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
@@ -448,8 +491,23 @@ fn yes_no(value: Option<bool>) -> Cell {
     value.map_or(Cell::Empty, Cell::yes_no)
 }
 
-/// VM-11's networks as rows; a report that can't be read at all is a note, and the sheet stays empty.
-async fn network_sheet(networks: &HostNetworks, ctx: &Context, notes: &mut Vec<String>) -> Sheet {
+fn plural(n: usize, word: &str) -> String {
+    if n == 1 {
+        format!("1 {word}")
+    } else {
+        format!("{n} {word}s")
+    }
+}
+
+/// VM-11's networks as rows; a report that can't be read at all is a note, and the sheet stays empty. Rule 8: the
+/// networks are this PC's, shared by every workspace, so only those a VM of this workspace is on go in, and of their
+/// forwards only those to a VM of this workspace (by its address, `vm_ips`); the rest are counted in a note.
+async fn network_sheet(
+    networks: &HostNetworks,
+    ctx: &Context,
+    vm_ips: &HashSet<String>,
+    notes: &mut Vec<String>,
+) -> Sheet {
     let mut sheet = Sheet::new("networks", "Networks", &NETWORK_COLUMNS);
     let report = match networks.report(ctx).await {
         Ok(report) => report,
@@ -464,7 +522,27 @@ async fn network_sheet(networks: &HostNetworks, ctx: &Context, notes: &mut Vec<S
     {
         notes.push(format!("Host networks: {problem}"));
     }
+    // The report's VMs are this workspace's, with the addresses they have on each network.
+    let mut ips = vm_ips.clone();
+    let on = report
+        .vmware
+        .networks
+        .iter()
+        .flat_map(|v| &v.vms)
+        .chain(report.virtualbox.host_only.iter().flat_map(|h| &h.vms))
+        .chain(report.virtualbox.nat_networks.iter().flat_map(|n| &n.vms))
+        .chain(report.virtualbox.other.iter().flat_map(|o| &o.vms));
+    for vm in on {
+        ips.extend(vm.ips.iter().cloned());
+    }
+    let mut networks_out = 0;
+    let mut forwards_out = 0;
     for v in &report.vmware.networks {
+        if v.vms.is_empty() {
+            networks_out += 1;
+            forwards_out += v.forwards.len();
+            continue;
+        }
         let kind = match &v.network.kind {
             VmnetKind::HostOnly => "Host-only".to_owned(),
             VmnetKind::Nat => "NAT".to_owned(),
@@ -476,8 +554,9 @@ async fn network_sheet(networks: &HostNetworks, ctx: &Context, notes: &mut Vec<S
             (Some(s), None) => s.clone(),
             _ => String::new(),
         };
-        let forwards = v
-            .forwards
+        let (mine, others): (Vec<_>, Vec<_>) = v.forwards.iter().partition(|f| ips.contains(&f.guest_ip));
+        forwards_out += others.len();
+        let forwards = mine
             .iter()
             .map(|f| {
                 format!(
@@ -503,6 +582,10 @@ async fn network_sheet(networks: &HostNetworks, ctx: &Context, notes: &mut Vec<S
     }
     let vbox = &report.virtualbox;
     for h in &vbox.host_only {
+        if h.vms.is_empty() {
+            networks_out += 1;
+            continue;
+        }
         let subnet = match (&h.iface.ip, &h.iface.mask) {
             (Some(ip), Some(m)) => format!("{ip} / {m}"),
             (Some(ip), None) => ip.clone(),
@@ -520,9 +603,19 @@ async fn network_sheet(networks: &HostNetworks, ctx: &Context, notes: &mut Vec<S
         ]);
     }
     for n in &vbox.nat_networks {
-        let rules = n
+        if n.vms.is_empty() {
+            networks_out += 1;
+            forwards_out += n.network.forwards.len();
+            continue;
+        }
+        // A rule without a guest address can't be told to lead to this workspace's VM.
+        let (mine, others): (Vec<_>, Vec<_>) = n
             .network
             .forwards
+            .iter()
+            .partition(|r| r.guest_ip.as_ref().is_some_and(|ip| ips.contains(ip)));
+        forwards_out += others.len();
+        let rules = mine
             .iter()
             .map(|r| {
                 format!(
@@ -548,6 +641,10 @@ async fn network_sheet(networks: &HostNetworks, ctx: &Context, notes: &mut Vec<S
         ]);
     }
     for o in &vbox.other {
+        if o.vms.is_empty() {
+            networks_out += 1;
+            continue;
+        }
         let kind = match o.kind.as_str() {
             "bridged" => "Bridged",
             "intnet" => "Internal",
@@ -584,6 +681,19 @@ async fn network_sheet(networks: &HostNetworks, ctx: &Context, notes: &mut Vec<S
             Cell::text(&v.vm.name),
             Cell::text(rules),
         ]);
+    }
+    let left_out = match (networks_out, forwards_out) {
+        (0, 0) => None,
+        (n, 0) => Some(format!("{} no VM of this workspace is on", plural(n, "network"))),
+        (0, f) => Some(format!("{} to VMs outside this workspace", plural(f, "port forward"))),
+        (n, f) => Some(format!(
+            "{} no VM of this workspace is on, and {} to VMs outside it,",
+            plural(n, "network"),
+            plural(f, "port forward")
+        )),
+    };
+    if let Some(what) = left_out {
+        notes.push(format!("Networks: {what} left out."));
     }
     sheet
 }
@@ -657,13 +767,14 @@ struct Fresh {
     read_now: String,
 }
 
-/// Reads the SSH hosts now, [`READS_AT_ONCE`] at a time.
+/// Reads the SSH hosts now, [`READS_AT_ONCE`] at a time, until `control` is cancelled (then `Cancelled`).
 async fn read_hosts(
     details: &HostDetails,
     ctx: &Context,
     sessions: &[SessionRecord],
     options: InventoryOptions,
-) -> (HashMap<Uuid, Fresh>, ReadSummary) {
+    control: &ReadControl,
+) -> Result<(HashMap<Uuid, Fresh>, ReadSummary)> {
     let reads = InventoryReads {
         updates: options.updates,
         packages: options.packages,
@@ -674,17 +785,33 @@ async fn read_hosts(
     for s in sessions.iter().filter(|s| matches!(s.kind, SessionKind::Ssh)) {
         summary.asked += 1;
         let (details, ctx, at_once, id, name) = (details.clone(), *ctx, Arc::clone(&at_once), s.id, s.name.clone());
+        let cancel = control.cancel.clone();
         jobs.spawn(async move {
-            let _turn = at_once.acquire_owned().await;
-            let read = tokio::time::timeout(HOST_READ_LIMIT, details.inventory_read(&ctx, id, reads)).await;
-            // Remotely's own connection for this goes now, not minutes later.
+            let read = tokio::select! {
+                biased;
+                () = cancel.cancelled() => None,
+                read = async {
+                    let _turn = at_once.acquire_owned().await;
+                    tokio::time::timeout(HOST_READ_LIMIT, details.inventory_read(&ctx, id, reads)).await
+                } => Some(read),
+            };
+            // Remotely's own connection for this goes now, not minutes later (a cancelled read's too).
             details.release(id).await;
             (id, name, read)
         });
     }
+    let total = summary.asked;
+    let mut done_count = 0;
+    control.report(ReadProgress { done: 0, total });
     let mut out = HashMap::new();
     while let Some(done) = jobs.join_next().await {
         let Ok((id, name, read)) = done else { continue };
+        done_count += 1;
+        control.report(ReadProgress {
+            done: done_count,
+            total,
+        });
+        let Some(read) = read else { continue };
         let mut fresh = Fresh::default();
         match read {
             Err(_) => {
@@ -715,8 +842,9 @@ async fn read_hosts(
         }
         out.insert(id, fresh);
     }
+    control.check()?;
     summary.problems.sort();
-    (out, summary)
+    Ok((out, summary))
 }
 
 /// What the inventory reads from.
@@ -726,13 +854,15 @@ pub struct Sources<'a> {
     pub networks: &'a HostNetworks,
 }
 
-/// Builds the inventory of the workspace `ctx` names (rule 8: every read takes this ctx).
+/// Builds the inventory of the workspace `ctx` names (rule 8: every read takes this ctx). `Cancelled` once `control`
+/// is.
 pub async fn collect(
     sources: &Sources<'_>,
     ctx: &Context,
     options: InventoryOptions,
     clock: &ReportClock,
     now_ms: i64,
+    control: &ReadControl,
 ) -> Result<InventoryData> {
     let store = sources.store;
     let vms = store.list_vms(ctx).await?;
@@ -752,7 +882,7 @@ pub async fn collect(
     let mut notes = Vec::new();
 
     let (mut fresh, read) = if options.reads_hosts() {
-        let (fresh, summary) = read_hosts(sources.details, ctx, &sessions, options).await;
+        let (fresh, summary) = read_hosts(sources.details, ctx, &sessions, options, control).await?;
         (fresh, Some(summary))
     } else {
         (HashMap::new(), None)
@@ -760,7 +890,12 @@ pub async fn collect(
 
     // VMs, with their stored hardware. A VM never read is read now from its files (QL-21's read, stored as the
     // details panel stores it); "Read again first" reads every VM's again.
-    if let Err(err) = sources.details.vm_networks(ctx, options.read_again).await {
+    let vm_read = tokio::select! {
+        biased;
+        () = control.cancel.cancelled() => return Err(CoreError::Cancelled),
+        read = sources.details.vm_networks(ctx, options.read_again) => read,
+    };
+    if let Err(err) = vm_read {
         notes.push(format!("The VMs' hardware could not be read: {err}"));
     }
     let mut stored_hw = store.all_vm_specs(ctx).await?;
@@ -772,12 +907,16 @@ pub async fn collect(
     }
     let mut vm_sheet = Sheet::new("vms", "VMs", &VM_COLUMNS);
     let mut nics = HashMap::new();
+    // Rule 8: the addresses of this workspace's VMs, which the networks' forwards are kept by.
+    let mut vm_ips: HashSet<String> = HashSet::new();
     for vm in &vms {
         let hw = stored_hw
             .remove(&vm.id)
             .and_then(|s| Some((serde_json::from_str::<VmHardware>(&s.specs).ok()?, s.collected_at)));
+        vm_ips.extend(vm.ip_address.iter().cloned());
         if let Some((h, _)) = &hw {
             nics.insert(vm.vmx_path.clone(), (vm.hypervisor, h.nics.clone()));
+            vm_ips.extend(h.guest_ips.iter().cloned());
         }
         let linked = by_vm.get(vm.id.as_str()).cloned().unwrap_or_default();
         vm_sheet.push(vm_row(vm, hw.as_ref(), &linked, clock));
@@ -829,7 +968,11 @@ pub async fn collect(
         }
     }
 
-    let networks = network_sheet(sources.networks, ctx, &mut notes).await;
+    let networks = tokio::select! {
+        biased;
+        () = control.cancel.cancelled() => return Err(CoreError::Cancelled),
+        sheet = network_sheet(sources.networks, ctx, &vm_ips, &mut notes) => sheet,
+    };
     let checks = check_sheet(store, ctx, now_ms, &session_names, &vm_names, clock).await?;
     Ok(InventoryData {
         vms: vm_sheet,

@@ -28,7 +28,8 @@ use crate::AppState;
 
 type IpcResult<T> = Result<T, IpcError>;
 
-/// The runs going on now, by the id the UI gave each.
+/// The runs the window can stop going on now, by the id the UI gave each: the toolbox's probes and F6's exports
+/// (`reports.rs`), whose host reads take minutes.
 #[derive(Default)]
 pub struct ToolRuns(Mutex<HashMap<Uuid, CancellationToken>>);
 
@@ -43,17 +44,29 @@ impl ToolRuns {
         }
         map.len()
     }
+
+    /// Stops one run; false when it isn't going on (it ended already).
+    pub fn cancel(&self, run: Uuid) -> bool {
+        let token = self.0.lock().ok().and_then(|map| map.get(&run).cloned());
+        match token {
+            Some(token) => {
+                token.cancel();
+                true
+            }
+            None => false,
+        }
+    }
 }
 
 /// A run's entry, taken out when the run ends.
-struct Running<'a> {
+pub(crate) struct Running<'a> {
     runs: &'a ToolRuns,
     id: Uuid,
-    token: CancellationToken,
+    pub(crate) token: CancellationToken,
 }
 
 impl<'a> Running<'a> {
-    fn start(runs: &'a ToolRuns, id: Uuid) -> Self {
+    pub(crate) fn start(runs: &'a ToolRuns, id: Uuid) -> Self {
         let token = CancellationToken::new();
         if let Ok(mut map) = runs.0.lock() {
             map.insert(id, token.clone());
@@ -193,14 +206,7 @@ pub async fn toolbox_certificate_file(
 /// Stops the run `run`. False when it wasn't running.
 #[tauri::command]
 pub fn toolbox_cancel(runs: State<'_, ToolRuns>, run: Uuid) -> bool {
-    let token = runs.0.lock().ok().and_then(|map| map.get(&run).cloned());
-    match token {
-        Some(token) => {
-            token.cancel();
-            true
-        }
-        None => false,
-    }
+    runs.cancel(run)
 }
 
 #[derive(Debug, Clone, Serialize)]

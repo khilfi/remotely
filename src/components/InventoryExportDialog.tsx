@@ -1,6 +1,7 @@
 // FD-05: the inventory to Excel. One workbook of the shown workspace (VMs, hosts, networks, health checks, and on
 // request each host's installed packages), from what Remotely has read before or, with "Read reachable hosts again
-// first", read now. Export opens the shell's save dialog; the core writes the file and audits it.
+// first", read now (the button counts the hosts done; Cancel or closing the dialog stops the reads and writes nothing).
+// Export opens the shell's save dialog; the core writes the file and audits it.
 
 import { useEffect, useState } from "react";
 import { FileSpreadsheetIcon, FolderOpenIcon } from "lucide-react";
@@ -18,10 +19,11 @@ import {
 import { Label } from "@/components/ui/label";
 import { HelpTip } from "@/components/HelpTip";
 import { WhyDisabled } from "@/components/WhyDisabled";
+import { useExportRun } from "@/hooks/use-export-run";
 import { errorMessage } from "@/lib/api";
 import { plural } from "@/lib/format";
 import { reportsApi, type InventoryExport, type ReportsOverview } from "@/lib/reports-api";
-import { inventorySavedText, readText, utcOffsetMinutes } from "@/lib/reports";
+import { busyText, inventorySavedText, readText, utcOffsetMinutes } from "@/lib/reports";
 
 interface Props {
   onClose: () => void;
@@ -32,14 +34,19 @@ export function InventoryExportDialog({ onClose }: Props) {
   const [readAgain, setReadAgain] = useState(false);
   const [updates, setUpdates] = useState(false);
   const [packages, setPackages] = useState(false);
-  const [busy, setBusy] = useState(false);
+  const exporting = useExportRun();
+  const busy = exporting.busy;
   const [error, setError] = useState<string | null>(null);
   const [done, setDone] = useState<InventoryExport | null>(null);
 
   useEffect(() => {
     let stale = false;
     reportsApi.overview().then(
-      (o) => !stale && setOverview(o),
+      (o) => {
+        if (stale) return;
+        setOverview(o);
+        setError(null);
+      },
       (err) => !stale && setError(errorMessage(err)),
     );
     return () => {
@@ -48,21 +55,22 @@ export function InventoryExportDialog({ onClose }: Props) {
   }, []);
 
   async function save() {
-    setBusy(true);
     setError(null);
     try {
-      const report = await reportsApi.exportInventory(
-        { readAgain, updates: readAgain && updates, packages: readAgain && packages },
-        utcOffsetMinutes(),
+      const report = await exporting.run((run) =>
+        reportsApi.exportInventory(
+          run,
+          { readAgain, updates: readAgain && updates, packages: readAgain && packages },
+          utcOffsetMinutes(),
+        ),
       );
+      // Also after a late Cancel: the file was written by then, so it says so.
       if (report) {
         setDone(report);
         toast.success(inventorySavedText(report));
       }
     } catch (err) {
       setError(errorMessage(err));
-    } finally {
-      setBusy(false);
     }
   }
 
@@ -76,11 +84,12 @@ export function InventoryExportDialog({ onClose }: Props) {
   }
 
   const noSsh = overview !== null && overview.sshSessions === 0;
-  const reason = busy ? (readAgain ? "Reading hosts…" : "Saving…") : null;
+  const reason = busy ? busyText({ reading: readAgain, progress: exporting.progress, saving: "Saving…" }) : null;
   const problems = [...(done?.read?.problems ?? []), ...(done?.notes ?? [])];
 
   return (
-    <Dialog open onOpenChange={(open) => !open && !busy && onClose()}>
+    // Closing while the hosts are read stops them (useExportRun); nothing is written.
+    <Dialog open onOpenChange={(open) => !open && onClose()}>
       <DialogContent className="sm:max-w-lg">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
@@ -175,7 +184,7 @@ export function InventoryExportDialog({ onClose }: Props) {
             </>
           ) : (
             <>
-              <Button variant="outline" onClick={onClose} disabled={busy}>
+              <Button variant="outline" onClick={onClose}>
                 Cancel
               </Button>
               <WhyDisabled reason={reason}>

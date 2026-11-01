@@ -3,7 +3,7 @@
 // (presentation-dom.ts) gathers the values learnt in one go and masks again only the text that mentions one of them.
 // Pure functions, tested in presentation-rescan.test.ts.
 
-import type { Learned } from "./presentation.ts";
+import { ansibleWorkspaceGroup, workspaceSlug, type Learned } from "./presentation.ts";
 
 function escapeRegExp(s: string) {
   return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -30,6 +30,12 @@ export class LearnedBatch {
   add(learned: Learned): boolean {
     const first = this.values.size === 0;
     this.values.add(learned.value);
+    // A workspace's name also shows as a file name's words (`Acme-Lab`) and an Ansible group (`workspace_acme_lab`).
+    if (learned.kind === "workspace") {
+      this.values.add(workspaceSlug(learned.value));
+      const group = ansibleWorkspaceGroup(learned.value);
+      if (group) this.values.add(group);
+    }
     return first;
   }
 

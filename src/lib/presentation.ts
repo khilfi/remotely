@@ -230,6 +230,22 @@ export function workspaceSlug(name: string): string {
   return Array.from(words.join("-")).slice(0, 40).join("");
 }
 
+/**
+ * 0.7.0 F6: a workspace's name as an Ansible inventory's group holds it (the core's `ansible::group_name`): its ASCII
+ * letters and digits in lower case, every other run of characters one `_`, at most 100, after `workspace_`
+ * (`workspace_acme_lab_2`). Null when nothing of the name is left.
+ */
+export function ansibleWorkspaceGroup(name: string): string | null {
+  let body = "";
+  for (const c of name) {
+    const ch = /^[A-Za-z0-9]$/.test(c) ? c.toLowerCase() : "_";
+    if (ch === "_" && (body === "" || body.endsWith("_"))) continue;
+    body += ch;
+  }
+  body = body.replace(/_+$/, "").slice(0, 100);
+  return body === "" ? null : `workspace_${body}`;
+}
+
 /** A value found in a text; `value` gets its stand-in only once the candidates are chosen, so they number in order. */
 type Part = { start: number; end: number; kind: MaskKind; value: string };
 type Candidate = { start: number; end: number; parts: Part[] };
@@ -245,6 +261,8 @@ export class Masker {
     workspace: new Set(),
   };
   private matchers: { re: RegExp; kind: "host" | "user" | "workspace" }[] | null = null;
+  /** F6: the known workspaces' Ansible group names (`workspace_acme_lab`), by that name, and a pattern for them. */
+  private groups: { re: RegExp; names: Map<string, string> } | null | undefined = undefined;
   private readonly listeners = new Set<(learned: Learned) => void>();
 
   /** Called with each new known value, so text already on screen that holds it can be masked again. */
@@ -308,6 +326,7 @@ export class Masker {
     if (this.known.workspace.has(key)) return false;
     this.known.workspace.add(key);
     this.matchers = null;
+    this.groups = undefined;
     const learned: Learned = { kind: "workspace", value };
     this.listeners.forEach((l) => l(learned));
     return true;
@@ -376,6 +395,7 @@ export class Masker {
     this.ipv4(text, found);
     this.names(text, found);
     this.bundleNames(text, found);
+    this.ansibleGroups(text, found);
     this.knownWords(text, found);
     if (found.length === 0) return [];
     found.sort((a, b) => a.start - b.start || b.end - a.end);
@@ -517,6 +537,42 @@ export class Masker {
         parts: [{ start, end: start + slug.length, kind: "workspace", value: known ?? slug }],
       });
     }
+  }
+
+  /**
+   * F6: a known workspace's name as an Ansible inventory's group (`workspace_acme_lab_2:` in YAML, `[workspace_acme_lab_2]`
+   * in INI), which neither the phrase matcher nor a file name's pattern sees. The part after `workspace_` gets the
+   * workspace's own stand-in.
+   */
+  private ansibleGroups(text: string, found: Candidate[]) {
+    if (!/workspace_/i.test(text)) return;
+    const groups = this.groupMatcher();
+    if (!groups) return;
+    groups.re.lastIndex = 0;
+    for (const m of text.matchAll(groups.re)) {
+      const name = groups.names.get((m[0] ?? "").toLowerCase());
+      if (!name) continue;
+      const at = m.index ?? 0;
+      const start = at + "workspace_".length;
+      const end = at + m[0].length;
+      found.push({ start: at, end, parts: [{ start, end, kind: "workspace", value: name }] });
+    }
+  }
+
+  private groupMatcher() {
+    if (this.groups !== undefined) return this.groups;
+    const names = new Map<string, string>();
+    for (const w of this.known.workspace) {
+      const group = ansibleWorkspaceGroup(w);
+      if (group && !names.has(group)) names.set(group, w);
+    }
+    if (names.size === 0) {
+      this.groups = null;
+      return null;
+    }
+    const sorted = [...names.keys()].sort((a, b) => b.length - a.length).map(escapeRegExp);
+    this.groups = { re: new RegExp(`(?<![A-Za-z0-9_])(?:${sorted.join("|")})(?![A-Za-z0-9_])`, "gi"), names };
+    return this.groups;
   }
 
   private knownWords(text: string, found: Candidate[]) {

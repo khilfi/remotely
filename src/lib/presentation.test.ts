@@ -2,6 +2,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  ansibleWorkspaceGroup,
   canonicalIpv6,
   fitWidth,
   hostPart,
@@ -340,4 +341,22 @@ test("F6: the workspace in an export's file name is masked too", () => {
   const unknown = m.text("Saved remotely-handover-Globex-2026-11-01.zip");
   assert.doesNotMatch(unknown, /Globex/);
   assert.equal(m.text("remotely-inventory-notes.txt"), "remotely-inventory-notes.txt");
+});
+
+test("F6: a workspace's Ansible group is masked with the workspace's stand-in", () => {
+  const m = new Masker();
+  assert.ok(m.learnWorkspace("Acme Lab 2"));
+  assert.ok(m.learnWorkspace("Kunde Müller"));
+  const top = m.text("Acme Lab 2");
+  assert.equal(ansibleWorkspaceGroup("Acme Lab 2"), "workspace_acme_lab_2");
+  assert.equal(ansibleWorkspaceGroup("Kunde Müller"), "workspace_kunde_m_ller", "as the core makes it");
+  assert.equal(ansibleWorkspaceGroup("…"), null);
+  const yaml = m.text('  children:\n    "workspace_acme_lab_2":\n      hosts:\n        "web01": {}');
+  assert.doesNotMatch(yaml, /acme/i);
+  assert.match(yaml, new RegExp(`"workspace_${top}":`));
+  const ini = m.text("[workspace_ACME_lab_2]\nweb01\n\n[workspace_kunde_m_ller]");
+  assert.doesNotMatch(ini, /acme|kunde/i);
+  // Not a longer group, nor the plain word.
+  assert.equal(m.text("[workspace_acme_lab_20]"), "[workspace_acme_lab_20]");
+  assert.equal(m.text("workspace_id"), "workspace_id");
 });

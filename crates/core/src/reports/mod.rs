@@ -32,17 +32,17 @@ use time::{OffsetDateTime, UtcOffset};
 use uuid::Uuid;
 
 use crate::bulk::{BulkRuns, TargetPicks};
-use crate::domain::Context;
+use crate::domain::{Context, Environment};
 use crate::error::{CoreError, Result};
 use crate::host_details::HostDetails;
 use crate::host_networks::HostNetworks;
 use crate::notes::Notes;
 use crate::save_guard::{self, Saved};
 use crate::sessions::{SessionKind, SessionRecord};
-use crate::store::{NewAuditEntry, Store};
+use crate::store::{self, NewAuditEntry, Store};
 
 pub use ansible::{AnsibleFormat, GroupBy};
-pub use inventory::{InventoryOptions, ReadSummary};
+pub use inventory::{InventoryOptions, ReadControl, ReadProgress, ReadSummary};
 
 /// Times in a report, in the offset of the PC that made it (the window gives it, as `Date` sees it).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -162,7 +162,17 @@ pub enum ReportKind {
 }
 
 /// `remotely-inventory-Acme-Lab-2026-11-01.xlsx`: the workspace's words joined by `-`, safe for any file system.
-pub fn file_name(kind: ReportKind, workspace: &str, date: &str, extension: &str) -> String {
+/// FD-03: `None` while presenting (`remotely-inventory-2026-11-01.xlsx`): the save dialog is Windows' own, out of the
+/// masker's reach, and a workspace may be named after a customer.
+pub fn file_name(kind: ReportKind, workspace: Option<&str>, date: &str, extension: &str) -> String {
+    let what = match kind {
+        ReportKind::Inventory => "inventory",
+        ReportKind::Ansible => "ansible",
+        ReportKind::Handover => "handover",
+    };
+    let Some(workspace) = workspace else {
+        return format!("remotely-{what}-{date}.{extension}");
+    };
     let words: Vec<String> = workspace
         .split(|c: char| !c.is_alphanumeric())
         .filter(|w| !w.is_empty())
@@ -172,11 +182,6 @@ pub fn file_name(kind: ReportKind, workspace: &str, date: &str, extension: &str)
         "workspace".into()
     } else {
         words.join("-").chars().take(40).collect()
-    };
-    let what = match kind {
-        ReportKind::Inventory => "inventory",
-        ReportKind::Ansible => "ansible",
-        ReportKind::Handover => "handover",
     };
     format!("remotely-{what}-{workspace}-{date}.{extension}")
 }
@@ -356,13 +361,14 @@ impl Reports {
         })
     }
 
-    /// The name the save dialog offers.
+    /// The name the save dialog offers; without the workspace while `presenting` (FD-03).
     pub async fn file_name(
         &self,
         ctx: &Context,
         kind: ReportKind,
         format: AnsibleFormat,
         utc_offset_minutes: i32,
+        presenting: bool,
     ) -> Result<String> {
         let workspace = self.store.workspace_name(ctx).await?;
         let date = ReportClock::new(utc_offset_minutes).file_date(now_ms());
@@ -371,7 +377,12 @@ impl Reports {
             ReportKind::Ansible => format.extension(),
             ReportKind::Handover => "zip",
         };
-        Ok(file_name(kind, &workspace, &date, extension))
+        Ok(file_name(
+            kind,
+            (!presenting).then_some(workspace.as_str()),
+            &date,
+            extension,
+        ))
     }
 
     async fn audit(&self, ctx: &Context, action: &str, detail: &str) -> Result<()> {
@@ -401,18 +412,21 @@ impl Reports {
         }
     }
 
-    /// FD-05: the inventory to `path` as an Excel workbook. Audited.
+    /// FD-05: the inventory to `path` as an Excel workbook. Audited. `Cancelled`, with nothing written, once
+    /// `control` is cancelled.
     pub async fn export_inventory(
         &self,
         ctx: &Context,
         path: &Path,
         request: InventoryRequest,
         made_by: &str,
+        control: &ReadControl,
     ) -> Result<InventoryExport> {
         save_guard::refuse_repository(path, Saved::Inventory)?;
         let clock = ReportClock::new(request.utc_offset_minutes);
         let workspace = self.store.workspace_name(ctx).await?;
-        let data = inventory::collect(&self.sources(), ctx, request.options, &clock, now_ms()).await?;
+        let data = inventory::collect(&self.sources(), ctx, request.options, &clock, now_ms(), control).await?;
+        control.check()?;
         let title = format!("Inventory: {workspace}, made with {made_by}");
         let sheets: Vec<table::Sheet> = data.sheets().into_iter().cloned().collect();
         let bytes = tokio::task::spawn_blocking(move || {
@@ -495,11 +509,25 @@ impl Reports {
             .filter(|id| seen.insert(**id))
             .filter_map(|id| by_id.get(id).copied())
             .collect();
+        let vms: HashMap<String, ansible::LinkedVm> = self
+            .store
+            .list_vms(ctx)
+            .await?
+            .into_iter()
+            .map(|vm| {
+                let linked = ansible::LinkedVm {
+                    protected: vm.protected,
+                    prod: vm.environment == Environment::Prod,
+                };
+                (vm.id, linked)
+            })
+            .collect();
         let made_at = ReportClock::new(0).at_ms(now_ms());
         let mut inventory = ansible::build(
             &hosts,
             &all,
             &folders,
+            &vms,
             &workspace,
             request.group_by,
             &format!("{made_at} UTC"),
@@ -578,6 +606,45 @@ impl Reports {
             .collect())
     }
 
+    /// Each listed job's targets, by job id. With `outputs`, each target's output is read one at a time, only while
+    /// the pack's cap on outputs ([`pack::MAX_OUTPUTS_CHARS`]) isn't reached: a year of bulk runs is never read whole.
+    /// True with them when a target's output was left unread.
+    async fn job_targets(
+        &self,
+        ctx: &Context,
+        groups: &[activity::Group],
+        outputs: bool,
+        control: &ReadControl,
+    ) -> Result<(HashMap<String, Vec<store::JobTargetRecord>>, bool)> {
+        let size = |t: &Option<String>| {
+            t.as_deref()
+                .map_or(0, |t| t.chars().count().min(pack::MAX_OUTPUT_CHARS))
+        };
+        let mut targets = HashMap::new();
+        let mut left = pack::MAX_OUTPUTS_CHARS;
+        let mut unread = false;
+        for g in groups.iter().filter(|g| g.is_job()).take(pack::MAX_JOBS_SHOWN) {
+            control.check()?;
+            let Ok(id) = Uuid::parse_str(&g.key) else { continue };
+            let mut list = self.store.job_targets_brief(ctx, id).await?;
+            if outputs {
+                for target in &mut list {
+                    if left == 0 {
+                        unread |= target.stdout_bytes.unwrap_or(0) > 0 || target.stderr_bytes.unwrap_or(0) > 0;
+                        continue;
+                    }
+                    let Some(full) = self.store.job_target(ctx, id, &target.target_key).await? else {
+                        continue;
+                    };
+                    left = left.saturating_sub(size(&full.output) + size(&full.stderr));
+                    *target = full;
+                }
+            }
+            targets.insert(g.key.clone(), list);
+        }
+        Ok((targets, unread))
+    }
+
     /// FD-08: what the pack would hold, for the dialog.
     pub async fn handover_preview(&self, ctx: &Context, request: &HandoverRequest) -> Result<HandoverPreview> {
         let groups = self.activity(ctx, request).await?;
@@ -589,13 +656,14 @@ impl Reports {
         })
     }
 
-    /// FD-08: the handover pack to `path`. Audited.
+    /// FD-08: the handover pack to `path`. Audited. `Cancelled`, with nothing written, once `control` is cancelled.
     pub async fn export_handover(
         &self,
         ctx: &Context,
         path: &Path,
         request: &HandoverRequest,
         made_by: &str,
+        control: &ReadControl,
     ) -> Result<HandoverExport> {
         save_guard::refuse_repository(path, Saved::Handover)?;
         let prepared_by = table::clean(&request.prepared_by);
@@ -608,17 +676,9 @@ impl Reports {
         let clock = ReportClock::new(request.utc_offset_minutes);
         let made_at = now_ms();
         let workspace = self.store.workspace_name(ctx).await?;
-        let inventory = inventory::collect(&self.sources(), ctx, request.inventory, &clock, made_at).await?;
-        let mut targets = HashMap::new();
-        for g in groups.iter().filter(|g| g.is_job()).take(pack::MAX_JOBS_SHOWN) {
-            let Ok(id) = Uuid::parse_str(&g.key) else { continue };
-            let list = if request.include_outputs {
-                self.store.job_targets(ctx, id).await?
-            } else {
-                self.store.job_targets_brief(ctx, id).await?
-            };
-            targets.insert(g.key.clone(), list);
-        }
+        let inventory = inventory::collect(&self.sources(), ctx, request.inventory, &clock, made_at, control).await?;
+        let (targets, outputs_unread) = self.job_targets(ctx, &groups, request.include_outputs, control).await?;
+        control.check()?;
         let uptime = self.store.check_uptime(ctx, request.from_ms, request.to_ms).await?;
         let notes = self.notes.for_handover(ctx).await?;
         let nics: Vec<topology::VmNics<'_>> = inventory
@@ -644,6 +704,7 @@ impl Reports {
             groups: &groups,
             targets: &targets,
             include_outputs: request.include_outputs,
+            outputs_unread,
             uptime: &uptime,
             notes: &notes,
             topology_svg: svg.as_deref(),
@@ -744,16 +805,21 @@ mod tests {
     #[test]
     fn file_names_hold_the_workspace_s_words() {
         assert_eq!(
-            file_name(ReportKind::Inventory, "Acme: Lab/2", "2026-11-01", "xlsx"),
+            file_name(ReportKind::Inventory, Some("Acme: Lab/2"), "2026-11-01", "xlsx"),
             "remotely-inventory-Acme-Lab-2-2026-11-01.xlsx"
         );
         assert_eq!(
-            file_name(ReportKind::Handover, "\u{202E}", "2026-11-01", "zip"),
+            file_name(ReportKind::Handover, Some("\u{202E}"), "2026-11-01", "zip"),
             "remotely-handover-workspace-2026-11-01.zip"
         );
         assert_eq!(
-            file_name(ReportKind::Ansible, "Kunde \u{e9}t\u{e9}", "d", "yml"),
+            file_name(ReportKind::Ansible, Some("Kunde \u{e9}t\u{e9}"), "d", "yml"),
             "remotely-ansible-Kunde-\u{e9}t\u{e9}-d.yml"
+        );
+        assert_eq!(
+            file_name(ReportKind::Inventory, None, "2026-11-01", "xlsx"),
+            "remotely-inventory-2026-11-01.xlsx",
+            "while presenting"
         );
     }
 

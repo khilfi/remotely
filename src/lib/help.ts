@@ -247,7 +247,7 @@ export const HELP = {
   "reports.ansible": {
     title: "Ansible inventory",
     body: [
-      "Each SSH session becomes a host with its address, port and user; a jump host goes in as ProxyJump. Groups follow the folders (nested), tags, environments and this workspace, and protected sessions are also in a protected group, so a playbook can leave them out.",
+      "Each SSH session becomes a host with its address, port and user; a jump host goes in as ProxyJump. Groups follow the folders (nested), tags, environments and this workspace. Protected sessions, and sessions of a protected VM, are also in a protected group, so a playbook can leave them out.",
       "No password, key or vault item goes in the file: give them to Ansible yourself. Names are made valid for Ansible and every value is quoted, so nothing in a name becomes part of the inventory's syntax. Remote desktop, VNC, Telnet and serial sessions are left out.",
     ],
   },

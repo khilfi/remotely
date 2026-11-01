@@ -414,7 +414,7 @@ export function SessionsPage({
                 onClick={() => onSupportBundle(selectedSsh.map((s) => s.id))}
               >
                 <PackageIcon data-icon="inline-start" />
-                Support bundle…
+                Make a support bundle…
               </Button>
             </WhyDisabled>
             <WhyDisabled reason={selectedSsh.length === 0 ? "An Ansible inventory takes SSH sessions only" : null}>
@@ -425,7 +425,7 @@ export function SessionsPage({
                 onClick={() => onExportAnsible(selectedSsh.map((s) => s.id))}
               >
                 <FileCodeIcon data-icon="inline-start" />
-                Ansible inventory…
+                Export Ansible inventory…
               </Button>
             </WhyDisabled>
           </SelectionBar>

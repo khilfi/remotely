@@ -166,11 +166,11 @@ fn page_loaded<R: Runtime>(webview: &Webview<R>, payload: &PageLoadPayload<'_>) 
     if loads == 0 {
         return;
     }
-    // FD-09: the old page's toolbox runs (a ping of 1000 requests, say) stop with it.
+    // FD-09: the old page's toolbox runs (a ping of 1000 requests, say) and F6's exports (host reads) stop with it.
     if let Some(runs) = webview.try_state::<toolbox::ToolRuns>() {
         let stopped = runs.cancel_all();
         if stopped > 0 {
-            tracing::info!(stopped, "the window reloaded; stopped its toolbox runs");
+            tracing::info!(stopped, "the window reloaded; stopped its toolbox runs and exports");
         }
     }
     let Some(state) = webview.try_state::<AppState>() else {
@@ -803,6 +803,7 @@ fn commands() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         reports::handover_preview,
         reports::handover_export,
         reports::reports_show_file,
+        reports::reports_cancel,
         // FD-02 workspaces, AP-08 change ID rule.
         workspaces::workspaces_list,
         workspaces::workspace_current,

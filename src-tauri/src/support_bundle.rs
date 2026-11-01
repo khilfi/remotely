@@ -51,7 +51,11 @@ pub async fn bundle_submit(
     let ctx = core.ctx();
     // Before the save dialog: nothing to collect, no host or the read-only lock say so at once.
     core.bundles.check(&ctx, &request).await?;
-    let name = core.bundles.default_file_name(&ctx).await?;
+    // FD-03: the save dialog is Windows' own, so its suggested name leaves the workspace out while presenting.
+    let name = core
+        .bundles
+        .default_file_name(&ctx, core.presentation.get().enabled)
+        .await?;
     let (tx, rx) = tokio::sync::oneshot::channel();
     let mut dialog = window
         .dialog()

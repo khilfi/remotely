@@ -3,7 +3,7 @@
 // file is saved.
 
 import type { DateRange } from "./activity.ts";
-import type { AnsibleExport, HandoverExport, InventoryExport, ReadSummary } from "./reports-api.ts";
+import type { AnsibleExport, HandoverExport, InventoryExport, ReadProgress, ReadSummary } from "./reports-api.ts";
 
 /** The core's longest range, in days (`MAX_RANGE_DAYS`). */
 export const MAX_RANGE_DAYS = 366;
@@ -71,25 +71,36 @@ export function daysFromActivity(range: DateRange, now: Date = new Date()): { fr
   }
 }
 
-/** Why the handover pack's Save is off, or null. */
+/** Why the handover pack's Save is off, or null. `problem`: why the dates' counts could not be read. */
 export function handoverReason(input: {
   range: { fromMs: number; toMs: number } | { problem: string };
   preparedBy: string;
   busy: boolean;
+  problem?: string | null;
 }): string | null {
   if (input.busy) return "Making the pack…";
   if ("problem" in input.range) return input.range.problem;
+  if (input.problem) return input.problem;
   if (input.preparedBy.trim().length > MAX_PREPARED_BY)
     return `"Prepared by" can be at most ${MAX_PREPARED_BY} characters.`;
   return null;
 }
 
-/** Why the Ansible export's Save is off, or null. */
-export function ansibleReason(input: { hosts: number | null; busy: boolean }): string | null {
+/** Why the Ansible export's Save is off, or null. `problem`: why the preview could not be made. */
+export function ansibleReason(input: { hosts: number | null; busy: boolean; problem?: string | null }): string | null {
   if (input.busy) return "Saving…";
+  if (input.problem) return input.problem;
   if (input.hosts === null) return "Reading the sessions…";
   if (input.hosts === 0) return "No SSH session is picked: pick sessions, or VMs linked to one.";
   return null;
+}
+
+/** What a busy export's button says: "Reading hosts: 3 of 12…" while the hosts are read, then `saving`. */
+export function busyText(input: { reading: boolean; progress: ReadProgress | null; saving: string }): string {
+  const p = input.progress;
+  if (!input.reading || (p !== null && p.total > 0 && p.done >= p.total)) return input.saving;
+  if (p === null || p.total === 0) return "Reading hosts…";
+  return `Reading hosts: ${p.done} of ${p.total}…`;
 }
 
 /** "2 of 3 SSH hosts read again; 1 could not be." */

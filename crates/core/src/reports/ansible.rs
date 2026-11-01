@@ -5,8 +5,9 @@
 //!   `ansible_port`, `ansible_user`, and its SS-07 jump hosts as `-o ProxyJump=...` in `ansible_ssh_common_args`.
 //!   Never a password, key, passphrase or vault item: the header says to give those to Ansible yourself.
 //! * **Groups**: by folder (nested, `folder_customer_web` a child of `folder_customer`), tag, environment and
-//!   workspace, as chosen; `protected` holds the protected sessions, so `--limit '!protected'` keeps a playbook off
-//!   them as Remotely's bulk runs are.
+//!   workspace, as chosen; `protected` holds the protected sessions and those whose linked VM is protected, so
+//!   `--limit '!protected'` keeps a playbook off them as Compare hosts is ([`LinkedVm`]: a Prod VM's session is in
+//!   `env_prod` the same way).
 //! * **Safe values**: every name is made of letters, digits and `_` (hosts also `.` and `-`), every YAML key and string
 //!   is double-quoted with escapes (so `no`, `1.0` or `a: b` stay names and text), a YAML string holding Jinja markers
 //!   (`{{`, `{%`, `{#`) is tagged `!unsafe` so Ansible never templates it, and INI values are quoted for its shlex
@@ -281,11 +282,22 @@ fn folder_paths(folders: &[SessionFolder]) -> HashMap<Uuid, Vec<Uuid>> {
         .collect()
 }
 
-/// The inventory of `hosts` (BX-01's resolved sessions, in their order). `all` resolves jump hosts.
+/// What a session's linked VM adds to it, by VM id: Compare hosts' rule (`bulk::BulkRuns::resolve`), so a session that
+/// reaches a protected VM is in `protected`, and one that reaches a Prod VM in `env_prod`, even when the session itself
+/// isn't marked.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct LinkedVm {
+    pub protected: bool,
+    pub prod: bool,
+}
+
+/// The inventory of `hosts` (BX-01's resolved sessions, in their order). `all` resolves jump hosts, `vms` the sessions'
+/// linked VMs.
 pub fn build(
     hosts: &[&SessionRecord],
     all: &[SessionRecord],
     folders: &[SessionFolder],
+    vms: &HashMap<String, LinkedVm>,
     workspace: &str,
     group_by: GroupBy,
     made_at: &str,
@@ -361,15 +373,26 @@ pub fn build(
                 member(group, &mut inventory);
             }
         }
-        if group_by.environment && session.environment != Environment::None {
-            let env = session.environment.as_str();
+        let vm = session
+            .vm_id
+            .as_deref()
+            .and_then(|v| vms.get(v))
+            .copied()
+            .unwrap_or_default();
+        let environment = if vm.prod {
+            Environment::Prod
+        } else {
+            session.environment
+        };
+        if group_by.environment && environment != Environment::None {
+            let env = environment.as_str();
             let group = group_of(format!("env:{env}"), group_name("env", env), &mut taken_groups);
             member(group, &mut inventory);
         }
         if let Some(group) = &workspace_group {
             member(group.clone(), &mut inventory);
         }
-        if session.protected {
+        if session.protected || vm.protected {
             let group = group_of("protected".into(), "protected".into(), &mut taken_groups);
             member(group, &mut inventory);
         }
@@ -396,7 +419,9 @@ fn yaml_quoted(text: &str) -> String {
             '\\' => out.push_str("\\\\"),
             c if c.is_control()
                 || crate::untrusted::is_format_char(c)
-                || matches!(c, '\u{2028}' | '\u{2029}' | '\u{FEFF}') =>
+                || super::table::is_line_break(c)
+                || super::table::is_not_xml(c)
+                || c == '\u{FEFF}' =>
             {
                 out.push_str(&format!("\\u{:04X}", u32::from(c)));
             }
@@ -415,7 +440,8 @@ fn yaml_value(value: &Value) -> String {
     }
 }
 
-/// A comment line: text only, nothing after it can become YAML or INI.
+/// A comment line: text only, nothing after it can become YAML or INI ([`clean`] makes every kind of line break a
+/// space, U+2028 and U+2029 included, at which YAML and Python would start a new line).
 fn comment(line: &str) -> String {
     format!("# {}\n", clean(line))
 }
@@ -473,7 +499,10 @@ fn ini_value(value: &Value) -> Option<String> {
                 match c {
                     '"' => out.push_str("\\\""),
                     '\\' => out.push_str("\\\\"),
-                    c if c.is_control() || crate::untrusted::is_format_char(c) => {}
+                    c if c.is_control()
+                        || crate::untrusted::is_format_char(c)
+                        || super::table::is_line_break(c)
+                        || super::table::is_not_xml(c) => {}
                     c => out.push(c),
                 }
             }
@@ -591,7 +620,15 @@ mod tests {
 
     fn inventory_of(sessions: &[SessionRecord], folders: &[SessionFolder], by: GroupBy) -> Inventory {
         let refs: Vec<&SessionRecord> = sessions.iter().collect();
-        build(&refs, sessions, folders, "Acme lab", by, "2026-11-01 10:00 UTC")
+        build(
+            &refs,
+            sessions,
+            folders,
+            &HashMap::new(),
+            "Acme lab",
+            by,
+            "2026-11-01 10:00 UTC",
+        )
     }
 
     #[test]
@@ -610,12 +647,12 @@ mod tests {
     fn hosts_get_their_address_port_user_and_jump_chain() {
         let mut outer = session("bastion", "203.0.113.5", Some("bob"));
         outer.port = 2222;
-        let mut inner = session("hop", "10.0.0.5", Some("alice"));
+        let mut inner = session("hop", "198.51.100.5", Some("alice"));
         inner.jump_session_id = Some(outer.id);
         let mut web = session("web01", "web01.test", Some("alice"));
         web.jump_session_id = Some(inner.id);
         let all = vec![outer, inner, web.clone()];
-        let inv = build(&[&web], &all, &[], "Acme", GroupBy::default(), "now");
+        let inv = build(&[&web], &all, &[], &HashMap::new(), "Acme", GroupBy::default(), "now");
         assert_eq!(inv.hosts.len(), 1);
         assert_eq!(
             inv.hosts[0].vars,
@@ -625,18 +662,20 @@ mod tests {
                 ("ansible_user", Value::Text("alice".into())),
                 (
                     "ansible_ssh_common_args",
-                    Value::Text("-o ProxyJump=bob@203.0.113.5:2222,alice@10.0.0.5:22".into())
+                    Value::Text("-o ProxyJump=bob@203.0.113.5:2222,alice@198.51.100.5:22".into())
                 ),
             ]
         );
         let text = yaml(&inv);
         assert!(
-            text.contains("      ansible_ssh_common_args: \"-o ProxyJump=bob@203.0.113.5:2222,alice@10.0.0.5:22\"\n"),
+            text.contains(
+                "      ansible_ssh_common_args: \"-o ProxyJump=bob@203.0.113.5:2222,alice@198.51.100.5:22\"\n"
+            ),
             "{text}"
         );
         let (ini_text, notes) = ini(&inv);
         assert!(notes.is_empty());
-        assert!(ini_text.contains("web01 ansible_host=\"web01.test\" ansible_port=22 ansible_user=\"alice\" ansible_ssh_common_args=\"-o ProxyJump=bob@203.0.113.5:2222,alice@10.0.0.5:22\"\n"), "{ini_text}");
+        assert!(ini_text.contains("web01 ansible_host=\"web01.test\" ansible_port=22 ansible_user=\"alice\" ansible_ssh_common_args=\"-o ProxyJump=bob@203.0.113.5:2222,alice@198.51.100.5:22\"\n"), "{ini_text}");
     }
 
     #[test]
@@ -651,7 +690,15 @@ mod tests {
         let mut evil_user = session("c", "c.test", Some("-oProxyCommand=calc"));
         evil_user.id = Uuid::new_v4();
         let all = vec![v6, a.clone(), bad.clone(), b.clone(), evil_user.clone()];
-        let inv = build(&[&a, &b, &bad, &evil_user], &all, &[], "W", GroupBy::default(), "now");
+        let inv = build(
+            &[&a, &b, &bad, &evil_user],
+            &all,
+            &[],
+            &HashMap::new(),
+            "W",
+            GroupBy::default(),
+            "now",
+        );
         let a_vars = &inv.hosts.iter().find(|h| h.name == "a").unwrap().vars;
         assert!(a_vars.contains(&(
             "ansible_ssh_common_args",
@@ -814,6 +861,84 @@ mod tests {
         assert!(!ini_text.contains("lookup"));
         assert_eq!(notes.len(), 1, "{notes:?}");
         assert_eq!(yaml_quoted("a\u{2028}b\u{7}"), "\"a\\u2028b\\u0007\"");
+    }
+
+    #[test]
+    fn unicode_line_breaks_never_end_a_comment_or_a_value() {
+        // YAML and Python's splitlines break lines at U+0085, U+2028 and U+2029.
+        let breaks = ["\u{2028}", "\u{2029}", "\u{85}", "\u{0B}", "\u{0C}"];
+        for b in breaks {
+            let workspace = format!("Acme{b}[all:vars]{b}ansible_ssh_common_args=-oProxyCommand=calc{b}all:{b}  vars:");
+            let mut s = session("web01", "web01.test", Some("alice"));
+            s.tags = vec![format!("web{b}[evil]")];
+            let all = vec![s.clone()];
+            let inv = build(
+                &[&all[0]],
+                &all,
+                &[],
+                &HashMap::new(),
+                &workspace,
+                GroupBy {
+                    workspace: true,
+                    ..GroupBy::default()
+                },
+                "now",
+            );
+            for text in [yaml(&inv), ini(&inv).0] {
+                assert!(
+                    !text.chars().any(|c| breaks.contains(&c.to_string().as_str())),
+                    "{text:?}"
+                );
+                for line in text.lines() {
+                    let line = line.trim_start();
+                    assert!(
+                        !line.starts_with("[all:vars]") && !line.starts_with("ansible_ssh_common_args=-oProxy"),
+                        "{line:?}"
+                    );
+                }
+                assert!(!text.contains("ProxyCommand=calc\n"), "{text}");
+            }
+            assert!(yaml(&inv).starts_with("# Ansible inventory from Remotely: workspace \"Acme [all:vars] "));
+        }
+        assert_eq!(
+            ini_value(&Value::Text("a\u{2028}b\u{85}c".into())).as_deref(),
+            Some("\"abc\"")
+        );
+    }
+
+    #[test]
+    fn a_session_is_protected_or_prod_when_its_vm_is() {
+        let mut web = session("web01", "web01.test", None);
+        web.vm_id = Some("vm-1".into());
+        let mut db = session("db01", "db01.test", None);
+        db.vm_id = Some("vm-2".into());
+        let lab = session("lab01", "lab01.test", None);
+        let all = vec![web, db, lab];
+        let refs: Vec<&SessionRecord> = all.iter().collect();
+        let vms = HashMap::from([
+            (
+                "vm-1".to_owned(),
+                LinkedVm {
+                    protected: true,
+                    prod: false,
+                },
+            ),
+            (
+                "vm-2".to_owned(),
+                LinkedVm {
+                    protected: false,
+                    prod: true,
+                },
+            ),
+        ]);
+        let inv = build(&refs, &all, &[], &vms, "W", GroupBy::default(), "now");
+        let members = |g: &str| inv.groups.get(g).map(|g| g.hosts.iter().cloned().collect::<Vec<_>>());
+        assert_eq!(
+            members("protected"),
+            Some(vec!["web01".to_owned()]),
+            "--limit '!protected' keeps off it"
+        );
+        assert_eq!(members("env_prod"), Some(vec!["db01".to_owned()]));
     }
 
     #[test]

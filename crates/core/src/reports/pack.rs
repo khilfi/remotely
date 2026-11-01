@@ -42,9 +42,11 @@ pub struct PackParts<'a> {
     pub clock: &'a ReportClock,
     pub inventory: &'a InventoryData,
     pub groups: &'a [Group],
-    /// By job id; with their output only when `include_outputs`.
+    /// By job id; with their output only when `include_outputs`, and then only up to [`MAX_OUTPUTS_CHARS`] or so.
     pub targets: &'a HashMap<String, Vec<JobTargetRecord>>,
     pub include_outputs: bool,
+    /// Some targets' outputs weren't read: the cap was reached.
+    pub outputs_unread: bool,
     pub uptime: &'a [CheckUptime],
     pub notes: &'a [(Note, String)],
     pub topology_svg: Option<&'a str>,
@@ -351,7 +353,7 @@ fn activity_section(parts: &PackParts<'_>) -> String {
             "muted",
         ));
     }
-    if cut {
+    if cut || parts.outputs_unread {
         body.push_str(&para(
             "Some outputs were left out: the pack holds at most 4 million characters of them.",
             "muted",

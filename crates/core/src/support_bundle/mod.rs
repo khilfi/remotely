@@ -103,10 +103,12 @@ impl SupportBundles {
             .unwrap_or_default())
     }
 
-    /// The zip's name the save dialog offers: `remotely-bundle-<workspace>-<UTC time>.zip`.
-    pub async fn default_file_name(&self, ctx: &Context) -> Result<String> {
+    /// The zip's name the save dialog offers: `remotely-bundle-<workspace>-<UTC time>.zip`, without the workspace while
+    /// `presenting` (FD-03).
+    pub async fn default_file_name(&self, ctx: &Context, presenting: bool) -> Result<String> {
+        let workspace = self.workspace_name(ctx).await?;
         Ok(spec::default_file_name(
-            &self.workspace_name(ctx).await?,
+            (!presenting).then_some(workspace.as_str()),
             time::OffsetDateTime::now_utc(),
         ))
     }

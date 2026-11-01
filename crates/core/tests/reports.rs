@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use common::{vault_password_given, vm, vmx, wait_finished, Setup, VAULT_PASSWORD};
+use remotely_core::adapters::host_networks::{ForwardProtocol, VmnetForward, VmnetKind};
 use remotely_core::adapters::remote::AgentSource;
 use remotely_core::adapters::vm_hardware::{VirtualDisk, VirtualNic, VmHardware};
 use remotely_core::adapters::vmware::VmxInfo;
@@ -30,7 +31,7 @@ use remotely_core::notes::{NoteInput, NoteTarget};
 use remotely_core::policy::ApprovalStep;
 use remotely_core::presentation::Presentation;
 use remotely_core::reports::{
-    AnsibleFormat, AnsibleRequest, GroupBy, HandoverRequest, InventoryOptions, InventoryRequest,
+    AnsibleFormat, AnsibleRequest, GroupBy, HandoverRequest, InventoryOptions, InventoryRequest, ReadControl,
 };
 use remotely_core::sessions::{SessionAuth, SessionInput};
 use remotely_core::toolbox::ProbeTarget;
@@ -130,7 +131,18 @@ fn web_hardware() -> VmHardware {
     }
 }
 
-/// Workstation with `web` (running, its hardware known) and a VM whose name is a formula.
+fn forward(host_port: u16, guest_ip: &str) -> VmnetForward {
+    VmnetForward {
+        protocol: ForwardProtocol::Tcp,
+        host_port,
+        guest_ip: guest_ip.into(),
+        guest_port: 22,
+        description: None,
+    }
+}
+
+/// Workstation with `web` (running, its hardware known, on NAT vmnet8) and a VM whose name is a formula. Rule 8: the
+/// networks are this PC's: vmnet8 also forwards to 203.0.113.99, which no VM of the lab has, and vmnet3 has no VM.
 fn vmware() -> FakeVmware {
     FakeVmware::with_running([vmx("web")])
         .in_library(&vmx("web"), Some("web"))
@@ -144,6 +156,10 @@ fn vmware() -> FakeVmware {
         )
         .with_hardware(&vmx("web"), web_hardware())
         .with_ip(&vmx("web"), "192.0.2.10")
+        .with_vmnet(8, VmnetKind::Nat, "192.0.2.0")
+        .with_vmnet(3, VmnetKind::HostOnly, "198.51.100.0")
+        .with_forward("vmnet8", forward(2210, "192.0.2.10"))
+        .with_forward("vmnet8", forward(2299, "203.0.113.99"))
 }
 
 async fn core() -> Core {
@@ -235,7 +251,11 @@ async fn lab() -> Lab {
         Some(secret),
     );
     web.folder_id = Some(customer.id);
-    web.tags = vec!["web".into(), format!("password={SECRET}")];
+    web.tags = vec![
+        "web".into(),
+        format!("password={SECRET}"),
+        format!("token\u{200B}={SECRET}"),
+    ];
     web.environment = Environment::Prod;
     let web = core.sessions.create(&core.ctx(), web).await.unwrap().id;
     let mut db = input("db01", "127.0.0.1", rhel.port(), Some(secret));
@@ -305,7 +325,7 @@ async fn the_inventory_goes_to_excel_with_every_text_as_text() {
     };
     let report = core
         .reports
-        .export_inventory(&ctx, &path, request, "Remotely test")
+        .export_inventory(&ctx, &path, request, "Remotely test", &ReadControl::default())
         .await
         .unwrap();
     assert_eq!(report.vms, 2);
@@ -386,7 +406,13 @@ async fn without_reading_again_the_stored_facts_are_used_and_nobody_logs_in() {
     let path = temp.join("stored.xlsx");
     let report = core
         .reports
-        .export_inventory(&ctx, &path, InventoryRequest::default(), "Remotely test")
+        .export_inventory(
+            &ctx,
+            &path,
+            InventoryRequest::default(),
+            "Remotely test",
+            &ReadControl::default(),
+        )
         .await
         .unwrap();
     assert!(report.read.is_none());
@@ -396,6 +422,73 @@ async fn without_reading_again_the_stored_facts_are_used_and_nobody_logs_in() {
     assert!(strings.contains("Red Hat Enterprise Linux"), "db01's stored facts");
     assert!(strings.contains("Stored facts"));
     assert!(!text_of(&files, "xl/workbook.xml").contains("Packages"));
+}
+
+#[tokio::test]
+async fn reading_again_says_how_far_it_got_and_a_cancel_writes_nothing() {
+    let lab = lab().await;
+    let core = &lab.core;
+    let ctx = core.ctx();
+    let temp = Temp::new();
+    let request = InventoryRequest {
+        options: InventoryOptions {
+            read_again: true,
+            ..InventoryOptions::default()
+        },
+        utc_offset_minutes: 0,
+    };
+
+    // Each SSH host done is heard of, up to all of them.
+    let heard = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let into = std::sync::Arc::clone(&heard);
+    let control = ReadControl::default().with_progress(move |p| into.lock().unwrap().push((p.done, p.total)));
+    let path = temp.join("followed.xlsx");
+    core.reports
+        .export_inventory(&ctx, &path, request, "x", &control)
+        .await
+        .unwrap();
+    let heard = heard.lock().unwrap().clone();
+    assert_eq!(heard.first(), Some(&(0, 3)), "web01, db01 and app01: {heard:?}");
+    assert_eq!(heard.last(), Some(&(3, 3)), "{heard:?}");
+
+    // Cancelled while the hosts are read: no file, nothing audited.
+    let cancel = tokio_util::sync::CancellationToken::new();
+    let stopper = cancel.clone();
+    let control = ReadControl::new(cancel).with_progress(move |p| {
+        if p.done == 0 {
+            stopper.cancel();
+        }
+    });
+    let path = temp.join("cancelled.xlsx");
+    let before = core.store.recent_audit(&ctx, 50).await.unwrap().len();
+    let err = core
+        .reports
+        .export_inventory(&ctx, &path, request, "x", &control)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, remotely_core::CoreError::Cancelled), "{err}");
+    assert!(!path.exists());
+    assert!(!temp.join("cancelled.xlsx.part").exists(), "no part file left either");
+    let after = core.store.recent_audit(&ctx, 50).await.unwrap().len();
+    assert_eq!(before, after, "nothing exported, nothing audited");
+
+    // The pack too.
+    let (from_ms, to_ms) = day_range();
+    let pack = HandoverRequest {
+        from_ms,
+        to_ms,
+        inventory: request.options,
+        ..HandoverRequest::default()
+    };
+    let control = ReadControl::new(tokio_util::sync::CancellationToken::new());
+    control.cancel.cancel();
+    let path = temp.join("cancelled.zip");
+    assert!(core
+        .reports
+        .export_handover(&ctx, &path, &pack, "x", &control)
+        .await
+        .is_err());
+    assert!(!path.exists());
 }
 
 #[tokio::test]
@@ -591,7 +684,9 @@ async fn the_handover_pack_is_one_safe_page_beside_the_inventory() {
             &NoteTarget::session(lab.web),
             NoteInput {
                 body: format!(
-                    "# Web tier\n\nRestart nginx after a deploy. db password: {SECRET}\n\nSee [the runbook](https://example.com/runbooks/web).\n\n<script>alert(1)</script>"
+                    "# Web tier\n\nRestart nginx after a deploy. db password: {SECRET}\n\n\
+                     **Password:** {SECRET}\n\n**Token**: {SECRET}\n\n`api_key`: {SECRET}\n\nSecret:\n- {SECRET}\n\n\
+                     See [the runbook](https://example.com/runbooks/web).\n\n<script>alert(1)</script>"
                 ),
                 handover: true,
             },
@@ -619,7 +714,7 @@ async fn the_handover_pack_is_one_safe_page_beside_the_inventory() {
     let path = temp.join("handover.zip");
     let report = core
         .reports
-        .export_handover(&ctx, &path, &request, "Remotely test")
+        .export_handover(&ctx, &path, &request, "Remotely test", &ReadControl::default())
         .await
         .unwrap();
     assert_eq!(report.jobs, 2);
@@ -754,7 +849,7 @@ async fn outputs_stay_out_unless_chosen() {
     let temp = Temp::new();
     let path = temp.join("no-outputs.zip");
     core.reports
-        .export_handover(&core.ctx(), &path, &request, "Remotely test")
+        .export_handover(&core.ctx(), &path, &request, "Remotely test", &ReadControl::default())
         .await
         .unwrap();
     let html = text_of(&members(&path), "index.html");
@@ -771,7 +866,7 @@ async fn outputs_stay_out_unless_chosen() {
     let refused = temp.join("refused.zip");
     assert!(core
         .reports
-        .export_handover(&core.ctx(), &refused, &backwards, "x")
+        .export_handover(&core.ctx(), &refused, &backwards, "x", &ReadControl::default())
         .await
         .is_err());
     assert!(!refused.exists());
@@ -786,7 +881,13 @@ async fn no_export_goes_into_a_git_working_tree() {
     let inventory = temp.join("inventory.xlsx");
     let err = core
         .reports
-        .export_inventory(&ctx, &inventory, InventoryRequest::default(), "x")
+        .export_inventory(
+            &ctx,
+            &inventory,
+            InventoryRequest::default(),
+            "x",
+            &ReadControl::default(),
+        )
         .await
         .unwrap_err();
     assert!(err.to_string().contains("inside a Git repository"), "{err}");
@@ -807,7 +908,7 @@ async fn no_export_goes_into_a_git_working_tree() {
     };
     assert!(core
         .reports
-        .export_handover(&ctx, &pack, &request, "x")
+        .export_handover(&ctx, &pack, &request, "x", &ReadControl::default())
         .await
         .unwrap_err()
         .to_string()
@@ -838,11 +939,28 @@ async fn the_read_only_lock_allows_exports_and_each_holds_one_workspace() {
         .unwrap();
     let temp = Temp::new();
     let path = temp.join("locked.xlsx");
-    core.reports
-        .export_inventory(&home, &path, InventoryRequest::default(), "x")
+    let report = core
+        .reports
+        .export_inventory(&home, &path, InventoryRequest::default(), "x", &ReadControl::default())
         .await
         .unwrap();
     assert!(path.exists());
+    // Rule 8: of this PC's networks, only the one a VM of this workspace is on, with only its forward to that VM.
+    let book = xlsx_text(&std::fs::read(&path).unwrap());
+    assert!(book.contains("vmnet8"), "web is on it");
+    assert!(book.contains("2210"), "the forward to web");
+    assert!(
+        !book.contains("203.0.113.99") && !book.contains("2299"),
+        "the other forward is left out"
+    );
+    assert!(!book.contains("vmnet3"), "no VM of this workspace is on vmnet3");
+    assert_eq!(report.networks, 1);
+    assert!(
+        report.notes.iter().any(|n| n
+            == "Networks: 1 network no VM of this workspace is on, and 1 port forward to VMs outside it, left out."),
+        "{:?}",
+        report.notes
+    );
     core.presentation
         .set(Presentation {
             enabled: false,
@@ -881,13 +999,31 @@ async fn the_read_only_lock_allows_exports_and_each_holds_one_workspace() {
         to_ms,
         ..HandoverRequest::default()
     };
-    core.reports.export_handover(&ctx, &pack, &request, "x").await.unwrap();
+    core.reports
+        .export_handover(&ctx, &pack, &request, "x", &ReadControl::default())
+        .await
+        .unwrap();
     let files = members(&pack);
     let html = text_of(&files, "index.html");
     assert!(html.contains("Handover: Globex"));
     assert!(
         !html.contains("db01") && !html.contains(">web<"),
         "nothing of the home workspace"
+    );
+    // No VM of Globex is on any network: none of this PC's networks or forwards go in.
+    let networks = text_of(&files, "networks.csv");
+    assert_eq!(networks.lines().count(), 1, "the header alone: {networks}");
+    assert!(!html.contains("vmnet8") && !html.contains("2210"), "{html}");
+    let book = xlsx_text(
+        files
+            .iter()
+            .find(|(n, _)| n == "inventory.xlsx")
+            .map(|(_, b)| b)
+            .unwrap(),
+    );
+    assert!(
+        !book.contains("vmnet") && !book.contains("192.0.2.10"),
+        "nothing of the home workspace's networks"
     );
     // Audited in the workspace it holds.
     assert!(core

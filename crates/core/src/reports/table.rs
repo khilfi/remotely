@@ -9,8 +9,8 @@
 use crate::export::{push_row, redact_secrets};
 use crate::untrusted::is_format_char;
 
-/// Characters a cell keeps at most. Excel's cells hold 32,767.
-pub const MAX_CELL_CHARS: usize = 32_000;
+/// UTF-16 units a cell keeps at most. Excel's cells hold 32,767 of them (an emoji takes two).
+pub const MAX_CELL_UNITS: usize = 32_000;
 
 /// One cell. Text is always text: no format writes it as a formula, whatever it starts with.
 #[derive(Debug, Clone, PartialEq)]
@@ -78,53 +78,84 @@ impl Cell {
     }
 }
 
-/// Text fit for a report: secrets redacted, control and format characters out (line breaks and tabs become spaces),
-/// runs of spaces made one, trimmed, and cut at [`MAX_CELL_CHARS`] characters (by character, never by byte).
+/// A character that ends a line somewhere a report is read: line feed, carriage return, vertical tab, form feed, and
+/// U+0085, U+2028 and U+2029, which YAML, Python's `splitlines` and JavaScript take for line breaks too.
+pub fn is_line_break(c: char) -> bool {
+    matches!(
+        c,
+        '\n' | '\r' | '\u{0B}' | '\u{0C}' | '\u{85}' | '\u{2028}' | '\u{2029}'
+    )
+}
+
+/// U+FFFE and U+FFFF, which XML 1.0 doesn't take: a workbook or an SVG holding one doesn't open.
+pub fn is_not_xml(c: char) -> bool {
+    matches!(c, '\u{FFFE}' | '\u{FFFF}')
+}
+
+/// Text fit for a report: control, format and non-XML characters out, line breaks and tabs made spaces, runs of spaces
+/// made one, trimmed; then secrets redacted (after, so a zero-width space between `password=` and its value can't hide
+/// it); then cut at [`MAX_CELL_UNITS`] UTF-16 units (by character, never by byte), as Excel counts.
 pub fn clean(value: &str) -> String {
-    let (redacted, _) = redact_secrets(value);
-    let mut out = String::with_capacity(redacted.len().min(MAX_CELL_CHARS));
+    let mut text = String::with_capacity(value.len());
     let mut space = false;
-    let mut count = 0;
-    for c in redacted.chars() {
-        let c = if c == '\n' || c == '\r' || c == '\t' { ' ' } else { c };
-        if c.is_control() || is_format_char(c) {
+    for c in value.chars() {
+        let c = if is_line_break(c) || c == '\t' { ' ' } else { c };
+        if c.is_control() || is_format_char(c) || is_not_xml(c) {
             continue;
         }
         if c == ' ' {
-            if space || out.is_empty() {
+            if space || text.is_empty() {
                 continue;
             }
             space = true;
         } else {
             space = false;
         }
-        if count >= MAX_CELL_CHARS {
+        text.push(c);
+    }
+    let (redacted, _) = redact_secrets(text.trim_end());
+    cut_units(redacted.trim_end(), MAX_CELL_UNITS)
+}
+
+/// `text` cut at `max` UTF-16 units, an ellipsis after it when cut.
+fn cut_units(text: &str, max: usize) -> String {
+    let mut out = String::with_capacity(text.len().min(max * 2));
+    let mut units = 0;
+    for c in text.chars() {
+        if units + c.len_utf16() > max {
             out.push('…');
             break;
         }
+        units += c.len_utf16();
         out.push(c);
-        count += 1;
     }
-    out.trim_end().to_owned()
+    out
 }
 
-/// Text that keeps its lines (a job's output in the handover pack): secrets redacted, control and format characters
-/// out but line breaks and tabs kept, cut at `max_chars`.
+/// Text that keeps its lines (a job's output in the handover pack): control, format and non-XML characters out but
+/// line breaks (each kind made `\n`) and tabs kept; then secrets redacted; then cut at `max_chars`.
 pub fn clean_lines(value: &str, max_chars: usize) -> (String, bool) {
-    let (redacted, _) = redact_secrets(value);
-    let mut out = String::new();
-    let mut cut = false;
-    for (count, c) in redacted.chars().filter(|c| *c != '\r').enumerate() {
-        if count >= max_chars {
-            cut = true;
-            break;
-        }
-        if (c.is_control() && c != '\n' && c != '\t') || is_format_char(c) {
+    let mut text = String::with_capacity(value.len());
+    let mut chars = value.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\r' && chars.peek() == Some(&'\n') {
             continue;
+        }
+        if is_line_break(c) {
+            text.push('\n');
+        } else if c == '\t' || !(c.is_control() || is_format_char(c) || is_not_xml(c)) {
+            text.push(c);
+        }
+    }
+    let (redacted, _) = redact_secrets(&text);
+    let mut out = String::new();
+    for (count, c) in redacted.chars().enumerate() {
+        if count >= max_chars {
+            return (out, true);
         }
         out.push(c);
     }
-    (out, cut)
+    (out, false)
 }
 
 /// A column: its heading and, for Excel, its width in characters.
@@ -203,15 +234,49 @@ mod tests {
             Cell::Text("db password=[redacted]".into())
         );
         assert_eq!(Cell::text(" \n "), Cell::Empty);
-        let long = "\u{e9}".repeat(MAX_CELL_CHARS + 10);
+        let long = "\u{e9}".repeat(MAX_CELL_UNITS + 10);
         let Cell::Text(cut) = Cell::text(&long) else {
             panic!("text")
         };
         assert_eq!(
             cut.chars().count(),
-            MAX_CELL_CHARS + 1,
+            MAX_CELL_UNITS + 1,
             "cut by character, with an ellipsis"
         );
+        // Excel counts UTF-16 units: 20,000 emoji are 40,000 of them.
+        let Cell::Text(cut) = Cell::text("\u{1F600}".repeat(20_000)) else {
+            panic!("text")
+        };
+        assert!(cut.encode_utf16().count() <= 32_767, "{}", cut.encode_utf16().count());
+        assert!(cut.ends_with('…'));
+    }
+
+    #[test]
+    fn a_hidden_character_never_hides_a_secret() {
+        for text in [
+            "password\u{200B}=Hunter2Hunter2",
+            "password=\u{200B}Hunter2Hunter2",
+            "pass\u{2060}word=Hunter2Hunter2",
+            "token:\u{0}\u{7}Hunter2Hunter2",
+            "password\u{FEFF}: Hunter2Hunter2",
+        ] {
+            let cleaned = clean(text);
+            assert!(!cleaned.contains("Hunter2"), "{text:?} gave {cleaned:?}");
+            let (lines, _) = clean_lines(text, 1000);
+            assert!(!lines.contains("Hunter2"), "{text:?} gave {lines:?}");
+        }
+    }
+
+    #[test]
+    fn every_kind_of_line_break_and_non_xml_character_goes() {
+        assert_eq!(
+            clean("a\u{2028}b\u{2029}c\u{85}d\u{0B}e\u{0C}f"),
+            "a b c d e f",
+            "YAML and Python break lines at these"
+        );
+        assert_eq!(clean("x\u{FFFE}y\u{FFFF}z"), "xyz");
+        let (text, _) = clean_lines("one\u{2028}two\rthree\r\nfour\u{FFFF}", 100);
+        assert_eq!(text, "one\ntwo\nthree\nfour");
     }
 
     #[test]

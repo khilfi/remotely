@@ -2,9 +2,13 @@
 //! `remotely_core::reports`; this is the IPC around it.
 //!
 //! Each file's place comes from a save dialog opened here (in Documents, named
-//! `remotely-<what>-<workspace>-<date>.<ext>`), never from the window, and the core refuses a Git working tree. Each
-//! export reads the shown workspace (`core.ctx()` per call). Show in folder opens Explorer at a file saved here, by the
-//! id its export returned, never at a path the window names.
+//! `remotely-<what>-<workspace>-<date>.<ext>`, without the workspace while presenting), never from the window, and the
+//! core refuses a Git working tree. Each export reads the shown workspace (`core.ctx()` per call). Show in folder opens
+//! Explorer at a file saved here, by the id its export returned, never at a path the window names.
+//!
+//! The inventory and the handover pack may read every SSH host first, which takes minutes: each runs under an id the
+//! window chose, in the toolbox's [`ToolRuns`] (so a reload of the window stops it, `lib.rs`), `reports_cancel` stops
+//! it with nothing written, and `reports://progress` says how many hosts are done.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -12,15 +16,16 @@ use std::sync::Mutex;
 
 use remotely_core::reports::{
     chosen_path, AnsibleExport, AnsibleFormat, AnsiblePreview, AnsibleRequest, HandoverExport, HandoverPreview,
-    HandoverRequest, InventoryExport, InventoryRequest, ReportKind, ReportsOverview,
+    HandoverRequest, InventoryExport, InventoryRequest, ReadControl, ReadProgress, ReportKind, ReportsOverview,
 };
 use remotely_core::CoreError;
 use serde::Serialize;
-use tauri::{Manager, State, WebviewWindow};
+use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow};
 use tauri_plugin_dialog::DialogExt;
 use uuid::Uuid;
 
 use crate::ipc::IpcError;
+use crate::toolbox::{Running, ToolRuns};
 use crate::AppState;
 
 type IpcResult<T> = Result<T, IpcError>;
@@ -60,6 +65,32 @@ fn made_by() -> String {
     format!("Remotely {}", env!("CARGO_PKG_VERSION"))
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProgressEvent {
+    run: Uuid,
+    #[serde(flatten)]
+    progress: ReadProgress,
+}
+
+/// The export's cancel token and its progress events, for run `run`.
+fn control(app: AppHandle, running: &Running<'_>, run: Uuid) -> ReadControl {
+    ReadControl::new(running.token.clone()).with_progress(move |progress| {
+        let _ = app.emit("reports://progress", ProgressEvent { run, progress });
+    })
+}
+
+/// FD-03: the save dialog is Windows' own, so its suggested name leaves the workspace out while presenting.
+fn presenting(state: &AppState) -> bool {
+    state.core.presentation.get().enabled
+}
+
+/// Stops an export's host reads; nothing is written. False when it isn't going on any more.
+#[tauri::command]
+pub fn reports_cancel(runs: State<'_, ToolRuns>, run: Uuid) -> bool {
+    runs.cancel(run)
+}
+
 /// Asks where to save, offering `name` in Documents. `None` when the dialog was closed.
 async fn ask_path(
     window: &WebviewWindow,
@@ -97,16 +128,22 @@ pub async fn reports_overview(state: State<'_, AppState>) -> IpcResult<ReportsOv
     Ok(core.reports.overview(&core.ctx()).await?)
 }
 
-/// FD-05: asks where to save, then writes the inventory there. `None` when the dialog was closed.
+/// FD-05: asks where to save, then writes the inventory there, as run `run` (`reports_cancel`). `None` when the dialog
+/// was closed.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn inventory_export(
+    app: AppHandle,
     window: WebviewWindow,
     state: State<'_, AppState>,
     saved: State<'_, SavedReports>,
+    runs: State<'_, ToolRuns>,
+    run: Uuid,
     request: InventoryRequest,
 ) -> IpcResult<Option<Saved<InventoryExport>>> {
     let core = &state.core;
     let ctx = core.ctx();
+    let running = Running::start(&runs, run);
     let name = core
         .reports
         .file_name(
@@ -114,12 +151,17 @@ pub async fn inventory_export(
             ReportKind::Inventory,
             AnsibleFormat::Yaml,
             request.utc_offset_minutes,
+            presenting(&state),
         )
         .await?;
     let Some(path) = ask_path(&window, "Save the inventory as", name, ("Excel workbook", &["xlsx"])).await? else {
         return Ok(None);
     };
-    let report = core.reports.export_inventory(&ctx, &path, request, &made_by()).await?;
+    let control = control(app, &running, run);
+    let report = core
+        .reports
+        .export_inventory(&ctx, &path, request, &made_by(), &control)
+        .await?;
     tracing::info!(vms = report.vms, hosts = report.hosts, "inventory exported");
     Ok(Some(Saved {
         saved_id: saved.remember(path),
@@ -155,7 +197,13 @@ pub async fn ansible_export(
     }
     let name = core
         .reports
-        .file_name(&ctx, ReportKind::Ansible, request.format, utc_offset_minutes)
+        .file_name(
+            &ctx,
+            ReportKind::Ansible,
+            request.format,
+            utc_offset_minutes,
+            presenting(&state),
+        )
         .await?;
     let filter: (&str, &[&str]) = match request.format {
         AnsibleFormat::Yaml => ("YAML inventory", &["yml", "yaml"]),
@@ -183,16 +231,22 @@ pub async fn handover_preview(state: State<'_, AppState>, request: HandoverReque
     Ok(core.reports.handover_preview(&core.ctx(), &request).await?)
 }
 
-/// FD-08: asks where to save, then writes the handover pack there. `None` when the dialog was closed.
+/// FD-08: asks where to save, then writes the handover pack there, as run `run` (`reports_cancel`). `None` when the
+/// dialog was closed.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn handover_export(
+    app: AppHandle,
     window: WebviewWindow,
     state: State<'_, AppState>,
     saved: State<'_, SavedReports>,
+    runs: State<'_, ToolRuns>,
+    run: Uuid,
     request: HandoverRequest,
 ) -> IpcResult<Option<Saved<HandoverExport>>> {
     let core = &state.core;
     let ctx = core.ctx();
+    let running = Running::start(&runs, run);
     // Before the dialog: a range that runs backwards says so at once.
     core.reports.handover_preview(&ctx, &request).await?;
     let name = core
@@ -202,12 +256,17 @@ pub async fn handover_export(
             ReportKind::Handover,
             AnsibleFormat::Yaml,
             request.utc_offset_minutes,
+            presenting(&state),
         )
         .await?;
     let Some(path) = ask_path(&window, "Save the handover pack as", name, ("Zip files", &["zip"])).await? else {
         return Ok(None);
     };
-    let report = core.reports.export_handover(&ctx, &path, &request, &made_by()).await?;
+    let control = control(app, &running, run);
+    let report = core
+        .reports
+        .export_handover(&ctx, &path, &request, &made_by(), &control)
+        .await?;
     tracing::info!(jobs = report.jobs, notes = report.notes, "handover pack saved");
     Ok(Some(Saved {
         saved_id: saved.remember(path),
