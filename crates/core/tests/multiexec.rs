@@ -203,6 +203,7 @@ impl Fleet {
                         color: None,
                         tags: vec![],
                         vm_id: None,
+                        kind: Default::default(),
                     },
                 )
                 .await

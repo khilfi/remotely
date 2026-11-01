@@ -74,7 +74,7 @@ pub struct Route {
     pub label: String,
     /// SS-07: the session's own jump host, which opens the connection to `host`.
     pub via: Option<JumpHost>,
-    /// The session's port (SSH's), for a port check that names none.
+    /// The session's port (its kind's: SSH, RDP, VNC or Telnet), for a port check that names none.
     pub port: Option<u16>,
 }
 
@@ -249,6 +249,14 @@ impl Toolbox {
                     .get_session(ctx, *session_id)
                     .await?
                     .ok_or_else(|| CoreError::UnknownTarget(format!("session {session_id}")))?;
+                // SS-12: a serial session's host is its COM port, no network address to probe.
+                if !session.kind.has_port() {
+                    return Err(CoreError::WrongSessionKind {
+                        session: session.name.clone(),
+                        kind: session.kind.label(),
+                        needs: "it has no network address to check".into(),
+                    });
+                }
                 let via = match session.jump_session_id {
                     Some(jump_id) => {
                         let jump = self.inner.store.get_session(ctx, jump_id).await?;

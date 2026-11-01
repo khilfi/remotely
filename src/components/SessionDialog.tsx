@@ -8,6 +8,9 @@
 // UX-04, UX-12: the basics first (name, host, port, user, login, folder, environment), the rest under Advanced (its
 // folded line says what is set inside); under Environment, one line says which environment applies and where from (a
 // Prod VM the session reaches makes it Prod). Taking Prod away, by the environment or by unlinking a Prod VM, asks first.
+// SS-12: the kind comes first (SSH, remote desktop, VNC, Telnet, serial), and each kind's own fields go under Advanced
+// (kind-fields in SessionKindFields). Only SSH logs in with a login of the app's; RDP's mstsc and the VNC viewer ask
+// for the password themselves, and Telnet and serial log in at the prompt. A serial session's host is its COM port.
 
 import { useEffect, useMemo, useState } from "react";
 import { ChevronRightIcon, PlusIcon } from "lucide-react";
@@ -41,11 +44,24 @@ import {
   type SessionColor,
   type SessionFolder,
   type SessionInput,
+  type SessionKind,
+  type SessionProtocol,
   type SessionRecord,
   type StartupRating,
   type VaultInfo,
   type VmRecord,
 } from "@/lib/api";
+import {
+  defaultKind,
+  kindOf,
+  kindSummary,
+  KINDS,
+  portAfterKindChange,
+  rdpProblem,
+  serialProblem,
+  takesJumpHost,
+} from "@/lib/session-kinds";
+import { SessionKindFields, SerialPortField } from "./SessionKindFields";
 import { HelpTip } from "@/components/HelpTip";
 import { Term } from "@/components/Term";
 import { flattenFolders, folderPath } from "@/lib/folders";
@@ -125,6 +141,10 @@ export function SessionDialog({
   const readOnly = useReadOnlyReason();
   // QL-16: what the session sets itself; what it has from its folders is `inherited`.
   const own = session?.own;
+  /** SS-12: what it opens, with that kind's own fields. */
+  const [kind, setKind] = useState<SessionKind>(session ? kindOf(session) : defaultKind("ssh"));
+  const protocol = kind.protocol;
+  const ssh = protocol === "ssh";
   const [name, setName] = useState(session?.name ?? "");
   const [folder, setFolder] = useState<string>(session ? (session.folderId ?? NONE) : (folderId ?? NONE));
   const [host, setHost] = useState(session?.host ?? "");
@@ -213,8 +233,20 @@ export function SessionDialog({
     rated && rated.command === startup.trim() && rated.environment === effectiveEnvironment ? rated.rating : null;
 
   const of = (kind: SecretKind) => secrets.filter((s) => s.kind === kind);
-  const portNumber = Number(port);
+  // SS-12: a serial session has no network port (the core keeps its column at 1).
+  const portNumber = protocol === "serial" ? 1 : Number(port);
   const portOk = Number.isInteger(portNumber) && portNumber >= 1 && portNumber <= 65535;
+  /** SS-12: what the kind's own fields refuse, if anything. */
+  const kindIssue =
+    kind.protocol === "serial" ? serialProblem(kind) : kind.protocol === "rdp" ? rdpProblem(kind) : null;
+  /** What saving waits for: the kind's fields right, and an SSH session's forwards loaded and right. */
+  const savable = kindIssue === null && (!ssh || (forwards !== null && forwardsProblem(forwards) === null));
+  /** SS-12: picks a kind, keeping the fields of the one it had; the port follows unless one was typed. */
+  function chooseKind(next: SessionProtocol) {
+    if (next === protocol) return;
+    setPort(portAfterKindChange(port, protocol, next));
+    setKind(session && session.kind.protocol === next ? session.kind : defaultKind(next));
+  }
   const tagList = tags
     .split(",")
     .map((t) => t.trim())
@@ -251,6 +283,8 @@ export function SessionDialog({
     (t) => !tags.split(",").some((x) => x.trim().toLowerCase() === t.tag.toLowerCase()),
   );
   const forwardsIssue = forwards ? forwardsProblem(forwards) : null;
+  /** SS-07: why the forwards keep it from saving (SSH sessions only have them). */
+  const forwardsReason = !ssh ? null : forwards ? forwardsIssue : "The port forwards are still loading.";
 
   // UX-12: the environment that will apply, and where it comes from: its own, its folders', or a Prod VM it reaches.
   const vmMap = useMemo(() => vmsById(vms), [vms]);
@@ -269,16 +303,22 @@ export function SessionDialog({
   /** What applied when the editor opened (a saved session's own, folders' and VM's). */
   const wasProd = session ? appliedEnvironment(session, vmMap).environment === "prod" : false;
   const summary = advancedSummary({
-    jumpHost: chain ? (chain.names[chain.names.length - 1] ?? null) : null,
-    vm: vm === NONE ? null : (vms.find((v) => v.id === vm)?.displayName ?? "not listed"),
-    startupCommand: startup.trim() !== "",
-    promptHook: hook === NONE ? null : hook === "on",
-    portForwards: forwards?.length ?? 0,
+    kind: kindSummary(kind),
+    jumpHost: takesJumpHost(kind) && chain ? (chain.names[chain.names.length - 1] ?? null) : null,
+    vm: !ssh || vm === NONE ? null : (vms.find((v) => v.id === vm)?.displayName ?? "not listed"),
+    startupCommand: ssh && startup.trim() !== "",
+    promptHook: !ssh || hook === NONE ? null : hook === "on",
+    portForwards: ssh ? (forwards?.length ?? 0) : 0,
     colour: color !== null,
     tags: tagList.length,
+    protocol,
   });
   /** Advanced opens by itself when something in it needs fixing. */
-  const showAdvanced = advancedOpen || forwardsIssue !== null || Boolean(chain?.loops);
+  const showAdvanced =
+    advancedOpen ||
+    (ssh && forwardsIssue !== null) ||
+    (takesJumpHost(kind) && Boolean(chain?.loops)) ||
+    kindIssue !== null;
 
   function auth(): SessionAuth {
     const pick = (v: string) => (v === NONE ? null : v);
@@ -303,29 +343,33 @@ export function SessionDialog({
 
   /** Throws, so the Prod confirm can show the error. */
   async function persist() {
+    // SS-12: only SSH logs in with a login of the app's and has a startup command, prompt hook and VM link; Telnet
+    // and serial take no jump host. The core tidies the same way.
+    const jumps = takesJumpHost(kind);
     const input: SessionInput = {
       name,
       folderId: folder === NONE ? null : folder,
       host,
       port: portNumber,
-      username: username.trim() || null,
-      auth: auth(),
-      jumpSessionId: jump === NONE || jump === DIRECT ? null : jump,
-      jumpDirect: jump === DIRECT,
-      startupCommand: startup.trim() || null,
-      startupOnReconnect: startupAgain,
-      promptHook: hook === NONE ? null : hook === "on",
+      username: protocol === "vnc" || protocol === "serial" ? null : username.trim() || null,
+      auth: ssh ? auth() : { method: "password", passwordId: null },
+      jumpSessionId: !jumps || jump === NONE || jump === DIRECT ? null : jump,
+      jumpDirect: !jumps || jump === DIRECT,
+      startupCommand: ssh ? startup.trim() || null : null,
+      startupOnReconnect: ssh && startupAgain,
+      promptHook: !ssh || hook === NONE ? null : hook === "on",
       environment,
       color,
       tags: tagList,
-      vmId: vm === NONE ? null : vm,
+      vmId: !ssh || vm === NONE ? null : vm,
+      kind,
     };
     // SS-04, AP-06: a vault password sent to a host where no saved session sends it yet asks for the vault password.
     const saved = await withVaultPassword((password) =>
       session ? api.updateSession(session.id, input, password) : api.createSession(input, password),
     );
     // SS-07: the forwards are saved after the session (a new one needs its id); the core skips an unchanged list.
-    if (forwards) {
+    if (forwards && ssh) {
       try {
         await api.saveForwards(saved.id, forwards);
       } catch (err) {
@@ -404,15 +448,38 @@ export function SessionDialog({
             className="grid gap-4"
             onSubmit={(e) => {
               e.preventDefault();
-              if (host.trim() && portOk && forwards && !forwardsIssue) submit();
+              if (host.trim() && portOk && savable) submit();
             }}
           >
             <DialogHeader>
               <DialogTitle>{session ? `Edit '${session.name}'` : "New session"}</DialogTitle>
               <DialogDescription>
-                Passwords and keys stay in the vault; one left out is asked when connecting.
+                {ssh
+                  ? "Passwords and keys stay in the vault; one left out is asked when connecting."
+                  : protocol === "rdp"
+                    ? "Opens Remote Desktop Connection, which asks for the password."
+                    : protocol === "vnc"
+                      ? "Opens your VNC viewer, which asks for the password."
+                      : "Opens a terminal tab; log in at the prompt."}
               </DialogDescription>
             </DialogHeader>
+
+            <div className="grid gap-2">
+              <Label>Kind</Label>
+              <ToggleGroup
+                type="single"
+                variant="outline"
+                className="flex-wrap justify-self-start"
+                value={protocol}
+                onValueChange={(v) => v && chooseKind(v as SessionProtocol)}
+              >
+                {KINDS.map((k) => (
+                  <ToggleGroupItem key={k.protocol} value={k.protocol}>
+                    {k.label}
+                  </ToggleGroupItem>
+                ))}
+              </ToggleGroup>
+            </div>
 
             <div className="grid gap-2">
               <Label htmlFor="session-name">Name</Label>
@@ -426,52 +493,58 @@ export function SessionDialog({
               />
             </div>
 
-            <div className="grid gap-4 sm:grid-cols-[1fr_8rem]">
-              <div className="grid gap-2">
-                <Label htmlFor="session-host">Host</Label>
-                <Input
-                  id="session-host"
-                  data-mask="host"
-                  autoFocus={!session}
-                  autoComplete="off"
-                  spellCheck={false}
-                  placeholder="web01.example.com or 192.0.2.10"
-                  className="font-mono"
-                  value={host}
-                  onChange={(e) => setHost(e.currentTarget.value)}
-                />
+            {protocol === "serial" ? (
+              <SerialPortField value={host} onChange={setHost} autoFocus={!session} />
+            ) : (
+              <div className="grid gap-4 sm:grid-cols-[1fr_8rem]">
+                <div className="grid gap-2">
+                  <Label htmlFor="session-host">Host</Label>
+                  <Input
+                    id="session-host"
+                    data-mask="host"
+                    autoFocus={!session}
+                    autoComplete="off"
+                    spellCheck={false}
+                    placeholder="web01.example.com or 192.0.2.10"
+                    className="font-mono"
+                    value={host}
+                    onChange={(e) => setHost(e.currentTarget.value)}
+                  />
+                </div>
+                <div className="grid gap-2">
+                  <Label htmlFor="session-port">Port</Label>
+                  <Input
+                    id="session-port"
+                    inputMode="numeric"
+                    value={port}
+                    onChange={(e) => setPort(e.currentTarget.value)}
+                    aria-invalid={!portOk || undefined}
+                  />
+                </div>
               </div>
-              <div className="grid gap-2">
-                <Label htmlFor="session-port">Port</Label>
-                <Input
-                  id="session-port"
-                  inputMode="numeric"
-                  value={port}
-                  onChange={(e) => setPort(e.currentTarget.value)}
-                  aria-invalid={!portOk || undefined}
-                />
-              </div>
-            </div>
+            )}
 
             <div className="grid gap-4 sm:grid-cols-2">
-              <div className="grid content-start gap-2">
-                <Label htmlFor="session-user">User</Label>
-                <Input
-                  id="session-user"
-                  data-mask="user"
-                  autoComplete="off"
-                  spellCheck={false}
-                  placeholder={inherited?.username ? "From its folder" : "alice"}
-                  value={username}
-                  onChange={(e) => setUsername(e.currentTarget.value)}
-                />
-                {inherited?.username && inherited.inherited.username && (
-                  <p className="text-xs text-muted-foreground">
-                    {username.trim() ? "Overrides " : "Empty: "}
-                    <span data-mask="user">{inherited.username}</span> from folder {inherited.inherited.username.name}
-                  </p>
-                )}
-              </div>
+              {protocol !== "vnc" && protocol !== "serial" && (
+                <div className="grid content-start gap-2">
+                  <Label htmlFor="session-user">User</Label>
+                  <Input
+                    id="session-user"
+                    data-mask="user"
+                    autoComplete="off"
+                    spellCheck={false}
+                    placeholder={inherited?.username ? "From its folder" : "alice"}
+                    value={username}
+                    onChange={(e) => setUsername(e.currentTarget.value)}
+                  />
+                  {inherited?.username && inherited.inherited.username && (
+                    <p className="text-xs text-muted-foreground">
+                      {username.trim() ? "Overrides " : "Empty: "}
+                      <span data-mask="user">{inherited.username}</span> from folder {inherited.inherited.username.name}
+                    </p>
+                  )}
+                </div>
+              )}
               <div className="grid content-start gap-2">
                 <Label htmlFor="session-folder">Folder</Label>
                 <Select value={folder} onValueChange={setFolder}>
@@ -491,59 +564,72 @@ export function SessionDialog({
               </div>
             </div>
 
-            <div className="grid gap-2">
-              <Label>Log in with</Label>
-              <ToggleGroup
-                type="single"
-                variant="outline"
-                className="justify-self-start"
-                value={method}
-                onValueChange={(v) => v && setMethod(v as Method)}
-              >
-                {(folder !== NONE || method === "folder") && (
-                  <ToggleGroupItem value="folder">From folder</ToggleGroupItem>
+            {ssh && (
+              <div className="grid gap-2">
+                <Label>Log in with</Label>
+                <ToggleGroup
+                  type="single"
+                  variant="outline"
+                  className="justify-self-start"
+                  value={method}
+                  onValueChange={(v) => v && setMethod(v as Method)}
+                >
+                  {(folder !== NONE || method === "folder") && (
+                    <ToggleGroupItem value="folder">From folder</ToggleGroupItem>
+                  )}
+                  <ToggleGroupItem value="password">Password</ToggleGroupItem>
+                  <ToggleGroupItem value="key">Private key</ToggleGroupItem>
+                  <ToggleGroupItem value="agent">SSH agent</ToggleGroupItem>
+                </ToggleGroup>
+                {method === "folder" && (
+                  <p className="text-sm text-muted-foreground">
+                    {inherited?.inherited.auth
+                      ? `Logs in with ${loginText(inherited.auth)}, from folder ${inherited.inherited.auth.name}.`
+                      : "No folder above sets a login yet, so a password is asked when connecting."}
+                  </p>
                 )}
-                <ToggleGroupItem value="password">Password</ToggleGroupItem>
-                <ToggleGroupItem value="key">Private key</ToggleGroupItem>
-                <ToggleGroupItem value="agent">SSH agent</ToggleGroupItem>
-              </ToggleGroup>
-              {method === "folder" && (
-                <p className="text-sm text-muted-foreground">
-                  {inherited?.inherited.auth
-                    ? `Logs in with ${loginText(inherited.auth)}, from folder ${inherited.inherited.auth.name}.`
-                    : "No folder above sets a login yet, so a password is asked when connecting."}
-                </p>
-              )}
-              {method === "password" && (
-                <div className="grid gap-2">
-                  <Label htmlFor="session-password" className="font-normal text-muted-foreground">
-                    Password from the vault
-                  </Label>
-                  {secretPicker("password", password, setPassword, "None: ask when connecting")}
-                </div>
-              )}
-              {method === "key" && (
-                <div className="grid gap-3 sm:grid-cols-2">
+                {method === "password" && (
                   <div className="grid gap-2">
-                    <Label htmlFor="session-privateKey" className="font-normal text-muted-foreground">
-                      Private key from the vault
+                    <Label htmlFor="session-password" className="font-normal text-muted-foreground">
+                      Password from the vault
                     </Label>
-                    {secretPicker("privateKey", key, setKey, "None chosen")}
+                    {secretPicker("password", password, setPassword, "None: ask when connecting")}
                   </div>
-                  <div className="grid gap-2">
-                    <Label htmlFor="session-passphrase" className="font-normal text-muted-foreground">
-                      Its passphrase
-                    </Label>
-                    {secretPicker("passphrase", passphrase, setPassphrase, "None: the key is not encrypted")}
+                )}
+                {method === "key" && (
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <div className="grid gap-2">
+                      <Label htmlFor="session-privateKey" className="font-normal text-muted-foreground">
+                        Private key from the vault
+                      </Label>
+                      {secretPicker("privateKey", key, setKey, "None chosen")}
+                    </div>
+                    <div className="grid gap-2">
+                      <Label htmlFor="session-passphrase" className="font-normal text-muted-foreground">
+                        Its passphrase
+                      </Label>
+                      {secretPicker("passphrase", passphrase, setPassphrase, "None: the key is not encrypted")}
+                    </div>
                   </div>
-                </div>
-              )}
-              {method === "agent" && (
-                <p className="text-sm text-muted-foreground">
-                  Uses the keys in a running OpenSSH agent or Pageant. Nothing is stored here.
-                </p>
-              )}
-            </div>
+                )}
+                {method === "agent" && (
+                  <p className="text-sm text-muted-foreground">
+                    Uses the keys in a running OpenSSH agent or Pageant. Nothing is stored here.
+                  </p>
+                )}
+              </div>
+            )}
+            {protocol === "telnet" && (
+              <p className="text-sm text-muted-foreground" role="note">
+                Telnet sends everything, passwords too, in clear text.
+              </p>
+            )}
+            {protocol === "vnc" && (
+              <p className="text-sm text-muted-foreground" role="note">
+                Many VNC servers don&apos;t encrypt the connection. Use a jump host or a VPN across networks you
+                don&apos;t trust.
+              </p>
+            )}
 
             <div className="grid gap-2">
               <Label>
@@ -583,143 +669,152 @@ export function SessionDialog({
                 </button>
               </CollapsibleTrigger>
               <CollapsibleContent className="grid gap-4 border-t p-3">
-                <div className="grid gap-2">
-                  <Label htmlFor="session-jump">
-                    <Term id="jumpHost" />
-                  </Label>
-                  <Select value={jump} onValueChange={setJump}>
-                    <SelectTrigger id="session-jump" className="w-full">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value={NONE}>
-                        {inherited?.inherited.jump
-                          ? inherited.jumpSessionId
-                            ? `From folder ${inherited.inherited.jump.name}: ${sessions.find((x) => x.id === inherited.jumpSessionId)?.name ?? "a session"}`
-                            : `From folder ${inherited.inherited.jump.name}: connect directly`
-                          : "None: connect directly"}
-                      </SelectItem>
-                      {(inherited?.jumpSessionId || jump === DIRECT) && (
-                        <SelectItem value={DIRECT}>No jump host (overrides the folder)</SelectItem>
-                      )}
-                      {jumpChoices.length > 0 && <SelectSeparator />}
-                      {jumpChoices.map((s) => (
-                        <SelectItem key={s.id} value={s.id}>
-                          {s.name}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                  {chain && (
-                    <p
-                      className={cn("text-xs", chain.loops ? "text-destructive" : "text-muted-foreground")}
-                      title={
-                        chain.loops
-                          ? undefined
-                          : "Each hop checks its host key and logs in with its own session's login; tunnels start from this host."
-                      }
-                    >
-                      {chain.loops
-                        ? "That jump host leads back to this session through its own jump hosts, so it can't be saved."
-                        : `Connects through ${routeText(chain.names)}.`}
-                    </p>
-                  )}
-                </div>
-
-                <div className="grid gap-2">
-                  <Label htmlFor="session-vm" className="flex items-center gap-1">
-                    VM it reaches
-                    <HelpTip topic="vmLink" />
-                  </Label>
-                  <Select value={vm} onValueChange={setVm}>
-                    <SelectTrigger id="session-vm" className="w-full">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value={NONE}>None</SelectItem>
-                      {vms.length > 0 && <SelectSeparator />}
-                      {vms.map((v) => (
-                        <SelectItem key={v.id} value={v.id}>
-                          {v.displayName}
-                        </SelectItem>
-                      ))}
-                      {vm !== NONE && !vms.some((v) => v.id === vm) && (
-                        <SelectItem value={vm} disabled>
-                          Not in the VM list now
-                        </SelectItem>
-                      )}
-                    </SelectContent>
-                  </Select>
-                  {linkNote() && <p className="text-xs text-muted-foreground">{linkNote()}</p>}
-                </div>
-
-                <div className="grid gap-2">
-                  <Label htmlFor="session-startup">Startup command</Label>
-                  <Textarea
-                    id="session-startup"
-                    rows={2}
-                    spellCheck={false}
-                    className="font-mono text-xs"
-                    placeholder="Runs after login, e.g. cd /srv/app"
-                    value={startup}
-                    onChange={(e) => setStartup(e.currentTarget.value)}
-                  />
-                  {startupRating && (
-                    <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-                      <StartupRatingBadges rating={startupRating} />
-                      <span>
-                        {startupRating.action === "execReadOnly"
-                          ? "Only reads, as a command on this session."
-                          : "Typed without asking: as a command on this session it would need this approval."}
-                      </span>
-                    </div>
-                  )}
-                  <p className="text-xs text-muted-foreground">
-                    Typed at the first prompt of each connection. Don&apos;t put passwords here.
-                  </p>
-                  <div className="flex items-center gap-2">
-                    <Checkbox
-                      id="session-startup-again"
-                      checked={startupAgain}
-                      disabled={!startup.trim()}
-                      onCheckedChange={(v) => setStartupAgain(v === true)}
-                    />
-                    <Label htmlFor="session-startup-again" className="font-normal">
-                      Type it again when the terminal reconnects by itself
+                {!ssh && <SessionKindFields kind={kind} onChange={setKind} problem={kindIssue} />}
+                {takesJumpHost(kind) && (
+                  <div className="grid gap-2">
+                    <Label htmlFor="session-jump">
+                      <Term id="jumpHost" />
                     </Label>
+                    <Select value={jump} onValueChange={setJump}>
+                      <SelectTrigger id="session-jump" className="w-full">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value={NONE}>
+                          {inherited?.inherited.jump
+                            ? inherited.jumpSessionId
+                              ? `From folder ${inherited.inherited.jump.name}: ${sessions.find((x) => x.id === inherited.jumpSessionId)?.name ?? "a session"}`
+                              : `From folder ${inherited.inherited.jump.name}: connect directly`
+                            : "None: connect directly"}
+                        </SelectItem>
+                        {(inherited?.jumpSessionId || jump === DIRECT) && (
+                          <SelectItem value={DIRECT}>No jump host (overrides the folder)</SelectItem>
+                        )}
+                        {jumpChoices.length > 0 && <SelectSeparator />}
+                        {jumpChoices.map((s) => (
+                          <SelectItem key={s.id} value={s.id}>
+                            {s.name}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                    {chain && (
+                      <p
+                        className={cn("text-xs", chain.loops ? "text-destructive" : "text-muted-foreground")}
+                        title={
+                          chain.loops
+                            ? undefined
+                            : "Each hop checks its host key and logs in with its own session's login; tunnels start from this host."
+                        }
+                      >
+                        {chain.loops
+                          ? "That jump host leads back to this session through its own jump hosts, so it can't be saved."
+                          : ssh
+                            ? `Connects through ${routeText(chain.names)}.`
+                            : `Opens a tunnel through ${routeText(chain.names)} first.`}
+                      </p>
+                    )}
                   </div>
-                </div>
+                )}
 
-                <div className="grid gap-2">
-                  <Label htmlFor="session-hook" className="flex items-center gap-1">
-                    Folder tracking (prompt hook)
-                    <HelpTip topic="promptHook" />
-                  </Label>
-                  <Select value={hook} onValueChange={setHook}>
-                    <SelectTrigger id="session-hook" className="w-full sm:w-80">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value={NONE}>
-                        As in Settings{applied.environment === "prod" ? " (off for Prod)" : ""}
-                      </SelectItem>
-                      <SelectItem value="on">On</SelectItem>
-                      <SelectItem value="off">Off</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </div>
+                {ssh && (
+                  <>
+                    <div className="grid gap-2">
+                      <Label htmlFor="session-vm" className="flex items-center gap-1">
+                        VM it reaches
+                        <HelpTip topic="vmLink" />
+                      </Label>
+                      <Select value={vm} onValueChange={setVm}>
+                        <SelectTrigger id="session-vm" className="w-full">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value={NONE}>None</SelectItem>
+                          {vms.length > 0 && <SelectSeparator />}
+                          {vms.map((v) => (
+                            <SelectItem key={v.id} value={v.id}>
+                              {v.displayName}
+                            </SelectItem>
+                          ))}
+                          {vm !== NONE && !vms.some((v) => v.id === vm) && (
+                            <SelectItem value={vm} disabled>
+                              Not in the VM list now
+                            </SelectItem>
+                          )}
+                        </SelectContent>
+                      </Select>
+                      {linkNote() && <p className="text-xs text-muted-foreground">{linkNote()}</p>}
+                    </div>
 
-                <div className="grid gap-2">
-                  <Label>Port forwards</Label>
-                  {forwards ? (
-                    <ForwardsEditor forwards={forwards} onChange={setForwards} disabled={busy} />
-                  ) : (
-                    <p className="text-sm text-muted-foreground">{forwardsError ?? "Loading…"}</p>
-                  )}
-                  <p className="text-xs text-muted-foreground">
-                    Start and stop them from the terminal&apos;s ⋯ menu, Tunnels.
-                  </p>
-                </div>
+                    <div className="grid gap-2">
+                      <Label htmlFor="session-startup">Startup command</Label>
+                      <Textarea
+                        id="session-startup"
+                        rows={2}
+                        spellCheck={false}
+                        className="font-mono text-xs"
+                        placeholder="Runs after login, e.g. cd /srv/app"
+                        value={startup}
+                        onChange={(e) => setStartup(e.currentTarget.value)}
+                      />
+                      {startupRating && (
+                        <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+                          <StartupRatingBadges rating={startupRating} />
+                          <span>
+                            {startupRating.action === "execReadOnly"
+                              ? "Only reads, as a command on this session."
+                              : "Typed without asking: as a command on this session it would need this approval."}
+                          </span>
+                        </div>
+                      )}
+                      <p className="text-xs text-muted-foreground">
+                        Typed at the first prompt of each connection. Don&apos;t put passwords here.
+                      </p>
+                      <div className="flex items-center gap-2">
+                        <Checkbox
+                          id="session-startup-again"
+                          checked={startupAgain}
+                          disabled={!startup.trim()}
+                          onCheckedChange={(v) => setStartupAgain(v === true)}
+                        />
+                        <Label htmlFor="session-startup-again" className="font-normal">
+                          Type it again when the terminal reconnects by itself
+                        </Label>
+                      </div>
+                    </div>
+
+                    <div className="grid gap-2">
+                      <Label htmlFor="session-hook" className="flex items-center gap-1">
+                        Folder tracking (prompt hook)
+                        <HelpTip topic="promptHook" />
+                      </Label>
+                      <Select value={hook} onValueChange={setHook}>
+                        <SelectTrigger id="session-hook" className="w-full sm:w-80">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value={NONE}>
+                            As in Settings{applied.environment === "prod" ? " (off for Prod)" : ""}
+                          </SelectItem>
+                          <SelectItem value="on">On</SelectItem>
+                          <SelectItem value="off">Off</SelectItem>
+                        </SelectContent>
+                      </Select>
+                    </div>
+
+                    <div className="grid gap-2">
+                      <Label>Port forwards</Label>
+                      {forwards ? (
+                        <ForwardsEditor forwards={forwards} onChange={setForwards} disabled={busy} />
+                      ) : (
+                        <p className="text-sm text-muted-foreground">{forwardsError ?? "Loading…"}</p>
+                      )}
+                      <p className="text-xs text-muted-foreground">
+                        Start and stop them from the terminal&apos;s ⋯ menu, Tunnels.
+                      </p>
+                    </div>
+                  </>
+                )}
 
                 <div className="grid gap-4 sm:grid-cols-2">
                   <div className="grid content-start gap-2">
@@ -795,11 +890,8 @@ export function SessionDialog({
               <Button type="button" variant="outline" onClick={onClose} disabled={busy}>
                 Cancel
               </Button>
-              <WhyDisabled reason={readOnly ?? (forwards ? forwardsIssue : "The port forwards are still loading.")}>
-                <Button
-                  type="submit"
-                  disabled={!host.trim() || !portOk || busy || !forwards || forwardsIssue !== null || readOnly !== null}
-                >
+              <WhyDisabled reason={readOnly ?? kindIssue ?? forwardsReason}>
+                <Button type="submit" disabled={!host.trim() || !portOk || busy || !savable || readOnly !== null}>
                   {session ? "Save" : "Create session"}
                 </Button>
               </WhyDisabled>

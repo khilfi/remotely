@@ -1,8 +1,8 @@
 // UX-10: Settings › Tools and VMs: every outside program Remotely runs, in one table ("vmrun · Found · Change"):
 // vmrun (VMware Workstation), vdiskmanager beside it, ovftool, VBoxManage (VM-18), qemu-img (CV-03) and docker
-// (CT-02). Change opens a small dialog with the path; an empty path finds the tool again by itself. How each is found
-// (the path set here, its REMOTELY_ variable, the registry, the default folder) is the "?"'s. Each change saves at
-// once, audited by the core, with Undo; the read-only lock refuses them.
+// (CT-02), and (SS-12) the VNC viewer. Change opens a small dialog with the path; an empty path finds the tool again
+// by itself. How each is found (the path set here, its REMOTELY_ variable, the registry, the default folder) is the
+// "?"'s. Each change saves at once, audited by the core, with Undo; the read-only lock refuses them.
 
 import { useEffect, useState } from "react";
 import { CheckIcon, CircleSlashIcon, ExternalLinkIcon } from "lucide-react";
@@ -39,6 +39,7 @@ const SAVE: Record<Exclude<ToolId, "vdiskmanager">, (path: string | null) => Pro
   vboxmanage: api.setVboxmanagePath,
   qemuImg: convertApi.setQemuImgPath,
   docker: api.setDockerPath,
+  vncViewer: api.setVncViewerPath,
 };
 
 /** What else reads a tool's path again once it changes (the VM list, the sidebar, Containers). */
@@ -207,6 +208,8 @@ function rowOf(id: Exclude<ToolId, "vdiskmanager">, s: Settings): string | null 
       return s.vboxmanagePathInUse;
     case "qemuImg":
       return s.qemuImgPathInUse;
+    case "vncViewer":
+      return s.vncViewerPathInUse;
     case "docker":
       return s.dockerPathInUse;
   }

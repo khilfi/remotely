@@ -506,6 +506,7 @@ async fn a_watched_host_that_cant_be_reached_fires_after_its_duration() {
                 color: None,
                 tags: vec![],
                 vm_id: None,
+                kind: Default::default(),
             },
         )
         .await

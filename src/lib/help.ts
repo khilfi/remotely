@@ -211,7 +211,7 @@ export const HELP = {
     title: "How Remotely finds its tools",
     body: [
       "VM actions run through Workstation's vmrun.exe and VirtualBox's VBoxManage.exe; either is enough. Without VirtualBox, the list simply has no VirtualBox VMs.",
-      "Each tool is found in this order: the path set in Settings, its variable (REMOTELY_VMRUN, REMOTELY_VBOXMANAGE, REMOTELY_OVFTOOL, REMOTELY_QEMU_IMG, REMOTELY_DOCKER), the registry, then the default install folder.",
+      "Each tool is found in this order: the path set in Settings, its variable (REMOTELY_VMRUN, REMOTELY_VBOXMANAGE, REMOTELY_OVFTOOL, REMOTELY_QEMU_IMG, REMOTELY_DOCKER, REMOTELY_VNC_VIEWER), the registry, then the default install folder (for VNC sessions, your own TigerVNC, TightVNC, RealVNC or UltraVNC viewer).",
     ],
     link: { label: "Tool settings", to: setting("vmware") },
   },

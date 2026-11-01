@@ -405,10 +405,19 @@ async fn open_on_connection(
     match opened {
         Ok(running) => {
             let at = running.listening.clone();
+            // SS-12: a tunnel tab's forward keeps the port it got, so a reconnect opens it there again, and its
+            // window may open now.
+            let carrier = control.carrier.as_ref().filter(|c| c.forward().id == forward.id);
+            if let Some(carrier) = carrier {
+                carrier.listening_at(&at);
+            }
             {
                 let mut table = locks::lock(&control.tunnels);
                 let entry = table.entry(forward);
-                entry.forward = forward.clone();
+                entry.forward = match carrier {
+                    Some(carrier) => carrier.forward(),
+                    None => forward.clone(),
+                };
                 entry.approved = Some(approved);
                 entry.state = TunnelState::Listening { at: at.clone() };
                 entry.running = Some(Running {
@@ -462,6 +471,25 @@ pub(super) async fn connected(terminals: Terminals, ctx: Context, id: Uuid, cont
     let Some(session_id) = control.session_id().filter(|_| first) else {
         return;
     };
+    // SS-12: a tunnel tab opens its RDP or VNC session's forward, never the jump host's own saved ones.
+    if let Some(carrier) = &control.carrier {
+        let forward = carrier.forward();
+        let _ops = control.tunnel_ops.lock().await;
+        if locks::lock(&control.forwards).is_some() {
+            if let Err(err) = start(&terminals, &ctx, id, &control, session_id, forward).await {
+                tracing::warn!(error = %err, "a tunnel tab's tunnel did not start");
+                let _ = control
+                    .events
+                    .send(TerminalEvent::Window {
+                        window: super::WindowState::Failed {
+                            message: err.to_string(),
+                        },
+                    })
+                    .await;
+            }
+        }
+        return;
+    }
     let saved = match terminals.inner.store.list_forwards(&ctx, session_id).await {
         Ok(saved) => saved,
         Err(err) => {

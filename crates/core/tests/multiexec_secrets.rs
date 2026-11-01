@@ -155,6 +155,7 @@ async fn a_password_typed_with_multiexec_is_never_logged_or_kept() {
                     color: None,
                     tags: vec![],
                     vm_id: None,
+                    kind: Default::default(),
                 },
             )
             .await

@@ -151,6 +151,7 @@ impl QuickConnect {
             color: save.color,
             tags: vec![],
             vm_id: None,
+            kind: Default::default(),
         })
     }
 

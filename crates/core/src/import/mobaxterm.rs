@@ -11,15 +11,22 @@
 //! [8] SSH gateway host   [9] gateway port   [10] gateway user   [14] private key path
 //! ```
 //!
-//! Only SSH sessions are imported. `[Passwords]` and `[Credentials]` hold saved passwords: their
+//! SSH sessions are imported, and (SS-12) Telnet (1), RDP (4), VNC (5) and serial (8) ones as those kinds, with their
+//! host, port and (RDP) user; other types are left out. `[Passwords]` and `[Credentials]` hold saved passwords: their
 //! values are never read, and a warning says they were not imported.
 
 use std::path::Path;
 
 use super::{finish, non_empty, parse_port, Candidate, CandidateAuth, Parsed, Skipped, DEFAULT_PORT};
+use crate::sessions::kinds::{RdpOptions, SerialOptions, TelnetOptions, VncOptions};
+use crate::sessions::SessionKind;
 
-/// MobaXterm's session type for SSH.
+/// MobaXterm's session types: SSH, and (SS-12) Telnet, RDP, VNC and serial.
 const SSH: &str = "0";
+const TELNET: &str = "1";
+const RDP: &str = "4";
+const VNC: &str = "5";
+const SERIAL: &str = "8";
 
 /// QL-10: where each setting is among a session line's `%`-separated connection settings, and what
 /// the import makes of it (the format guide lists these).
@@ -35,7 +42,7 @@ pub(crate) const KEY_PATH: usize = 14;
 pub(crate) const FIELDS: [(usize, &str); 9] = [
     (
         TYPE,
-        "The session type: 0 is SSH; other types (RDP, Telnet, ...) are left out",
+        "The session type: 0 SSH, 1 Telnet, 4 RDP, 5 VNC, 8 serial (its COM port and speed); other types are left out",
     ),
     (HOST, "The host"),
     (PORT, "The port (empty: 22)"),
@@ -150,7 +157,14 @@ fn session(name: &str, value: &str, folder: &[String], home: &Path) -> Result<Ca
     match field(TYPE) {
         SSH => {}
         "" => return Err(skip("not a MobaXterm session line".into())),
-        other => return Err(skip(format!("not an SSH session (MobaXterm type {other})"))),
+        // SS-12: Telnet, RDP, VNC and serial sessions come in as those kinds.
+        TELNET | RDP | VNC => return network_session(name, field(TYPE), &fields, folder),
+        SERIAL => return serial_session(name, &fields, folder),
+        other => {
+            return Err(skip(format!(
+                "not an SSH, Telnet, RDP, VNC or serial session (MobaXterm type {other})"
+            )))
+        }
     }
     if field(HOST).is_empty() {
         return Err(skip("no host name".into()));
@@ -175,6 +189,75 @@ fn session(name: &str, value: &str, folder: &[String], home: &Path) -> Result<Ca
         },
     };
     finish(c)
+}
+
+/// SS-12: a Telnet (type 1), RDP (4) or VNC (5) session: its host, port (each kind's own when empty) and, for RDP,
+/// its user. MobaXterm's own settings of these kinds (screen, redirections, gateways) are not read: the kind's
+/// defaults apply, and the preview says so.
+fn network_session(name: &str, kind: &str, fields: &[String], folder: &[String]) -> Result<Candidate, Skipped> {
+    let skip = |reason: String| Skipped::new(name, reason);
+    let field = |i: usize| fields.get(i).map_or("", |f| f.trim());
+    if field(HOST).is_empty() {
+        return Err(skip("no host name".into()));
+    }
+    let (kind, what) = match kind {
+        TELNET => (SessionKind::Telnet(TelnetOptions::default()), "Telnet"),
+        RDP => (SessionKind::Rdp(RdpOptions::default()), "remote desktop"),
+        _ => (SessionKind::Vnc(VncOptions::default()), "VNC"),
+    };
+    let port = match field(PORT) {
+        "" | "-1" => kind.default_port(),
+        port => parse_port(port).map_err(skip)?,
+    };
+    let mut c = Candidate::new(name, field(HOST));
+    c.kind = kind;
+    c.port = port;
+    c.folder = folder.to_vec();
+    if matches!(c.kind, SessionKind::Rdp(_) | SessionKind::Telnet(_)) {
+        c.username = non_empty(field(USER));
+    }
+    c.notes.push(format!(
+        "MobaXterm's own {what} settings were not imported: Remotely's defaults apply"
+    ));
+    finish(c)
+}
+
+/// SS-12: a serial session (type 8): the COM port named in its settings (`COM3  (USB Serial Port (COM3))`) and its
+/// speed; the rest of its line settings get Remotely's defaults (8N1, no flow control), and the preview says so.
+fn serial_session(name: &str, fields: &[String], folder: &[String]) -> Result<Candidate, Skipped> {
+    let skip = |reason: String| Skipped::new(name, reason);
+    let port = fields
+        .iter()
+        .skip(1)
+        .find_map(|f| com_port_in(f))
+        .ok_or_else(|| skip("no COM port in its settings".into()))?;
+    const SPEEDS: [u32; 15] = [
+        110, 300, 600, 1200, 2400, 4800, 9600, 14_400, 19_200, 38_400, 57_600, 115_200, 230_400, 460_800, 921_600,
+    ];
+    let speed = fields
+        .iter()
+        .skip(1)
+        .filter_map(|f| f.trim().parse::<u32>().ok())
+        .find(|s| SPEEDS.contains(s));
+    let mut c = Candidate::new(name, port);
+    c.folder = folder.to_vec();
+    c.kind = SessionKind::Serial(SerialOptions {
+        speed: speed.unwrap_or(SerialOptions::default().speed),
+        ..SerialOptions::default()
+    });
+    c.notes.push(
+        "MobaXterm's serial settings other than the port and speed were not imported: 8 data bits, no parity, 1 stop \
+         bit and no flow control apply"
+            .into(),
+    );
+    finish(c)
+}
+
+/// The first `COMn` in a field, as a whole word.
+fn com_port_in(field: &str) -> Option<String> {
+    field
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .find_map(|word| crate::sessions::kinds::com_port_name(word).ok())
 }
 
 /// `user@host:port`, leaving out an empty user and port 22 (or a port that is not a number).
@@ -252,7 +335,7 @@ web99=#109#0%web99.example.com%22%alice#MobaFont#0# #-1
         let parsed = parse(EXPORT, home());
         assert!(parsed.warnings.is_empty(), "{:?}", parsed.warnings);
         let names: Vec<_> = parsed.candidates.iter().map(|c| c.name.as_str()).collect();
-        assert_eq!(names, ["web01", "db01", "gw01"]);
+        assert_eq!(names, ["web01", "db01", "rdp01", "gw01"]);
 
         let web = &parsed.candidates[0];
         assert_eq!(web.host, "web01.example.com");
@@ -276,7 +359,15 @@ web99=#109#0%web99.example.com%22%alice#MobaFont#0# #-1
         assert_eq!(db.startup_command.as_deref(), Some("sudo -i; uptime"));
         assert_eq!(db.jump.as_deref(), Some("alice@bastion.example.org:2200"));
 
-        let gw = &parsed.candidates[2];
+        let rdp = &parsed.candidates[2];
+        assert!(matches!(rdp.kind, SessionKind::Rdp(_)), "{:?}", rdp.kind);
+        assert_eq!(
+            (rdp.host.as_str(), rdp.port, rdp.username.as_deref()),
+            ("192.0.2.40", 3389, Some("alice"))
+        );
+        assert_eq!(rdp.folder, ["Customer A", "Lab"]);
+
+        let gw = &parsed.candidates[3];
         assert_eq!(gw.port, 22);
         assert_eq!(gw.username, None);
         assert_eq!(gw.jump.as_deref(), Some("bastion.example.org"));
@@ -299,7 +390,6 @@ web99=#109#0%web99.example.com%22%alice#MobaFont#0# #-1
         assert_eq!(
             skipped,
             [
-                ("rdp01", "not an SSH session (MobaXterm type 4)"),
                 ("odd", "not a MobaXterm session line"),
                 ("short", "not a MobaXterm session line"),
                 ("noport", "port ssh is not valid"),
@@ -356,5 +446,31 @@ web99=#109#0%web99.example.com%22%alice#MobaFont#0# #-1
             home(),
         );
         assert_eq!(eq.candidates[0].startup_command.as_deref(), Some("export A=1"));
+    }
+
+    #[test]
+    fn telnet_vnc_and_serial_sessions_come_in_as_their_kinds() {
+        let text = "[Bookmarks]\nSubRep=Gear\n\
+                    sw01=#98#1%sw01.example.com%%admin%%-1#MobaFont#0# #-1\n\
+                    vnc01=#128#5%192.0.2.70%5901%%-1#MobaFont#0# #-1\n\
+                    console=#131#8%-1%115200%3%0%0%1%2%COM4  (USB Serial Port (COM4))%0#MobaFont#0# #-1\n\
+                    noport=#131#8%-1%9600%3#MobaFont#0# #-1\n\
+                    ftp01=#140#6%ftp.example.com%21#MobaFont#0# #-1\n";
+        let parsed = parse(text, home());
+        let telnet = &parsed.candidates[0];
+        assert_eq!(telnet.kind, SessionKind::Telnet(TelnetOptions::default()));
+        assert_eq!((telnet.host.as_str(), telnet.port), ("sw01.example.com", 23));
+        assert_eq!(telnet.folder, ["Gear"]);
+        let vnc = &parsed.candidates[1];
+        assert!(matches!(vnc.kind, SessionKind::Vnc(_)));
+        assert_eq!((vnc.port, vnc.username.as_deref()), (5901, None));
+        let serial = &parsed.candidates[2];
+        assert_eq!(serial.host, "COM4");
+        assert!(matches!(
+            serial.kind,
+            SessionKind::Serial(SerialOptions { speed: 115_200, .. })
+        ));
+        let skipped: Vec<_> = parsed.skipped.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(skipped, ["noport", "ftp01"]);
     }
 }

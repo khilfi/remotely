@@ -53,6 +53,7 @@ fn session_input(name: &str, host: &str, port: u16, jump: Option<Uuid>, environm
         color: None,
         tags: vec![],
         vm_id: None,
+        kind: Default::default(),
     }
 }
 

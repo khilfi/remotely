@@ -338,9 +338,21 @@ pub struct ExecResult {
 #[derive(Debug)]
 pub enum ShellInput {
     Data(Vec<u8>),
-    Resize { cols: u16, rows: u16 },
+    /// QL-06: a vault secret typed at a prompt, then Enter: sent like `Data`, but never echoed locally (SS-12's
+    /// Telnet and serial local echo).
+    Secret(Vec<u8>),
+    Resize {
+        cols: u16,
+        rows: u16,
+    },
+    /// SS-12: a serial line's break (Telnet sends IAC BRK); an SSH shell ignores it.
+    Break,
     Close,
 }
+
+/// SS-12: whether the pane's screen shows a password, passphrase or code prompt now (QL-06, SS-10's detection), so a
+/// console's local echo shows nothing of what is typed.
+pub type SecretPromptShown = std::sync::Arc<dyn Fn() -> bool + Send + Sync>;
 
 /// Output of an interactive shell: raw bytes (never decoded here, so a character split across two
 /// reads arrives whole in xterm.js), then one `Closed`.
@@ -1824,13 +1836,15 @@ fn pump_pty(
                         }
                     }
                     msg = input_rx.recv() => match msg {
-                        Some(ShellInput::Data(bytes)) => {
+                        Some(ShellInput::Data(bytes) | ShellInput::Secret(bytes)) => {
                             // A failed write shows up as the channel closing below.
                             let _ = channel.data_bytes(bytes).await;
                         }
                         Some(ShellInput::Resize { cols, rows }) => {
                             let _ = channel.window_change(u32::from(cols), u32::from(rows), 0, 0).await;
                         }
+                        // SS-12: a serial line's break; an SSH shell has none.
+                        Some(ShellInput::Break) => {}
                         Some(ShellInput::Close) | None => {
                             let _ = channel.close().await;
                             break ShellEnd::Exited { status: exit_status };
