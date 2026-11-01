@@ -18,7 +18,9 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
 import { jumpChain, routeText } from "@/lib/tunnels";
 import {
+  FileCodeIcon,
   FileLockIcon,
+  FileSpreadsheetIcon,
   FolderIcon,
   FolderOpenIcon,
   FolderPlusIcon,
@@ -108,6 +110,10 @@ interface Props {
   onConnect: (sessionId: string) => void;
   /** FD-04: the support bundle dialog, with these sessions picked (a selection's; none from the "⋯" menu). */
   onSupportBundle: (sessionIds: string[]) => void;
+  /** BX-12: the Ansible inventory dialog, with these sessions picked (none: every SSH session). */
+  onExportAnsible: (sessionIds: string[]) => void;
+  /** FD-05: the inventory to Excel. */
+  onExportInventory: () => void;
   /** True while the page is shown, so the lists are read again when the user comes back. */
   active: boolean;
   /** R10: a session to show (a search result, a map node): the filters cleared, its row scrolled to and lit. */
@@ -150,6 +156,8 @@ export function SessionsPage({
   onOpenVault,
   onConnect,
   onSupportBundle,
+  onExportAnsible,
+  onExportInventory,
   active,
   focus = null,
 }: Props) {
@@ -372,6 +380,22 @@ export function SessionsPage({
                 <ReasonLine reason={all.length === 0 ? "No sessions to collect from yet" : null} />
               </span>
             </DropdownMenuItem>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem disabled={all.length === 0} onSelect={() => onExportAnsible([])}>
+              <FileCodeIcon />
+              <span className="grid">
+                Export an Ansible inventory…
+                <span className="text-xs text-muted-foreground">Hosts and groups for playbooks, no secrets</span>
+                <ReasonLine reason={all.length === 0 ? "No sessions to export yet" : null} />
+              </span>
+            </DropdownMenuItem>
+            <DropdownMenuItem onSelect={onExportInventory}>
+              <FileSpreadsheetIcon />
+              <span className="grid">
+                Export the inventory to Excel…
+                <span className="text-xs text-muted-foreground">VMs, hosts, networks and checks</span>
+              </span>
+            </DropdownMenuItem>
           </>
         }
       >
@@ -390,7 +414,18 @@ export function SessionsPage({
                 onClick={() => onSupportBundle(selectedSsh.map((s) => s.id))}
               >
                 <PackageIcon data-icon="inline-start" />
-                Support bundle…
+                Make a support bundle…
+              </Button>
+            </WhyDisabled>
+            <WhyDisabled reason={selectedSsh.length === 0 ? "An Ansible inventory takes SSH sessions only" : null}>
+              <Button
+                variant="ghost"
+                size="sm"
+                disabled={selectedSsh.length === 0}
+                onClick={() => onExportAnsible(selectedSsh.map((s) => s.id))}
+              >
+                <FileCodeIcon data-icon="inline-start" />
+                Export Ansible inventory…
               </Button>
             </WhyDisabled>
           </SelectionBar>

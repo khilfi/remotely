@@ -73,6 +73,9 @@ ed25519-dalek = "3"
 # FD-04: the support bundle's zip (written only; Remotely never extracts one). Deflate through flate2's zlib-rs, which
 # the dependencies already pull in; `time` gives each entry the time it was collected.
 zip = { version = "9.2", default-features = false, features = ["deflate-flate2-zlib-rs", "time"] }
+# FD-05: the inventory as an Excel file (and inside FD-08's handover pack). Written only; every text cell goes in as a
+# string, never a formula. It writes its xlsx with the zip crate above.
+rust_xlsxwriter = { version = "0.102", default-features = false }
 # FD-09: the certificate viewer's TLS handshake (rustls, above) over a TCP connection or a jump host's channel,
 # and a certificate's SHA-1 fingerprint beside its SHA-256 one. The versions reqwest and russh already pull in.
 tokio-rustls = { version = "0.26", default-features = false, features = ["tls12"] }

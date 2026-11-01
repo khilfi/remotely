@@ -95,6 +95,7 @@ pub mod notifications;
 pub mod policy;
 pub mod presentation;
 pub mod reachability;
+pub mod reports;
 pub mod retention;
 pub mod save_guard;
 pub mod schedules;
@@ -391,6 +392,9 @@ pub struct Core {
     /// FD-04: support bundles from many hosts (presets, preview, submit, where one was saved). Collecting is a command
     /// on [`Core::bus`].
     pub bundles: support_bundle::SupportBundles,
+    /// FD-05, BX-12, FD-08: the inventory to Excel, an Ansible inventory and the handover pack. Reads only; each export
+    /// is audited.
+    pub reports: reports::Reports,
 }
 
 /// What lets go of decrypted secrets when the vault locks ([`Core::spawn_lock_watch`]).
@@ -601,6 +605,7 @@ impl Core {
             vault: Arc::clone(&adapters.vault),
             remote: Arc::clone(&adapters.remote),
             known_hosts: Arc::clone(&known_hosts),
+            login_guard: login_guard.clone(),
         });
         host_details.set_winrm(Arc::clone(&winrm));
         // FD-09: the toolbox's reads; a session behind a jump host is reached over its jump host's connection.
@@ -763,7 +768,17 @@ impl Core {
             inventory: Arc::clone(&inventory),
             metrics: Arc::clone(&metrics),
         });
+        // FD-05, BX-12, FD-08: the exports read what the other services read (BX-01's targets with the terminals).
+        let notes = notes::Notes::new(store.clone());
+        let reports = reports::Reports::new(
+            store.clone(),
+            host_details.clone(),
+            networks.clone(),
+            notes.clone(),
+            BulkRuns::new(store.clone()).with_terminals(terminals.clone()),
+        );
         let core = Self {
+            reports,
             vm_settings,
             networks,
             insight,
@@ -813,7 +828,7 @@ impl Core {
             alerts,
             layouts: Layouts::new(store.clone(), current.clone()),
             notifications: Notifications::new(),
-            notes: notes::Notes::new(store.clone()),
+            notes,
             stars: stars::Stars::new(store.clone()),
             trash: trash::Trash::new(store.clone(), current.clone())
                 .with_bindings(bindings.clone())

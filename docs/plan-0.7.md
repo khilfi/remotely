@@ -177,6 +177,14 @@ editor and `sessions.rs`, and F1 and F9 the Toolbox page; the later one merges m
   their approvals, change IDs and results, grouped as Activity groups them; outputs left out unless chosen; everything
   through `export::redact_secrets`), the checks' uptime (F2) and the notes marked for it (F5). CSVs follow A10's rules.
 - All three save through `save_guard` and are audited `data_exported`; one workspace each (rule 8).
+- F4 merged first, so F6 added WinRM: BX-12 takes SSH and WinRM sessions (`reports::ansible::connection_vars`,
+  `bulk::Reach::SshAndWinrm`): `ansible_connection: winrm`, the port, `ansible_winrm_scheme` and
+  `ansible_winrm_transport` (`kerberos` for "my Windows sign-in", `ntlm`, `basic` over HTTPS only), the user where the
+  session has one; never a password, never `ansible_winrm_server_cert_validation: ignore` (a certificate trusted by
+  fingerprint is named in the header, which says to give Ansible the CA or the certificate); a WinRM session behind
+  an SSH jump host is left out. The inventory's hosts sheet shows Windows facts (addresses and MACs from the adapters,
+  domain or workgroup, hardware, listening ports), and "Read again first" reads WinRM hosts too through F4's
+  host-details path and the login guard; updates and packages stay Linux reads, and the file's notes say so.
 
 ## F7: support bundle (FD-04)
 

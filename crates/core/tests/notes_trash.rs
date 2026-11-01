@@ -165,7 +165,13 @@ async fn a_note_is_saved_rendered_and_audited_without_its_text() {
     let handover = core.notes.for_handover(&ctx).await.unwrap();
     assert_eq!(handover.len(), 1);
     assert!(!handover[0].0.looks_secret);
-    assert!(handover[0].1.contains("<a href=\"https://example.com/runbooks/nginx\""));
+    // F6: the pack carries the address as text, never as a link's attribute.
+    assert!(
+        handover[0].1.contains("(https://example.com/runbooks/nginx)"),
+        "{}",
+        handover[0].1
+    );
+    assert!(!handover[0].1.contains("href"));
     assert!(!handover[0].1.contains("data-note-link"));
 
     // QL-20: notes are listed for search with what they are about.

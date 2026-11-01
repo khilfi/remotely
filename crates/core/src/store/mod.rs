@@ -20,6 +20,7 @@ mod metrics;
 mod multiexec_groups;
 mod notes;
 mod quick_connect;
+mod reports;
 #[cfg(test)]
 mod retention_tests;
 mod schedules;

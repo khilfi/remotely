@@ -49,6 +49,9 @@ import {
   HardDriveIcon,
   ImportIcon,
   NetworkIcon,
+  FileCodeIcon,
+  FileSpreadsheetIcon,
+  PackageCheckIcon,
   PackageIcon,
   Rows3Icon,
   RocketIcon,
@@ -100,6 +103,9 @@ import { ApprovalDialog } from "@/components/ApprovalDialog";
 import { DeployDialog } from "@/components/DeployDialog";
 import { VmExportDialog } from "@/components/VmExportDialog";
 import { SupportBundleDialog } from "@/components/SupportBundleDialog";
+import { AnsibleExportDialog } from "@/components/AnsibleExportDialog";
+import { HandoverPackDialog } from "@/components/HandoverPackDialog";
+import { InventoryExportDialog } from "@/components/InventoryExportDialog";
 import { VmImportDialog } from "@/components/VmImportDialog";
 import { CommandPalette, type PaletteAction } from "@/components/CommandPalette";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
@@ -133,6 +139,8 @@ import { fromSkipped, fromUpdate } from "@/lib/notifications";
 import { notify } from "@/lib/notifications-store";
 import { opensShortcutSheet, pageShortcuts } from "@/lib/shortcuts";
 import { reportVault } from "@/lib/status-bar";
+import { daysFromActivity } from "@/lib/reports";
+import type { DateRange } from "@/lib/activity";
 import {
   api,
   errorCode,
@@ -319,6 +327,14 @@ export default function App() {
   // FD-04: the support bundle dialog, on hosts picked already (the Sessions page) or none (the palette).
   const [bundling, setBundling] = useState<{ sessionIds: string[] } | null>(null);
   const openSupportBundle = useCallback((sessionIds: string[]) => setBundling({ sessionIds }), []);
+  // FD-05, BX-12, FD-08: the inventory to Excel, the Ansible inventory (on sessions picked already, or none) and the
+  // handover pack (on the Activity page's dates, or the last 30 days).
+  const [inventoryOpen, setInventoryOpen] = useState(false);
+  const openInventory = useCallback(() => setInventoryOpen(true), []);
+  const [ansibleFor, setAnsibleFor] = useState<{ sessionIds: string[] } | null>(null);
+  const openAnsible = useCallback((sessionIds: string[]) => setAnsibleFor({ sessionIds }), []);
+  const [handoverDays, setHandoverDays] = useState<{ from: string; to: string } | null>(null);
+  const openHandover = useCallback((range: DateRange) => setHandoverDays(daysFromActivity(range)), []);
   // CV-01: the Import dialog (on a file Image tools inspected, or none); VM-17: the Export dialog on a VM.
   const [importing, setImporting] = useState<{ path: string | null } | null>(null);
   // A path only when it is one (a click handler may pass its event).
@@ -963,6 +979,30 @@ export default function App() {
       run: () => openSupportBundle([]),
     },
     {
+      // FD-05.
+      id: "export-inventory",
+      label: "Export the inventory to Excel…",
+      icon: FileSpreadsheetIcon,
+      keywords: "xlsx spreadsheet workbook report vms hosts packages networks checks csv",
+      run: openInventory,
+    },
+    {
+      // BX-12.
+      id: "export-ansible",
+      label: "Export an Ansible inventory…",
+      icon: FileCodeIcon,
+      keywords: "ansible inventory yaml ini playbook hosts groups proxyjump",
+      run: () => openAnsible([]),
+    },
+    {
+      // FD-08.
+      id: "handover-pack",
+      label: "Make a handover pack…",
+      icon: PackageCheckIcon,
+      keywords: "handover report customer end of engagement pdf print summary what was done zip",
+      run: () => openHandover("30d"),
+    },
+    {
       id: "multiexec",
       label: "Type in all tabs: send your typing to several terminals",
       icon: RadioTowerIcon,
@@ -1312,6 +1352,8 @@ export default function App() {
                   onOpenVault={show.vault}
                   onConnect={openTerminal}
                   onSupportBundle={openSupportBundle}
+                  onExportAnsible={openAnsible}
+                  onExportInventory={openInventory}
                   active={page === "sessions"}
                   focus={sessionsFocus}
                 />
@@ -1350,7 +1392,12 @@ export default function App() {
             </section>
             <section hidden={page !== "activity"}>
               <ErrorBoundary name="Activity">
-                <Activity version={jobsVersion} active={page === "activity"} focusJob={jobFocus} />
+                <Activity
+                  version={jobsVersion}
+                  active={page === "activity"}
+                  focusJob={jobFocus}
+                  onHandover={openHandover}
+                />
               </ErrorBoundary>
             </section>
             <section hidden={page !== "settings"}>
@@ -1397,6 +1444,20 @@ export default function App() {
           }}
           onClose={() => setBundling(null)}
         />
+      )}
+      {inventoryOpen && <InventoryExportDialog onClose={() => setInventoryOpen(false)} />}
+      {ansibleFor && (
+        <AnsibleExportDialog
+          sessionIds={ansibleFor.sessionIds}
+          onOpenSessions={() => {
+            setAnsibleFor(null);
+            show.sessions();
+          }}
+          onClose={() => setAnsibleFor(null)}
+        />
+      )}
+      {handoverDays && (
+        <HandoverPackDialog from={handoverDays.from} to={handoverDays.to} onClose={() => setHandoverDays(null)} />
       )}
       {approval && (
         <ApprovalDialog

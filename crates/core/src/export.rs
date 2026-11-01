@@ -14,6 +14,11 @@ use serde_json::Value;
 use crate::store::AuditEntry;
 use crate::untrusted::is_format_char;
 
+/// `password: x`'s key and separator. F6: markdown may sit around the separator (a note's `**Password:** x`,
+/// `**Password**: x`, `` `password`: x ``, `password\: x`), which would otherwise be read as the value.
+const KEY_AND_SEPARATOR: &str =
+    r"(?:password|passwd|pwd|passphrase|secret|token|api[_-]?key|access[_-]?key)[*_`~\\]*\s*[=:][*_`~\\]*\s*";
+
 // Constant patterns, compiled by the tests below; `expect` cannot fire on user input here.
 #[allow(clippy::expect_used)]
 static SECRET_PATTERNS: LazyLock<Vec<(Regex, &'static str)>> = LazyLock::new(|| {
@@ -21,23 +26,33 @@ static SECRET_PATTERNS: LazyLock<Vec<(Regex, &'static str)>> = LazyLock::new(|| 
         // --password hunter2, -token=abc, --api-key 'x y'; CT-01 Redis's --requirepass and --masterauth (a
         // container's command line)
         (
-            r#"(?i)(--?(?:password|passwd|pass|pwd|passphrase|secret|token|api-?key|access-?key|requirepass|masterauth)(?:=|\s+))("[^"]*"|'[^']*'|[^\s;&|`"']+)"#,
+            r#"(?i)(--?(?:password|passwd|pass|pwd|passphrase|secret|token|api-?key|access-?key|requirepass|masterauth)(?:=|\s+))("[^"]*"|'[^']*'|[^\s;&|`"']+)"#.to_owned(),
             "${1}[redacted]",
         ),
         // password=hunter2, TOKEN: abc, api_key = "x"
         (
-            r#"(?i)((?:password|passwd|pwd|passphrase|secret|token|api[_-]?key|access[_-]?key)\s*[=:]\s*)("[^"]*"|'[^']*'|[^\s;&|`"']+)"#,
+            format!(r#"(?i)({KEY_AND_SEPARATOR})("[^"]*"|'[^']*'|[^\s;&|`"']+)"#),
             "${1}[redacted]",
         ),
         // https://alice:hunter2@example.com
-        (r"(?i)\b([a-z][a-z0-9+.-]*://[^/\s:@]+:)[^@\s/]+@", "${1}[redacted]@"),
+        (r"(?i)\b([a-z][a-z0-9+.-]*://[^/\s:@]+:)[^@\s/]+@".to_owned(), "${1}[redacted]@"),
         // Authorization: Bearer abc.def
-        (r"(?i)\b(bearer\s+)[a-z0-9._~+/=-]+", "${1}[redacted]"),
+        (r"(?i)\b(bearer\s+)[a-z0-9._~+/=-]+".to_owned(), "${1}[redacted]"),
     ]
     .into_iter()
-    .map(|(pattern, with)| (Regex::new(pattern).expect("valid secret pattern"), with))
+    .map(|(pattern, with)| (Regex::new(&pattern).expect("valid secret pattern"), with))
     .collect()
 });
+
+#[allow(clippy::expect_used)]
+static ENDS_WITH_KEY: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(&format!("(?i){KEY_AND_SEPARATOR}$")).expect("valid key pattern"));
+
+/// F6: `text` ends with a secret's key and separator and no value (`Password:`), so the value may be what follows
+/// it: a note's next block, say.
+pub fn ends_with_secret_key(text: &str) -> bool {
+    ENDS_WITH_KEY.is_match(text)
+}
 
 /// Replaces what looks like a password, token or key in free text with `[redacted]`. Returns the
 /// text and whether anything was replaced.
@@ -272,6 +287,12 @@ mod tests {
                 "redis-server --masterauth=hunter2",
                 "redis-server --masterauth=[redacted]",
             ),
+            // F6: markdown around the separator.
+            ("**Password:** Hunter2Hunter2", "**Password:** [redacted]"),
+            ("**Password**: Hunter2Hunter2", "**Password**: [redacted]"),
+            ("`password`: Hunter2Hunter2", "`password`: [redacted]"),
+            ("_token_ = abc123", "_token_ = [redacted]"),
+            ("password\\: Hunter2Hunter2", "password\\: [redacted]"),
         ] {
             assert_eq!(redact_secrets(input), (expected.to_owned(), true), "{input}");
         }
@@ -291,6 +312,14 @@ mod tests {
         ] {
             assert_eq!(redact_secrets(text), (text.to_owned(), false), "{text}");
         }
+    }
+
+    #[test]
+    fn a_key_with_no_value_after_it_is_found() {
+        assert!(ends_with_secret_key("Password:"));
+        assert!(ends_with_secret_key("the **api_key**: "));
+        assert!(!ends_with_secret_key("password: x"));
+        assert!(!ends_with_secret_key("Change the password"));
     }
 
     #[test]

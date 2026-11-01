@@ -228,6 +228,12 @@ export const GLOSSARY = {
     definition: "A health check that failed as many runs in a row as it allows (two by default).",
     aliases: ["failing check"],
   },
+  handoverPack: {
+    term: "Handover pack",
+    definition:
+      "A zip for the customer at the end of a job: one printable page with the inventory, a network diagram, what was done and your notes.",
+    aliases: ["handover", "report", "end of engagement"],
+  },
 } as const satisfies Record<string, GlossaryEntry>;
 
 export type TermKey = keyof typeof GLOSSARY;

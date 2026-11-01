@@ -1,11 +1,22 @@
 //! MO-13, MO-14: the test server's view of itself, for host details. With
 //! [`super::TestSshServer::with_host_facts`] its exec shell has `uname`, `lscpu`, `lsblk`, `df -PT`,
-//! `systemd-detect-virt`, `systemctl list-units` and `is-active` (MO-08), `ss`, `who`, `last`, `ps`, `stat` and `apt` or `dnf`,
-//! printing what a real host prints (the samples in `host_details::linux` and `host_details::admin`),
-//! and files `/etc/os-release`, `/proc/cpuinfo` and `/proc/swaps`.
+//! `systemd-detect-virt`, `systemctl list-units` and `is-active` (MO-08), `ss`, `who`, `last`, `ps`, `stat`, `apt` or
+//! `dnf`, and `dpkg-query` or `rpm` (FD-05's installed packages), printing what a real host prints (the samples in
+//! `host_details::linux`, `host_details::admin` and `host_details::packages`), and files `/etc/os-release`,
+//! `/proc/cpuinfo` and `/proc/swaps`.
 
 use super::docker::Ran;
-use crate::host_details::{admin::samples as admin, linux::samples as linux};
+use crate::host_details::{admin::samples as admin, linux::samples as linux, packages::samples as installed};
+
+/// FD-05: the package database the host has, with what it lists.
+#[derive(Debug, Clone)]
+pub enum Installed {
+    None,
+    /// What `dpkg-query -W -f=...` prints.
+    Dpkg(String),
+    /// What `rpm -qa` prints.
+    Rpm(String),
+}
 
 /// What `apt` or `dnf` says is pending.
 #[derive(Debug, Clone)]
@@ -47,6 +58,7 @@ pub struct HostFixture {
     pub last: String,
     pub ps: String,
     pub packages: Packages,
+    pub installed: Installed,
 }
 
 impl HostFixture {
@@ -73,6 +85,7 @@ impl HostFixture {
                 list: admin::APT.trim_start_matches("present\n").into(),
                 refreshed_unix: 1_792_600_000,
             },
+            installed: Installed::Dpkg(installed::DPKG.into()),
         }
     }
 
@@ -88,6 +101,7 @@ impl HostFixture {
                 list: admin::DNF.trim_start_matches("present\n").into(),
                 status: 100,
             },
+            installed: Installed::Rpm(installed::RPM.into()),
             ..Self::ubuntu()
         }
     }
@@ -107,6 +121,8 @@ impl HostFixture {
             "lscpu" => self.lscpu.is_some(),
             "apt" => matches!(self.packages, Packages::Apt { .. }),
             "dnf" => matches!(self.packages, Packages::Dnf { .. }),
+            "dpkg-query" => matches!(self.installed, Installed::Dpkg(_)),
+            "rpm" => matches!(self.installed, Installed::Rpm(_)),
             "uname" | "lsblk" | "systemd-detect-virt" | "systemctl" | "ss" | "who" | "last" | "ps" | "stat" => true,
             _ => false,
         }
@@ -202,6 +218,17 @@ pub fn run(host: &HostFixture, program: &str, args: &[String]) -> Option<Ran> {
                 stderr: String::new(),
                 status: *status,
             },
+            _ => return None,
+        },
+        // FD-05: the installed packages, as `dpkg-query -W -f=...` and `rpm -qa` print them.
+        "dpkg-query" => match &host.installed {
+            Installed::Dpkg(list) if has("-W") => ok(list.clone()),
+            Installed::Dpkg(_) => fail("dpkg-query: only -W here", 2),
+            _ => return None,
+        },
+        "rpm" => match &host.installed {
+            Installed::Rpm(list) if has("-qa") => ok(list.clone()),
+            Installed::Rpm(_) => fail("rpm: only -qa here", 1),
             _ => return None,
         },
         _ => return None,

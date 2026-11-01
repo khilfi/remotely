@@ -810,3 +810,127 @@ async fn service_checks_read_windows_services_on_one_kept_sign_in() {
     .await
     .expect("a vault lock closes the checks' kept WinRM connection");
 }
+
+/// Every text an xlsx holds: its members' XML.
+fn xlsx_text(path: &std::path::Path) -> String {
+    use std::io::Read;
+    let bytes = std::fs::read(path).unwrap();
+    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+    let mut all = String::new();
+    for i in 0..zip.len() {
+        let mut file = zip.by_index(i).unwrap();
+        let mut text = String::new();
+        let _ = file.read_to_string(&mut text);
+        all.push_str(&text);
+    }
+    all
+}
+
+/// F6 (FD-05, BX-12): a Windows host in the inventory to Excel, read again on a sign-in of Remotely's own through the
+/// login guard, and in the Ansible inventory as a `winrm` host.
+#[tokio::test]
+async fn the_inventory_reads_a_windows_host_again_and_a_refused_one_is_parked() {
+    use remotely_core::reports::{AnsibleRequest, InventoryOptions, InventoryRequest, ReadControl};
+
+    let password = new_password();
+    let server = WinrmTestServer::start(FakeWinrm::HttpNtlm, "alice", &password)
+        .await
+        .unwrap();
+    let core = core(Arc::new(FakeNetworkTools::new())).await;
+    let o = options(WinrmTransport::Http, WinrmSignIn::Ntlm, WinrmCertificate::Windows);
+    let id = session(&core, &server, &password, o).await;
+    let temp = std::env::temp_dir().join(format!("remotely-winrm-inventory-{}", Uuid::new_v4().simple()));
+    std::fs::create_dir_all(&temp).unwrap();
+    let request = InventoryRequest {
+        options: InventoryOptions {
+            read_again: true,
+            updates: true,
+            packages: true,
+        },
+        utc_offset_minutes: 0,
+    };
+
+    let path = temp.join("inventory.xlsx");
+    let report = core
+        .reports
+        .export_inventory(&core.ctx(), &path, request, "Remotely test", &ReadControl::default())
+        .await
+        .unwrap();
+    let read = report.read.clone().unwrap();
+    assert_eq!((read.asked, read.read), (1, 1), "{read:?}");
+    assert!(read.problems.is_empty(), "{read:?}");
+    assert!(
+        report
+            .notes
+            .iter()
+            .any(|n| n.contains("read from Linux hosts only, so 1 Windows host has none")),
+        "{:?}",
+        report.notes
+    );
+    // The host's facts reach the sheet: kind, OS, build, adapter MAC and its listening ports.
+    let book = xlsx_text(&path);
+    for fact in [
+        "WinRM",
+        "Windows Server 2022 Datacenter",
+        "20348.2340",
+        "00:50:56:ab:cd:ef",
+        "tcp 5985",
+        "Read now",
+    ] {
+        assert!(book.contains(fact), "{fact} is in the workbook");
+    }
+    assert!(!book.contains(&password));
+    // Stored as a Refresh stores them, and the PowerShell ran only the facts' read (no Linux script).
+    let specs = core.host_details.session_specs(&core.ctx(), id).await.unwrap().unwrap();
+    assert_eq!(specs.collected_by, CollectedBy::Refresh);
+    assert!(
+        server
+            .stats()
+            .stdin
+            .iter()
+            .all(|line| !line.contains("dpkg-query") && !line.contains("rpm -qa")),
+        "no Linux read went to Windows"
+    );
+
+    // BX-12: the same host in the Ansible inventory, with nothing picked.
+    let preview = core
+        .reports
+        .ansible_preview(&core.ctx(), &AnsibleRequest::default())
+        .await
+        .unwrap();
+    assert_eq!(preview.hosts, 1, "{}", preview.text);
+    assert!(
+        preview.text.contains("ansible_connection: \"winrm\""),
+        "{}",
+        preview.text
+    );
+    assert!(
+        preview.text.contains("ansible_winrm_scheme: \"http\""),
+        "{}",
+        preview.text
+    );
+    assert!(
+        preview.text.contains("ansible_winrm_transport: \"ntlm\""),
+        "{}",
+        preview.text
+    );
+    assert!(!preview.text.contains(&password) && !preview.text.contains("ignore"));
+
+    // A refused password parks the host: the exports after it sign in no more, so no lockout.
+    server.set_password("rotated-elsewhere");
+    for n in 0..3 {
+        let path = temp.join(format!("again-{n}.xlsx"));
+        let report = core
+            .reports
+            .export_inventory(&core.ctx(), &path, request, "Remotely test", &ReadControl::default())
+            .await
+            .unwrap();
+        let read = report.read.unwrap();
+        assert_eq!(read.read, 0, "{read:?}");
+        assert_eq!(read.problems.len(), 1, "{read:?}");
+        let book = xlsx_text(&path);
+        assert!(book.contains("Windows Server 2022 Datacenter"), "the stored facts stay");
+    }
+    assert_eq!(server.stats().refused_sign_ins, 1, "parked after the first refusal");
+    let _ = std::fs::remove_dir_all(temp);
+}
