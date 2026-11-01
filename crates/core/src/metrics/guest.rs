@@ -30,6 +30,7 @@ use super::{GuestState, GuestStatus, MetricSample, MetricSource, MetricsSource, 
 use crate::adapters::remote::{
     AgentSource, AuthMethod, ConnectOptions, ConnectRequest, ExecSession, HostKeyVerifier, RemoteAdapter, SessionSpec,
 };
+use crate::adapters::winrm::{WinrmAdapter, WinrmConnect, WinrmSession, WinrmSpec, WinrmTuning};
 use crate::domain::{now_rfc3339, Context, Target, TargetRef};
 use crate::error::{CoreError, Result};
 use crate::host_details::{CollectedBy, SpecsCollector};
@@ -93,6 +94,8 @@ struct Host {
     /// What the connection was made with: a session edited since then reconnects.
     spec_key: String,
     conn: Option<Arc<dyn ExecSession>>,
+    /// F4: the same connection as a WinRM session (its kept PowerShell), for a Windows host.
+    winrm: Option<Arc<dyn WinrmSession>>,
     previous: Option<(GuestReading, Instant)>,
     failures: u32,
     next_try: Option<Instant>,
@@ -108,6 +111,7 @@ impl Host {
         Self {
             spec_key: String::new(),
             conn: None,
+            winrm: None,
             previous: None,
             failures: 0,
             next_try: None,
@@ -118,6 +122,7 @@ impl Host {
     }
 
     async fn disconnect(&mut self) {
+        self.winrm = None;
         if let Some(conn) = self.conn.take() {
             conn.close().await;
         }
@@ -147,6 +152,8 @@ struct Shared {
     specs: OnceLock<SpecsCollector>,
     /// P8: the time between two polls of a host ([`POLL_KEY`]).
     interval: RwLock<Duration>,
+    /// F4: the WinRM client Windows hosts are read with.
+    winrm: RwLock<Arc<dyn WinrmAdapter>>,
 }
 
 impl Shared {
@@ -198,9 +205,13 @@ impl Failure {
         let state = match err {
             CoreError::VaultLocked | CoreError::VaultNotSetUp => GuestState::VaultLocked,
             CoreError::AuthFailed(_) | CoreError::AgentUnavailable(_) => GuestState::LoginFailed,
-            CoreError::HostKeyChanged { .. } | CoreError::HostKeyRejected { .. } | CoreError::HostKeyUnknown { .. } => {
-                GuestState::HostKey
-            }
+            CoreError::HostKeyChanged { .. }
+            | CoreError::HostKeyRejected { .. }
+            | CoreError::HostKeyUnknown { .. }
+            | CoreError::CertificateChanged { .. }
+            | CoreError::CertificateRejected { .. }
+            | CoreError::CertificateUnknown { .. }
+            | CoreError::CertificateNotTrusted { .. } => GuestState::HostKey,
             CoreError::Ssh(_) | CoreError::Timeout { .. } | CoreError::Io(_) => GuestState::Unreachable,
             _ => GuestState::Error,
         };
@@ -297,6 +308,7 @@ impl GuestSource {
                 fresh: Mutex::new(HashMap::new()),
                 specs: OnceLock::new(),
                 interval: RwLock::new(Duration::from_secs(POLL_CHOICES[0])),
+                winrm: RwLock::new(Arc::new(crate::adapters::winrm::NoWinrm)),
             }),
             hosts: Mutex::new(HashMap::new()),
         }
@@ -306,6 +318,11 @@ impl GuestSource {
     /// [`crate::host_details::SpecsTuning::dashboard_max_age`].
     pub fn set_specs(&self, collector: SpecsCollector) {
         let _ = self.shared.specs.set(collector);
+    }
+
+    /// F4: the WinRM client Windows guests are read with (MO-05).
+    pub fn set_winrm(&self, adapter: Arc<dyn WinrmAdapter>) {
+        *locks::write(&self.shared.winrm) = adapter;
     }
 
     /// MO-13, MO-14: the watched session's kept connection, when it is open and not in the middle of
@@ -543,6 +560,12 @@ async fn read_once(
     let spec = match shared.store.session_spec(&ctx, id).await {
         Ok(Some(spec)) => spec,
         Ok(None) => return Err(Failure::new(GuestState::Error, "the session was deleted")),
+        // MO-05: a Windows host over WinRM.
+        Err(CoreError::WrongSessionKind { .. }) => match shared.store.winrm_spec(&ctx, id).await {
+            Ok(Some(spec)) => return read_windows(shared, tuning, id, host, &spec).await,
+            Ok(None) => return Err(Failure::new(GuestState::Error, "the session was deleted")),
+            Err(err) => return Err(Failure::from_error(&err)),
+        },
         Err(err) => return Err(Failure::from_error(&err)),
     };
     let key = spec_key(&spec);
@@ -624,6 +647,198 @@ async fn read_once(
     };
     host.previous = Some((reading, at));
     Ok(sample)
+}
+
+/// MO-05: one read of a Windows host: its WinRM connection kept between rounds (signed in once, the certificate
+/// checked like a bulk run checks a host key), the CIM script in the PowerShell it keeps open, and the reading made
+/// rates like a Linux guest's.
+async fn read_windows(
+    shared: &Shared,
+    tuning: &GuestTuning,
+    id: Uuid,
+    host: &mut Host,
+    spec: &WinrmSpec,
+) -> std::result::Result<MetricSample, Failure> {
+    let key = spec.login_key();
+    if host.spec_key != key {
+        host.disconnect().await;
+        host.previous = None;
+        host.spec_key = key;
+    }
+    if host.conn.as_ref().is_some_and(|c| c.is_closed()) {
+        host.disconnect().await;
+    }
+    if host.winrm.is_none() {
+        let session = connect_windows(shared, tuning, spec).await?;
+        host.conn = Some(Arc::clone(&session).exec());
+        host.winrm = Some(session);
+    }
+    let Some(session) = host.winrm.clone() else {
+        return Err(Failure::new(GuestState::Error, "no connection"));
+    };
+    let read = tokio::time::timeout(
+        tuning.command_timeout.saturating_mul(2),
+        session.read(
+            super::windows::METRICS_SCRIPT,
+            super::windows::MAX_OUTPUT,
+            tuning.command_timeout,
+        ),
+    )
+    .await;
+    let text = match read {
+        Ok(Ok(text)) => text,
+        Ok(Err(err)) => {
+            host.disconnect().await;
+            return Err(Failure::from_error(&err));
+        }
+        Err(_) => {
+            host.disconnect().await;
+            return Err(Failure::new(
+                GuestState::Unreachable,
+                format!(
+                    "{} stopped answering (no reply in {} s)",
+                    spec.name,
+                    tuning.command_timeout.as_secs()
+                ),
+            ));
+        }
+    };
+    let at = Instant::now();
+    let reading = super::windows::parse(&text);
+    if reading.is_empty() {
+        return Err(Failure::new(
+            GuestState::NoData,
+            "the host answered, but its CIM classes gave nothing: guest metrics need Windows with PowerShell 5.1",
+        ));
+    }
+    let rates = procfs::rates(host.previous.as_ref().map(|(r, t)| (r, *t)), &reading, at);
+    let sample = MetricSample {
+        source: MetricSource::Guest,
+        target: TargetRef::Session { session_id: id },
+        ts: now_rfc3339(),
+        cpu_pct: rates.cpu_pct,
+        host_cpu_pct: None,
+        host_mem_pct: None,
+        mem_bytes: reading.mem_used_bytes(),
+        mem_total_bytes: reading.mem_total_bytes,
+        swap_used_bytes: reading.swap_used_bytes(),
+        swap_total_bytes: reading.swap_total_bytes,
+        disk_read_bps: rates.disk_read_bps,
+        disk_write_bps: rates.disk_write_bps,
+        net_rx_bps: rates.net_rx_bps,
+        net_tx_bps: rates.net_tx_bps,
+        load1: None,
+        load5: None,
+        load15: None,
+        uptime_secs: reading.uptime_secs.map(|u| u as u64),
+        mounts: reading.mounts.clone(),
+    };
+    host.previous = Some((reading, at));
+    Ok(sample)
+}
+
+/// MO-05: signs in to a Windows host with the session's saved login, through the same parks and caps as an SSH login
+/// ([`crate::login_guard`]). Nothing is asked: a certificate not trusted yet fails (open the console once).
+async fn connect_windows(
+    shared: &Shared,
+    tuning: &GuestTuning,
+    spec: &WinrmSpec,
+) -> std::result::Result<Arc<dyn WinrmSession>, Failure> {
+    let key = spec.login_key();
+    let park = |reason: ParkReason, what: &str| {
+        let parked = Parked {
+            reason,
+            message: login_guard::parked_message(what),
+        };
+        shared.guard.park(spec.id, ParkScope::Login, &key, parked.clone());
+        Failure::parked(&parked)
+    };
+    if let Some(parked) = shared.guard.parked(spec.id, ParkScope::Login, &key) {
+        return Err(Failure::parked(&parked));
+    }
+    if spec.missing_password() {
+        return Err(park(
+            ParkReason::SecretMissing,
+            &format!(
+                "no password is saved for '{}'. Save it in the vault and choose it in that session, so the dashboard can sign in",
+                spec.name
+            ),
+        ));
+    }
+    let password = match spec.password_id {
+        Some(secret) => {
+            if shared.vault.status() != VaultStatus::Unlocked {
+                return Err(Failure {
+                    retry_now: true,
+                    ..Failure::new(
+                        GuestState::VaultLocked,
+                        format!(
+                            "the vault is locked, and signing in to '{}' needs a secret from it",
+                            spec.name
+                        ),
+                    )
+                });
+            }
+            match shared.vault.get(&shared.ctx(), secret).await {
+                Ok(password) => Some(password),
+                Err(CoreError::UnknownTarget(_)) => {
+                    return Err(park(
+                        ParkReason::SecretMissing,
+                        "a secret this login needs is no longer in the vault. Choose another one in the session",
+                    ))
+                }
+                Err(err) => return Err(Failure::from_error(&err)),
+            }
+        }
+        None => None,
+    };
+    if let Err(wait) = shared.guard.admit(spec.id, &[spec.login_host()]) {
+        return Err(Failure {
+            wait: Some(wait),
+            ..Failure::new(
+                GuestState::Paused,
+                login_guard::capped_message(&spec.login_host(), shared.guard.per_hour(), wait),
+            )
+        });
+    }
+    let verifier = Arc::new(GuestVerifier {
+        known_hosts: Arc::clone(&shared.known_hosts),
+        ctx: shared.ctx(),
+        target: Target {
+            target: TargetRef::Session { session_id: spec.id },
+            name: spec.name.clone(),
+            environment: spec.environment,
+            protected: false,
+        },
+        record_blocked: true,
+    });
+    let adapter = Arc::clone(&*locks::read(&shared.winrm));
+    let limit = tuning.connect_timeout.saturating_mul(2);
+    let connected = tokio::time::timeout(
+        limit,
+        adapter.connect(WinrmConnect {
+            spec,
+            password,
+            verifier,
+            tuning: WinrmTuning {
+                connect_timeout: tuning.connect_timeout,
+                request_timeout: tuning.command_timeout,
+                ..WinrmTuning::default()
+            },
+        }),
+    )
+    .await;
+    match connected {
+        Ok(Ok(session)) => Ok(session),
+        Ok(Err(err)) => match ParkReason::of(&err) {
+            Some(reason) => Err(park(reason, &Failure::from_error(&err).message)),
+            None => Err(Failure::from_error(&err)),
+        },
+        Err(_) => Err(Failure::new(
+            GuestState::Unreachable,
+            format!("signing in to '{}' took longer than {} s", spec.name, limit.as_secs()),
+        )),
+    }
 }
 
 /// MO-13: after a good reading, the host's facts on the same connection when they are older than

@@ -108,6 +108,7 @@ use crate::adapters::remote::{
     ShellRequest,
 };
 use crate::adapters::serial::SerialPorts;
+use crate::adapters::winrm::{WinrmAdapter, WinrmConnect, WinrmTuning};
 use crate::command_bus::CommandBus;
 use crate::containers::ContainerShell;
 use crate::domain::{Context, Environment, Target, TargetRef};
@@ -840,6 +841,9 @@ struct Inner {
     serial: std::sync::RwLock<Arc<dyn SerialPorts>>,
     /// SS-12: each COM port a pane's thread opened, by name, and whether that thread has let go of it since.
     serial_held: Mutex<HashMap<String, tokio::sync::watch::Receiver<bool>>>,
+    /// F4: the WinRM client (PowerShell consoles), and its time limits.
+    winrm: std::sync::RwLock<Arc<dyn WinrmAdapter>>,
+    winrm_tuning: Mutex<WinrmTuning>,
 }
 
 /// SS-12: the longest a serial pane waits for the port's last connection to let go of it (a write held up by flow
@@ -920,6 +924,8 @@ impl Terminals {
                 launcher: std::sync::RwLock::new(launcher),
                 serial: std::sync::RwLock::new(serial),
                 serial_held: Mutex::default(),
+                winrm: std::sync::RwLock::new(Arc::new(crate::adapters::winrm::NoWinrm)),
+                winrm_tuning: Mutex::new(WinrmTuning::default()),
             }),
         }
     }
@@ -1019,6 +1025,7 @@ impl Terminals {
             SessionKind::Telnet(_) => return self.open_console(ctx, session, PaneKind::Telnet, size).await,
             SessionKind::Serial(_) => return self.open_console(ctx, session, PaneKind::Serial, size).await,
             SessionKind::Rdp(_) | SessionKind::Vnc(_) => return self.open_tunnel_tab(ctx, session, size).await,
+            SessionKind::Winrm(_) => return self.open_console(ctx, session, PaneKind::Powershell, size).await,
         }
         self.open_saved(
             ctx,
@@ -1203,7 +1210,7 @@ impl Terminals {
         // SS-12: a COM port has one pane, a tunnel tab one window; a Telnet pane opens another like itself.
         match control.kind {
             PaneKind::Ssh => {}
-            PaneKind::Telnet => {
+            PaneKind::Telnet | PaneKind::Powershell => {
                 let Source::Saved(session_id) = control.source else {
                     return Err(CoreError::UnknownTarget(format!("terminal {id}")));
                 };
@@ -1926,7 +1933,9 @@ impl Terminals {
         hop: Option<Uuid>,
     ) -> Result<(Destination, Option<(Uuid, String)>)> {
         // SS-12: a Telnet or serial pane's password goes to its host (or COM port), never through a jump host.
-        if let (PaneKind::Telnet | PaneKind::Serial, Some(session_id)) = (control.kind, control.session_id()) {
+        if let (PaneKind::Telnet | PaneKind::Serial | PaneKind::Powershell, Some(session_id)) =
+            (control.kind, control.session_id())
+        {
             let session = self
                 .inner
                 .store
@@ -2043,6 +2052,14 @@ impl ExecSession for ScrubbedCommands {
     }
 
     async fn close(&self) {}
+
+    fn script_kind(&self) -> crate::adapters::remote::ScriptKind {
+        self.inner.script_kind()
+    }
+
+    fn peer_ip(&self) -> Option<std::net::IpAddr> {
+        self.inner.peer_ip()
+    }
 
     // FD-09: the toolbox's checks of a host behind this terminal's host go through its connection.
     async fn open_direct(
@@ -2582,7 +2599,10 @@ impl Pane {
     /// shell prompt once the SS-08 prompt hook is out of the way, and whether the hook may go.
     async fn connect(&mut self) -> Result<(ShellHandle, Typed)> {
         // SS-12: Telnet and serial panes connect their own way.
-        if matches!(self.control.kind, PaneKind::Telnet | PaneKind::Serial) {
+        if matches!(
+            self.control.kind,
+            PaneKind::Telnet | PaneKind::Serial | PaneKind::Powershell
+        ) {
             self.automatic = false;
             return self.connect_console().await;
         }
@@ -2715,6 +2735,97 @@ impl Pane {
         Arc::new(move || control.upgrade().is_some_and(|c| c.screen().at_secret_prompt()))
     }
 
+    /// F4: a PowerShell pane's connection: the WinRM session as saved now, its password from the vault (or typed in
+    /// the pane, kept for reconnects like an SSH pane's), the certificate checked by the session's rule (a new one
+    /// asked in the pane, like an SSH host key), then a new PowerShell. A reconnect starts a new one and says so.
+    async fn connect_powershell(&mut self, session_id: Uuid) -> Result<ShellHandle> {
+        let spec = self
+            .inner
+            .store
+            .winrm_spec(&self.ctx, session_id)
+            .await?
+            .ok_or_else(|| CoreError::UnknownTarget("the session was deleted".into()))?;
+        let reconnect = self.control.connection.load(Ordering::SeqCst) > 0;
+        let transport = if spec.options.https() { "HTTPS" } else { "HTTP, sealed" };
+        self.say(
+            format!(
+                "\x1b[2mConnecting to {} (WinRM, {transport}, {})…\x1b[0m\r\n",
+                spec.address(),
+                spec.options.sign_in.label()
+            )
+            .into_bytes(),
+        )
+        .await;
+        if !self.asked_dns {
+            self.asked_dns = true;
+            self.ask_dns(&spec.host);
+        }
+        let password = if !spec.options.uses_password() {
+            None
+        } else if let Some(id) = spec.password_id {
+            Some(self.inner.vault.get(&self.ctx, id).await?)
+        } else {
+            let remembered = locks::lock(&self.control.remembered).clone();
+            match remembered {
+                Some(password) => Some(password),
+                None => {
+                    let user = spec.username.clone().unwrap_or_default();
+                    let mut prompter = PanePrompter {
+                        input: &mut self.input,
+                        output: &self.output,
+                        size: &mut self.size,
+                        remembered: &self.control.remembered,
+                        jump_passwords: &self.control.jump_passwords,
+                        jump: None,
+                        hop: &self.control.hop,
+                    };
+                    let typed = prompter
+                        .ask(&format!("Password for {user} on {}: ", spec.host), false)
+                        .await?;
+                    *locks::lock(&self.control.remembered) = Some(typed.clone());
+                    Some(typed)
+                }
+            }
+        };
+        *locks::lock(&self.control.secrets) = password.iter().cloned().collect();
+        let verifier = Arc::new(PaneVerifier {
+            known_hosts: Arc::clone(&self.inner.known_hosts),
+            ctx: self.ctx,
+            control: Arc::clone(&self.control),
+            events: self.events.clone(),
+            wait: self.tuning().host_key_wait,
+        });
+        let adapter = Terminals {
+            inner: Arc::clone(&self.inner),
+        }
+        .winrm();
+        let tuning = locks::lock(&self.inner.winrm_tuning).clone();
+        let session = adapter
+            .connect(WinrmConnect {
+                spec: &spec,
+                password,
+                verifier,
+                tuning,
+            })
+            .await?;
+        let peer_ip = session.peer_ip();
+        if let Some(ip) = peer_ip {
+            self.learn(|facts| facts.learn_ip(ip, FactSource::Host)).await;
+        }
+        let console = session.console(self.secret_prompt_shown()).await?;
+        if reconnect {
+            self.say(notice(
+                YELLOW,
+                "A new PowerShell started: the last one's variables and folder are gone",
+            ))
+            .await;
+        }
+        let mut handle = console::console_handle(console.input, console.output, peer_ip);
+        // MO-13: the host's facts on this connection, beside the console.
+        handle.commands = Some(session.exec());
+        Ok(handle)
+    }
+
     /// SS-12: a Telnet or serial pane's connection: the session as saved now, then the transport. Nothing logs in
     /// for the user here (the remote side asks), and nothing is typed by itself.
     async fn connect_console(&mut self) -> Result<(ShellHandle, Typed)> {
@@ -2730,6 +2841,17 @@ impl Pane {
         locks::lock(&self.control.secrets).clear();
         let tuning = self.tuning();
         let handle = match session.kind {
+            SessionKind::Winrm(_) if self.control.kind == PaneKind::Powershell => {
+                let handle = self.connect_powershell(session_id).await?;
+                return Ok((
+                    handle,
+                    Typed {
+                        startup: Vec::new(),
+                        hook: false,
+                        environment: session.environment,
+                    },
+                ));
+            }
             SessionKind::Telnet(options) if self.control.kind == PaneKind::Telnet => {
                 let address = crate::known_hosts::address(&session.host, session.port);
                 self.say(format!("\x1b[2mConnecting to {address} (Telnet, clear text)…\x1b[0m\r\n").into_bytes())

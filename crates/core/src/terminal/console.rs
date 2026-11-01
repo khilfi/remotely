@@ -33,6 +33,7 @@ use crate::adapters::remote::{
     PtySize, RemoteEntry, RemoteFiles, RemoteListing, RemoteRead, RemoteWrite, ShellHandle, ShellInput, ShellOutput,
 };
 use crate::adapters::serial::{ComPort, SerialPorts};
+use crate::adapters::winrm::{WinrmAdapter, WinrmTuning};
 use crate::domain::{Context, Environment, Target, TargetRef};
 use crate::error::{CoreError, Result};
 use crate::forwards::PortForward;
@@ -53,6 +54,8 @@ pub enum PaneKind {
     Serial,
     /// An SSH connection to a jump host that carries an RDP or VNC session's tunnel.
     Tunnel,
+    /// F4: a WinRM session's PowerShell console.
+    Powershell,
 }
 
 impl PaneKind {
@@ -62,6 +65,7 @@ impl PaneKind {
             PaneKind::Telnet => "Telnet",
             PaneKind::Serial => "serial",
             PaneKind::Tunnel => "tunnel",
+            PaneKind::Powershell => "PowerShell",
         }
     }
 
@@ -258,6 +262,20 @@ impl Terminals {
 
     pub(super) fn serial(&self) -> Arc<dyn SerialPorts> {
         Arc::clone(&locks::read(&self.inner.serial))
+    }
+
+    /// F4: the WinRM client PowerShell panes connect with (Core sets the real one; tests use the fake server).
+    pub fn set_winrm(&self, adapter: Arc<dyn WinrmAdapter>) {
+        *locks::write(&self.inner.winrm) = adapter;
+    }
+
+    pub(super) fn winrm(&self) -> Arc<dyn WinrmAdapter> {
+        Arc::clone(&locks::read(&self.inner.winrm))
+    }
+
+    /// F4: WinRM's time limits for panes (tests shorten them).
+    pub fn set_winrm_tuning(&self, tuning: WinrmTuning) {
+        *locks::lock(&self.inner.winrm_tuning) = tuning;
     }
 
     fn launcher(&self) -> Arc<dyn ConsoleLauncher> {
@@ -501,6 +519,10 @@ impl Terminals {
                 format!("Opened a Telnet terminal to '{}'", session.name),
                 format!("{}; {what}; clear text", session.address()),
             ),
+            PaneKind::Powershell => (
+                format!("Opened a PowerShell console to '{}'", session.name),
+                format!("{}; {what}", session.address()),
+            ),
             _ => (
                 format!("Opened a serial terminal to '{}'", session.name),
                 format!("{}; {what}", session.address()),
@@ -731,7 +753,13 @@ mod tests {
     #[test]
     fn only_ssh_panes_join_type_in_all_tabs() {
         assert!(PaneKind::Ssh.joins_multiexec());
-        for kind in [PaneKind::Telnet, PaneKind::Serial, PaneKind::Tunnel] {
+        // F8 widens it to PowerShell panes.
+        for kind in [
+            PaneKind::Telnet,
+            PaneKind::Serial,
+            PaneKind::Tunnel,
+            PaneKind::Powershell,
+        ] {
             assert!(!kind.joins_multiexec(), "{kind:?}");
         }
         assert_eq!(higher(Environment::Lab, Environment::Prod), Environment::Prod);

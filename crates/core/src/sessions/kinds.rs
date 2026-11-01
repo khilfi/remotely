@@ -214,6 +214,72 @@ impl SerialOptions {
     }
 }
 
+/// WinRM's transport: HTTPS (5986), or HTTP (5985) with every message encrypted by the sign-in (never in clear).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum WinrmTransport {
+    #[default]
+    Https,
+    Http,
+}
+
+/// How a WinRM session signs in.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum WinrmSignIn {
+    /// The session's user and its vault password, through Windows' NTLM (workgroup hosts, and domain hosts that
+    /// allow NTLM). Over HTTP the messages are sealed with the session key.
+    #[default]
+    Ntlm,
+    /// The session's user and its vault password in the request header: HTTPS only (the host must allow Basic).
+    Basic,
+    /// The Windows account signed in to this PC, through Windows' Negotiate (Kerberos for domain hosts). No
+    /// password is stored or sent by Remotely.
+    Windows,
+}
+
+impl WinrmSignIn {
+    pub fn label(self) -> &'static str {
+        match self {
+            WinrmSignIn::Ntlm => "user and password (NTLM)",
+            WinrmSignIn::Basic => "user and password (Basic)",
+            WinrmSignIn::Windows => "my Windows sign-in (Kerberos)",
+        }
+    }
+}
+
+/// The rule for a WinRM host's HTTPS certificate.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum WinrmCertificate {
+    /// Windows must trust it, for the session's host name.
+    #[default]
+    Windows,
+    /// One Windows doesn't trust is trusted per host by its SHA-256 fingerprint, asked the first time like an SSH
+    /// host key (SS-05); a changed one blocks.
+    Fingerprint,
+}
+
+/// WinRM's own fields. Its port is the session's port.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct WinrmOptions {
+    pub transport: WinrmTransport,
+    pub sign_in: WinrmSignIn,
+    pub certificate: WinrmCertificate,
+}
+
+impl WinrmOptions {
+    pub fn https(&self) -> bool {
+        self.transport == WinrmTransport::Https
+    }
+
+    /// The session's user and vault password sign in (not "my Windows sign-in").
+    pub fn uses_password(&self) -> bool {
+        self.sign_in != WinrmSignIn::Windows
+    }
+}
+
 /// The highest serial speed a session may ask for (USB adapters go to a few Mbit/s).
 pub const MAX_SERIAL_SPEED: u32 = 4_000_000;
 /// The highest COM port number Windows gives out.
@@ -231,9 +297,14 @@ pub enum SessionKind {
     Vnc(VncOptions),
     Telnet(TelnetOptions),
     Serial(SerialOptions),
+    /// F4: a Windows host over WinRM: a PowerShell console, guest metrics and facts.
+    Winrm(WinrmOptions),
 }
 
 impl SessionKind {
+    /// Every protocol this version opens, for the check that a row it can't read is never rewritten.
+    pub const PROTOCOLS: [&'static str; 6] = ["ssh", "rdp", "vnc", "telnet", "serial", "winrm"];
+
     /// The `sessions.protocol` value.
     pub fn protocol(&self) -> &'static str {
         match self {
@@ -242,6 +313,7 @@ impl SessionKind {
             SessionKind::Vnc(_) => "vnc",
             SessionKind::Telnet(_) => "telnet",
             SessionKind::Serial(_) => "serial",
+            SessionKind::Winrm(_) => "winrm",
         }
     }
 
@@ -253,12 +325,13 @@ impl SessionKind {
             SessionKind::Vnc(_) => "VNC",
             SessionKind::Telnet(_) => "Telnet",
             SessionKind::Serial(_) => "serial",
+            SessionKind::Winrm(_) => "WinRM",
         }
     }
 
     /// The kind as it is read back: `protocol` and the JSON of its fields. A field this version doesn't know is
     /// dropped and a missing one gets its default; an unreadable object gives the kind's defaults. `None` for a
-    /// protocol this version doesn't open (F4's `winrm` in a newer database).
+    /// protocol this version doesn't open (one a newer version adds).
     pub fn read(protocol: &str, options: Option<&str>) -> Option<Self> {
         fn options_of<T: Default + for<'de> Deserialize<'de>>(json: Option<&str>) -> T {
             json.and_then(|j| serde_json::from_str(j).ok()).unwrap_or_default()
@@ -269,6 +342,7 @@ impl SessionKind {
             "vnc" => SessionKind::Vnc(options_of(options)),
             "telnet" => SessionKind::Telnet(options_of(options)),
             "serial" => SessionKind::Serial(options_of(options)),
+            "winrm" => SessionKind::Winrm(options_of(options)),
             _ => return None,
         })
     }
@@ -281,6 +355,7 @@ impl SessionKind {
             SessionKind::Vnc(o) => serde_json::to_string(o),
             SessionKind::Telnet(o) => serde_json::to_string(o),
             SessionKind::Serial(o) => serde_json::to_string(o),
+            SessionKind::Winrm(o) => serde_json::to_string(o),
         };
         json.ok()
     }
@@ -289,9 +364,42 @@ impl SessionKind {
         matches!(self, SessionKind::Ssh)
     }
 
-    /// Opens in a terminal pane (SSH, Telnet, serial).
+    pub fn is_winrm(&self) -> bool {
+        matches!(self, SessionKind::Winrm(_))
+    }
+
+    /// Logs in with the session's own login from the vault: SSH (password, key or agent), and WinRM with a user
+    /// and password. Every other kind's program or remote side asks for the login, so it never sends a vault
+    /// password ([`Self::tidy`]).
+    pub fn logs_in_with_vault(&self) -> bool {
+        match self {
+            SessionKind::Ssh => true,
+            SessionKind::Winrm(o) => o.uses_password(),
+            _ => false,
+        }
+    }
+
+    /// A login of this kind may be a key or the SSH agent (SSH only); WinRM takes a password.
+    pub fn takes_keys(&self) -> bool {
+        self.is_ssh()
+    }
+
+    /// May be linked to the VM it reaches (QL-01), so the VM shows its guest metrics and facts: SSH and WinRM.
+    pub fn links_to_vms(&self) -> bool {
+        matches!(self, SessionKind::Ssh | SessionKind::Winrm(_))
+    }
+
+    /// Gives guest metrics (MO-02, MO-05) and host facts (MO-13): SSH and WinRM.
+    pub fn reads_guest(&self) -> bool {
+        self.links_to_vms()
+    }
+
+    /// Opens in a terminal pane (SSH, Telnet, serial, WinRM's PowerShell console).
     pub fn is_terminal(&self) -> bool {
-        matches!(self, SessionKind::Ssh | SessionKind::Telnet(_) | SessionKind::Serial(_))
+        matches!(
+            self,
+            SessionKind::Ssh | SessionKind::Telnet(_) | SessionKind::Serial(_) | SessionKind::Winrm(_)
+        )
     }
 
     /// Opens a window of another program (RDP, VNC).
@@ -299,7 +407,9 @@ impl SessionKind {
         matches!(self, SessionKind::Rdp(_) | SessionKind::Vnc(_))
     }
 
-    /// May go through a jump host (an SSH session): SSH itself, and RDP and VNC through a tunnel.
+    /// May go through a jump host (an SSH session): SSH itself, and RDP and VNC through a tunnel. F4: WinRM connects
+    /// directly; a host behind a jump host is reached through a saved SS-07 forward (a WinRM session to 127.0.0.1
+    /// and the forward's port, with the certificate trusted by its fingerprint).
     pub fn takes_jump_host(&self) -> bool {
         matches!(self, SessionKind::Ssh | SessionKind::Rdp(_) | SessionKind::Vnc(_))
     }
@@ -322,6 +432,10 @@ impl SessionKind {
             SessionKind::Vnc(_) => 5900,
             SessionKind::Telnet(_) => 23,
             SessionKind::Serial(_) => SERIAL_PORT_COLUMN,
+            SessionKind::Winrm(o) => match o.transport {
+                WinrmTransport::Https => 5986,
+                WinrmTransport::Http => 5985,
+            },
         }
     }
 
@@ -332,6 +446,13 @@ impl SessionKind {
     pub(crate) fn tidy(&self, host: &mut String, port: &mut u16) -> Result<()> {
         match self {
             SessionKind::Ssh | SessionKind::Vnc(_) | SessionKind::Telnet(_) => {}
+            SessionKind::Winrm(o) => {
+                if o.sign_in == WinrmSignIn::Basic && !o.https() {
+                    return invalid(
+                        "Basic sends the password as it is, so it needs HTTPS. Choose HTTPS, or sign in with NTLM.",
+                    );
+                }
+            }
             SessionKind::Rdp(o) => {
                 if let RdpScreen::Window { width, height } = o.screen {
                     if !(200..=8192).contains(&width) || !(200..=8192).contains(&height) {
@@ -396,6 +517,16 @@ impl SessionKind {
                 }
             }
             SessionKind::Telnet(o) => format!("Telnet, Enter sends {}", o.line_ending.label()),
+            SessionKind::Winrm(o) => {
+                let transport = match o.transport {
+                    WinrmTransport::Https => match o.certificate {
+                        WinrmCertificate::Windows => "HTTPS, certificate trusted by Windows",
+                        WinrmCertificate::Fingerprint => "HTTPS, certificate trusted by Windows or by its fingerprint",
+                    },
+                    WinrmTransport::Http => "HTTP, messages encrypted by the sign-in",
+                };
+                format!("WinRM, {transport}, {}", o.sign_in.label())
+            }
             SessionKind::Serial(o) => format!(
                 "serial, {}, {}, Enter sends {}{}",
                 o.frame(),
@@ -453,15 +584,72 @@ mod tests {
                 local_echo: true,
                 ..SerialOptions::default()
             }),
+            SessionKind::Winrm(WinrmOptions {
+                transport: WinrmTransport::Http,
+                sign_in: WinrmSignIn::Windows,
+                certificate: WinrmCertificate::Fingerprint,
+            }),
         ];
         for kind in kinds {
             let json = kind.options_json();
             assert_eq!(SessionKind::read(kind.protocol(), json.as_deref()), Some(kind));
+            assert!(SessionKind::PROTOCOLS.contains(&kind.protocol()));
         }
         assert_eq!(
-            SessionKind::read("winrm", None),
+            SessionKind::read("x11", None),
             None,
-            "F4's kind is not this version's"
+            "a kind a newer version adds is not this version's"
+        );
+        assert_eq!(
+            SessionKind::read("winrm", None),
+            Some(SessionKind::Winrm(WinrmOptions::default()))
+        );
+    }
+
+    #[test]
+    fn winrm_signs_in_with_the_vault_unless_it_uses_the_windows_sign_in() {
+        let ntlm = SessionKind::Winrm(WinrmOptions::default());
+        let windows = SessionKind::Winrm(WinrmOptions {
+            sign_in: WinrmSignIn::Windows,
+            ..WinrmOptions::default()
+        });
+        assert!(ntlm.logs_in_with_vault() && !windows.logs_in_with_vault());
+        assert!(SessionKind::Ssh.logs_in_with_vault());
+        assert!(!SessionKind::Telnet(TelnetOptions::default()).logs_in_with_vault());
+        assert!(!ntlm.takes_keys() && SessionKind::Ssh.takes_keys());
+        assert!(ntlm.is_terminal() && ntlm.links_to_vms() && !ntlm.takes_jump_host());
+        assert_eq!(ntlm.default_port(), 5986);
+        let http = SessionKind::Winrm(WinrmOptions {
+            transport: WinrmTransport::Http,
+            ..WinrmOptions::default()
+        });
+        assert_eq!(http.default_port(), 5985);
+        assert_eq!(
+            http.describe().unwrap(),
+            "WinRM, HTTP, messages encrypted by the sign-in, user and password (NTLM)"
+        );
+        // Basic never goes over HTTP: the password would cross the network as it is.
+        let basic_http = SessionKind::Winrm(WinrmOptions {
+            transport: WinrmTransport::Http,
+            sign_in: WinrmSignIn::Basic,
+            ..WinrmOptions::default()
+        });
+        let (mut host, mut port) = ("win01.example.com".to_owned(), 5985);
+        assert!(basic_http.tidy(&mut host, &mut port).is_err());
+        let basic_https = SessionKind::Winrm(WinrmOptions {
+            sign_in: WinrmSignIn::Basic,
+            ..WinrmOptions::default()
+        });
+        assert!(basic_https.tidy(&mut host, &mut port).is_ok());
+        let kind: SessionKind =
+            serde_json::from_str(r#"{"protocol":"winrm","transport":"http","signIn":"windows"}"#).unwrap();
+        assert_eq!(
+            kind,
+            SessionKind::Winrm(WinrmOptions {
+                transport: WinrmTransport::Http,
+                sign_in: WinrmSignIn::Windows,
+                certificate: WinrmCertificate::Windows,
+            })
         );
     }
 

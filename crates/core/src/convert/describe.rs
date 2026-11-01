@@ -150,13 +150,36 @@ fn parse_attributes(text: &str) -> Vec<(String, String)> {
 /// Comments, processing instructions and CDATA are skipped; a DOCTYPE refuses the document (descriptions never
 /// need one, and entities are never expanded).
 pub fn parse_xml(text: &str) -> Option<Element> {
+    parse_xml_limited(
+        text,
+        XmlLimits {
+            depth: MAX_DEPTH,
+            elements: MAX_ELEMENTS,
+            text: 64 * 1024,
+        },
+    )
+}
+
+/// What [`parse_xml_limited`] reads at most.
+#[derive(Debug, Clone, Copy)]
+pub struct XmlLimits {
+    /// Elements inside each other.
+    pub depth: usize,
+    /// Elements in all.
+    pub elements: usize,
+    /// Bytes of text kept per element (the rest is dropped).
+    pub text: usize,
+}
+
+/// [`parse_xml`] with its own caps (F4: a WinRM answer's output stream runs to a few hundred KB of base64).
+pub fn parse_xml_limited(text: &str, limits: XmlLimits) -> Option<Element> {
     let mut stack: Vec<Element> = vec![Element::default()];
     let mut rest = text;
     let mut count = 0usize;
     while let Some(lt) = rest.find('<') {
         let text_part = &rest[..lt];
         if let Some(top) = stack.last_mut() {
-            if !text_part.trim().is_empty() && top.text.len() < 64 * 1024 {
+            if !text_part.trim().is_empty() && top.text.len() < limits.text {
                 top.text.push_str(&unescape(text_part));
             }
         }
@@ -188,7 +211,7 @@ pub fn parse_xml(text: &str) -> Option<Element> {
             continue;
         }
         count += 1;
-        if count > MAX_ELEMENTS || stack.len() > MAX_DEPTH {
+        if count > limits.elements || stack.len() > limits.depth {
             return None;
         }
         let self_closing = inner.ends_with('/');

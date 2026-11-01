@@ -27,6 +27,7 @@
 pub mod admin;
 pub mod linux;
 pub mod networks;
+pub mod windows;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, RwLock, Weak};
@@ -42,9 +43,11 @@ pub use linux::HostSpecs;
 
 use crate::adapters::hypervisor::{Hypervisor, Hypervisors};
 use crate::adapters::remote::{
-    AgentSource, AuthMethod, ConnectOptions, ConnectRequest, ExecResult, ExecSession, RemoteAdapter, SessionSpec,
+    AgentSource, AuthMethod, ConnectOptions, ConnectRequest, ExecResult, ExecSession, RemoteAdapter, ScriptKind,
+    SessionSpec,
 };
 use crate::adapters::vm_hardware::VmHardware;
+use crate::adapters::winrm::WinrmAdapter;
 use crate::domain::{now_rfc3339, Context, Target, TargetRef};
 use crate::error::{CoreError, Result};
 use crate::known_hosts::KnownHosts;
@@ -353,13 +356,30 @@ impl SpecsCollector {
         by: CollectedBy,
     ) -> Result<SessionSpecs> {
         let timeout = self.tuning().specs_timeout;
-        let result = run_with_timeout(exec, linux::SPECS_SCRIPT, linux::MAX_OUTPUT, timeout).await?;
-        let specs = linux::parse(&result.output.stdout);
-        if specs.is_empty() {
-            return Err(CoreError::InvalidInput(
-                "the host answered, but not like Linux: host details need a Linux host".into(),
-            ));
-        }
+        // F4: a WinRM connection runs PowerShell, so a Windows host gets its CIM read.
+        let specs = match exec.script_kind() {
+            ScriptKind::Posix => {
+                let result = run_with_timeout(exec, linux::SPECS_SCRIPT, linux::MAX_OUTPUT, timeout).await?;
+                let specs = linux::parse(&result.output.stdout);
+                if specs.is_empty() {
+                    return Err(CoreError::InvalidInput(
+                        "the host answered, but not like Linux: host details need a Linux host".into(),
+                    ));
+                }
+                specs
+            }
+            ScriptKind::PowerShell => {
+                let result = run_with_timeout(exec, windows::FACTS_SCRIPT, windows::MAX_OUTPUT, timeout).await?;
+                let specs = windows::parse(&result.output.stdout);
+                if specs.is_empty() {
+                    return Err(CoreError::InvalidInput(
+                        "the host answered, but its CIM classes gave nothing: is it Windows with PowerShell 5.1?"
+                            .into(),
+                    ));
+                }
+                specs
+            }
+        };
         let collected_at = now_rfc3339();
         let json = serde_json::to_string(&specs).map_err(|err| CoreError::InvalidInput(err.to_string()))?;
         self.inner
@@ -442,6 +462,8 @@ struct Inner {
     remote: Arc<dyn RemoteAdapter>,
     known_hosts: Arc<KnownHosts>,
     kept: Mutex<HashMap<Uuid, Arc<tokio::sync::Mutex<Kept>>>>,
+    /// F4: the WinRM client for Windows hosts' own connections.
+    winrm: std::sync::RwLock<Arc<dyn WinrmAdapter>>,
 }
 
 /// What [`HostDetails::new`] needs.
@@ -474,6 +496,7 @@ impl HostDetails {
             remote: parts.remote,
             known_hosts: parts.known_hosts,
             kept: Mutex::default(),
+            winrm: std::sync::RwLock::new(Arc::new(crate::adapters::winrm::NoWinrm)),
         });
         // Remotely's own connections close on their own when idle.
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
@@ -493,6 +516,11 @@ impl HostDetails {
 
     pub fn collector(&self) -> &SpecsCollector {
         &self.inner.collector
+    }
+
+    /// F4: the WinRM client a Windows host's own connection uses.
+    pub fn set_winrm(&self, adapter: Arc<dyn WinrmAdapter>) {
+        *locks::write(&self.inner.winrm) = adapter;
     }
 
     /// MO-13: what was last read about the session, if anything. Makes no connection.
@@ -516,6 +544,7 @@ impl HostDetails {
     /// MO-14: services, ports, users, boots and processes, read now.
     pub async fn admin(&self, ctx: &Context, session_id: Uuid) -> Result<AdminReport> {
         let (exec, via) = self.connection(ctx, session_id).await?;
+        linux_only(exec.as_ref())?;
         let timeout = self.inner.collector.tuning().admin_timeout;
         let result = run_with_timeout(exec.as_ref(), admin::ADMIN_SCRIPT, admin::MAX_OUTPUT, timeout).await?;
         Ok(AdminReport {
@@ -535,6 +564,7 @@ impl HostDetails {
             let watched = guest.watched().await?.contains(&session_id);
             return Ok(ServicesRead::NotConnected { watched });
         };
+        linux_only(exec.as_ref())?;
         let timeout = self.inner.collector.tuning().admin_timeout;
         let result = run_with_timeout(exec.as_ref(), admin::SERVICES_SCRIPT, admin::MAX_OUTPUT, timeout).await?;
         let details = admin::parse(&result.output.stdout);
@@ -553,6 +583,7 @@ impl HostDetails {
     /// MO-14: pending updates (apt's lists as they are, or dnf, which may refresh its metadata first).
     pub async fn updates(&self, ctx: &Context, session_id: Uuid) -> Result<UpdatesCheck> {
         let (exec, via) = self.connection(ctx, session_id).await?;
+        linux_only(exec.as_ref())?;
         let timeout = self.inner.collector.tuning().updates_timeout;
         let started = Instant::now();
         let result = tokio::time::timeout(timeout, exec.run(admin::UPDATES_SCRIPT, admin::MAX_OUTPUT))
@@ -670,13 +701,92 @@ impl HostDetails {
         if let Some(exec) = self.inner.metrics.guest().kept_connection(session_id).await {
             return Ok((exec, Via::Dashboard));
         }
-        let spec = self
-            .inner
-            .store
-            .session_spec(ctx, session_id)
-            .await?
-            .ok_or_else(|| CoreError::UnknownTarget(session_id.to_string()))?;
+        let spec = match self.inner.store.session_spec(ctx, session_id).await {
+            Ok(spec) => spec.ok_or_else(|| CoreError::UnknownTarget(session_id.to_string()))?,
+            // F4: a Windows host over WinRM.
+            Err(CoreError::WrongSessionKind { .. }) => {
+                let spec = self
+                    .inner
+                    .store
+                    .winrm_spec(ctx, session_id)
+                    .await?
+                    .ok_or_else(|| CoreError::UnknownTarget(session_id.to_string()))?;
+                return Ok((self.own_winrm_connection(ctx, &spec).await?, Via::OwnConnection));
+            }
+            Err(err) => return Err(err),
+        };
         Ok((self.own_connection(ctx, &spec).await?, Via::OwnConnection))
+    }
+
+    /// F4: Remotely's own WinRM connection to a Windows host, kept like an SSH one (closed when idle, on a vault lock
+    /// or when the panel closes). The saved login only; a certificate not trusted yet fails (open the console first).
+    async fn own_winrm_connection(
+        &self,
+        ctx: &Context,
+        spec: &crate::adapters::winrm::WinrmSpec,
+    ) -> Result<Arc<dyn ExecSession>> {
+        let slot = Arc::clone(locks::lock(&self.inner.kept).entry(spec.id).or_default());
+        let mut kept = slot.lock().await;
+        let key = spec.login_key();
+        if kept.spec_key != key || kept.connection.as_ref().is_some_and(|c| c.is_closed()) {
+            if let Some(old) = kept.connection.take() {
+                old.close().await;
+            }
+        }
+        if kept.connection.is_none() {
+            if spec.missing_password() {
+                return Err(CoreError::AuthFailed(format!(
+                    "no password is saved for '{}'. Save it in the vault and choose it in that session, or open its console first",
+                    spec.name
+                )));
+            }
+            let password = match spec.password_id {
+                Some(id) => {
+                    if self.inner.vault.status() != VaultStatus::Unlocked {
+                        return Err(CoreError::VaultLocked);
+                    }
+                    Some(self.inner.vault.get(ctx, id).await?)
+                }
+                None => None,
+            };
+            let verifier = Arc::new(GuestVerifier {
+                known_hosts: Arc::clone(&self.inner.known_hosts),
+                ctx: *ctx,
+                target: Target {
+                    target: TargetRef::Session { session_id: spec.id },
+                    name: spec.name.clone(),
+                    environment: spec.environment,
+                    protected: false,
+                },
+                record_blocked: true,
+            });
+            let tuning = self.inner.collector.tuning();
+            let adapter = Arc::clone(&locks::read(&self.inner.winrm));
+            let limit = tuning.connect_timeout.saturating_mul(2);
+            let session = tokio::time::timeout(
+                limit,
+                adapter.connect(crate::adapters::winrm::WinrmConnect {
+                    spec,
+                    password,
+                    verifier,
+                    tuning: crate::adapters::winrm::WinrmTuning {
+                        connect_timeout: tuning.connect_timeout,
+                        ..crate::adapters::winrm::WinrmTuning::default()
+                    },
+                }),
+            )
+            .await
+            .map_err(|_| CoreError::Timeout {
+                command: format!("signing in to '{}'", spec.name),
+                seconds: limit.as_secs(),
+            })??;
+            kept.connection = Some(session.exec());
+            kept.spec_key = key;
+        }
+        kept.used = Some(Instant::now());
+        kept.connection
+            .clone()
+            .ok_or_else(|| CoreError::Winrm("no connection".into()))
     }
 
     async fn own_connection(&self, ctx: &Context, spec: &SessionSpec) -> Result<Arc<dyn ExecSession>> {
@@ -768,6 +878,16 @@ impl HostDetails {
             }
             Err(err) => Err(err),
         }
+    }
+}
+
+/// MO-14's reads are Linux's: a Windows host's services and ports are on its System tab (MO-13).
+fn linux_only(exec: &dyn ExecSession) -> Result<()> {
+    match exec.script_kind() {
+        ScriptKind::Posix => Ok(()),
+        ScriptKind::PowerShell => Err(CoreError::InvalidInput(
+            "This read is for Linux hosts. A Windows host's listening ports are on its System tab.".into(),
+        )),
     }
 }
 
