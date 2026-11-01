@@ -154,6 +154,7 @@ import { SettingsPage } from "@/pages/SettingsPage";
 import { TemplatesPage, type TemplatesTab } from "@/pages/TemplatesPage";
 import { TerminalPage } from "@/pages/TerminalPage";
 import { ToolboxPage, type ToolboxRequest } from "@/pages/ToolboxPage";
+import type { ChecksRequest } from "@/components/checks/ChecksTab";
 import { TOOLBOX_TOOLS, type ToolboxTool } from "@/lib/toolbox";
 import { VaultPage } from "@/pages/VaultPage";
 import { VmsPage, type VmPageRequest, type VmPanel } from "@/pages/VmsPage";
@@ -295,6 +296,8 @@ export default function App() {
   const [containerRequest, setContainerRequest] = useState<ContainerRequest | null>(null);
   // FD-09: a Toolbox tool, with the session, VM or host a row handed it.
   const [toolboxRequest, setToolboxRequest] = useState<ToolboxRequest | null>(null);
+  /** MO-08: a check's history, or a new check on a row, for the Dashboard's Checks tab. */
+  const [checksRequest, setChecksRequest] = useState<ChecksRequest | null>(null);
   // QL-25, QL-24, QL-23: the notification centre, the shortcut sheet and the first-run wizard.
   const [centreOpen, setCentreOpen] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
@@ -693,6 +696,10 @@ export default function App() {
           break;
         case "alerts":
           go({ page: "dashboard", tab: "metrics" });
+          break;
+        case "checks":
+          setChecksRequest((prev) => ({ checkId: link.checkId, add: link.add, n: (prev?.n ?? 0) + 1 }));
+          go({ page: "dashboard", tab: "checks" });
           break;
         case "schedule":
           openSchedules({ scheduleId: link.scheduleId });
@@ -1253,6 +1260,7 @@ export default function App() {
                   onActions={openPalette}
                   onOpenVms={show.vms}
                   onOpenSessions={show.sessions}
+                  checksRequest={checksRequest}
                 />
               </ErrorBoundary>
             </section>

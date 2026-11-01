@@ -449,6 +449,8 @@ impl crate::Core {
             .await;
         self.containers.close_all().await;
         self.host_details.close_all().await;
+        // MO-08: the old workspace's checks stop (runs in flight cancelled); the new one's load at the next tick.
+        self.checks.leave().await;
         // FD-09: the toolbox's kept connections to jump hosts.
         self.toolbox.close_all().await;
         self.metrics.leave_workspace().await;

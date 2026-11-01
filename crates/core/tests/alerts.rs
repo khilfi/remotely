@@ -135,6 +135,8 @@ async fn built_in_rules_are_there_once_and_the_quiet_ones_start_off() {
             ("vm-cpu", false),
             ("vm-memory", false),
             ("host-cpu", false),
+            ("check-down", true),
+            ("cert-expiring", true),
         ]
     );
     // A built-in rule keeps its metric and scope, and can't be deleted; reset puts it back.
@@ -402,7 +404,7 @@ async fn editing_or_deleting_a_rule_resolves_its_alerts_and_a_restart_closes_the
     assert_eq!(list.open, 0);
     let pc = list.alerts.iter().find(|a| a.rule_id == memory.id).unwrap();
     assert_eq!(pc.resolution, Some(Resolution::Restarted));
-    assert_eq!(core.alerts.rules().len(), 9, "built-in rules are not added twice");
+    assert_eq!(core.alerts.rules().len(), 11, "built-in rules are not added twice");
 
     // A deleted rule's alerts stay in the list.
     core.alerts.delete_rule(memory.id).await.unwrap();

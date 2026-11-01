@@ -48,6 +48,8 @@ pub enum AlertTargetKind {
     Vm,
     Session,
     ThisPc,
+    /// MO-08: a health check (its id).
+    Check,
 }
 
 impl AlertTargetKind {
@@ -56,6 +58,7 @@ impl AlertTargetKind {
             AlertTargetKind::Vm => "vm",
             AlertTargetKind::Session => "session",
             AlertTargetKind::ThisPc => "thisPc",
+            AlertTargetKind::Check => "check",
         }
     }
 
@@ -64,12 +67,19 @@ impl AlertTargetKind {
             "vm" => Some(AlertTargetKind::Vm),
             "session" => Some(AlertTargetKind::Session),
             "thisPc" => Some(AlertTargetKind::ThisPc),
+            "check" => Some(AlertTargetKind::Check),
             _ => None,
         }
     }
 }
 
-/// A VM (its key), a watched host (its session id) or this PC, with the name it had.
+/// MO-08: the health checks' readings, added to each round's targets (the checks service, [`crate::checks`]).
+pub trait CheckReadings: Send + Sync {
+    /// The active checks of `ctx`'s workspace as the rules read them; none while the checks follow another one.
+    fn check_readings(&self, ctx: &Context) -> Vec<Reading>;
+}
+
+/// A VM (its key), a watched host (its session id), this PC or a health check (its id), with the name it had.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AlertTarget {
@@ -203,6 +213,8 @@ pub struct Alerts {
     tx: broadcast::Sender<AlertEvent>,
     /// Errors are logged once per kind, not every round.
     failing: Mutex<bool>,
+    /// MO-08: the health checks, whose readings each round adds.
+    checks: RwLock<Option<std::sync::Arc<dyn CheckReadings>>>,
 }
 
 impl Alerts {
@@ -226,11 +238,17 @@ impl Alerts {
             directory: tokio::sync::Mutex::new(None),
             tx,
             failing: Mutex::new(false),
+            checks: RwLock::new(None),
         })
     }
 
     fn ctx(&self) -> Context {
         *locks::read(&self.ctx)
+    }
+
+    /// MO-08: the health checks whose readings each round adds.
+    pub fn set_checks(&self, checks: std::sync::Arc<dyn CheckReadings>) {
+        *locks::write(&self.checks) = Some(checks);
     }
 
     /// FD-02: another workspace is shown. The old one's alerts still firing close as gone (its targets left the
@@ -405,7 +423,7 @@ impl Alerts {
     pub async fn evaluate(&self, round: &RecordedRound<'_>) -> Result<()> {
         let rules = self.rules();
         let mut eval = self.eval.lock().await;
-        let snapshot = {
+        let mut snapshot = {
             let mut directory = self.directory.lock().await;
             if directory.as_ref().is_none_or(|d| d.read_at.elapsed() >= DIRECTORY_TTL) {
                 *directory = Some(Directory {
@@ -420,6 +438,10 @@ impl Alerts {
                 None => return Ok(()),
             }
         };
+        let checks = locks::read(&self.checks).clone();
+        if let Some(checks) = checks {
+            snapshot.readings.extend(checks.check_readings(&self.ctx()));
+        }
         let mut by_remotely = HashSet::new();
         if rules.iter().any(|r| r.enabled && r.metric == AlertMetric::Stopped) {
             let now = time::OffsetDateTime::from_unix_timestamp(round.t_ms.div_euclid(1000))
@@ -472,11 +494,16 @@ impl Alerts {
             .ok_or_else(|| CoreError::UnknownTarget(id.to_string()))
     }
 
-    /// A watched host rule needs a saved session.
+    /// A watched host rule needs a saved session; a check's rule (MO-08) a check of this workspace.
     async fn check_scope(&self, scope: &AlertScope) -> Result<()> {
         if let AlertScope::Host { session_id } = scope {
             if self.store.get_session(&self.ctx(), *session_id).await?.is_none() {
                 return Err(CoreError::InvalidInput("Choose a saved session for the rule.".into()));
+            }
+        }
+        if let AlertScope::Check { check_id } = scope {
+            if self.store.get_check(&self.ctx(), *check_id).await?.is_none() {
+                return Err(CoreError::InvalidInput("Choose a health check for the rule.".into()));
             }
         }
         Ok(())
@@ -580,6 +607,7 @@ fn reading(
         disk_mount: fullest.map(|(_, mount)| mount),
         swap,
         unreachable,
+        ..Reading::default()
     }
 }
 

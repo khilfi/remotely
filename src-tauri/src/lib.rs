@@ -3,6 +3,7 @@
 //! [`files`], [`clipboard`] and [`dashboard`], never vmrun or SSH directly.
 
 mod catalog;
+mod checks;
 mod clipboard;
 mod command_panel;
 mod containers;
@@ -399,6 +400,9 @@ fn forward_events(app: &App, core: &Arc<Core>) {
         // VM-14, VM-27: the scheduler on the wall clock; its runs and pauses -> UI.
         schedules::start(app, core);
 
+        // MO-08: the health checks' runner for the shown workspace; its results and changes -> UI.
+        checks::start(app, core);
+
         // QL-04: reachability checks of the sessions the Terminal page's tree shows -> UI.
         let reachability = Arc::clone(&core.reachability);
         tauri::async_runtime::spawn(async move { reachability.run(CancellationToken::new()).await });
@@ -562,6 +566,14 @@ fn commands() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         dashboard::alerts_list,
         dashboard::alerts_acknowledge,
         dashboard::alert_rules,
+        checks::checks_overview,
+        checks::checks_summary,
+        checks::check_history,
+        checks::check_create,
+        checks::check_update,
+        checks::check_pause,
+        checks::check_delete,
+        checks::check_run_now,
         dashboard::alert_rule_create,
         dashboard::alert_rule_update,
         dashboard::alert_rule_delete,

@@ -1895,6 +1895,8 @@ export interface ExportReport {
   folderDefaults: number;
   /** QL-19 saved MultiExec groups. */
   groups: number;
+  /** MO-08 health check definitions. */
+  checks: number;
   /** VM-19 to VM-21: own sizes, images and launch templates. */
   catalog: { sizes: number; images: number; templates: number; stacks: number };
 }
@@ -1939,6 +1941,8 @@ export interface TransferPreview {
   folderDefaults: TransferItem[];
   /** QL-19 saved MultiExec groups. */
   groups: TransferItem[];
+  /** MO-08 health checks; files from before 0.7.0 have none. */
+  checks?: TransferItem[];
   /** VM-19 to VM-21: own sizes, images (by path) and launch templates. */
   catalog: { sizes: TransferItem[]; images: TransferItem[]; templates: TransferItem[]; stacks: TransferItem[] };
   warnings: string[];
@@ -1963,6 +1967,8 @@ export interface TransferReport {
   favourites: TransferCounts;
   /** QL-19 saved MultiExec groups. */
   groups: TransferCounts;
+  /** MO-08 health checks. */
+  checks?: TransferCounts;
   /** VM-19 to VM-21; imagesMissingHere: imported without their file (or golden VM) on this laptop. */
   catalog: {
     sizes: TransferCounts;
@@ -3557,6 +3563,8 @@ export const api = {
     folderDefaults: TransferChoice[];
     /** QL-19 saved MultiExec groups. */
     groups?: TransferChoice[];
+    /** MO-08 health checks. */
+    checks?: TransferChoice[];
     /** VM-19 to VM-21. */
     catalog?: {
       sizes: TransferChoice[];

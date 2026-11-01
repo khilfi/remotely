@@ -6,7 +6,8 @@
 // read: it goes straight to the core's metrics collector, never through the command bus. Actions open the command
 // palette, which submits to the bus like every other page.
 //
-// UX-08: the Map (QL-21's page until 0.6.0) is the Dashboard's second tab.
+// UX-08: the Map (QL-21's page until 0.6.0) is the Dashboard's last tab. MO-08: the Checks tab, between them, runs
+// health checks on a schedule (ChecksTab); the grid can hold a Checks widget too.
 //
 // UX-03, UX-07 (0.6.0): one range for the page's charts (in the header, and in a drill-down, which changes the same
 // one), the round's timing behind "Updated hh:mm", Watch hosts as the one place to watch or stop watching a host,
@@ -20,6 +21,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent }
 import {
   CheckIcon,
   GaugeIcon,
+  HeartPulseIcon,
   LayoutDashboardIcon,
   MonitorIcon,
   NetworkIcon,
@@ -51,6 +53,8 @@ import { Toggle } from "@/components/ui/toggle";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { AlertsWidget } from "@/components/AlertsWidget";
+import { ChecksTab, type ChecksRequest } from "@/components/checks/ChecksTab";
+import { ChecksWidget } from "@/components/checks/ChecksWidget";
 import { EnvBadge, StateBadge } from "@/components/Badges";
 import { CapacityPanel } from "@/components/CapacityPanel";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
@@ -70,7 +74,7 @@ import { ServicesWidget } from "@/components/ServicesWidget";
 import { SortableHead } from "@/components/SortableHead";
 import { ThisPcMemoryChart } from "@/components/ThisPcMemoryChart";
 import { Tip } from "@/components/Tip";
-import { ReasonLine } from "@/components/WhyDisabled";
+import { ReasonLine, WhyDisabled } from "@/components/WhyDisabled";
 import { useVisibility } from "@/hooks/use-poll";
 import {
   api,
@@ -82,7 +86,15 @@ import {
   type HostCapacity,
   type SessionRecord,
 } from "@/lib/api";
-import { dashboardApi, type ChartRange, type DashboardLayout, type LayoutInfo, type Widget } from "@/lib/dashboard-api";
+import {
+  dashboardApi,
+  type ChartRange,
+  type DashboardLayout,
+  type HistoryRange,
+  type LayoutInfo,
+  type Widget,
+} from "@/lib/dashboard-api";
+import { requestLink } from "@/lib/links";
 import { addWidget, cannotAdd, WIDGET_CHOICES, widgetTitle, type WidgetKindName } from "@/lib/dashboard-layout";
 import { formatWhen, plural } from "@/lib/format";
 import { specsSummary } from "@/lib/host-details";
@@ -115,7 +127,7 @@ import { MapPage } from "@/pages/MapPage";
 
 interface Props {
   active: boolean;
-  /** UX-08: Metrics, or the Map (App keeps the tab, so links can open either). */
+  /** UX-08: Metrics, Checks (MO-08) or the Map (App keeps the tab, so links can open any). */
   tab: DashboardTab;
   onTabChange: (tab: DashboardTab) => void;
   /** The map's nodes open their items. */
@@ -128,6 +140,8 @@ interface Props {
   onActions: (vmxPath: string) => void;
   onOpenVms: () => void;
   onOpenSessions: () => void;
+  /** MO-08: a check's history, or a new check on a row, asked for by a link. */
+  checksRequest: ChecksRequest | null;
 }
 
 type SortKey =
@@ -770,7 +784,17 @@ function LayoutBar({
   );
 }
 
-export function DashboardPage({ active, tab, onTabChange, onOpenLink, theme, focus, onConnect, onActions }: Props) {
+export function DashboardPage({
+  active,
+  tab,
+  onTabChange,
+  onOpenLink,
+  theme,
+  focus,
+  onConnect,
+  onActions,
+  checksRequest,
+}: Props) {
   const [overview, setOverview] = useState<DashboardOverview | null>(null);
   const [capacity, setCapacity] = useState<HostCapacity | null>(null);
   const [round, setRound] = useState(0);
@@ -789,6 +813,9 @@ export function DashboardPage({ active, tab, onTabChange, onOpenLink, theme, foc
   const [range, setRange] = useState<ChartRange>("live");
   /** UX-03: Watch hosts, the one place to watch a host (the empty grid opens it too). */
   const [watchOpen, setWatchOpen] = useState(false);
+  /** MO-08: the Checks tab's range (the history only), and its header button's presses. */
+  const [checksRange, setChecksRange] = useState<HistoryRange>("24h");
+  const [addCheck, setAddCheck] = useState(0);
   const readOnly = useReadOnlyReason();
 
   // P8: rounds count only while the page shows and the window is visible; showing it again counts as a round, so
@@ -944,7 +971,16 @@ export function DashboardPage({ active, tab, onTabChange, onOpenLink, theme, foc
       case "thisPcMemory":
         return <ThisPcMemoryChart round={round} range={range} live={reading} theme={theme} height={height - 124} />;
       case "alerts":
-        return <AlertsWidget live={reading} onOpenTarget={(target) => setSelected(target.key)} />;
+        return (
+          <AlertsWidget
+            live={reading}
+            onOpenTarget={(target) =>
+              target.kind === "check" ? requestLink({ kind: "checks", checkId: target.key }) : setSelected(target.key)
+            }
+          />
+        );
+      case "checks":
+        return <ChecksWidget live={reading} />;
       case "services":
         return (
           <ServicesWidget
@@ -985,6 +1021,13 @@ export function DashboardPage({ active, tab, onTabChange, onOpenLink, theme, foc
               vmOf={vmOf}
               onWatch={(id, on) => void watch(id, on)}
             />
+          ) : tab === "checks" ? (
+            <WhyDisabled reason={readOnly}>
+              <Button disabled={readOnly !== null} onClick={() => setAddCheck((n) => n + 1)}>
+                <HeartPulseIcon data-icon="inline-start" />
+                Add a check
+              </Button>
+            </WhyDisabled>
           ) : undefined
         }
         tools={
@@ -1004,6 +1047,10 @@ export function DashboardPage({ active, tab, onTabChange, onOpenLink, theme, foc
               <GaugeIcon />
               Metrics
             </TabsTrigger>
+            <TabsTrigger value="checks">
+              <HeartPulseIcon />
+              Checks
+            </TabsTrigger>
             {/* UX-08: the map, a page of its own until 0.6.0. */}
             <TabsTrigger value="map">
               <NetworkIcon />
@@ -1017,6 +1064,14 @@ export function DashboardPage({ active, tab, onTabChange, onOpenLink, theme, foc
             <RangePicker value={range} onChange={setRange} label="Charts' range" />
             <UpdatedAt cost={cost} rows={rows} />
           </>
+        )}
+        {tab === "checks" && (
+          <RangePicker
+            value={checksRange}
+            onChange={(r) => r !== "live" && setChecksRange(r)}
+            label="Checks' range"
+            live={false}
+          />
         )}
       </PageHeader>
       {/* Mounted while hidden, as the page itself is: widgets read only while the tab shows (live). */}
@@ -1101,6 +1156,15 @@ export function DashboardPage({ active, tab, onTabChange, onOpenLink, theme, foc
             onClose={() => setConfirmReset(false)}
           />
         )}
+      </TabsContent>
+      <TabsContent value="checks" forceMount className="min-h-0 data-[state=inactive]:hidden">
+        <ChecksTab
+          active={active && tab === "checks"}
+          range={checksRange}
+          onRangeChange={setChecksRange}
+          request={checksRequest}
+          addRequest={addCheck}
+        />
       </TabsContent>
       <TabsContent value="map" forceMount className="min-h-0 data-[state=inactive]:hidden">
         <MapPage active={active && tab === "map"} onOpenLink={onOpenLink} />

@@ -1,5 +1,6 @@
 // QL-22 status bar along the bottom of the window: the vault's lock countdown (SS-04's idle lock), the jobs running, the
-// open tunnels (SS-07), the open alerts (MO-07) and the update state (FD-14), then the notification centre's bell
+// open tunnels (SS-07), the open alerts (MO-07), the failing health checks (MO-08) and the update state (FD-14), then the
+// notification centre's bell
 // (QL-25). Each opens what it is about. It reads only what the app already has: the vault's answers (App's activity
 // pings carry the countdown), job events after one read of the recent jobs, the panes' tunnel events, and the alert
 // list's counts after each alert event. Nothing polls; the countdown ticks on its own between the vault's answers.
@@ -11,6 +12,7 @@ import {
   BellDotIcon,
   CableIcon,
   DownloadIcon,
+  HeartPulseIcon,
   KeyRoundIcon,
   ListChecksIcon,
   LockIcon,
@@ -21,6 +23,7 @@ import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { api, type SessionRecord, type UpdateCheck, type VaultInfo } from "@/lib/api";
+import { checksApi } from "@/lib/checks-api";
 import { dashboardApi } from "@/lib/dashboard-api";
 import type { AppLink } from "@/lib/links";
 import { unreadBadge } from "@/lib/notifications";
@@ -28,6 +31,7 @@ import { useNotifications } from "@/lib/notifications-store";
 import { openTunnels, subscribeTunnels } from "@/lib/open-tunnels";
 import {
   alertsText,
+  checksText,
   jobsText,
   OpenJobs,
   reportVault,
@@ -66,6 +70,7 @@ export function StatusBar({ vault, updateCheck, updateProblem, onOpenLink, onOpe
   const [now, setNow] = useState(() => Date.now());
   const jobs = useOpenJobs();
   const alerts = useOpenAlerts();
+  const checks = useFailingChecks();
   const [names, setNames] = useState<Map<string, SessionRecord>>(new Map());
 
   // The vault's status as App knows it starts the countdown too.
@@ -108,6 +113,7 @@ export function StatusBar({ vault, updateCheck, updateProblem, onOpenLink, onOpe
   const jobsStatus = jobsText(jobs.count, jobs.summaries);
   const tunnelsStatus = tunnelsText(tunnels, sessionName);
   const alertsStatus = alertsText(alerts.open, alerts.unacknowledged);
+  const checksStatus = checksText(checks.down, checks.failing);
   const update = updateText(updateCheck, updateProblem);
   const badge = unreadBadge(unread);
 
@@ -159,6 +165,9 @@ export function StatusBar({ vault, updateCheck, updateProblem, onOpenLink, onOpe
         </Popover>
       )}
       {alertsStatus && <Item icon={SirenIcon} status={alertsStatus} onClick={() => onOpenLink({ kind: "alerts" })} />}
+      {checksStatus && (
+        <Item icon={HeartPulseIcon} status={checksStatus} onClick={() => onOpenLink({ kind: "checks" })} />
+      )}
       <div className="ml-auto flex items-center gap-1">
         {update && (
           <Item
@@ -253,6 +262,28 @@ function useOpenJobs() {
     };
   }, [tracker]);
   return { count: tracker.count, summaries: tracker.summaries };
+}
+
+/** MO-08: the shown workspace's down and failing checks: read once, then from each check event (which carries them). */
+function useFailingChecks() {
+  const [counts, setCounts] = useState({ down: 0, failing: 0 });
+  useEffect(() => {
+    let stopped = false;
+    checksApi.summary().then(
+      (s) => {
+        if (!stopped) setCounts({ down: s.down, failing: s.failing });
+      },
+      () => undefined,
+    );
+    const unlisten = checksApi.onEvent((event) => {
+      if (!stopped) setCounts({ down: event.summary.down, failing: event.summary.failing });
+    });
+    return () => {
+      stopped = true;
+      void unlisten.then((stop) => stop());
+    };
+  }, []);
+  return counts;
 }
 
 /** MO-07's open alert counts: read once, then after each alert event (at most one read per round of them). */

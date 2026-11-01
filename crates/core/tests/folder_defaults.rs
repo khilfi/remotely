@@ -991,6 +991,7 @@ fn commit_all(
         vault_password: vault_password.map(pw),
         folder_defaults,
         groups: vec![],
+        checks: vec![],
         catalog: Default::default(),
     }
 }

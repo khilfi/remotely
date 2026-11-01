@@ -165,6 +165,22 @@ export function alertsText(open: number, unacknowledged: number): StatusText | n
   };
 }
 
+// ---- MO-08: health checks ----
+
+/** The checks that are down or failing; null when none is. */
+export function checksText(down: number, failing: number): StatusText | null {
+  const total = down + failing;
+  if (total === 0) return null;
+  const parts = [down > 0 ? `${down} down` : null, failing > 0 ? `${failing} failing, not down yet` : null].filter(
+    (p): p is string => p !== null,
+  );
+  return {
+    label: total === 1 ? "1 check failing" : `${total} checks failing`,
+    title: `Health checks: ${parts.join(", ")}. Open the dashboard's Checks tab.`,
+    tone: down > 0 ? "danger" : "warning",
+  };
+}
+
 // ---- Updates ----
 
 /** FD-14: the last check in words; null before the first one. */

@@ -731,6 +731,7 @@ impl MetricsHistory {
                 removed.minutes += got.minutes;
                 removed.series += got.series;
                 removed.alerts += got.alerts;
+                removed.check_results += got.check_results;
                 pruned.push((ctx, got));
             }
         }
@@ -775,6 +776,7 @@ impl MetricsHistory {
                 minutes = removed.minutes,
                 series = removed.series,
                 alerts = removed.alerts,
+                check_results = removed.check_results,
                 compacted,
                 "pruned old dashboard history"
             );
@@ -846,6 +848,12 @@ pub fn describe(report: &HistoryPruneReport) -> String {
         parts.push(format!(
             "{} that no longer report went with them",
             plural(r.series, "series", "series")
+        ));
+    }
+    if r.check_results > 0 {
+        parts.push(format!(
+            "{} removed",
+            plural(r.check_results, "health check result", "health check results")
         ));
     }
     if report.compacted {

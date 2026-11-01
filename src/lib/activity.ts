@@ -84,6 +84,7 @@ export const EVENT_LABELS: Record<string, string> = {
   setting_changed: "Setting changed",
   alert_acknowledged: "Alert acknowledged",
   alert_rule_changed: "Alert rule changed",
+  check_changed: "Health check changed",
   dashboard_layout_changed: "Dashboard layout changed",
   history_pruned: "Dashboard history pruned",
   journal_purged: "Old job outputs removed",

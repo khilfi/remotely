@@ -23,6 +23,9 @@ export const METRICS: { value: AlertMetric; label: string; hint: string }[] = [
   { value: "swap", label: "Swap", hint: "Swap in use against its size (this PC: its paging files)" },
   { value: "unreachable", label: "Unreachable", hint: "A watched host that can't be reached" },
   { value: "stopped", label: "Stopped", hint: "A VM that stopped running with no Remotely job on it" },
+  { value: "checkDown", label: "Check down", hint: "A health check that failed as many runs in a row as it allows" },
+  { value: "checkSlow", label: "Check slow", hint: "A health check whose last run took longer than this" },
+  { value: "certExpiring", label: "Certificate expiring", hint: "A certificate check with fewer days left than this" },
 ];
 
 export const SCOPES: { value: AlertScopeKind; label: string }[] = [
@@ -32,6 +35,8 @@ export const SCOPES: { value: AlertScopeKind; label: string }[] = [
   { value: "allHosts", label: "Every watched host" },
   { value: "host", label: "One watched host" },
   { value: "thisPc", label: "This PC" },
+  { value: "allChecks", label: "Every health check" },
+  { value: "check", label: "One health check" },
 ];
 
 export const SEVERITIES: { value: Severity; label: string }[] = [
@@ -47,11 +52,39 @@ export function metricLabel(metric: AlertMetric): string {
 }
 
 export function hasThreshold(metric: AlertMetric): boolean {
-  return metric === "cpu" || metric === "memory" || metric === "disk" || metric === "swap";
+  return metric !== "unreachable" && metric !== "stopped" && metric !== "checkDown";
+}
+
+/** Watched on health checks (only check scopes take them). */
+export function onChecks(metric: AlertMetric): boolean {
+  return metric === "checkDown" || metric === "checkSlow" || metric === "certExpiring";
+}
+
+/** A threshold's unit as the editor shows it beside the field. */
+export function thresholdUnit(metric: AlertMetric): string {
+  if (metric === "checkSlow") return "ms";
+  if (metric === "certExpiring") return "days left";
+  return "%";
+}
+
+/** The threshold a new rule of a metric starts with. */
+export function defaultThreshold(metric: AlertMetric): number | null {
+  if (metric === "checkSlow") return 1000;
+  if (metric === "certExpiring") return 14;
+  return hasThreshold(metric) ? 90 : null;
+}
+
+/** A threshold in its unit: "90%", "500 ms", "14 days". */
+export function thresholdText(metric: AlertMetric, value: number): string {
+  if (metric === "checkSlow") return `${Math.round(value)} ms`;
+  if (metric === "certExpiring") return `${Math.round(value)} day${Math.round(value) === 1 ? "" : "s"}`;
+  return pct(value);
 }
 
 /** Whether a metric means anything on a scope (as the core checks it). */
 export function scopeAllows(scope: AlertScopeKind, metric: AlertMetric): boolean {
+  if (scope === "allChecks" || scope === "check") return onChecks(metric);
+  if (onChecks(metric)) return false;
   if (scope === "thisPc") return metric === "cpu" || metric === "memory" || metric === "swap";
   if (scope === "host" || scope === "allHosts") return metric !== "stopped";
   return true;
@@ -74,6 +107,7 @@ function pct(value: number): string {
 export interface ScopeNames {
   vm?: (key: string) => string | undefined;
   session?: (id: string) => string | undefined;
+  check?: (id: string) => string | undefined;
 }
 
 export function scopeText(scope: AlertScope, names: ScopeNames = {}): string {
@@ -90,6 +124,10 @@ export function scopeText(scope: AlertScope, names: ScopeNames = {}): string {
       return `the host ${names.session?.(scope.sessionId) ?? "(a saved session)"}`;
     case "thisPc":
       return "this PC";
+    case "allChecks":
+      return "every health check";
+    case "check":
+      return `the check ${names.check?.(scope.checkId) ?? "(a health check)"}`;
   }
 }
 
@@ -103,8 +141,12 @@ export function conditionText(rule: Pick<AlertRuleInput, "metric" | "threshold" 
       return rule.forSecs > 0
         ? `Stopped without a Remotely action, still off after ${durationText(rule.forSecs)}`
         : "Stopped without a Remotely action";
+    case "checkDown":
+      return `Down${held}`;
+    case "certExpiring":
+      return `Certificate expiring in under ${rule.threshold === null ? "—" : thresholdText(rule.metric, rule.threshold)}`;
     default:
-      return `${metricLabel(rule.metric)} above ${rule.threshold === null ? "—" : pct(rule.threshold)}${held}`;
+      return `${metricLabel(rule.metric)} above ${rule.threshold === null ? "—" : thresholdText(rule.metric, rule.threshold)}${held}`;
   }
 }
 
@@ -132,6 +174,8 @@ export function scopeOfKind(kind: AlertScopeKind, old: AlertScope): AlertScope {
       return { kind, tag: "" };
     case "host":
       return { kind, sessionId: "" };
+    case "check":
+      return { kind, checkId: "" };
     default:
       return { kind };
   }
@@ -148,9 +192,15 @@ export function ruleProblem(input: AlertRuleInput): string | null {
   if (input.scope.kind === "vm" && !input.scope.key.trim()) return "Choose the VM.";
   if (input.scope.kind === "tag" && !input.scope.tag.trim()) return "Choose the tag.";
   if (input.scope.kind === "host" && !input.scope.sessionId) return "Choose the host.";
-  if (hasThreshold(input.metric)) {
-    const t = input.threshold;
-    if (t === null || !Number.isFinite(t) || t <= 0 || t >= 100) {
+  if (input.scope.kind === "check" && !input.scope.checkId) return "Choose the check.";
+  const t = input.threshold;
+  const finite = t !== null && Number.isFinite(t);
+  if (input.metric === "checkSlow") {
+    if (!finite || t < 1 || t > 600_000) return "A check's time must be 1 to 600,000 ms (10 minutes).";
+  } else if (input.metric === "certExpiring") {
+    if (!finite || t < 1 || t > 365) return "The days left must be 1 to 365.";
+  } else if (hasThreshold(input.metric)) {
+    if (!finite || t <= 0 || t >= 100) {
       return "The threshold must be more than 0% and less than 100%.";
     }
   }
@@ -200,7 +250,7 @@ export function notificationText(fired: Alert[]): { title: string; body: string 
   };
 }
 
-/** The reading an alert shows: "97%", or nothing for states. */
+/** The reading an alert shows: "97%", "812 ms", "9 days", or nothing for states. */
 export function alertValue(alert: Alert): string | null {
-  return alert.value === null ? null : pct(alert.value);
+  return alert.value === null ? null : thresholdText(alert.metric, alert.value);
 }

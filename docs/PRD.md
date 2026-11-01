@@ -173,6 +173,13 @@ Toolbox (0.7.0, FD-09, `docs/plan-0.7.md` "Approval tiers"). The tools run from 
 | Wake-on-LAN: one magic packet for a session's, a VM's or a typed MAC | Low |
 | Wake-on-LAN for a session or VM labelled Prod | Medium |
 
+Health checks (0.7.0, MO-08, `docs/plan-0.7.md` "Approval tiers"). Checks run from this PC on their schedule, for the workspace shown; a session behind a jump host is checked from that jump host on one kept connection:
+
+| Action | Tier |
+| --- | --- |
+| A health check's run (ping, TCP port, HTTP(S), certificate, DNS, or a systemd unit's state over SSH), and "Run now" | Not a command: no tier, not audited (reads), allowed by the read-only lock; each result kept in the checks' history |
+| Adding, editing, pausing, resuming or deleting a health check | No tier; audited (`check_changed`), refused by the read-only lock |
+
 | ID | Requirement | Phase |
 | --- | --- | --- |
 | AP-01 | A policy engine classes every state-changing action into a tier; tier rules are editable | MVP |
@@ -200,7 +207,7 @@ Workstation has no per-VM metrics API, so the dashboard combines two sources:
 | MO-05 | Windows guest metrics over WinRM | v2 |
 | MO-06 | Metric history in SQLite (raw for 7 days, 1-minute averages for 90 days) with trend charts | v2 |
 | MO-07 | Thresholds and alerts by desktop notification, email, or Teams or Slack webhook | v2 |
-| MO-08 | Health checks: ping, TCP port, HTTP status, service status | v2 |
+| MO-08 | Health checks: ping, TCP port, HTTP status, service status | 0.7.0 |
 | MO-09 | Top processes per host; killing one goes through the approval flow | v2 |
 | MO-10 | Live log view across hosts (merged, one color per host) with search | v2 |
 | MO-11 | Certificate expiry, pending OS updates and disk-full forecast | v3 |
