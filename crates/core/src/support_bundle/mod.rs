@@ -3,7 +3,8 @@
 //! `manifest.json` with every command, exit code, size, SHA-256 and what was redacted or cut.
 //!
 //! * Hosts are BX-01's targets (saved sessions; a VM only through a chosen or confirmed link), picked in the UI.
-//!   SS-12: SSH sessions only ([`HOSTS_NEED`]); an RDP, VNC, Telnet or serial session is refused, named.
+//!   SSH sessions are Linux hosts and BX-13's WinRM sessions Windows hosts ([`HOSTS_NEED`]); an RDP, VNC, Telnet or
+//!   serial session is refused, named.
 //! * What is collected: presets ([`presets`]: System, Logs, Containers, Network) and custom commands and files, all
 //!   expanded into the spec before the bus rates it, so what is approved is what runs ([`spec::BundleSpec`]).
 //! * The policy engine rates the commands as in Compare hosts: the presets only read, so they are Low (Medium on
@@ -13,7 +14,9 @@
 //! * The zip's place comes from the shell's save dialog (never the UI: `Command::check_from_ui`), never in a Git
 //!   working tree; it is written as hosts give their files and takes its name at the end ([`writer`]).
 //! * Caps, scrubbing and redaction: [`collect`]. The job's end audits `data_exported`.
-//! * F8 adds Windows hosts: a [`collect::BundleHost`] over WinRM and presets of [`presets::HostKind`] Windows.
+//! * BX-13: Windows hosts give the bundle's Windows items ([`spec::BundleSpec::windows_items`]: the Windows presets'
+//!   PowerShell reads, custom PowerShell commands and files) through [`collect::WinrmHost`], rated by the PowerShell
+//!   rules; a bundle with hosts of both kinds rates each by its own.
 
 pub mod collect;
 pub mod presets;
@@ -27,7 +30,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-pub use collect::{BundleHost, FileRead, HostReport, ItemLimits, SshHost};
+pub use collect::{BundleHost, FileRead, HostReport, ItemLimits, SshHost, WinrmHost};
 pub use presets::{HostKind, PresetId, PresetView};
 pub use runner::{BundleActions, BundleRunner};
 pub use spec::{BundleItem, BundleSpec, MAX_BUNDLE_BYTES, MAX_FILE_BYTES, MAX_HOST_BYTES, MAX_ITEMS};
@@ -39,9 +42,8 @@ use crate::save_guard::{self, Saved};
 use crate::store::Store;
 use crate::vault::SecretId;
 
-/// SS-12: why a session of another kind can't be a host: "'console' is a Telnet session, and <this>". F8 widens the
-/// rule for WinRM sessions.
-pub const HOSTS_NEED: &str = "a support bundle collects from SSH sessions only";
+/// SS-12, BX-13: why a session of another kind can't be a host: "'console' is a Telnet session, and <this>".
+pub const HOSTS_NEED: &str = "a support bundle collects from SSH and WinRM sessions only";
 
 /// What the dialog asks for: the hosts (sessions BX-01 resolved), presets, custom commands and files, and how to run.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
@@ -53,6 +55,10 @@ pub struct BundleRequest {
     pub commands: Vec<String>,
     /// Full paths on the hosts; blank ones are left out.
     pub files: Vec<String>,
+    /// BX-13: PowerShell commands for the Windows hosts (WinRM sessions); blank ones are left out.
+    pub windows_commands: Vec<String>,
+    /// BX-13: full paths on the Windows hosts (`C:\…`); blank ones are left out.
+    pub windows_files: Vec<String>,
     pub sudo: bool,
     pub sudo_password_id: Option<SecretId>,
     pub trust_new_host_keys: bool,
@@ -113,17 +119,52 @@ impl SupportBundles {
 
     /// The command the request becomes, saving to `output`.
     async fn command(&self, ctx: &Context, request: &BundleRequest, output: &Path) -> Result<Command> {
-        // SS-12: refused before the bus rates anything. The job's login refuses one again (`Store::session_spec`)
-        // if a session changed kind after the approval.
+        // SS-12: refused before the bus rates anything. The job checks again that each host's connection runs what was
+        // rated, if a session changed kind after the approval.
         let sessions = self.store.list_sessions(ctx).await?;
+        let mut linux = 0;
+        let mut windows = 0;
         for session in sessions.iter().filter(|s| request.session_ids.contains(&s.id)) {
-            session.require_ssh(HOSTS_NEED)?;
+            if session.kind.is_winrm() {
+                windows += 1;
+            } else {
+                session.require_ssh(HOSTS_NEED)?;
+                linux += 1;
+            }
         }
         let mut presets = request.presets.clone();
         presets.sort();
         presets.dedup();
+        let items = presets::expand(HostKind::Linux, &presets, &request.commands, &request.files);
+        let windows_items = presets::expand(
+            HostKind::Windows,
+            &presets,
+            &request.windows_commands,
+            &request.windows_files,
+        );
+        // BX-13: every host has something to give.
+        if linux > 0 && items.is_empty() && !windows_items.is_empty() {
+            return Err(CoreError::InvalidInput(
+                "The Linux hosts have nothing to collect: choose a Linux preset, or add a command or a file for them."
+                    .into(),
+            ));
+        }
+        if windows > 0 && windows_items.is_empty() && !items.is_empty() {
+            return Err(CoreError::InvalidInput(
+                "The Windows hosts have nothing to collect: choose a Windows preset, or add a PowerShell command or a \
+                 file for them."
+                    .into(),
+            ));
+        }
+        // Only the items the picked hosts can use go into the spec, so what is rated is what runs.
+        let (items, windows_items) = match (linux > 0, windows > 0) {
+            (true, false) => (items, Vec::new()),
+            (false, true) => (Vec::new(), windows_items),
+            _ => (items, windows_items),
+        };
         let spec = BundleSpec {
-            items: presets::expand(&presets, &request.commands, &request.files),
+            items,
+            windows_items,
             presets,
             sudo: request.sudo,
             sudo_password_id: request.sudo.then_some(request.sudo_password_id).flatten(),

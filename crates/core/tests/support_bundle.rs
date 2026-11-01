@@ -577,6 +577,7 @@ fn spec(items: Vec<BundleItem>, output: &Path) -> BundleSpec {
     BundleSpec {
         presets: Vec::new(),
         items,
+        windows_items: Vec::new(),
         sudo: false,
         sudo_password_id: None,
         trust_new_host_keys: false,

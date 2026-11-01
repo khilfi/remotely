@@ -16,6 +16,7 @@ use uuid::Uuid;
 use crate::adapters::containers::{EngineKind, ImageRef, PruneWhat};
 use crate::adapters::hypervisor::Hypervisor;
 use crate::adapters::remote::forward::ForwardKind;
+use crate::adapters::remote::ScriptKind;
 use crate::capacity::CapacityChecker;
 use crate::domain::{now_rfc3339, ContainerHost, Context, Environment, Target, TargetRef};
 use crate::error::{CoreError, Result};
@@ -765,6 +766,15 @@ impl Command {
         }
     }
 
+    /// BX-13: the text the policy engine rates for targets whose scripts run in `kind`: a support bundle's Linux or
+    /// Windows commands; the same text in both languages for the rest.
+    pub fn rated_script_for(&self, kind: ScriptKind) -> Option<std::borrow::Cow<'_, str>> {
+        match self {
+            Command::SupportBundle { spec, .. } => Some(spec.rated_script_for(kind).into()),
+            _ => self.rated_script(),
+        }
+    }
+
     /// BX-07: the vault password sudo gets, when the command runs with sudo and one was chosen (a run's or a support
     /// bundle's). `None`: no sudo, or each session's own login password.
     pub fn sudo_password_id(&self) -> Option<SecretId> {
@@ -1038,6 +1048,12 @@ impl Command {
 #[async_trait]
 pub trait TargetDirectory: Send + Sync {
     async fn resolve(&self, ctx: &Context, target: &TargetRef) -> Result<Target>;
+
+    /// BX-13: the language a command's script runs in on this target: PowerShell for a WinRM session or a PowerShell
+    /// tab, the shell's for the rest. The policy engine rates each target's script by its language's rules.
+    async fn script_kind(&self, _ctx: &Context, _target: &TargetRef) -> Result<ScriptKind> {
+        Ok(ScriptKind::Posix)
+    }
 }
 
 /// What happened to a submitted command.
@@ -1240,7 +1256,7 @@ impl UploadDetails {
 }
 
 /// A remote command as the approval dialog and the bulk run editor show it (BX-02, BX-06, BX-07).
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExecDetails {
     /// The whole script, as typed.
@@ -1263,6 +1279,11 @@ pub struct ExecDetails {
     pub run_key: Option<String>,
     /// H9: one host first, and a stop after failures.
     pub rollout: Rollout,
+    /// BX-13: the languages its targets run it in (the shell's, PowerShell's or both), whose rules rated it.
+    pub languages: Vec<ScriptKind>,
+    /// BX-13: a support bundle's Windows commands, one per line, when it has Windows hosts (`script` is its Linux
+    /// hosts').
+    pub windows_script: Option<String>,
 }
 
 /// What a command would need, without submitting it (BX-06: the bulk run editor shows the tier and
@@ -1429,7 +1450,14 @@ impl CommandBus {
         let Some(secret) = command.sudo_password_id() else {
             return Ok(());
         };
-        let new = self.new_sudo_places(ctx, secret, &decision.targets).await?;
+        // BX-13: a Windows host of a support bundle runs without sudo; the password never goes there.
+        let linux: Vec<Target> = decision
+            .targets
+            .iter()
+            .filter(|t| decision.script_kinds.get(&t.target.key()) != Some(&ScriptKind::PowerShell))
+            .cloned()
+            .collect();
+        let new = self.new_sudo_places(ctx, secret, &linux).await?;
         if new.is_empty() {
             return Ok(());
         }
@@ -1795,15 +1823,8 @@ impl CommandBus {
     pub async fn preview(&self, ctx: &Context, command: &Command) -> Result<CommandPreview> {
         let targets = self.resolve_targets(ctx, command).await?;
         self.note_signed_in(command).await;
-        let (mut decision, dangerous) = {
-            let policy = locks::read(&self.policy);
-            let decision = policy.evaluate(command, &targets);
-            let dangerous = command
-                .rated_script()
-                .map(|script| policy.dangerous_details(&script))
-                .unwrap_or_default();
-            (decision, dangerous)
-        };
+        let mut decision = self.decide(ctx, command, &targets).await?;
+        let dangerous = self.dangerous_details(command, &decision);
         self.apply_change_id_rule(ctx, &mut decision).await?;
         Ok(CommandPreview {
             action: decision.action,
@@ -1816,11 +1837,58 @@ impl CommandBus {
         })
     }
 
+    /// BX-06, BX-13: the dangerous-command rules the command's script matches, in each language its targets run (the
+    /// shell's when none is known), each rule once.
+    fn dangerous_details(&self, command: &Command, decision: &Decision) -> Vec<DangerousMatch> {
+        let mut kinds: Vec<ScriptKind> = decision.script_kinds.values().copied().collect();
+        kinds.sort();
+        kinds.dedup();
+        if kinds.is_empty() {
+            kinds.push(ScriptKind::Posix);
+        }
+        let policy = locks::read(&self.policy);
+        let mut out: Vec<DangerousMatch> = Vec::new();
+        for kind in kinds {
+            let Some(script) = command.rated_script_for(kind) else {
+                continue;
+            };
+            for found in policy.dangerous_details_as(&script, kind) {
+                if !out.iter().any(|m| m.rule == found.rule) {
+                    out.push(found);
+                }
+            }
+        }
+        out
+    }
+
     /// For a remote command: what the approval dialog shows about it.
     async fn exec_details(
         &self,
         ctx: &Context,
         command: &Command,
+        decision: &Decision,
+        retry_of: Option<Uuid>,
+    ) -> Result<Option<Box<ExecDetails>>> {
+        let mut details = self.exec_details_of(ctx, command, decision, retry_of).await?;
+        if let Some(details) = details.as_mut() {
+            let mut languages: Vec<ScriptKind> = decision.script_kinds.values().copied().collect();
+            languages.sort();
+            languages.dedup();
+            details.languages = languages;
+            if let Command::SupportBundle { spec, .. } = command {
+                if !spec.windows_items.is_empty() {
+                    details.windows_script = Some(spec.rated_script_for(ScriptKind::PowerShell));
+                }
+            }
+        }
+        Ok(details)
+    }
+
+    async fn exec_details_of(
+        &self,
+        ctx: &Context,
+        command: &Command,
+        decision: &Decision,
         retry_of: Option<Uuid>,
     ) -> Result<Option<Box<ExecDetails>>> {
         let key_script = match command {
@@ -1861,6 +1929,7 @@ impl CommandBus {
                 unreliable: false,
                 run_key: None,
                 rollout: Rollout::default(),
+                ..ExecDetails::default()
             })));
         }
         if let Command::TerminalLine {
@@ -1873,12 +1942,13 @@ impl CommandBus {
                 sudo_password_label: None,
                 trust_new_host_keys: false,
                 timeout_secs: None,
-                dangerous: locks::read(&self.policy).dangerous_details(line),
+                dangerous: self.dangerous_details(command, decision),
                 retry_of: None,
                 multi_exec: true,
                 unreliable: *unreliable,
                 run_key: run_key(keys).map(|key| key.label().to_owned()),
                 rollout: Rollout::default(),
+                ..ExecDetails::default()
             })));
         }
         // FD-04: a bundle's commands, one per line, run on each host like a run's script.
@@ -1911,7 +1981,7 @@ impl CommandBus {
             None => None,
         };
         Ok(Some(Box::new(ExecDetails {
-            dangerous: locks::read(&self.policy).dangerous_details(&script),
+            dangerous: self.dangerous_details(command, decision),
             script,
             sudo,
             sudo_password_label,
@@ -1922,6 +1992,7 @@ impl CommandBus {
             unreliable: false,
             run_key: None,
             rollout,
+            ..ExecDetails::default()
         })))
     }
 
@@ -1978,10 +2049,27 @@ impl CommandBus {
         let targets = self.resolve_targets(ctx, &command).await?;
 
         self.note_signed_in(&command).await;
-        let mut decision = locks::read(&self.policy).evaluate(&command, &targets);
+        let mut decision = self.decide(ctx, &command, &targets).await?;
         self.apply_change_id_rule(ctx, &mut decision).await?;
         if decision.targets.is_empty() {
             return Err(CoreError::AllTargetsProtected);
+        }
+        // BX-07, BX-13: sudo is a Linux host's; PowerShell runs as the session's sign-in user. (A support bundle's sudo
+        // is for its Linux hosts' commands; its Windows hosts have their own.)
+        if matches!(&command, Command::RemoteExec { sudo: true, .. }) {
+            let windows = decision
+                .script_kinds
+                .values()
+                .filter(|k| **k == ScriptKind::PowerShell)
+                .count();
+            if windows > 0 {
+                return Err(CoreError::InvalidInput(format!(
+                    "sudo is for Linux hosts, and {} {} WinRM: PowerShell runs as the session's sign-in user. Run \
+                     without sudo, or leave the Windows hosts out.",
+                    windows,
+                    if windows == 1 { "host is" } else { "hosts are" }
+                )));
+            }
         }
         let impact = self.add_warnings(ctx, &command, &mut decision).await;
         // VM-04, VM-21, VM-24: a snapshot or VM delete that linked clones stop on every VM is refused before anything is
@@ -2303,7 +2391,7 @@ impl CommandBus {
             reasons: decision.reasons.clone(),
             warnings: decision.warnings.clone(),
             impact,
-            exec: self.exec_details(ctx, command, retry_of).await?,
+            exec: self.exec_details(ctx, command, decision, retry_of).await?,
             upload: UploadDetails::of(command),
             tunnel: TunnelDetails::of(command),
             deploy: self
@@ -2364,7 +2452,8 @@ impl CommandBus {
             .map(|t| (t.target.key(), t))
             .collect();
         let mut changes = Vec::new();
-        for target in &now {
+        let kinds = self.script_kinds(&pending.ctx, &pending.command, &now).await?;
+        for (i, target) in now.iter().enumerate() {
             let Some(was) = before.get(&target.target.key()) else {
                 continue;
             };
@@ -2372,9 +2461,45 @@ impl CommandBus {
                 changes.push(format!("{} is protected now", target.name));
             } else if target.environment == Environment::Prod && was.environment != Environment::Prod {
                 changes.push(format!("{} is labelled Prod now", target.name));
+            } else if let (Some(rated), Some(kind)) =
+                (pending.decision.script_kinds.get(&target.target.key()), kinds.get(i))
+            {
+                // BX-13: a session edited to another kind since: its script would run in another language.
+                if rated != kind {
+                    let language = match kind {
+                        ScriptKind::PowerShell => "PowerShell",
+                        ScriptKind::Posix => "a shell",
+                    };
+                    changes.push(format!("{} runs {language} now", target.name));
+                }
             }
         }
         Ok((now, changes))
+    }
+
+    /// BX-13: the language each target runs the command's script in (targets in order), for commands with one; empty
+    /// for the rest. A Type in all tabs line goes to tabs of one language: its keys mean different things to a shell
+    /// and to a PowerShell tab.
+    async fn script_kinds(&self, ctx: &Context, command: &Command, targets: &[Target]) -> Result<Vec<ScriptKind>> {
+        if command.rated_script().is_none() {
+            return Ok(Vec::new());
+        }
+        let mut kinds = Vec::with_capacity(targets.len());
+        for target in targets {
+            kinds.push(self.directory.script_kind(ctx, &target.target).await?);
+        }
+        if matches!(command, Command::TerminalLine { .. }) && kinds.windows(2).any(|pair| pair[0] != pair[1]) {
+            return Err(CoreError::InvalidInput(
+                "A line typed in all tabs goes to SSH tabs or to PowerShell tabs, not both at once.".into(),
+            ));
+        }
+        Ok(kinds)
+    }
+
+    /// The policy engine's answer for the command on these targets, each rated in its own language (BX-13).
+    async fn decide(&self, ctx: &Context, command: &Command, targets: &[Target]) -> Result<Decision> {
+        let kinds = self.script_kinds(ctx, command, targets).await?;
+        Ok(locks::read(&self.policy).evaluate_on(command, targets, &kinds))
     }
 
     /// AP-01: the approval again, for the targets as they are now, under the same id. Nothing runs; the
@@ -2382,7 +2507,10 @@ impl CommandBus {
     async fn ask_again(&self, request_id: Uuid, pending: Pending, now: Vec<Target>, changes: Vec<String>) -> CoreError {
         let ctx = pending.ctx;
         self.note_signed_in(&pending.command).await;
-        let mut decision = locks::read(&self.policy).evaluate(&pending.command, &now);
+        let mut decision = match self.decide(&ctx, &pending.command, &now).await {
+            Ok(decision) => decision,
+            Err(err) => return err,
+        };
         if let Err(err) = self.apply_change_id_rule(&ctx, &mut decision).await {
             return err;
         }
@@ -2759,6 +2887,7 @@ mod tests {
                 targets: vec![],
                 spec: Box::new(crate::support_bundle::BundleSpec {
                     presets: vec![crate::support_bundle::PresetId::System],
+                    windows_items: Vec::new(),
                     items: vec![
                         crate::support_bundle::BundleItem::command("uname -a"),
                         crate::support_bundle::BundleItem::file("/etc/os-release"),

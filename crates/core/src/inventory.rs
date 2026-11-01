@@ -30,6 +30,7 @@ use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 
 use crate::adapters::hypervisor::{Hypervisor, Hypervisors};
+use crate::adapters::remote::ScriptKind;
 use crate::adapters::virtualbox::{self, VboxListedVm, VboxVmInfo, VirtualBoxAdapter};
 use crate::adapters::vmware::{path_key, with_backslashes, ToolsState, VmxInfo};
 use crate::command_bus::TargetDirectory;
@@ -936,6 +937,22 @@ impl TargetDirectory for StoreDirectory {
                 protected: false,
             }),
         }
+    }
+
+    /// BX-13: a WinRM session runs PowerShell, and so does a PowerShell tab (by the tab's own kind: a session edited
+    /// since the tab opened doesn't change what the tab runs).
+    async fn script_kind(&self, ctx: &Context, target: &TargetRef) -> Result<ScriptKind> {
+        Ok(match target {
+            TargetRef::Session { session_id } => match self.store.get_session(ctx, *session_id).await? {
+                Some(session) if session.kind.is_winrm() => ScriptKind::PowerShell,
+                _ => ScriptKind::Posix,
+            },
+            TargetRef::Terminal { terminal_id, .. } => match self.terminals.as_ref().and_then(|t| t.pane_info(*terminal_id)) {
+                Some(info) if info.kind == crate::terminal::PaneKind::Powershell => ScriptKind::PowerShell,
+                _ => ScriptKind::Posix,
+            },
+            _ => ScriptKind::Posix,
+        })
     }
 }
 

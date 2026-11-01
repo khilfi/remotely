@@ -118,7 +118,8 @@ impl BundleActions for BundleRunner {
 
     async fn collect(&self, job_id: Uuid, target: &Target, host: &dyn BundleHost) -> Result<HostReport> {
         let bundle = self.bundle(job_id)?;
-        let items = bundle.spec().items.clone();
+        // BX-13: a Windows host gives the Windows items.
+        let items = bundle.spec().items_for(host.kind()).to_vec();
         let names = entry_names(&items);
         collect_host(
             &bundle,

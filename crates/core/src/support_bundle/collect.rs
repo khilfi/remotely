@@ -163,6 +163,111 @@ impl BundleHost for SshHost {
     }
 }
 
+/// BX-13: a Windows host over WinRM: each command in a PowerShell of its own (`ExecSession::run` of a WinRM
+/// connection), and each file read by a fixed PowerShell read of Remotely's own (never the user's text), as the
+/// sign-in user: at most `max_bytes + 1` bytes, sent back in base64, so a binary file is told apart and a big one
+/// never travels whole.
+pub struct WinrmHost {
+    session: Arc<dyn ExecSession>,
+    address: String,
+    secrets: Vec<SecretString>,
+}
+
+impl WinrmHost {
+    /// `secrets`: the sign-in password, if the session has one.
+    pub fn new(session: Arc<dyn ExecSession>, address: String, secrets: Vec<SecretString>) -> Self {
+        Self {
+            session,
+            address,
+            secrets,
+        }
+    }
+
+    pub async fn close(&self) {
+        self.session.close().await;
+    }
+}
+
+/// The PowerShell that reads at most `limit` bytes of `path`: its size on one line, then the bytes in base64.
+pub(crate) fn windows_read_script(path: &str, limit: u64) -> String {
+    let path = crate::adapters::winrm::console::single_quoted(path);
+    format!(
+        "$ErrorActionPreference = 'Stop'\n\
+         $i = Get-Item -LiteralPath {path} -Force\n\
+         if ($i.PSIsContainer) {{ throw 'it is a folder' }}\n\
+         $f = [System.IO.File]::Open($i.FullName, 'Open', 'Read', 'ReadWrite')\n\
+         try {{\n\
+         $n = [Math]::Min([int64]$f.Length, [int64]{limit})\n\
+         $b = New-Object byte[] $n\n\
+         $r = 0\n\
+         while ($r -lt $n) {{ $k = $f.Read($b, $r, $n - $r); if ($k -le 0) {{ break }}; $r += $k }}\n\
+         [Console]::Out.WriteLine([string]$i.Length)\n\
+         [Console]::Out.WriteLine([Convert]::ToBase64String($b, 0, $r))\n\
+         }} finally {{ $f.Close() }}\n"
+    )
+}
+
+#[async_trait]
+impl BundleHost for WinrmHost {
+    fn kind(&self) -> HostKind {
+        HostKind::Windows
+    }
+
+    fn address(&self) -> String {
+        self.address.clone()
+    }
+
+    fn peer_ip(&self) -> Option<IpAddr> {
+        self.session.peer_ip()
+    }
+
+    async fn run(&self, command: &str, max_bytes: usize) -> Result<ExecResult> {
+        self.session.run(command, max_bytes).await
+    }
+
+    async fn read(&self, path: &str, max_bytes: u64) -> Result<FileRead> {
+        let limit = max_bytes.saturating_add(1);
+        // Base64 is 4 characters for 3 bytes; the size line and line breaks fit in the rest.
+        let room = usize::try_from(limit.saturating_mul(4) / 3 + 1024).unwrap_or(usize::MAX);
+        let result = self.session.run(&windows_read_script(path, limit), room).await?;
+        if result.exit_code != Some(0) || result.output.truncated {
+            let why = result
+                .output
+                .stderr
+                .lines()
+                .chain(result.output.stdout.lines())
+                .map(str::trim)
+                .find(|l| !l.is_empty())
+                .unwrap_or("PowerShell could not read it")
+                .to_owned();
+            return Err(CoreError::InvalidInput(why));
+        }
+        let mut lines = result.output.stdout.lines().map(str::trim).filter(|l| !l.is_empty());
+        let size: u64 = lines
+            .next()
+            .and_then(|l| l.parse().ok())
+            .ok_or_else(|| CoreError::InvalidInput("PowerShell gave no size for it".into()))?;
+        let mut bytes = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, lines.next().unwrap_or(""))
+            .map_err(|_| CoreError::InvalidInput("PowerShell's answer could not be read".into()))?;
+        let cap = usize::try_from(max_bytes).unwrap_or(usize::MAX);
+        let more = bytes.len() > cap || size > max_bytes;
+        bytes.truncate(cap);
+        Ok(FileRead {
+            size: size.max(bytes.len() as u64),
+            bytes,
+            more,
+        })
+    }
+
+    fn secrets(&self) -> &[SecretString] {
+        &self.secrets
+    }
+
+    fn lost(&self) -> bool {
+        self.session.is_closed()
+    }
+}
+
 /// What one host gave.
 #[derive(Debug, Clone, Default)]
 pub struct HostReport {

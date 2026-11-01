@@ -35,7 +35,7 @@ use russh::keys::agent::client::AgentClient;
 use russh::keys::agent::AgentIdentity;
 use russh::keys::{Algorithm, HashAlg, PrivateKey, PrivateKeyWithHashAlg, PublicKeyOrCertificate};
 use russh::{ChannelMsg, Disconnect, MethodKind, MethodSet};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
@@ -316,7 +316,7 @@ pub trait ExecSession: Send + Sync {
 }
 
 /// F4: the language an [`ExecSession`]'s scripts are in.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum ScriptKind {
     /// `sh` and its kin, over SSH.

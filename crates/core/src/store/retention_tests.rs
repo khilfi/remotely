@@ -336,6 +336,7 @@ async fn the_purge_empties_a_support_bundles_commands_and_files() {
         targets: vec![],
         spec: Box::new(BundleSpec {
             presets: vec![],
+            windows_items: Vec::new(),
             items: vec![
                 BundleItem::command("journalctl -u app"),
                 BundleItem::file("/etc/app.conf"),
