@@ -312,6 +312,8 @@ export type Command =
   | { type: "imageConvert"; targets: TargetRef[]; spec: Record<string, unknown> }
   /** VM-17, CV-02: an export. Never submitted by the UI: `exportSubmit` builds it in the core after a folder dialog. */
   | { type: "vmExport"; targets: TargetRef[]; spec: Record<string, unknown> }
+  /** FD-04: a support bundle. Never submitted by the UI: `bundleSubmit` builds it in the core after a save dialog. */
+  | { type: "supportBundle"; targets: TargetRef[]; spec: Record<string, unknown> }
   /** FD-09: a Wake-on-LAN magic packet. One target: the session or VM it wakes, or the app for a MAC typed alone. */
   | { type: "wakeOnLan"; targets: TargetRef[]; wake: WakeSpec };
 
@@ -320,6 +322,50 @@ export interface WakeSpec {
   mac: string;
   destination: { kind: "adapter"; address: string } | { kind: "address"; address: string };
   port: number;
+}
+
+// ---- FD-04 support bundles ----
+
+export type BundlePresetId = "system" | "logs" | "containers" | "network";
+
+/** One thing collected from each host: a command's output, or a file read over SFTP as the login user. */
+export type BundleItem = { kind: "command"; command: string } | { kind: "file"; path: string };
+
+export interface BundlePreset {
+  id: BundlePresetId;
+  hostKind: "linux";
+  label: string;
+  description: string;
+  items: BundleItem[];
+}
+
+export interface BundleLimits {
+  fileBytes: number;
+  hostBytes: number;
+  bundleBytes: number;
+  maxItems: number;
+}
+
+/** What the support bundle dialog asks for. */
+export interface BundleRequest {
+  sessionIds: string[];
+  presets: BundlePresetId[];
+  commands: string[];
+  files: string[];
+  sudo: boolean;
+  sudoPasswordId: string | null;
+  trustNewHostKeys: boolean;
+  timeoutSecs: number | null;
+  rollout: Rollout;
+}
+
+/** A support bundle as the approval dialog shows it (its commands are in `exec`). */
+export interface BundleDetails {
+  presets: string[];
+  files: string[];
+  /** Where the zip is saved. */
+  output: string;
+  limits: BundleLimits;
 }
 
 /** VM-11: what a network adapter is attached to. */
@@ -543,6 +589,8 @@ export interface ApprovalRequest {
   capacity?: DeployCapacity | null;
   /** VM-14, VM-27: a schedule's approval: when it runs and what each run does. */
   standing?: StandingDetails | null;
+  /** FD-04: a support bundle's files and where the zip goes. */
+  bundle?: BundleDetails | null;
 }
 
 /** VM-14, VM-27: a schedule as its approval dialog shows it (the approval holds for each of its runs). */
@@ -3899,6 +3947,15 @@ export const api = {
   filesRetry: (transferId: string) => invoke<Retried>("files_retry", { transferId }),
   /** SS-08: Explorer at a finished download. */
   filesOpenFolder: (transferId: string) => invoke<void>("files_open_folder", { transferId }),
+  /** FD-04: the support bundle's presets, each with its commands and files. */
+  bundlePresets: () => invoke<BundlePreset[]>("bundle_presets"),
+  bundleLimits: () => invoke<BundleLimits>("bundle_limits"),
+  /** FD-04: the tier the bundle would get now. A read. */
+  bundlePreview: (request: BundleRequest) => invoke<CommandPreview>("bundle_preview", { request }),
+  /** FD-04: a save dialog for the zip, then the bus. null: the dialog was closed. */
+  bundleSubmit: (request: BundleRequest) => invoke<SubmitOutcome | null>("bundle_submit", { request }),
+  /** FD-04: Explorer at a finished bundle. */
+  bundleShowFolder: (jobId: string) => invoke<void>("bundle_show_folder", { jobId }),
   onTransfer: (handler: (transfer: TransferInfo) => void): Promise<UnlistenFn> =>
     listen<TransferInfo>("files://transfer", (e) => handler(e.payload)),
   onFilesDropped: (handler: (dropped: DroppedFiles) => void): Promise<UnlistenFn> =>

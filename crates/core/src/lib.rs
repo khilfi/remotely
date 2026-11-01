@@ -49,6 +49,8 @@
 //!     adapters::host_networks; changing a forward is a command on the bus. vm_insight (VM-25): a VM's logs and
 //!     timeline; waste (VM-16, VM-14): the waste finder's report. Reads only
 //!   notifications (QL-25): the notification centre's history, in memory and redacted
+//!   support_bundle (FD-04): commands' output and files from many hosts into one zip; collecting is a command on the
+//!     bus, which the job runner carries out on each host's kept connection (SFTP for files)
 //!   toolbox (FD-09): ping, trace route, DNS, port checks and certificates from this PC (behind a jump host, ports and
 //!     certificates from it) ──► adapters::net_tools; reads only. Wake-on-LAN is a command on the bus
 //! ```
@@ -99,6 +101,7 @@ pub mod snippets;
 pub mod ssh_keys;
 pub mod stacks;
 pub mod store;
+pub mod support_bundle;
 pub mod terminal;
 pub mod toolbox;
 pub mod transfer;
@@ -346,6 +349,9 @@ pub struct Core {
     pub convert: convert::service::Conversions,
     /// CV-03: what the job runner converts with; tests shorten its waits.
     converter: Arc<convert::Converter>,
+    /// FD-04: support bundles from many hosts (presets, preview, submit, where one was saved). Collecting is a command
+    /// on [`Core::bus`].
+    pub bundles: support_bundle::SupportBundles,
 }
 
 /// What lets go of decrypted secrets when the vault locks ([`Core::spawn_lock_watch`]).
@@ -619,6 +625,9 @@ impl Core {
         jobs.set_converter(converter.clone());
         deployer.set_converter(Arc::clone(&converter));
         let convert = convert::service::Conversions::new(store.clone(), Arc::clone(&converter), Arc::clone(&bus));
+        // FD-04: a support bundle is a job; the job runner writes its zip through the bundle runner.
+        jobs.set_bundles(Arc::new(support_bundle::BundleRunner::new(store.clone())));
+        let bundles = support_bundle::SupportBundles::new(store.clone(), Arc::clone(&bus));
         let deploy = deploy::service::Deploys::new(
             store.clone(),
             catalog.clone(),
@@ -666,6 +675,7 @@ impl Core {
             waste,
             convert,
             converter,
+            bundles,
             workspaces: workspaces::Workspaces::new(store.clone(), current.clone()),
             current: current.clone(),
             home,

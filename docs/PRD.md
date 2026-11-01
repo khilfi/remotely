@@ -165,6 +165,14 @@ Schedules (0.5.0, VM-14 and VM-27, `docs/plan-0.5.md` "Approval tiers"):
 | A run after the schedule was edited, a VM became Prod or protected, got its tag or joined its stack, or the rules that rated it changed | Doesn't run: the schedule pauses and asks again |
 | Creating, editing, pausing, resuming and deleting schedules; the snapshot chain warnings' limits | No tier beyond the schedule's approval; audited |
 
+Support bundles (0.7.0, FD-04, `docs/plan-0.7.md` "Approval tiers"). The hosts are saved SSH sessions (SS-12: an RDP, VNC, Telnet or serial session is refused); a Prod-labelled one moves the bundle up one tier, and protected ones are skipped:
+
+| Action | Tier |
+| --- | --- |
+| Collect a support bundle of the presets (System, Logs, Containers, Network) or other read-only commands, and files (read over SFTP as the login user, never with sudo) | Low; Medium on Prod |
+| A bundle with a command that is not read-only, or one flagged dangerous | As a Compare hosts run of its commands: Medium (High on 5 or more hosts), or High for a dangerous one |
+| Save the zip (audited `data_exported`, never into a Git working tree) | Part of the bundle's job |
+
 Toolbox (0.7.0, FD-09, `docs/plan-0.7.md` "Approval tiers"). The tools run from this PC; a session behind a jump host has its ports and certificate checked from that jump host (SS-07). A Prod-labelled target moves Wake-on-LAN up one tier, and a protected one is skipped:
 
 | Action | Tier |
@@ -223,7 +231,7 @@ These features are for work at customer sites: keeping engagements apart, sharin
 | FD-01 | Command palette (Ctrl+K), full keyboard use, dark and light themes | MVP |
 | FD-02 | Customer workspaces (0.5.0): sessions, VMs, templates, stacks, schedules, vault items, jobs, audit log, rules and per-engagement settings kept separate per engagement; switched from the top bar; an FD-07 export holds one workspace | 0.5.0 |
 | FD-03 | Presentation mode: mask IPs, hostnames, usernames and secrets on screen; optional read-only lock | v2 |
-| FD-04 | Support bundle: collect logs, configs and system info from many hosts into one timestamped zip | v2 |
+| FD-04 | Support bundle (0.7.0): collect logs, configs and system info from many hosts into one timestamped zip, with a folder per host and a manifest; presets and custom commands and files, secrets redacted, caps of 10 MB a file, 100 MB a host and 1 GB a bundle | 0.7.0 |
 | FD-05 | Inventory export (OS, IPs, MACs, CPU, RAM, packages, open ports) to Excel | v2 |
 | FD-06 | Markdown notes per host, linked to its credentials and runbooks | v2 |
 | FD-07 | Encrypted backup, export and import of sessions, settings and vault; also how sessions are shared with teammates | v2 |

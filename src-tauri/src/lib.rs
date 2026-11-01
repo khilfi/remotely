@@ -19,6 +19,7 @@ mod multiexec;
 mod navigation;
 mod schedules;
 mod stacks;
+mod support_bundle;
 mod terminal;
 mod terminal_rules;
 mod toolbox;
@@ -740,6 +741,12 @@ fn commands() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         files::files_cancel,
         files::files_retry,
         files::files_open_folder,
+        // FD-04 support bundles.
+        support_bundle::bundle_presets,
+        support_bundle::bundle_limits,
+        support_bundle::bundle_preview,
+        support_bundle::bundle_submit,
+        support_bundle::bundle_show_folder,
         // FD-02 workspaces, AP-08 change ID rule.
         workspaces::workspaces_list,
         workspaces::workspace_current,

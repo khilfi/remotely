@@ -216,6 +216,13 @@ export const HELP = {
       "Its second view compares the lines you typed in all tabs, with what each terminal answered, so you don't type them again.",
     ],
   },
+  supportBundle: {
+    title: "Support bundle",
+    body: [
+      "Runs the same commands on each host over SSH and reads the chosen files over SFTP as the session's user (never with sudo), into one zip with a folder per host and a manifest of what ran, sizes and checksums. Remote desktop, VNC, Telnet and serial sessions can't be hosts. The presets only read.",
+      "What looks like a password, token or private key is redacted in every file, but look through the zip before you share it. Each file keeps up to 10 MB, each host 100 MB and the bundle 1 GB; what is cut or left out is in the manifest.",
+    ],
+  },
   recordedLines: {
     title: "Recorded lines",
     body: [
