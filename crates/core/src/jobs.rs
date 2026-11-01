@@ -603,6 +603,8 @@ pub struct JobRunner {
     stacks: RwLock<Option<Arc<dyn crate::stacks::StackActions>>>,
     /// CV-03, VM-17: what converts images and exports VMs (set once the core is put together).
     converter: RwLock<Option<Arc<dyn crate::convert::runner::ConvertActions>>>,
+    /// FD-09: what sends Wake-on-LAN's magic packet (set once the core is put together).
+    network_tools: RwLock<Option<Arc<dyn crate::adapters::net_tools::NetworkTools>>>,
     exec_tuning: RwLock<ExecTuning>,
     /// Read when a job starts, so a changed setting applies to the next job.
     limits: RwLock<JobLimits>,
@@ -649,6 +651,7 @@ impl JobRunner {
             deployer: RwLock::new(None),
             stacks: RwLock::new(None),
             converter: RwLock::new(None),
+            network_tools: RwLock::new(None),
             exec_tuning: RwLock::new(ExecTuning::default()),
             limits: RwLock::new(limits),
             events,
@@ -703,6 +706,11 @@ impl JobRunner {
     /// CV-03, VM-17: what converts images and exports VMs.
     pub fn set_converter(&self, converter: Arc<dyn crate::convert::runner::ConvertActions>) {
         *locks::write(&self.converter) = Some(converter);
+    }
+
+    /// FD-09: what sends a Wake-on-LAN magic packet.
+    pub fn set_network_tools(&self, tools: Arc<dyn crate::adapters::net_tools::NetworkTools>) {
+        *locks::write(&self.network_tools) = Some(tools);
     }
 
     /// BX-02: connect timeout, agent and output cap of bulk runs (tests shorten them).
@@ -1818,6 +1826,20 @@ impl JobRunner {
                     ..TargetOutcome::done()
                 })
             }
+            // FD-09: one magic packet, for the one session, VM or typed MAC.
+            (Command::WakeOnLan { wake, .. }, TargetRef::Vm { .. } | TargetRef::Session { .. } | TargetRef::App) => {
+                if token.is_cancelled() {
+                    return Err(CoreError::Cancelled);
+                }
+                let tools = locks::read(&self.network_tools)
+                    .clone()
+                    .ok_or_else(|| CoreError::NotImplemented("Wake-on-LAN"))?;
+                let note = crate::toolbox::wake::send(tools.as_ref(), wake).await?;
+                Ok(TargetOutcome {
+                    note: Some(note),
+                    ..TargetOutcome::done()
+                })
+            }
             // VM-21, VM-22, VM-10: one new VM, with its after-deploy steps. Cancel stops it and removes what this job
             // made for it; VMs already made stay.
             (Command::Deploy { spec: deploy, .. }, TargetRef::NewVm { name, .. }) => {
@@ -2223,7 +2245,11 @@ impl JobRunner {
             // SS-10: pressing Enter is instant; every terminal at once, so they start together.
             Command::TerminalLine { targets, .. } => targets.len(),
             // SS-08: one terminal, its files one after another. SS-07: one tunnel on one terminal. VM-11: one forward.
-            Command::FileUpload { .. } | Command::OpenTunnel { .. } | Command::HostNetwork { .. } => 1,
+            // FD-09: one packet.
+            Command::FileUpload { .. }
+            | Command::OpenTunnel { .. }
+            | Command::HostNetwork { .. }
+            | Command::WakeOnLan { .. } => 1,
             // VM-21: each VM copies or writes whole disks, so two at a time keep this PC's disk usable.
             Command::Deploy { .. } => limits.vm_ops.min(crate::deploy::PARALLEL_VMS),
             // VM-08: within a step, as the commands it stands for.
@@ -2393,6 +2419,7 @@ fn safety_verb(command: &Command) -> &'static str {
             crate::stacks::StackOp::Teardown { .. } => "teardown",
         },
         Command::HostNetwork { .. } => "port forward",
+        Command::WakeOnLan { .. } => "wake-up",
         Command::ImageConvert { .. } => "conversion",
         Command::VmExport { .. } => "export",
     }

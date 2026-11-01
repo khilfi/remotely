@@ -9,6 +9,7 @@ pub mod github;
 pub mod host_counters;
 pub mod host_networks;
 pub mod hypervisor;
+pub mod net_tools;
 pub mod network;
 pub mod paging;
 pub mod remote;

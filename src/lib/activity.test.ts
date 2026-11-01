@@ -189,6 +189,7 @@ test("kinds come from a job's action, or an entry's event", () => {
   assert.equal(kindOfAction("pruneVolumes"), "containers");
   assert.equal(kindOfAction("imageConvert"), "vms");
   assert.equal(kindOfAction("appUpdate"), "app");
+  assert.equal(kindOfAction("wakeOnLan"), "sessions");
   assert.equal(kindOfEvent("host_key_trusted"), "sessions");
   assert.equal(kindOfEvent("folder_hook_installed"), "sessions");
   assert.equal(kindOfEvent("session_changed"), "sessions");

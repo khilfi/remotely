@@ -8,7 +8,7 @@ import { movedPageEntries, PAGES } from "./navigation.ts";
 /** The page shortcuts for the sheet: the sidebar's pages in order, then the tabs that were pages and kept theirs. */
 export function pageShortcuts(): { label: string; shortcut: string }[] {
   return [
-    ...PAGES.map((p) => ({ label: p.label, shortcut: p.shortcut })),
+    ...PAGES.flatMap((p) => (p.shortcut ? [{ label: p.label, shortcut: p.shortcut }] : [])),
     ...movedPageEntries().flatMap((m) => (m.shortcut ? [{ label: m.label, shortcut: m.shortcut }] : [])),
   ];
 }

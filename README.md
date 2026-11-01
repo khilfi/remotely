@@ -865,6 +865,27 @@ CT-01 and CT-02 (0.4.0), Ctrl+3: Docker and Podman on SSH hosts, and Docker Desk
 Not done here: a shell in Docker Desktop's containers (it needs a terminal on this PC, which Remotely doesn't have),
 compose stacks as a whole (the Compose project shows on each container), creating containers, and image builds.
 
+### Toolbox
+
+FD-09 (0.7.0): network tools in the sidebar's Remote group, opened from Ctrl+K or a session's or VM's **Toolbox**
+menu, which fills in the target. Each tab keeps its last 20 inputs in the window's local storage.
+
+- **Reads only**: ping (Windows' ICMP API, no administrator rights), trace route (30 hops, 3 requests each, names only
+  when asked), DNS lookups (A, AAAA, CNAME, MX, TXT, NS, SOA, PTR, SRV, CAA through Windows' resolver or a server you
+  type), port checks (a TCP connection to each of up to 100 ports, closed again at once; optionally the service's
+  first 256 bytes, without control characters), the certificate viewer and the subnet calculator (IPv4 and IPv6, in
+  the window). None is a command: no tier, not audited, and they work while presenting with the read-only lock.
+- **Certificates**: a TLS handshake with SNI that takes whatever chain the server sends, so a bad one can be read
+  too; then Windows checks it against its trust store with only what this PC has (no root, intermediate or revocation
+  list is downloaded, and revocation isn't checked), and the name is checked against the leaf's alternative names.
+  A `.crt`, `.cer` or `.pem` file opens the same way.
+- **Jump hosts**: a session behind one has its ports and certificate checked from that jump host, over an open
+  terminal's connection or one the toolbox keeps (saved logins only, with the background logins' parks and hourly
+  cap). Ping and trace route go from this PC only, and say so for such a session.
+- **Wake up**: a Wake-on-LAN magic packet (UDP, port 9 by default) for a MAC from the VM's hardware, the VM a session
+  is linked to, or typed, sent from an adapter to its subnet broadcast or to an address you type (a directed
+  broadcast such as `192.0.2.255`). It is a command: Low, Medium for a Prod target, audited.
+
 ### Dashboard: history, alerts and layout
 
 - **History** (MO-06): once a minute the dashboard writes, in one go, an average of each running VM's host-side
@@ -1375,6 +1396,7 @@ a dependency of the app. App-specific colours (risk tiers, environment labels) a
 | Host networks      | `crates/core/src/host_networks/`, `adapters/host_networks.rs`     | VM-11                                                                                                                                                             | Working: vmnets, VirtualBox host-only interfaces and NAT networks with the VMs on each; NAT port forwards added and removed on the bus (High); Workstation's refused without administrator rights                                                              |
 | VM insight         | `crates/core/src/vm_insight/`, `store/timeline.rs`                | VM-25                                                                                                                                                             | Working: a VM's logs (capped tails, following), its timeline from the audit log and the job journal                                                                                                                                                            |
 | Waste finder       | `crates/core/src/waste/`                                          | VM-16, VM-14                                                                                                                                                      | Working: idle VMs from the dashboard's history, suspended VMs, long snapshot chains, folders no VM uses                                                                                                                                                        |
+| Toolbox            | `crates/core/src/toolbox/`, `adapters/net_tools.rs`               | FD-09                                                                                                                                                             | Working: ping, trace route, DNS, port checks and the certificate viewer from this PC (ports and certificates through a session's jump host); Wake-on-LAN on the bus (Low); the subnet calculator in the UI                                                     |
 | Capacity check     | `crates/core/src/capacity.rs`                                     | VM-07, MO-04                                                                                                                                                      | Working: host RAM vs assigned RAM, free disk on VM drives; the dashboard's capacity panel                                                                                                                                                                      |
 | Metrics collector  | `crates/core/src/metrics/`                                        | MO-01, MO-02, MO-03, MO-04, MO-15                                                                                                                                 | Working: host-side source every 5 s, SSH guests every 5, 15, 30 or 60 s (one `grep` of /proc, `df` once a minute), 30 minutes of history in memory (allocated memory, swap, this PC's paging files), collector cost                                            |
 | Dashboard history  | `crates/core/src/metrics/history.rs`, `store/metrics.rs`          | MO-06                                                                                                                                                             | Working: 1-minute averages of VMs, watched hosts and this PC written once a minute; ranges of 1 h to 7 d in buckets; kept 7 days by default, pruned daily and audited; the UI's range picker                                                                   |
