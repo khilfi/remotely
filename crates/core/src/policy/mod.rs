@@ -20,6 +20,8 @@ mod convert_tests;
 #[cfg(test)]
 mod deploy_tests;
 #[cfg(test)]
+mod file_server_tests;
+#[cfg(test)]
 mod host_networks_tests;
 #[cfg(test)]
 mod stack_tests;
@@ -188,11 +190,16 @@ pub enum ActionKind {
     VmExport,
     /// FD-09: send a Wake-on-LAN magic packet from this PC.
     WakeOnLan,
+    /// FD-09: run the quick file server (TFTP, HTTP) on an address of this PC, serving only: other computers on its
+    /// network can fetch the chosen file or folder.
+    FileServer,
+    /// FD-09: the same, accepting uploads into an empty folder of this PC.
+    FileServerUploads,
 }
 
 impl ActionKind {
     /// Every action, in the order Settings lists them (AP-01).
-    pub const ALL: [ActionKind; 56] = [
+    pub const ALL: [ActionKind; 58] = [
         ActionKind::VmStart,
         ActionKind::VmUnpause,
         ActionKind::VmPause,
@@ -248,6 +255,8 @@ impl ActionKind {
         ActionKind::PruneBuildCache,
         ActionKind::PruneVolumes,
         ActionKind::WakeOnLan,
+        ActionKind::FileServer,
+        ActionKind::FileServerUploads,
         ActionKind::AppUpdate,
     ];
 
@@ -310,6 +319,8 @@ impl ActionKind {
             ActionKind::ImageConvert => "Convert a disk image (writes a new file)",
             ActionKind::VmExport => "Export a VM (writes new files)",
             ActionKind::WakeOnLan => "Wake a machine up (Wake-on-LAN)",
+            ActionKind::FileServer => "Run the file server (serving only)",
+            ActionKind::FileServerUploads => "Run the file server accepting uploads",
         }
     }
 
@@ -943,6 +954,10 @@ impl Default for PolicyRules {
             (VmExport, TierRule::same(Low)),
             // FD-09 (docs/plan-0.7.md): one packet that wakes a machine; a Prod target's is Medium.
             (WakeOnLan, TierRule::same(Low)),
+            // FD-09: other computers on the network can fetch what it serves; with uploads they can also write files
+            // onto this PC.
+            (FileServer, TierRule::same(Medium)),
+            (FileServerUploads, TierRule::same(High)),
         ]);
         Self {
             tiers,
@@ -1189,6 +1204,9 @@ impl PolicyEngine {
                 }
             }
             Command::WakeOnLan { .. } => ActionKind::WakeOnLan,
+            // FD-09: accepting uploads lets other computers write files onto this PC.
+            Command::FileServer { spec, .. } if spec.uploads.is_some() => ActionKind::FileServerUploads,
+            Command::FileServer { .. } => ActionKind::FileServer,
         }
     }
 
@@ -1307,6 +1325,24 @@ impl PolicyEngine {
                 reasons.push(format!(
                     "{side} on {}, which other computers can reach",
                     forward.spec.listen_address()
+                ));
+            }
+        }
+
+        // FD-09: say who can reach the file server and what it lets them do, for the dialog and the audit log.
+        if let Command::FileServer { spec, .. } = command {
+            if spec.address.is_loopback() {
+                reasons.push(format!("it listens on {}, which only this PC reaches", spec.address));
+            } else {
+                reasons.push(format!(
+                    "it listens on {}, which other computers on that network can reach without logging in",
+                    spec.address
+                ));
+            }
+            if let Some(uploads) = &spec.uploads {
+                reasons.push(format!(
+                    "files they send are saved in {} (at most {} MB each, {} MB in all)",
+                    uploads.folder, uploads.max_file_mb, uploads.max_total_mb
                 ));
             }
         }
@@ -1552,8 +1588,10 @@ pub fn safety_snapshot_applies(command: &Command) -> bool {
         | Command::VmExport { .. }
         // FD-04: commands on hosts, never VMs.
         | Command::SupportBundle { .. }
-        // FD-09: a wake-up starts a machine that is off; there is nothing in it to lose.
-        | Command::WakeOnLan { .. } => false,
+        // FD-09: a wake-up starts a machine that is off; there is nothing in it to lose. The file server runs on this
+        // PC.
+        | Command::WakeOnLan { .. }
+        | Command::FileServer { .. } => false,
     };
     on_vms && can_lose_state
 }

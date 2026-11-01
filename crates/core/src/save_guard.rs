@@ -1,8 +1,8 @@
 //! Files Remotely saves on this PC never go into a Git working tree, where they could be committed by mistake
 //! (FD-07, BX-05, SS-08, SS-11, AP-05). Every save path checks first: FD-07 exports, the audit log CSV, Compare
-//! and MultiExec exports, saved terminal output, session logs and downloads. They all hold customer data
-//! (host names, what ran, what the hosts printed), so the check refuses and says why; the user picks another
-//! folder.
+//! and MultiExec exports, saved terminal output, session logs, downloads and the file server's uploads (FD-09). They
+//! all hold customer data (host names, what ran, what the hosts printed), so the check refuses and says why; the
+//! user picks another folder.
 
 use std::future::Future;
 use std::path::{Path, PathBuf};
@@ -28,6 +28,8 @@ pub enum Saved {
     Image,
     /// VM-17, CV-02: an exported VM (its disks, descriptors and README).
     Export,
+    /// FD-09: files other computers upload to the quick file server.
+    Upload,
     /// FD-04: a support bundle (what hosts printed, their logs and files).
     Bundle,
     /// FD-05: the inventory as an Excel file.
@@ -49,6 +51,7 @@ impl Saved {
             Saved::Download => "A downloaded file holds the host's data,",
             Saved::Image => "A disk image holds everything on the disk it came from,",
             Saved::Export => "An exported VM holds its disks and everything on them,",
+            Saved::Upload => "Uploaded files hold whatever other computers sent,",
             Saved::Bundle => "A support bundle holds your hosts' logs, settings and what they printed,",
             Saved::Inventory => "The inventory names your VMs and hosts, their addresses and what runs on them,",
             Saved::Ansible => "An Ansible inventory names your hosts, their addresses and users,",
