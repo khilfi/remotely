@@ -27,6 +27,7 @@ import {
   LibraryIcon,
   ListTreeIcon,
   NotebookPenIcon,
+  PackageIcon,
   PencilIcon,
   PlusIcon,
   SearchIcon,
@@ -94,6 +95,9 @@ import { withVaultPassword } from "@/lib/reauth-prompt";
 import { reveal } from "@/lib/reveal";
 import { appliedEnvironment, environmentText, sourceText, vmsById } from "@/lib/session-environment";
 import { cn } from "@/lib/utils";
+import { openSessionWindow } from "@/lib/console-open";
+import { kindAddress, kindLabel, kindOf, opensWindow } from "@/lib/session-kinds";
+import { usePresentation } from "@/components/Presentation";
 
 interface Props {
   vault: VaultInfo | null;
@@ -101,6 +105,8 @@ interface Props {
   onOpenVault: () => void;
   /** SS-03: opens the session in a new terminal tab. */
   onConnect: (sessionId: string) => void;
+  /** FD-04: the support bundle dialog, with these sessions picked (a selection's; none from the "⋯" menu). */
+  onSupportBundle: (sessionIds: string[]) => void;
   /** True while the page is shown, so the lists are read again when the user comes back. */
   active: boolean;
   /** R10: a session to show (a search result, a map node): the filters cleared, its row scrolled to and lit. */
@@ -126,7 +132,9 @@ const LABELS: { value: Environment; label: string; className: string }[] = [
   { value: "prod", label: "Prod", className: "data-[state=on]:text-env-prod" },
 ];
 
+/** Where it connects; SS-12: another kind's own port, or a serial session's COM port and line. */
 function address(s: SessionRecord) {
+  if (kindOf(s).protocol !== "ssh") return kindAddress(s);
   return `${s.username ? `${s.username}@` : ""}${s.host}${s.port === 22 ? "" : `:${s.port}`}`;
 }
 
@@ -135,7 +143,16 @@ function FromNote({ text }: { text: string }) {
   return <div className="text-xs text-muted-foreground">{text}</div>;
 }
 
-export function SessionsPage({ vault, onVaultChanged, onOpenVault, onConnect, active, focus = null }: Props) {
+export function SessionsPage({
+  vault,
+  onVaultChanged,
+  onOpenVault,
+  onConnect,
+  onSupportBundle,
+  active,
+  focus = null,
+}: Props) {
+  const presentation = usePresentation();
   const [all, setAll] = useState<SessionRecord[]>([]);
   const [shown, setShown] = useState<SessionRecord[]>([]);
   const [folders, setFolders] = useState<SessionFolder[]>([]);
@@ -274,8 +291,16 @@ export function SessionsPage({ vault, onVaultChanged, onOpenVault, onConnect, ac
     }
   }
 
-  /** SS-07: a session behind jump hosts connects through them; the terminal says how. */
+  /**
+   * SS-07: a session behind jump hosts connects through them; the terminal says how. SS-12: an RDP or VNC session with
+   * no jump host opens its window from here; behind one, a tunnel tab on the Terminal page opens it.
+   */
   function connect(session: SessionRecord) {
+    const kind = kindOf(session);
+    if (opensWindow(kind) && !session.jumpSessionId) {
+      openSessionWindow({ id: session.id, name: session.name, kind }, presentation.presenting);
+      return;
+    }
     onConnect(session.id);
   }
 
@@ -334,6 +359,15 @@ export function SessionsPage({ vault, onVaultChanged, onOpenVault, onConnect, ac
               <span>
                 Export to another laptop…
                 <ReasonLine reason={all.length === 0 ? "No sessions to export yet" : null} />
+              </span>
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem disabled={all.length === 0} onSelect={() => onSupportBundle([])}>
+              <PackageIcon />
+              <span className="grid">
+                Collect a support bundle…
+                <span className="text-xs text-muted-foreground">Logs and settings from hosts, in one zip</span>
+                <ReasonLine reason={all.length === 0 ? "No sessions to collect from yet" : null} />
               </span>
             </DropdownMenuItem>
           </>
@@ -619,7 +653,14 @@ export function SessionsPage({ vault, onVaultChanged, onOpenVault, onConnect, ac
                           )}
                         </TableCell>
                         <TableCell className="font-mono text-xs">
-                          <span data-mask="address">{address(s)}</span>
+                          {kindOf(s).protocol === "serial" ? (
+                            <span>{address(s)}</span>
+                          ) : (
+                            <span data-mask="address">{address(s)}</span>
+                          )}
+                          {kindOf(s).protocol !== "ssh" && (
+                            <div className="font-sans text-muted-foreground">{kindLabel(kindOf(s).protocol)}</div>
+                          )}
                           {(s.lastHostname || s.lastIp) && (
                             <div
                               className="font-sans text-muted-foreground"
@@ -680,7 +721,9 @@ export function SessionsPage({ vault, onVaultChanged, onOpenVault, onConnect, ac
                                 Note…
                               </DropdownMenuItem>
                               <DropdownMenuItem onSelect={() => void duplicate(s)}>Duplicate</DropdownMenuItem>
-                              <ToolboxMenu target={{ kind: "session", sessionId: s.id, label: s.name }} />
+                              {kindOf(s).protocol !== "serial" && (
+                                <ToolboxMenu target={{ kind: "session", sessionId: s.id, label: s.name }} />
+                              )}
                               <DropdownMenuSub>
                                 <DropdownMenuSubTrigger>Move to</DropdownMenuSubTrigger>
                                 <DropdownMenuSubContent>

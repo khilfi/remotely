@@ -276,6 +276,7 @@ async fn compare_and_multiexec_exports_carry_the_change_id() {
                     color: None,
                     tags: vec![],
                     vm_id: None,
+                    kind: Default::default(),
                 },
             )
             .await

@@ -190,6 +190,11 @@ impl Folders {
         self.by_id.get(&id)
     }
 
+    /// Every folder, in no order.
+    pub fn all(&self) -> impl Iterator<Item = &SessionFolder> {
+        self.by_id.values()
+    }
+
     /// A copy where `folder` has `defaults` (to see what a change would do before saving it).
     pub fn with_defaults(&self, folder: Uuid, defaults: FolderDefaults) -> Self {
         let mut copy = self.clone();

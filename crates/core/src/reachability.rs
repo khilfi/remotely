@@ -1,5 +1,5 @@
-//! QL-04 reachability dots (MO-08 lite): a cheap background check of each saved session's SSH port,
-//! for the Terminal page's session tree.
+//! QL-04 reachability dots (MO-08 lite): a cheap background check of each saved session's port (SSH, and SS-12's RDP,
+//! VNC and Telnet; a serial session has none), for the Terminal page's session tree.
 //!
 //! A check opens a TCP connection and closes it at once (no SSH handshake, no login), through the
 //! network adapter. It is a read, so it skips the command bus and the audit log. The host's sshd still
@@ -345,7 +345,8 @@ impl ReachabilityChecker {
         {
             let mut last = locks::lock(&self.last_probe);
             let mut results = locks::lock(&self.results);
-            for session in sessions.iter().filter(|s| watched.contains(&s.id)) {
+            // SS-12: every kind's own port (SSH, RDP, VNC, Telnet); a serial session has no network port.
+            for session in sessions.iter().filter(|s| watched.contains(&s.id) && s.kind.has_port()) {
                 // SS-07: behind jump hosts, the first one stands in; a chain that loops is not checked.
                 let Some((checked, via)) = first_hop(session, &by_id) else {
                     continue;
@@ -523,6 +524,14 @@ impl ExecSession for Tracked {
 
     async fn close(&self) {
         self.0.close().await;
+    }
+
+    fn files(&self) -> Option<Arc<dyn crate::adapters::remote::RemoteFiles>> {
+        self.0.files()
+    }
+
+    fn peer_ip(&self) -> Option<std::net::IpAddr> {
+        self.0.peer_ip()
     }
 
     async fn open_direct(

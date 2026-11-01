@@ -35,6 +35,8 @@ function startReason(snapshot: PaneSnapshot): string | null {
 /** QL-08: why the "⋯" menu's Tunnels item is off, or null. */
 export function tunnelsReason(pane: PaneSession | undefined, snapshot: PaneSnapshot): string | null {
   if (!pane) return "Open a terminal first";
+  // SS-12: Telnet and serial terminals have no SSH connection to carry a tunnel.
+  if (snapshot.paneKind === "telnet" || snapshot.paneKind === "serial") return "Only SSH terminals have tunnels";
   if (!snapshot.sessionId) return "Only saved sessions have port forwards: save the connection as a session first";
   return null;
 }

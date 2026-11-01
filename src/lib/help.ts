@@ -197,7 +197,7 @@ export const HELP = {
     title: "How Remotely finds its tools",
     body: [
       "VM actions run through Workstation's vmrun.exe and VirtualBox's VBoxManage.exe; either is enough. Without VirtualBox, the list simply has no VirtualBox VMs.",
-      "Each tool is found in this order: the path set in Settings, its variable (REMOTELY_VMRUN, REMOTELY_VBOXMANAGE, REMOTELY_OVFTOOL, REMOTELY_QEMU_IMG, REMOTELY_DOCKER), the registry, then the default install folder.",
+      "Each tool is found in this order: the path set in Settings, its variable (REMOTELY_VMRUN, REMOTELY_VBOXMANAGE, REMOTELY_OVFTOOL, REMOTELY_QEMU_IMG, REMOTELY_DOCKER, REMOTELY_VNC_VIEWER), the registry, then the default install folder (for VNC sessions, your own TigerVNC, TightVNC, RealVNC or UltraVNC viewer).",
     ],
     link: { label: "Tool settings", to: setting("vmware") },
   },
@@ -214,6 +214,13 @@ export const HELP = {
     body: [
       "Runs one command once on each picked host, in its own login shell rather than in your terminals, and groups the hosts whose output is the same.",
       "Its second view compares the lines you typed in all tabs, with what each terminal answered, so you don't type them again.",
+    ],
+  },
+  supportBundle: {
+    title: "Support bundle",
+    body: [
+      "Runs the same commands on each host over SSH and reads the chosen files over SFTP as the session's user (never with sudo), into one zip with a folder per host and a manifest of what ran, sizes and checksums. Remote desktop, VNC, Telnet and serial sessions can't be hosts. The presets only read.",
+      "What looks like a password, token or private key is redacted in every file, but look through the zip before you share it. Each file keeps up to 10 MB, each host 100 MB and the bundle 1 GB; what is cut or left out is in the manifest.",
     ],
   },
   recordedLines: {

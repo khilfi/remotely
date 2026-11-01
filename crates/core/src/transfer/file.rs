@@ -33,7 +33,11 @@ pub const FORMAT: &str = "remotely-export";
 /// can take their login from their folders and folders carry defaults (QL-16), which an older version would drop or
 /// fail on, so it refuses such a file with that message instead. An export that uses neither is still written as
 /// [`FORMAT_VERSION_PLAIN`], so 0.4.x can import it (new parts it doesn't know, such as MultiExec groups, it skips).
-pub const FORMAT_VERSION: u32 = 2;
+/// 3 (0.7.0, SS-12): sessions have kinds (RDP, VNC, Telnet, serial), which an older version would import as SSH
+/// sessions; an export with only SSH sessions says 2 or 1 as before.
+pub const FORMAT_VERSION: u32 = 3;
+/// QL-16's layout (0.5.0 and 0.6.x read it): what an export with folder defaults and SSH sessions only is written as.
+pub const FORMAT_VERSION_FOLDERS: u32 = 2;
 /// The layout 0.2.1 to 0.4.x read: what an export without QL-16 folder defaults is written as.
 pub const FORMAT_VERSION_PLAIN: u32 = 1;
 /// How new exports derive their key: Argon2id with 256 MiB and 3 passes on one lane, four times the

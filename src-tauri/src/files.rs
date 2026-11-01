@@ -188,8 +188,9 @@ pub fn files_open_folder(state: State<'_, AppState>, transfer_id: Uuid) -> IpcRe
     reveal(&path)
 }
 
+/// Explorer at a file this PC saved, with the file selected (FD-04 reuses it for a support bundle).
 #[cfg(windows)]
-fn reveal(path: &std::path::Path) -> IpcResult<()> {
+pub(crate) fn reveal(path: &std::path::Path) -> IpcResult<()> {
     use std::os::windows::process::CommandExt;
     // Explorer reads `/select,"path"` itself; Rust's own quoting would wrap the whole argument.
     std::process::Command::new("explorer.exe")
@@ -200,7 +201,7 @@ fn reveal(path: &std::path::Path) -> IpcResult<()> {
 }
 
 #[cfg(not(windows))]
-fn reveal(_path: &std::path::Path) -> IpcResult<()> {
+pub(crate) fn reveal(_path: &std::path::Path) -> IpcResult<()> {
     Err(IpcError::new("unsupported", "Opening a folder needs Windows."))
 }
 

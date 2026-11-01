@@ -68,6 +68,7 @@ fn session(name: &str, host: &str) -> SessionInput {
         color: None,
         tags: vec![],
         vm_id: None,
+        kind: Default::default(),
     }
 }
 

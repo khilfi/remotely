@@ -136,6 +136,7 @@ async fn session(core: &Core, server: &TestSshServer, password: &str, vm_id: Opt
                 color: None,
                 tags: vec![],
                 vm_id,
+                kind: Default::default(),
             },
         )
         .await

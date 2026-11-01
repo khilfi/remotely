@@ -876,6 +876,7 @@ async fn a_session_reaching_a_virtualbox_guest_is_linked_by_a_refresh() {
         color: None,
         tags: vec![],
         vm_id: None,
+        kind: Default::default(),
     };
     let session = core.sessions.create(&core.ctx(), input).await.unwrap();
     core.inventory.refresh(&core.ctx()).await.unwrap();

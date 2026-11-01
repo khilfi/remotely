@@ -6,7 +6,7 @@ import type { PolicyRules, Settings, Tier } from "./api.ts";
 
 // ---- Tool paths ----
 
-export type ToolId = "vmrun" | "vdiskmanager" | "ovftool" | "vboxmanage" | "qemuImg" | "docker";
+export type ToolId = "vmrun" | "vdiskmanager" | "ovftool" | "vboxmanage" | "qemuImg" | "docker" | "vncViewer";
 
 export interface ToolRow {
   id: ToolId;
@@ -79,6 +79,16 @@ export function toolRows(settings: Settings, vdiskmanager: string | null): ToolR
       saved: settings.dockerPathSaved,
       editable: true,
     },
+    {
+      // SS-12: the owner's own viewer, for VNC sessions.
+      id: "vncViewer",
+      section: "vnc-viewer",
+      exe: "VNC viewer",
+      purpose: "VNC sessions: TigerVNC, TightVNC, RealVNC or UltraVNC",
+      inUse: settings.vncViewerPathInUse,
+      saved: settings.vncViewerPathSaved,
+      editable: true,
+    },
   ];
 }
 
@@ -95,6 +105,8 @@ export function toolStatus(row: Pick<ToolRow, "id" | "inUse" | "saved">): string
       return "Not installed";
     case "docker":
       return "Not installed";
+    case "vncViewer":
+      return "None found: VNC sessions can't open";
     default:
       return "Not found";
   }

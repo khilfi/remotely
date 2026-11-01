@@ -20,6 +20,7 @@ mod multiexec;
 mod navigation;
 mod schedules;
 mod stacks;
+mod support_bundle;
 mod terminal;
 mod terminal_rules;
 mod toolbox;
@@ -634,6 +635,9 @@ fn commands() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         terminal::terminal_output_save,
         terminal::terminal_log_start,
         terminal::terminal_log_stop,
+        terminal::console_open_window,
+        terminal::serial_ports_list,
+        terminal::terminal_send_break,
         containers::containers_hosts,
         containers::containers_marks,
         containers::containers_set_marks,
@@ -649,6 +653,7 @@ fn commands() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         containers::containers_release,
         containers::container_shell_open,
         ipc::settings_set_docker_path,
+        ipc::settings_set_vnc_viewer_path,
         tunnels::forwards_list,
         tunnels::forwards_all,
         tunnels::forwards_save,
@@ -758,6 +763,12 @@ fn commands() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         files::files_cancel,
         files::files_retry,
         files::files_open_folder,
+        // FD-04 support bundles.
+        support_bundle::bundle_presets,
+        support_bundle::bundle_limits,
+        support_bundle::bundle_preview,
+        support_bundle::bundle_submit,
+        support_bundle::bundle_show_folder,
         // FD-02 workspaces, AP-08 change ID rule.
         workspaces::workspaces_list,
         workspaces::workspace_current,

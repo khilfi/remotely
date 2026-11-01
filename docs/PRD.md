@@ -175,6 +175,14 @@ Notes, stars and recents, the trash and bulk edit (0.7.0, `docs/plan-0.7.md` "Ap
 | Bulk edit sessions: folder, port, user, login, jump host, environment, tags (QL-28) | No tier; one audit entry naming every session, refused by the read-only lock; asks for the vault password once when a login would send one somewhere new (AP-06) |
 | Star a session, VM or command; the items opened last (QL-26) | Not audited, not locked (like the notification centre) |
 
+Support bundles (0.7.0, FD-04, `docs/plan-0.7.md` "Approval tiers"). The hosts are saved SSH sessions (SS-12: an RDP, VNC, Telnet or serial session is refused); a Prod-labelled one moves the bundle up one tier, and protected ones are skipped:
+
+| Action | Tier |
+| --- | --- |
+| Collect a support bundle of the presets (System, Logs, Containers, Network) or other read-only commands, and files (read over SFTP as the login user, never with sudo) | Low; Medium on Prod |
+| A bundle with a command that is not read-only, or one flagged dangerous | As a Compare hosts run of its commands: Medium (High on 5 or more hosts), or High for a dangerous one |
+| Save the zip (audited `data_exported`, never into a Git working tree) | Part of the bundle's job |
+
 Toolbox (0.7.0, FD-09, `docs/plan-0.7.md` "Approval tiers"). The tools run from this PC; a session behind a jump host has its ports and certificate checked from that jump host (SS-07). A Prod-labelled target moves Wake-on-LAN up one tier, and a protected one is skipped:
 
 | Action | Tier |
@@ -182,6 +190,14 @@ Toolbox (0.7.0, FD-09, `docs/plan-0.7.md` "Approval tiers"). The tools run from 
 | Ping, trace route, DNS lookup, port check (up to 100 ports a run), view a certificate, the subnet calculator | Not a command: no tier, not audited (reads), allowed by the read-only lock |
 | Wake-on-LAN: one magic packet for a session's, a VM's or a typed MAC | Low |
 | Wake-on-LAN for a session or VM labelled Prod | Medium |
+
+Remote desktop and consoles (0.7.0, SS-12, `docs/plan-0.7.md` "Approval tiers"). Opening one changes nothing on the host, so it is audited like opening a terminal; mstsc and the VNC viewer ask for the password themselves, and a vault password typed into a Telnet terminal asks for the vault password again on each connection:
+
+| Action | Tier |
+| --- | --- |
+| Open an RDP window (mstsc on a `.rdp` file), a VNC viewer, or a Telnet or serial terminal | No tier; audited (`rdp_opened`, `vnc_opened`, or `terminal_opened`) before it starts |
+| Send a break on a serial (or Telnet) line (it can halt a running console) | No tier; audited (`terminal_break_sent`); a confirm first on a Prod or protected session |
+| Open an RDP or VNC session behind a jump host: a tunnel tab to the jump host, then the window | The tunnel at SS-07's tier (a loopback local forward: Low; Medium when the jump host or the session is Prod), audited `tunnel_opened`; the window as above |
 
 | ID | Requirement | Phase |
 | --- | --- | --- |
@@ -225,7 +241,7 @@ These features are for work at customer sites: keeping engagements apart, sharin
 | FD-01 | Command palette (Ctrl+K), full keyboard use, dark and light themes | MVP |
 | FD-02 | Customer workspaces (0.5.0): sessions, VMs, templates, stacks, schedules, vault items, jobs, audit log, rules and per-engagement settings kept separate per engagement; switched from the top bar; an FD-07 export holds one workspace | 0.5.0 |
 | FD-03 | Presentation mode: mask IPs, hostnames, usernames and secrets on screen; optional read-only lock | v2 |
-| FD-04 | Support bundle: collect logs, configs and system info from many hosts into one timestamped zip | v2 |
+| FD-04 | Support bundle (0.7.0): collect logs, configs and system info from many hosts into one timestamped zip, with a folder per host and a manifest; presets and custom commands and files, secrets redacted, caps of 10 MB a file, 100 MB a host and 1 GB a bundle | 0.7.0 |
 | FD-05 | Inventory export (OS, IPs, MACs, CPU, RAM, packages, open ports) to Excel | v2 |
 | FD-06 | Markdown notes per host, linked to its credentials and runbooks | v2 |
 | FD-07 | Encrypted backup, export and import of sessions, settings and vault; also how sessions are shared with teammates | v2 |

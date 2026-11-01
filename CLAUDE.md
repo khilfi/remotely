@@ -118,7 +118,9 @@ crates/core/          remotely-core: all app logic
                       clock), Purge now, audited journal_purged; secure_delete, a WAL checkpoint and VACUUM after a big
                       purge; the read-only lock refuses the setting and Purge now, never the schedule
     save_guard.rs     No save path writes into a Git working tree (audit CSV, Compare and MultiExec exports, saved
-                      output, session logs, downloads, FD-07 exports); write_atomically (a `.part` file, renamed)
+                      output, session logs, downloads, FD-07 exports, FD-04 bundles); write_atomically (a `.part` file,
+                      renamed), and AtomicFile, the same for a file written bit by bit (a bundle's zip; its `.part` goes
+                      on every failure, a failed commit's too)
     adapters/         vmware.rs (VM-23 also the .vmx's backup, atomic write and restore, vdiskmanager and vmware.exe
                       found beside vmrun, vmrun_change; VM-21 ovftool found like vmrun, Workstation's default VM
                       folder), vmx_file.rs (VM-23 a .vmx as its lines: unknown keys, order,
@@ -136,6 +138,12 @@ crates/core/          remotely-core: all app logic
                       file, keeps mode and owner, posix-rename, else a .bak; RemoteWrite::abort; Written says how; A9
                       a second RawSftpSession for capped listings, MAX_LISTING); remote/forward.rs SS-07 port forwards on
                       it, local, remote and SOCKS, behind RemoteForwards; remote/socks.rs SOCKS 4/4a/5),
+                      telnet.rs (SS-12 RFC 854 client: NAWS, TTYPE, ECHO, SGA, Enter as the session's line ending,
+                      local echo when the server won't; the same shell channels as SSH), serial.rs (SS-12 COM ports from
+                      HARDWARE\DEVICEMAP\SERIALCOMM, opened with CreateFileW and SetCommState behind SerialPorts; one
+                      thread per port, Send Break), launcher.rs (SS-12 ConsoleLauncher: mstsc.exe from System32 on a
+                      .rdp file in this user's temp folder, deleted once read; the VNC viewer found like the other tools,
+                      locate_vnc_viewer, `consoles.vncViewerPath`; NoLauncher under `fakes`),
                       exec_output.rs (BX-02/BX-07 output cap, hashes,
                       secret scrubbing), host_counters.rs (MO-01 VM processes: vmware-vmx.exe, VirtualBoxVM.exe,
                       VBoxHeadless.exe; MO-15 `paging()`), paging.rs (MO-15 this PC's paging files and commit charge:
@@ -364,7 +372,13 @@ crates/core/          remotely-core: all app logic
                       add; a folder's jump host never applies to itself). The store resolves every session it reads
                       (SessionRecord's fields are what applies, `own` what the editor edits, `inherited` the folders),
                       so every consumer gets it; set_folder_defaults, move_to, move_folder, delete_folder and restore
-                      check SecretBindings like a session edit (confirm_folder_change, SecretPlaces read once)
+                      check SecretBindings like a session edit (confirm_folder_change, SecretPlaces read once);
+                      sessions/kinds.rs SS-12 SessionKind (the `protocol` column; each kind's fields in `kind_options`,
+                      migration 0031): SSH, RDP (screen, clipboard, drives, printers, audio, admin), VNC (view only),
+                      Telnet (line ending), serial (the host is the COM port; speed, framing, flow control, line ending,
+                      local echo). Only SSH logs in with the vault (others: "asked when connecting"), a jump host is an
+                      SSH session and only SSH, RDP and VNC take one; Store::session_spec refuses every other kind, so
+                      no SSH feature (bulk runs, MultiExec, guest polling, containers, host details) reaches one
     forwards.rs       SS-07 saved port forwards per session (audited like the library; opening one is
                       Command::OpenTunnel on the bus)
     vm_links.rs       QL-01 sessions linked to the VMs they reach: automatically by guest IP, or by hand (audited);
@@ -402,7 +416,17 @@ crates/core/          remotely-core: all app logic
                       hypervisors' and templates' VM folders, 4 levels and 20,000 folders a root, links, junctions and
                       .lck left alone, A3); mod.rs the report and folder_to_open (only folders the report or a known VM
                       names)
-    terminal/         SS-03 terminal panes (mod.rs): one supervised SSH connection each (keep-alive, auto-reconnect:
+    terminal/         SS-12 console.rs: PaneKind (SSH, Telnet, serial, a tunnel tab); Telnet and serial panes connect
+                      through their adapters into the same supervisor (logs and output scrubbed, reconnects, alerts; no
+                      SFTP, tunnels, hook or startup command; never MultiExec or Compare); one pane per COM port,
+                      reopened only once the last connection's thread let go of it (SerialShell::released); local
+                      echo shows nothing at a secret prompt, nor a typed vault secret (ShellInput::Secret);
+                      a vault password typed into Telnet asks for the vault password on each connection
+                      (SecretBindings::confirm_given); Send break audited (terminal_break_sent), confirmed on Prod or
+                      protected; open_window starts RDP or VNC (audited rdp_opened, vnc_opened, before it starts);
+                      behind a jump host, a tunnel tab to it opens a loopback forward through the bus, then the window
+                      on it, and closes when the window does; rdp_file;
+                      SS-03 terminal panes (mod.rs): one supervised SSH connection each (keep-alive, auto-reconnect:
                       R9 TerminalTuning::retry_delay, 10 fast tries then 12 slow ones, each spread at random;
                       Terminals::wake_reconnects on a resume or a new address, from the shell's wake.rs,
                       QL-03 host name and IP, QL-06 a vault password typed at a prompt (a new place, or with force,
@@ -487,6 +511,26 @@ crates/core/          remotely-core: all app logic
                       BX-05 exports: the Terminal page's Compare output (running is RemoteExec on the bus); QL-12
                       recorded MultiExec lines group (group_with_output), diff and export (export_recorded, audited
                       multiexec_exported) through the same code
+    support_bundle/   FD-04 support bundles (no migration): spec.rs BundleSpec (Command::SupportBundle; presets expanded
+                      into its items before the bus rates them; refused from the UI: the zip's place comes from the
+                      shell's save dialog; never retried), its checks, entry names safe for Windows and the file name
+                      `remotely-bundle-<workspace>-<UTC time>.zip`; presets.rs PRESETS (System, Logs, Containers,
+                      Network) by HostKind, every command read-only by the default rules (policy/bundle_tests.rs);
+                      collect.rs the BundleHost trait (SshHost: commands on a kept connection's exec channels, sudo
+                      through BX-07; files over SFTP on the same connection as the login user, ExecSession::files; F8
+                      adds Windows) and collect_host (caps 10 MB a file, 100 MB a host, 1 GB a bundle; ItemLimits: a
+                      command 60 s, a file read 180 s, then the item is noted as timed out and the host goes on;
+                      exec_output's scrubber, redact_secrets and private keys: PEM and PGP blocks, a key whose BEGIN was
+                      cut away, PuTTY's private lines, kubeconfig's client-key-data; a file with a NUL byte left out);
+                      writer.rs OpenBundle (the zip through save_guard::AtomicFile, written as hosts give files, on
+                      blocking threads; Reservation gives an item's bytes of the cap back however it ends; add_file
+                      puts a file and its manifest record in together; manifest.json); runner.rs BundleRunner, the job
+                      runner's BundleActions (begin, collect, each host's end, save and audit `data_exported`; a
+                      cancelled job saves nothing); mod.rs SupportBundles (Core.bundles: presets, preview, check,
+                      submit, saved_at for Show folder; SS-12 SSH sessions only, another kind refused by name,
+                      HOSTS_NEED); spec.rs zip_path (a name given `.zip` never replaces a file
+                      unasked). The policy engine rates a bundle's commands as a Compare hosts run
+                      (Command::rated_script). FD-03: presentation.ts masks the workspace in a bundle's file name
     multiexec_groups.rs QL-19 saved MultiExec groups (Core.groups): named sets of saved sessions in order (1 to 60
                       characters, 1 to 100 sessions, 200 groups); audited multiexec_group_changed with the member
                       sessions as targets, refused by the read-only lock (Change::MultiExecGroups); a deleted session
@@ -561,6 +605,10 @@ crates/core/          remotely-core: all app logic
                       ssh_server/docker.rs CT-01 its `docker` and `podman` programs (each CLI's JSON from a fixture);
                       ssh_server/host.rs MO-13, MO-14 a HostFixture (ubuntu, rhel) its exec shell describes itself with
     fakes/containers.rs  CT-01, CT-02 the container Fixture (sample, hostile names) and FakeContainers (engines in memory)
+    fakes/consoles.rs  SS-12 FakeLauncher (records each .rdp file and viewer command; windows close on cue) and
+                      FakeSerialPorts (COM ports in memory, one open at a time, unplug, breaks)
+    fakes/telnet_server.rs  SS-12 TelnetTestServer: a router console on 127.0.0.1 with a login (sizes, terminal type
+                      and raw bytes kept; a dropped connection resets), also in dev_ssh_server
     fakes/github_server.rs  FD-14 fake GitHub API, github.com download links and release storage on 127.0.0.1
                       (private or public, rate limits), throwaway update-signing key
     fakes/net_tools.rs  FD-09 FakeNetworkTools: echoes along routes the test sets, DNS answers from a table, ports that
@@ -581,9 +629,11 @@ crates/core/          remotely-core: all app logic
                       host_networks.rs: VM-11; vm_insight.rs: VM-25; waste.rs: VM-16, VM-14; schedules.rs: VM-14,
                       VM-27 on a FakeClock, no sleeping; stacks.rs: VM-08 and VM-26 on the fakes and FakeStackClock;
                       conversion.rs: CV-01 to CV-03, VM-17; workspaces.rs: FD-02 isolation of every service and
-                      switching; change_ids.rs: AP-08; toolbox.rs: FD-09 on FakeNetworkTools, a TLS server with an
+                      switching; change_ids.rs: AP-08; support_bundle.rs: FD-04 on the test SSH server, zips in the
+                      temp folder; toolbox.rs: FD-09 on FakeNetworkTools, a TLS server with an
                       rcgen certificate made at run time, jump hosts through the test SSH server, Wake-on-LAN to
-                      127.0.0.1); opt-in workstation_it.rs, virtualbox_it.rs and
+                      127.0.0.1; consoles.rs: SS-12 RDP, VNC, Telnet, serial and tunnel tabs); opt-in
+                      workstation_it.rs, virtualbox_it.rs and
                       conversion_it.rs (the real conversion tools on small images in the temp folder)
 src-tauri/            Tauri 2 shell: window, IPC commands (ipc.rs), terminal bridge, MultiExec (multiexec.rs; groups.rs
                       QL-19 saved MultiExec groups; terminal_rules.rs QL-17 rules), command
@@ -618,13 +668,14 @@ src-tauri/            Tauri 2 shell: window, IPC commands (ipc.rs), terminal bri
                       file dialog, Inspect, Convert's options and its save dialog, Verify with `convert://verify`
                       progress, Export's options and folder dialog, Import's analysis, check and submit, QEMU's page
                       after checked_qemu_site; Settings' qemu-img path in ipc.rs); FD-02, AP-08 workspaces.rs (the
-                      switcher's commands, Unassigned VMs, the change ID rule, FD-07 import into a new workspace); FD-09
-                      toolbox.rs (each tool's run under an id the UI chose, `toolbox://progress` events, toolbox_cancel,
-                      the certificate file dialog, Wake up's adapters and MACs); 0.7.0 F5 comfort.rs (FD-06 notes,
-                      render, a note's web link through ShellExecute after the window's confirm, http(s) only; QL-26
-                      stars and recents; QL-27 the trash, its Undo, and its daily purge started in lib.rs; QL-28 bulk
-                      edit preview and save); lib.rs
-                      and schedules.rs pass job and schedule events to the window only for the shown workspace
+                      switcher's commands, Unassigned VMs, the change ID rule, FD-07 import into a new workspace); FD-04
+                      support_bundle.rs (presets, the tier preview, the zip's save dialog in Downloads, Show folder by
+                      job id); FD-09 toolbox.rs (each tool's run under an id the UI chose, `toolbox://progress` events,
+                      toolbox_cancel, the certificate file dialog, Wake up's adapters and MACs); 0.7.0 F5 comfort.rs
+                      (FD-06 notes, render, a note's web link through ShellExecute after the window's confirm, http(s)
+                      only; QL-26 stars and recents; QL-27 the trash, its Undo, and its daily purge started in lib.rs;
+                      QL-28 bulk edit preview and save); lib.rs and schedules.rs pass job and schedule events to the
+                      window only for the shown workspace
 src/                  React + TypeScript UI
   components/ui/      shadcn/ui components (generated)
   components/         app components (approval dialog, badges, Compare panel with its one-shot and MultiExec views
@@ -658,12 +709,16 @@ src/                  React + TypeScript UI
                       VmExportDialog (each target with its plan or why not) (ImportDialog and ExportDialog are SS-02's
                       and FD-07's);
                       QL-16 FolderDefaultsDialog (a folder's Defaults…) and SessionDialog's "from folder X" values;
+                      SS-12 SessionDialog's kind first and SessionKindFields (each kind's fields, the COM port);
                       MultiExecGroupsMenu and MultiExecGroupsDialog for QL-19; ScrollbackSearchPanel for QL-18
                       (Ctrl+Shift+G); TerminalRulesCard for QL-17; R10: StatusBar (QL-22), NotificationCentre and
                       NotificationSources (QL-25: jobs and MO-07 alerts kept whatever page shows), ShortcutSheet
                       (QL-24, Ctrl+/), FirstRunWizard (QL-23: the Vault page's SetupCard, the import dialog); VM-14,
                       VM-27 ScheduleDialog (the core's preview of next runs and warnings), ScheduleRunsSheet,
-                      VmSchedulesTab (a VM's Schedules tab and chain), ApprovalDialog's StandingSummary; FD-02
+                      VmSchedulesTab (a VM's Schedules tab and chain), ApprovalDialog's StandingSummary; FD-04
+                      SupportBundleDialog (hosts, presets, commands and files, options; then BulkResultsView's bundle
+                      mode with Show folder; the Sessions page's "⋯" and Ctrl+K open it) and ApprovalDialog's
+                      BundleSummary; FD-02
                       WorkspaceSwitcher (the top bar's menu, the switch, edit and manage dialogs; the window loads again
                       after a switch), UnassignedVmsSheet; AP-08 ChangeIdSetting (ChangeIdCard.tsx, a row of the
                       approval rules' card) and the approval dialog's one reason or change ID field; UX-10 Settings:
@@ -716,7 +771,10 @@ src/                  React + TypeScript UI
                       through paste.ts, every selection copy scrubbed by the core, OSC 8 links never opened), paste.ts (QL-05 paste cleaning, the
                       multi-line confirm's preview; TerminalSettings.confirm_multiline_paste, on by default),
                       terminal-input.ts (SS-10 input told from xterm.js's replies to the host, which skip MultiExec:
-                      xterm's internal onUserInput, checked by a test), multiexec.ts, multiexec-groups.ts (QL-19 which
+                      xterm's internal onUserInput, checked by a test), session-kinds.ts (SS-12 each kind's defaults,
+                      ports, checks, one-line summaries and why a tab can't join), console-open.ts (SS-12 an RDP or VNC
+                      window from the Terminal or Sessions page; the presenting notice), multiexec.ts,
+                      multiexec-groups.ts (QL-19 which
                       tabs a group picks or opens, saving picked tabs, editor checks), scrollback-search.ts (QL-18
                       logical lines, matching, caps, grouping by tab), scrollback-xterm.ts (QL-18 reading a pane's
                       buffer, showing a match with a decoration), highlight-rules.ts (QL-17 scope, compile, match a
@@ -763,6 +821,7 @@ src/                  React + TypeScript UI
                       addresses as `mac-N`; FD-02 workspace names, `data-mask="workspace"`, learnWorkspace),
                       workspaces.ts and workspaces-api.ts (FD-02 checks and texts; wrappers that teach the masker every
                       workspace name), rollout.ts (H9 canary, stop after failures, retry choices),
+                      support-bundle.ts (FD-04 the dialog's typed lines, item count, QL-08 reasons and caps),
                       key-options.ts (SS-09 expiry-time and from for a pushed key),
                       presentation-dom.ts (masks every text node and text attribute before paint, `data-mask` fields,
                       `data-presentation-skip` for terminals; a value learnt later re-masks only the text that
@@ -1066,6 +1125,10 @@ ovftool 5.0, VirtualBox 7.2.22 and qemu-img 10.1 on images of a few MB.
   that fail when asked for one (`import::openssh::IncludeFiles`, `adapters::vm_hardware::VmFiles`) or an injected
   check (`import::importer::key_file`); an end-to-end test may use a DOS device name such as `NUL` instead.
 - Tests against real Workstation or VirtualBox are opt-in: they run only when `REMOTELY_IT=1` is set, read only, and only touch VMs whose display name starts with `it-`.
+- Consoles (SS-12): never start mstsc.exe or a VNC viewer, or open a real COM port, in a test. Under the `fakes`
+  feature `Terminals` starts with `NoLauncher` and an empty `FakeSerialPorts`, so a test that forgets its fakes fails
+  instead; tests give `FakeLauncher` and `FakeSerialPorts` (`set_launcher`, `set_serial_ports`) and talk Telnet to
+  `fakes::TelnetTestServer` on 127.0.0.1 (`tests/consoles.rs`).
 - Don't connect to real SSH hosts in tests. Use a local test server or a fake: `fakes::ssh_server::TestSshServer`
   (russh on 127.0.0.1, keys made at run time; it can drop or freeze its connections, or refuse new ones for a while
   (`set_refusing`, R9 reconnect tests), and runs exec requests in a toy shell with sudo modes, /proc files, a `grep`
@@ -1098,6 +1161,8 @@ ovftool 5.0, VirtualBox 7.2.22 and qemu-img 10.1 on images of a few MB.
   never an image on a network share. The opt-in `conversion_it.rs` runs the real tools on 64 MB images in the temp
   folder and exports an `it-` Workstation VM made of files there, never registered; it checks VirtualBox's media
   list is as it was.
+- Support bundles (FD-04): tests collect from `TestSshServer` (its exec shell and SFTP) or in-memory hosts, and write
+  their zips to the system temp folder, never the repo (`tests/support_bundle.rs`).
 - Containers (CT-01, CT-02): never start, stop, remove or prune real containers. Bus and policy tests use
   `fakes::FakeContainers` (`tests/containers.rs`); end-to-end tests use the test server's `docker` and `podman`
   (`with_containers(engine, Fixture::sample())`, `without_docker_group()` for sudo; `tests/containers_ssh.rs`).
@@ -1128,7 +1193,8 @@ ovftool 5.0, VirtualBox 7.2.22 and qemu-img 10.1 on images of a few MB.
   can't open over SFTP, and `su bob` to switch user). SS-07: the servers reach each other as
   `dev-host-01.test`, `dev-host-02.test`... (names this PC can't resolve, so they need a jump host) and a web page as
   `web.test:80`, for trying chains and tunnels. CT-01: each has `docker` and `podman` with a small shop of containers
-  (from the second server on, docker needs sudo); mark a session as a container host on the Containers page.
+  (from the second server on, docker needs sudo); mark a session as a container host on the Containers page. SS-12: a
+  Telnet router console listens on the port after the web page (alice and the same password), for a Telnet session.
 - Opt-in test against real Workstation (reads only: the library, `vmrun list`, Tools state and IP of running VMs, and their processes' counters): `REMOTELY_IT=1 cargo test -p remotely-core --test workstation_it`
 - Opt-in test against real VirtualBox (reads only: `list vms`, then for `it-` VMs only `showvminfo`, snapshots, guest properties and their processes): `REMOTELY_IT=1 cargo test -p remotely-core --test virtualbox_it`
 - Opt-in test against the real conversion tools (vdiskmanager, VBoxManage, qemu-img when installed, ovftool; temp images and an `it-` VM's files only): `REMOTELY_IT=1 cargo test -p remotely-core --test conversion_it -- --nocapture`

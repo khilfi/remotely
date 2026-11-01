@@ -12,7 +12,7 @@ use crate::domain::{now_rfc3339, Context, Environment};
 use crate::error::{CoreError, Result};
 use crate::sessions::defaults::APP_DEFAULT_AUTH;
 use crate::sessions::{
-    FolderDefaults, Folders, Inherited, OwnValues, SessionAuth, SessionColor, SessionFolder, SessionInput,
+    FolderDefaults, Folders, Inherited, OwnValues, SessionAuth, SessionColor, SessionFolder, SessionInput, SessionKind,
     SessionRecord, MAX_JUMP_DEPTH,
 };
 use crate::vault::SecretId;
@@ -26,7 +26,7 @@ macro_rules! session_columns {
         "id, folder_id, name, protocol, host, port, username, auth_method, credential_id, key_passphrase_id,
          jump_session_id, startup_command, startup_on_reconnect, prompt_hook, environment, color, protected, vm_id,
          vm_link, imported_from, created_at, updated_at, last_ip, last_hostname, last_seen_at, last_opened_at,
-         auth_from_folder, jump_direct,
+         auth_from_folder, jump_direct, kind_options,
          (SELECT group_concat(t.name, char(31)) FROM target_tags tt JOIN tags t ON t.id = tt.tag_id
           WHERE tt.target_kind = 'session' AND tt.target_id = sessions.id) AS tags"
     };
@@ -96,11 +96,17 @@ fn row_to_session(row: &sqlx::sqlite::SqliteRow) -> Result<SessionRecord> {
         environment: Environment::parse(&env),
         tags,
     };
+    // SS-12: a protocol this version doesn't open (F4's `winrm` in a newer database) reads as SSH, but keeps its
+    // protocol, and `session_spec` refuses anything that is not `ssh`, so nothing connects to it over SSH.
+    let protocol: String = row.try_get("protocol")?;
+    let options: Option<String> = row.try_get("kind_options")?;
+    let kind = SessionKind::read(&protocol, options.as_deref()).unwrap_or_default();
     Ok(SessionRecord {
         id: parse_uuid(&id)?,
         folder_id: optional_uuid(row, "folder_id")?,
         name: row.try_get("name")?,
-        protocol: row.try_get("protocol")?,
+        protocol,
+        kind,
         host: row.try_get("host")?,
         port: u16::try_from(port).unwrap_or(22),
         username: own.username.clone(),
@@ -260,7 +266,12 @@ impl Store {
         self.get_session_in(ctx, id, &folders).await
     }
 
-    async fn get_session_in(&self, ctx: &Context, id: Uuid, folders: &Folders) -> Result<Option<SessionRecord>> {
+    pub(crate) async fn get_session_in(
+        &self,
+        ctx: &Context,
+        id: Uuid,
+        folders: &Folders,
+    ) -> Result<Option<SessionRecord>> {
         let row = sqlx::query(concat!(
             "SELECT ",
             session_columns!(),
@@ -291,14 +302,15 @@ impl Store {
             "INSERT INTO sessions (id, workspace_id, user_id, folder_id, name, protocol, host, port, username,
                                    auth_method, credential_id, key_passphrase_id, jump_session_id, startup_command,
                                    startup_on_reconnect, prompt_hook, environment, color, vm_id, imported_from,
-                                   created_at, updated_at, auth_from_folder, jump_direct)
-             VALUES (?, ?, ?, ?, ?, 'ssh', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                                   created_at, updated_at, auth_from_folder, jump_direct, kind_options)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(id.to_string())
         .bind(ctx.workspace_id.to_string())
         .bind(ctx.user_id.to_string())
         .bind(input.folder_id.map(|f| f.to_string()))
         .bind(&input.name)
+        .bind(input.kind.protocol())
         .bind(&input.host)
         .bind(i64::from(input.port))
         .bind(&input.username)
@@ -317,6 +329,7 @@ impl Store {
         .bind(&now)
         .bind(i64::from(input.auth == SessionAuth::Folder))
         .bind(i64::from(input.jump_direct && input.jump_session_id.is_none()))
+        .bind(input.kind.options_json())
         .execute(&mut *tx)
         .await?;
         set_session_tags(&mut tx, ctx, id, &input.tags).await?;
@@ -359,7 +372,7 @@ async fn update_session_in(
             "UPDATE sessions SET folder_id = ?, name = ?, host = ?, port = ?, username = ?, auth_method = ?,
                  credential_id = ?, key_passphrase_id = ?, jump_session_id = ?, startup_command = ?,
                  startup_on_reconnect = ?, prompt_hook = ?, environment = ?, color = ?, vm_id = ?, user_id = ?,
-                 updated_at = ?, auth_from_folder = ?, jump_direct = ?
+                 updated_at = ?, auth_from_folder = ?, jump_direct = ?, protocol = ?, kind_options = ?
              WHERE workspace_id = ? AND id = ?",
         )
         .bind(input.folder_id.map(|f| f.to_string()))
@@ -381,6 +394,8 @@ async fn update_session_in(
         .bind(now_rfc3339())
         .bind(i64::from(input.auth == SessionAuth::Folder))
         .bind(i64::from(input.jump_direct && input.jump_session_id.is_none()))
+        .bind(input.kind.protocol())
+        .bind(input.kind.options_json())
         .bind(ctx.workspace_id.to_string())
         .bind(id.to_string())
         .execute(&mut **tx)
@@ -748,11 +763,26 @@ impl Store {
     /// error that names them. So is a key login with no key chosen, here or on a jump host.
     ///
     /// QL-16: each hop's user, login and jump host are the ones that apply to it (its own, then its folders').
+    ///
+    /// SS-12: SSH sessions only, so nothing that connects over SSH (terminals, bulk runs, MultiExec, the dashboard's
+    /// guest polling, containers, host details, key pushes) ever reaches a Telnet, serial, RDP or VNC session that
+    /// way: [`CoreError::WrongSessionKind`]. A jump host on the way must be SSH too.
     pub async fn session_spec(&self, ctx: &Context, id: Uuid) -> Result<Option<SessionSpec>> {
         let folders = self.session_folders(ctx).await?;
         let Some(session) = self.get_session_in(ctx, id, &folders).await? else {
             return Ok(None);
         };
+        if session.protocol != "ssh" {
+            return Err(CoreError::WrongSessionKind {
+                session: session.name.clone(),
+                kind: session.kind.label(),
+                needs: "this works over SSH only".into(),
+            });
+        }
+        self.ssh_chain(ctx, session, &folders).await.map(Some)
+    }
+
+    async fn ssh_chain(&self, ctx: &Context, session: SessionRecord, folders: &Folders) -> Result<SessionSpec> {
         let mut names = vec![session.name.clone()];
         let mut seen = vec![session.id];
         let mut jumps: Vec<SessionRecord> = Vec::new();
@@ -774,9 +804,17 @@ impl Store {
                 )));
             }
             // A jump host deleted meanwhile leaves the chain shorter (the link is cleared with it).
-            let Some(jump) = self.get_session_in(ctx, jump_id, &folders).await? else {
+            let Some(jump) = self.get_session_in(ctx, jump_id, folders).await? else {
                 break;
             };
+            if jump.protocol != "ssh" {
+                return Err(CoreError::JumpChain(format!(
+                    "the jump host '{}' of '{}' is a {} session, and a jump host is an SSH session. Choose another one",
+                    jump.name,
+                    session.name,
+                    jump.kind.label()
+                )));
+            }
             seen.push(jump.id);
             names.push(jump.name.clone());
             next = jump.jump_session_id;
@@ -789,7 +827,7 @@ impl Store {
             via = Some(Box::new(spec_of(jump, auth, via)));
         }
         let auth = spec_auth(&session, None)?;
-        Ok(Some(spec_of(session, auth, via)))
+        Ok(spec_of(session, auth, via))
     }
 }
 

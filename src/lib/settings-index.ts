@@ -71,6 +71,13 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
     title: "Docker Desktop on this PC",
     keywords: "docker.exe path containers tool paths",
   },
+  {
+    id: "vnc-viewer",
+    group: "tools",
+    card: "tools",
+    title: "VNC viewer",
+    keywords: "vnc viewer vncviewer.exe tvnviewer.exe tigervnc tightvnc realvnc ultravnc remote screen tool paths",
+  },
   { id: "vm-folders", group: "tools", title: "VM folders", keywords: "scan folders vmx library find vms" },
   {
     id: "power",

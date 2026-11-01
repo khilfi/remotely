@@ -266,6 +266,26 @@ impl SecretBindings {
         Err(CoreError::WrongVaultPassword)
     }
 
+    /// SS-12: [`Self::confirm`] without [`REAUTH_GRACE`]: the vault password must come with this request (a Telnet
+    /// pane asks for it on each connection, however recently it was given). Says [`ASKED_NOW`].
+    pub async fn confirm_given(
+        &self,
+        ctx: &Context,
+        password: Option<&SecretString>,
+        action: &str,
+        reason: &str,
+    ) -> Result<&'static str> {
+        if self.inner.vault.status() == VaultStatus::NotSetUp {
+            return Err(CoreError::VaultNotSetUp);
+        }
+        let Some(password) = password.filter(|p| !p.is_empty()) else {
+            return Err(CoreError::ReauthRequired {
+                reason: reason.to_owned(),
+            });
+        };
+        self.confirm(ctx, Some(password), action, reason).await
+    }
+
     /// Lets a saved session use `secret` from now on, after the master password was given (`how`, from
     /// [`Self::confirm`]). Audited when it is new.
     pub async fn allow(

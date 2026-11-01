@@ -84,6 +84,7 @@ fn session_input(name: &str, host: &str, port: u16, password_id: Option<SecretId
         color: None,
         tags: vec![],
         vm_id: None,
+        kind: Default::default(),
     }
 }
 

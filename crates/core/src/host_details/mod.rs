@@ -747,6 +747,7 @@ impl HostDetails {
                 jump_credentials,
                 options: &options,
                 verifier,
+                who: "host details",
             }),
         )
         .await

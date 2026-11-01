@@ -1,5 +1,5 @@
-//! Session library (SS-01, SS-06): saved SSH sessions in folders, with tags, colours, search and an
-//! environment label.
+//! Session library (SS-01, SS-06): saved sessions in folders, with tags, colours, search and an
+//! environment label. SS-12: each session has a kind ([`kinds::SessionKind`]): SSH, RDP, VNC, Telnet or serial.
 //!
 //! A session stores where to connect and how to log in: host, port, user, auth method (a password or
 //! a private key from the vault, or the SSH agent), a jump host (another session) and a startup
@@ -18,6 +18,7 @@
 //! its last connection saw (QL-03) and when it was last opened (QL-02 Recent sessions).
 
 pub mod defaults;
+pub mod kinds;
 pub mod tree;
 
 use std::collections::{HashMap, HashSet};
@@ -37,6 +38,7 @@ use crate::store::{clean_name, NewAuditEntry, Store, MAX_TAG_LEN};
 use crate::vault::{Destination, SecretBindings, SecretId, SecretKind, SecretString, Vault};
 use crate::vm_links::{AutoLinkReport, VmLink, VmLinks};
 pub use defaults::{Effective, FolderDefaults, Folders, FromFolder, Inherited, InheritedTag, OwnValues};
+pub use kinds::SessionKind;
 use tree::{SessionTree, TreeGrouping};
 
 /// Colour of a session's tab and list entry (SS-01). Named, so each theme can draw it legibly.
@@ -193,9 +195,12 @@ pub struct SessionInput {
     #[serde(default)]
     pub tags: Vec<String>,
     /// BX-01: the VM this session reaches (its `vms.id`), so a bulk run can pick the VM. A Prod or
-    /// protected VM makes the session count as Prod or protected too.
+    /// protected VM makes the session count as Prod or protected too. SSH sessions only.
     #[serde(default)]
     pub vm_id: Option<String>,
+    /// SS-12: what it opens, with that kind's own fields (SSH when not given).
+    #[serde(default)]
+    pub kind: SessionKind,
 }
 
 fn default_port() -> u16 {
@@ -211,8 +216,10 @@ pub struct SessionRecord {
     pub id: Uuid,
     pub folder_id: Option<Uuid>,
     pub name: String,
-    /// `ssh` in the MVP; RDP, VNC, serial and WinRM come in v3 (SS-12).
+    /// The `sessions.protocol` column: `kind`'s protocol (`ssh`, `rdp`, `vnc`, `telnet`, `serial`).
     pub protocol: String,
+    /// SS-12: what it opens, with that kind's own fields.
+    pub kind: SessionKind,
     pub host: String,
     pub port: u16,
     pub username: Option<String>,
@@ -279,9 +286,25 @@ impl SessionRecord {
         }
     }
 
-    fn address(&self) -> String {
+    /// `alice@web01.example.com:22`; a serial session's COM port alone (`COM3`).
+    pub fn address(&self) -> String {
+        if !self.kind.has_port() {
+            return self.host.clone();
+        }
         let user = self.username.as_deref().map(|u| format!("{u}@")).unwrap_or_default();
         format!("{user}{}:{}", self.host, self.port)
+    }
+
+    /// SS-12: refused unless the session is SSH: `needs` says what wants it ("Compare hosts runs over SSH only").
+    pub fn require_ssh(&self, needs: &str) -> Result<()> {
+        if self.kind.is_ssh() {
+            return Ok(());
+        }
+        Err(CoreError::WrongSessionKind {
+            session: self.name.clone(),
+            kind: self.kind.label(),
+            needs: needs.to_owned(),
+        })
     }
 
     /// The editor's view of this session, to start a copy or compare an edit: what it sets itself (QL-16: not
@@ -303,6 +326,7 @@ impl SessionRecord {
             color: self.color,
             tags: self.own.tags.clone(),
             vm_id: self.vm_id.clone(),
+            kind: self.kind,
         }
     }
 }
@@ -476,7 +500,28 @@ fn invalid<T>(message: impl Into<String>) -> Result<T> {
 fn tidy(mut input: SessionInput) -> Result<SessionInput> {
     input.host = input.host.trim().to_owned();
     if input.host.is_empty() {
-        return invalid("Enter the host name or IP address.");
+        return invalid(if input.kind.has_port() {
+            "Enter the host name or IP address."
+        } else {
+            "Choose the COM port."
+        });
+    }
+    // SS-12: the kind's own fields; a serial session's host is its COM port.
+    let kind = input.kind;
+    kind.tidy(&mut input.host, &mut input.port)?;
+    if !kind.is_ssh() {
+        // Its own program or the remote side asks for the login: no vault password goes anywhere through it
+        // (QL-16: not a folder's either). The startup command, prompt hook and VM link are SSH's.
+        input.auth = SessionAuth::Password { password_id: None };
+        input.startup_command = None;
+        input.startup_on_reconnect = false;
+        input.prompt_hook = None;
+        input.vm_id = None;
+    }
+    if !kind.takes_jump_host() {
+        // Telnet and serial never go through a jump host, not even a folder's.
+        input.jump_session_id = None;
+        input.jump_direct = true;
     }
     if input.host.contains('@') {
         return invalid("Put the user name in the User field, not in the host.");
@@ -1753,8 +1798,17 @@ impl SessionLibrary {
             self.check_auth(ctx, auth).await?;
         }
         if let Some(jump) = d.jump_session_id {
-            if self.store.get_session(ctx, jump).await?.is_none() {
-                return invalid("The chosen jump host is not a saved session.");
+            match self.store.get_session(ctx, jump).await? {
+                None => return invalid("The chosen jump host is not a saved session."),
+                // SS-12: a jump host is an SSH session.
+                Some(hop) if !hop.kind.is_ssh() => {
+                    return invalid(format!(
+                        "'{}' is a {} session, and a jump host is an SSH session.",
+                        hop.name,
+                        hop.kind.label()
+                    ))
+                }
+                Some(_) => {}
             }
             d.jump_direct = false;
         }
@@ -1951,12 +2005,44 @@ impl SessionLibrary {
                 return invalid("A session can't be its own jump host.");
             }
         }
+        // SS-12: a jump host is an SSH session, so one that others go through stays SSH.
+        if let (Some(id), false) = (id, input.kind.is_ssh()) {
+            let jumpers = self
+                .store
+                .list_sessions_in(ctx, &folders)
+                .await?
+                .into_iter()
+                .filter(|s| s.jump_session_id == Some(id))
+                .count();
+            let in_folders = folders.all().any(|f| f.defaults.jump_session_id == Some(id));
+            if jumpers > 0 || in_folders {
+                return invalid(format!(
+                    "This session is the jump host of {}, and a jump host is an SSH session. Choose another jump \
+                     host for them first.",
+                    if jumpers > 0 {
+                        plural(jumpers, "session")
+                    } else {
+                        "a folder".to_owned()
+                    }
+                ));
+            }
+        }
         // QL-16: the jump host that applies, its own or its folders'.
         let effective = folders.resolve(id, &input.own(), input.folder_id);
         if let Some(jump) = effective.jump_session_id {
             let jumps = self.store.session_jumps_in(ctx, &folders).await?;
             if !jumps.contains_key(&jump) {
                 return invalid("The chosen jump host is not a saved session.");
+            }
+            // SS-12: only an SSH session can carry the connection on.
+            if let Some(hop) = self.store.get_session_in(ctx, jump, &folders).await? {
+                if !hop.kind.is_ssh() {
+                    return invalid(format!(
+                        "'{}' is a {} session, and a jump host is an SSH session.",
+                        hop.name,
+                        hop.kind.label()
+                    ));
+                }
             }
             let from_folder = input.jump_session_id.is_none();
             let mut next = Some(jump);
@@ -2035,7 +2121,12 @@ impl SessionLibrary {
     /// One line for the audit log: where it connects and how, without any secret.
     async fn describe(&self, ctx: &Context, s: &SessionRecord) -> Result<String> {
         let (folders, sessions) = self.names(ctx).await?;
-        let mut parts = vec![s.address(), s.auth.describe()];
+        let mut parts = vec![s.address()];
+        // SS-12: what it opens; only SSH logs in with a login of the app's.
+        parts.extend(s.kind.describe());
+        if s.kind.is_ssh() {
+            parts.push(s.auth.describe());
+        }
         if s.environment != Environment::None {
             parts.push(format!("environment {}", s.environment.as_str()));
         }
@@ -2093,6 +2184,9 @@ impl SessionLibrary {
             }
         };
         field("name", a.name.clone(), b.name.clone());
+        // SS-12: the kind and its fields.
+        let kind = |s: &SessionRecord| s.kind.describe().unwrap_or_else(|| "SSH".to_owned());
+        field("kind", kind(a), kind(b));
         field("folder", folder(a.folder_id), folder(b.folder_id));
         field("host", a.host.clone(), b.host.clone());
         field("port", a.port.to_string(), b.port.to_string());
@@ -2378,6 +2472,7 @@ mod tests {
             color: None,
             tags: vec![],
             vm_id: None,
+            kind: Default::default(),
         }
     }
 
@@ -2417,6 +2512,7 @@ mod tests {
                 tags: vec![],
             },
             inherited: Inherited::default(),
+            kind: Default::default(),
         }
     }
 

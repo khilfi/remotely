@@ -5,6 +5,7 @@
 //! tests in `tests/`. The app never enables that feature.
 
 pub mod clock;
+pub mod consoles;
 pub mod containers;
 pub mod disk_images;
 pub mod disk_tools;
@@ -13,6 +14,7 @@ pub mod host_networks;
 pub mod net_tools;
 pub mod ssh_server;
 pub mod stack_clock;
+pub mod telnet_server;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -1176,9 +1178,11 @@ fn find_snapshot(tree: &SnapshotTree, name: &str) -> Option<u32> {
     found
 }
 
+pub use consoles::{FakeLauncher, FakeSerialDevice, FakeSerialPorts};
 pub use containers::FakeContainers;
 pub use disk_tools::FakeDiskTools;
 pub use net_tools::FakeNetworkTools;
+pub use telnet_server::TelnetTestServer;
 
 /// VM-18: VirtualBox in memory. VMs are registered with a UUID, a name and a state; power calls
 /// change the state and snapshot calls the tree the way VBoxManage would, through the same checks as
@@ -2697,11 +2701,13 @@ impl RemoteAdapter for FakeRemote {
             generation: std::sync::Arc::clone(&self.generation),
             opened_in: self.generation.load(Ordering::SeqCst),
             closed: std::sync::atomic::AtomicBool::new(false),
+            files: self.files.clone(),
         }))
     }
 }
 
-/// A connection [`FakeRemote::connect`] kept open: answers every command like `exec` would.
+/// A connection [`FakeRemote::connect`] kept open: answers every command like `exec` would. FD-04: its files are
+/// the fake's ([`FakeRemote::with_files`]).
 struct FakeSession {
     host: String,
     stdout: String,
@@ -2710,6 +2716,7 @@ struct FakeSession {
     generation: std::sync::Arc<AtomicUsize>,
     opened_in: usize,
     closed: std::sync::atomic::AtomicBool,
+    files: FakeFiles,
 }
 
 #[async_trait]
@@ -2749,6 +2756,10 @@ impl ExecSession for FakeSession {
     async fn close(&self) {
         self.closed.store(true, Ordering::SeqCst);
     }
+
+    fn files(&self) -> Option<std::sync::Arc<dyn RemoteFiles>> {
+        Some(std::sync::Arc::new(self.files.clone()))
+    }
 }
 
 /// A shell that echoes what is typed and answers each line with `not connected: <line>`; `exit`
@@ -2766,8 +2777,8 @@ pub fn loopback_shell_with(files: FakeFiles, shell: Option<PromptShell>) -> Shel
         while let Some(msg) = input_rx.recv().await {
             let bytes = match msg {
                 ShellInput::Close => break,
-                ShellInput::Resize { .. } => continue,
-                ShellInput::Data(bytes) => bytes,
+                ShellInput::Resize { .. } | ShellInput::Break => continue,
+                ShellInput::Data(bytes) | ShellInput::Secret(bytes) => bytes,
             };
             let mut out = Vec::new();
             for byte in bytes {
