@@ -178,15 +178,33 @@ impl Toolbox {
             guard: parts.login_guard,
             terminals: parts.terminals,
         });
-        Self {
-            inner: Arc::new(Inner {
-                store: parts.store,
-                tools: parts.tools,
-                network: parts.network,
-                host_details: parts.host_details,
-                jumps,
-            }),
+        let inner = Arc::new(Inner {
+            store: parts.store,
+            tools: parts.tools,
+            network: parts.network,
+            host_details: parts.host_details,
+            jumps,
+        });
+        // Kept connections to jump hosts close on their own when idle, like host details' (QL-04 then checks the
+        // jump host again).
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            let weak = Arc::downgrade(&inner);
+            let wake = inner.jumps.wake();
+            runtime.spawn(async move {
+                // Ends once the toolbox is gone.
+                while let Some(every) = weak.upgrade().map(|inner| inner.jumps.sweep_every()) {
+                    tokio::select! {
+                        () = tokio::time::sleep(every) => {}
+                        () = wake.notified() => {}
+                    }
+                    let Some(inner) = weak.upgrade() else {
+                        break;
+                    };
+                    inner.jumps.close_idle().await;
+                }
+            });
         }
+        Self { inner }
     }
 
     /// The probes, for F2's health checks and the job runner.
@@ -197,6 +215,16 @@ impl Toolbox {
     /// SS-04, FD-02: the kept connections to jump hosts close (the vault locked, or the workspace changed).
     pub async fn close_all(&self) {
         self.inner.jumps.close_all().await;
+    }
+
+    /// How long a kept connection to a jump host may sit unused (2 minutes); tests shorten it.
+    pub fn set_jump_idle(&self, idle: Duration) {
+        self.inner.jumps.set_idle(idle);
+    }
+
+    /// The toolbox's own kept connections to jump hosts open now (an open terminal's are not counted).
+    pub fn kept_jump_connections(&self) -> usize {
+        self.inner.jumps.kept_open()
     }
 
     /// Where `target` is: a typed host as it is, a session's host (with its jump host), a VM's guest IP.
@@ -327,8 +355,11 @@ impl Toolbox {
     }
 
     /// A DNS lookup.
-    pub async fn dns(&self, request: &DnsRequest) -> Result<DnsResult> {
-        dns::lookup(self.inner.tools.as_ref(), request).await
+    pub async fn dns(&self, request: &DnsRequest, cancel: &CancellationToken) -> Result<DnsResult> {
+        tokio::select! {
+            result = dns::lookup(self.inner.tools.as_ref(), request) => result,
+            () = cancel.cancelled() => Err(CoreError::Cancelled),
+        }
     }
 
     /// A port check: a TCP connection to each port, each result reported as it comes.

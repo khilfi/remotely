@@ -381,7 +381,8 @@ fn record_data(record: &DNS_RECORDW) -> String {
         match record.wType {
             1 => Ipv4Addr::from(record.Data.A.IpAddress.to_ne_bytes()).to_string(),
             28 => Ipv6Addr::from(record.Data.AAAA.Ip6Address.IP6Byte).to_string(),
-            2 | 5 | 12 => wide(record.Data.PTR.pNameHost),
+            // NS, CNAME, PTR and DNAME share one structure: a name.
+            2 | 5 | 12 | 39 => wide(record.Data.PTR.pNameHost),
             15 => format!("{} {}", record.Data.MX.wPreference, wide(record.Data.MX.pNameExchange)),
             16 => {
                 let txt = &record.Data.TXT;
@@ -415,12 +416,16 @@ fn record_data(record: &DNS_RECORDW) -> String {
                     wide(srv.pNameTarget)
                 )
             }
+            // Windows read it into a structure of its own (pointers, not bytes) that this tool doesn't show.
+            code if super::windows_parses(code) => format!("({} data not shown)", super::RecordType::name_of(code)),
             _ => {
-                // Types Windows doesn't parse (CAA among them) come as their raw bytes.
+                // Types Windows doesn't parse (NULL, CAA and every type it doesn't know) come as their raw bytes:
+                // a 4-byte count, then the bytes; the record's data length counts both (WinDNS.h's
+                // DNS_NULL_RECORD_LENGTH), so the read never goes past it.
                 let raw = &record.Data.Null;
                 let len = usize::try_from(raw.dwByteCount)
                     .unwrap_or(0)
-                    .min(usize::from(record.wDataLength));
+                    .min(usize::from(record.wDataLength).saturating_sub(4));
                 let bytes = std::slice::from_raw_parts(raw.Data.as_ptr(), len);
                 if record.wType == 257 {
                     crate::toolbox::dns::caa_text(bytes)

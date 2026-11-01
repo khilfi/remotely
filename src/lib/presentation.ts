@@ -579,6 +579,10 @@ const FIELD_KINDS: Record<string, MaskKind | "address"> = {
   address: "address",
   // FD-02: the workspace an FD-07 file was exported from.
   workspace: "workspace",
+  // FD-09: the Toolbox's certificate's server name, a DNS lookup's name, and (a list) the names a certificate shows.
+  serverName: "host",
+  queryName: "host",
+  hosts: "host",
 };
 
 /**
@@ -592,11 +596,17 @@ export function learnFields(masker: Masker, value: unknown, depth = 0): void {
     return;
   }
   for (const [key, field] of Object.entries(value as Record<string, unknown>)) {
+    const kind = Object.prototype.hasOwnProperty.call(FIELD_KINDS, key) ? FIELD_KINDS[key] : undefined;
     if (typeof field === "string") {
-      const kind = FIELD_KINDS[key];
       if (!kind) continue;
       if (kind === "address") learnAddress(masker, field);
       else masker.learn(kind, field);
+    } else if (kind && Array.isArray(field) && field.every((item) => typeof item === "string")) {
+      // A list of one kind of value (FD-09's `hosts`).
+      for (const item of field as string[]) {
+        if (kind === "address") learnAddress(masker, item);
+        else masker.learn(kind, item);
+      }
     } else if (field && typeof field === "object") {
       learnFields(masker, field, depth + 1);
     }

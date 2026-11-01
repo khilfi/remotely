@@ -131,6 +131,16 @@ impl RecordType {
     }
 }
 
+/// Record types Windows' DNS client reads into a structure of its own (names as pointers, keys, signatures...): the
+/// members of `DNS_RECORD`'s data union. Every other type, NULL (10) included, comes as its raw bytes, which is the only
+/// way an answer's data is read when this tool doesn't name the type.
+pub fn windows_parses(code: u16) -> bool {
+    matches!(
+        code,
+        1..=9 | 11..=21 | 24 | 25 | 28 | 30 | 33..=35 | 39 | 41 | 43 | 46..=52 | 64 | 65 | 249 | 250 | 0xff01 | 0xff02
+    )
+}
+
 /// One DNS query.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DnsQuery {
@@ -396,6 +406,18 @@ mod tests {
             serde_json::from_str::<RecordType>("\"CNAME\"").unwrap(),
             RecordType::Cname
         );
+    }
+
+    #[test]
+    fn only_types_windows_leaves_raw_are_read_as_bytes() {
+        // Read into structures: never read as raw bytes (DNAME, NAPTR, MINFO, HINFO, RRSIG, TLSA, SVCB...).
+        for code in [1, 2, 5, 6, 12, 13, 14, 15, 16, 28, 33, 35, 39, 46, 52, 64, 65, 0xff01] {
+            assert!(windows_parses(code), "{code}");
+        }
+        // Raw: NULL, CAA, and types Windows doesn't know (LOC, CERT, NSAP).
+        for code in [10, 257, 29, 37, 22, 23, 99, 1000] {
+            assert!(!windows_parses(code), "{code}");
+        }
     }
 
     // Loopback only: nothing leaves this PC.

@@ -37,8 +37,8 @@ pub enum DnsServerUsed {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DnsResult {
-    /// The name asked for (a PTR's `arpa` name).
-    pub name: String,
+    /// The name asked for (a PTR's `arpa` name). FD-03: `queryName` is a field the presentation masker learns.
+    pub query_name: String,
     pub record_type: RecordType,
     pub records: Vec<DnsRecord>,
     /// Why there are no records.
@@ -167,7 +167,7 @@ pub async fn lookup(tools: &dyn NetworkTools, request: &DnsRequest) -> Result<Dn
         Err(failure) => (Vec::new(), Some(failure)),
     };
     Ok(DnsResult {
-        name,
+        query_name: name,
         record_type: request.record_type,
         records,
         failure,

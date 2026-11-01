@@ -340,11 +340,12 @@ fn public_key(content: &[u8]) -> Result<String> {
                 .map(|modulus| {
                     let modulus = strip_leading_zero(modulus);
                     let lead = modulus.first().map_or(8, |b| b.leading_zeros() as usize);
-                    modulus.len() * 8 - lead
+                    // An empty modulus is 0 bits, never an underflow.
+                    modulus.len().saturating_mul(8).saturating_sub(lead)
                 });
             match bits {
-                Some(bits) => format!("RSA {bits} bits"),
-                None => "RSA".to_owned(),
+                Some(bits) if bits > 0 => format!("RSA {bits} bits"),
+                _ => "RSA".to_owned(),
             }
         }
         "1.2.840.10045.2.1" => {
@@ -442,18 +443,28 @@ pub(crate) fn clean(text: &str) -> String {
 
 /// UTCTime (`YYMMDDHHMMSSZ`) or GeneralizedTime (`YYYYMMDDHHMMSSZ`). `None` for a time it can't read.
 fn time_value(tlv: Tlv<'_>) -> Result<Option<OffsetDateTime>> {
-    let text = std::str::from_utf8(tlv.content).map_err(|_| bad("a time"))?;
-    let digits = text.strip_suffix('Z').unwrap_or(text);
-    let (year, rest) = match tlv.tag {
-        0x17 if digits.len() >= 12 => {
-            let yy: i32 = digits[..2].parse().map_err(|_| bad("a time"))?;
-            (if yy >= 50 { 1900 + yy } else { 2000 + yy }, &digits[2..])
-        }
-        0x18 if digits.len() >= 14 => (digits[..4].parse().map_err(|_| bad("a time"))?, &digits[4..]),
-        0x17 | 0x18 => return Ok(None),
+    // Read as bytes, never sliced as text: a hostile time may hold multibyte characters, and a slice through one
+    // would panic. Only ASCII digits are read; anything else is a time Remotely can't read.
+    let width = match tlv.tag {
+        0x17 => 12,
+        0x18 => 14,
         _ => return Err(bad("a time")),
     };
-    let field = |at: usize| rest.get(at..at + 2).and_then(|s| s.parse::<u8>().ok());
+    let Some(digits) = tlv.content.get(..width).filter(|d| d.iter().all(u8::is_ascii_digit)) else {
+        return Ok(None);
+    };
+    let number = |from: usize, len: usize| {
+        digits[from..from + len]
+            .iter()
+            .fold(0u32, |acc, d| acc * 10 + u32::from(d - b'0'))
+    };
+    let (year, rest) = if width == 12 {
+        let yy = i32::try_from(number(0, 2)).unwrap_or(0);
+        (if yy >= 50 { 1900 + yy } else { 2000 + yy }, 2)
+    } else {
+        (i32::try_from(number(0, 4)).unwrap_or(0), 4)
+    };
+    let field = |at: usize| u8::try_from(number(rest + at, 2)).ok();
     let (Some(month), Some(day), Some(hour), Some(minute), Some(second)) =
         (field(0), field(2), field(4), field(6), field(8))
     else {
@@ -572,6 +583,86 @@ mod tests {
         }
         assert!(parse(&[0x30, 0x84, 0xff, 0xff, 0xff, 0xff]).is_err());
         assert!(parse(b"not a certificate").is_err());
+        // Valid UTF-8 that isn't ASCII ("é" is two bytes) written over every pair of bytes: a time or a name with a
+        // multibyte character must never be sliced through it.
+        for i in 0..der.len().saturating_sub(1) {
+            let mut accented = der.clone();
+            accented[i] = 0xc3;
+            accented[i + 1] = 0xa9;
+            let _ = parse(&accented);
+        }
+    }
+
+    /// The certificate with the first time of `tag` (UTCTime 0x17, GeneralizedTime 0x18) given other bytes of the
+    /// same length.
+    fn with_time(der: &[u8], tag: u8, content: &[u8]) -> Vec<u8> {
+        let mut out = der.to_vec();
+        let len = u8::try_from(content.len()).unwrap();
+        let at = out
+            .windows(2)
+            .position(|w| w == [tag, len])
+            .expect("the certificate has that time");
+        out[at + 2..at + 2 + content.len()].copy_from_slice(content);
+        out
+    }
+
+    #[test]
+    fn a_time_with_multibyte_characters_is_not_read_and_does_not_panic() {
+        // 13 bytes, like "260101120000Z", with a two-byte character at the second place.
+        let utc = "1é010112000Z".as_bytes();
+        assert_eq!(utc.len(), 13);
+        assert!(time_value(Tlv {
+            tag: 0x17,
+            content: utc
+        })
+        .unwrap()
+        .is_none());
+        let general = "2é99123123595Z".as_bytes();
+        assert_eq!(general.len(), 15);
+        assert!(time_value(Tlv {
+            tag: 0x18,
+            content: general
+        })
+        .unwrap()
+        .is_none());
+        assert!(time_value(Tlv {
+            tag: 0x17,
+            content: "+60101120000Z".as_bytes()
+        })
+        .unwrap()
+        .is_none());
+        // In a whole certificate: rcgen writes its start as UTCTime and its end (in 4096) as GeneralizedTime.
+        let der = cert(&["web01.example.com"]);
+        let bad_start = with_time(&der, 0x17, utc);
+        let info = parse(&bad_start).unwrap();
+        assert_eq!(info.not_before, "");
+        assert!(!info.valid_at(OffsetDateTime::now_utc()));
+        let bad_end = with_time(&der, 0x18, general);
+        assert_eq!(parse(&bad_end).unwrap().days_left(OffsetDateTime::now_utc()), None);
+    }
+
+    #[test]
+    fn an_empty_rsa_modulus_is_zero_bits_not_an_underflow() {
+        // SubjectPublicKeyInfo's inside: rsaEncryption with NULL, and a BIT STRING holding RSAPublicKey { modulus
+        // INTEGER (empty), exponent 3 }.
+        let alg = [
+            0x30, 0x0d, 0x06, 0x09, 0x2a, 0x86, 0x48, 0x86, 0xf7, 0x0d, 0x01, 0x01, 0x01, 0x05, 0x00,
+        ];
+        let key = |modulus: &[u8]| {
+            let mut rsa = vec![0x02, u8::try_from(modulus.len()).unwrap()];
+            rsa.extend_from_slice(modulus);
+            rsa.extend_from_slice(&[0x02, 0x01, 0x03]);
+            let mut sequence = vec![0x30, u8::try_from(rsa.len()).unwrap()];
+            sequence.extend(rsa);
+            let mut bits = vec![0x03, u8::try_from(sequence.len() + 1).unwrap(), 0x00];
+            bits.extend(sequence);
+            let mut all = alg.to_vec();
+            all.extend(bits);
+            all
+        };
+        assert_eq!(public_key(&key(&[])).unwrap(), "RSA");
+        assert_eq!(public_key(&key(&[0x00])).unwrap(), "RSA");
+        assert_eq!(public_key(&key(&[0x00, 0x80, 0x01])).unwrap(), "RSA 16 bits");
     }
 
     #[test]

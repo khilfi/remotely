@@ -218,7 +218,7 @@ export function TraceTool({ incoming }: { incoming: Incoming | null }) {
                   <TableCell className="text-muted-foreground">{h.hop}</TableCell>
                   <TableCell className="font-mono text-xs whitespace-normal">
                     {h.address ?? "No answer"}
-                    {h.name && <span className="text-muted-foreground"> ({h.name})</span>}
+                    {h.hostname && <span className="text-muted-foreground"> ({h.hostname})</span>}
                     {h.note && <span className="text-destructive"> · {h.note}</span>}
                   </TableCell>
                   <TableCell className="font-mono text-xs">{hopTimes(h)}</TableCell>
@@ -252,8 +252,8 @@ export function DnsTool() {
   const lookUp = () => {
     if (!name.trim()) return;
     remember(name);
-    void run.start(() =>
-      toolboxApi.dns({ name: name.trim(), recordType: type, server: server.trim() ? server.trim() : null }),
+    void run.start((id) =>
+      toolboxApi.dns(id, { name: name.trim(), recordType: type, server: server.trim() ? server.trim() : null }),
     );
   };
   const result = run.result;

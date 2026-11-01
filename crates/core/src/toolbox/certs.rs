@@ -71,6 +71,14 @@ pub struct CertificateReport {
     pub days_left: Option<i64>,
     /// The handshake failed after the chain was read (its signature, a protocol the server offers...).
     pub handshake_error: Option<String>,
+    /// Certificates sent after the leaf that couldn't be read, in words ("the 2nd certificate: ..."); the rest of the
+    /// report still stands.
+    pub unreadable: Vec<String>,
+    /// FD-03: the host checked; `None` for a file.
+    pub host: Option<String>,
+    /// FD-03: the names the report shows that may be a customer's hosts (the server name, the leaf's common name and
+    /// DNS alternative names), for the presentation masker to learn.
+    pub hosts: Vec<String>,
 }
 
 /// Takes any chain and keeps it, so the viewer can show what Windows wouldn't trust. The handshake's signature is
@@ -249,6 +257,10 @@ pub(super) async fn from_server(
     report.cipher = shaken.cipher;
     report.handshake_error = shaken.error;
     report.name_matches = report.chain.first().map(|leaf| leaf.matches_host(&checked_name));
+    report.host = Some(route.host.clone());
+    if !report.hosts.contains(&checked_name) {
+        report.hosts.insert(0, checked_name);
+    }
     Ok(report)
 }
 
@@ -274,7 +286,24 @@ async fn report_for(tools: &dyn NetworkTools, chain: &[Vec<u8>], usage: TrustUse
     if chain.is_empty() {
         return Err(CoreError::Network("the server sent no certificate".into()));
     }
-    let infos: Vec<CertificateInfo> = chain.iter().map(|der| x509::parse(der)).collect::<Result<_>>()?;
+    // The leaf must be readable; a bad certificate after it is noted, and the report goes on.
+    let mut infos: Vec<CertificateInfo> = vec![x509::parse(&chain[0])?];
+    let mut unreadable = Vec::new();
+    for (i, der) in chain.iter().enumerate().skip(1) {
+        match x509::parse(der) {
+            Ok(info) => infos.push(info),
+            Err(err) => unreadable.push(format!("the {} certificate sent: {err}", ordinal(i + 1))),
+        }
+    }
+    let leaf = &infos[0];
+    let mut hosts: Vec<String> = leaf
+        .dns_names
+        .iter()
+        .map(|n| n.trim_start_matches("*.").to_owned())
+        .collect();
+    hosts.extend(leaf.subject_common_name.clone());
+    let mut seen = std::collections::HashSet::new();
+    hosts.retain(|h| !h.is_empty() && seen.insert(h.to_ascii_lowercase()));
     let verdict = tools
         .check_chain(chain, usage)
         .await
@@ -304,5 +333,19 @@ async fn report_for(tools: &dyn NetworkTools, chain: &[Vec<u8>], usage: TrustUse
         trust_problems: verdict.problems,
         name_matches: None,
         handshake_error: None,
+        unreadable,
+        host: None,
+        hosts,
     })
+}
+
+/// "2nd", "3rd", "11th".
+fn ordinal(n: usize) -> String {
+    let suffix = match (n % 10, n % 100) {
+        (1, r) if r != 11 => "st",
+        (2, r) if r != 12 => "nd",
+        (3, r) if r != 13 => "rd",
+        _ => "th",
+    };
+    format!("{n}{suffix}")
 }

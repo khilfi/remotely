@@ -2,12 +2,14 @@
 //! terminal to the jump host lends its connection; otherwise the toolbox keeps one of its own, logged in with the
 //! saved login only (nothing is asked), through [`crate::login_guard`]: a refused login, a changed host key or a
 //! missing secret parks the jump host, and every login counts against the hourly cap. A kept connection closes once
-//! it was idle for [`KEPT_IDLE`], when the vault locks and when the workspace switches.
+//! it was idle for [`KEPT_IDLE`] (a sweep looks every [`SWEEP_EVERY`], so QL-04 checks the jump host again soon after),
+//! when the vault locks and when the workspace switches; one a check is still using stays.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use tokio::sync::Notify;
 use uuid::Uuid;
 
 use crate::adapters::remote::{AuthMethod, ConnectOptions, ConnectRequest, ExecSession, RemoteAdapter, SessionSpec};
@@ -23,6 +25,9 @@ use crate::vault::{Vault, VaultStatus};
 
 /// A kept connection unused this long is closed.
 pub(super) const KEPT_IDLE: Duration = Duration::from_secs(120);
+
+/// How often the sweep looks for idle kept connections (or sooner, with a shorter idle time).
+pub(super) const SWEEP_EVERY: Duration = Duration::from_secs(15);
 
 /// How long connecting and logging in to a jump host may take.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
@@ -46,6 +51,10 @@ struct Kept {
 pub(super) struct JumpConnections {
     parts: JumpParts,
     kept: Mutex<HashMap<Uuid, Arc<tokio::sync::Mutex<Kept>>>>,
+    /// How long a kept connection may sit unused; tests shorten it.
+    idle: Mutex<Duration>,
+    /// Wakes the sweep when `idle` changes.
+    wake: Arc<Notify>,
 }
 
 impl JumpConnections {
@@ -53,7 +62,35 @@ impl JumpConnections {
         Self {
             parts,
             kept: Mutex::default(),
+            idle: Mutex::new(KEPT_IDLE),
+            wake: Arc::new(Notify::new()),
         }
+    }
+
+    pub(super) fn set_idle(&self, idle: Duration) {
+        *locks::lock(&self.idle) = idle;
+        self.wake.notify_one();
+    }
+
+    /// How long the sweep sleeps between two looks.
+    pub(super) fn sweep_every(&self) -> Duration {
+        locks::lock(&self.idle).min(SWEEP_EVERY).max(Duration::from_millis(10))
+    }
+
+    pub(super) fn wake(&self) -> Arc<Notify> {
+        Arc::clone(&self.wake)
+    }
+
+    /// Kept connections open now (an open terminal's are not counted).
+    pub(super) fn kept_open(&self) -> usize {
+        let slots: Vec<Arc<tokio::sync::Mutex<Kept>>> = locks::lock(&self.kept).values().cloned().collect();
+        slots
+            .iter()
+            .filter(|slot| {
+                slot.try_lock()
+                    .map_or(true, |kept| kept.connection.as_ref().is_some_and(|c| !c.is_closed()))
+            })
+            .count()
     }
 
     /// A connection to the jump host `jump_id`: an open terminal's, or the toolbox's own.
@@ -96,7 +133,9 @@ impl JumpConnections {
         }
     }
 
-    async fn close_idle(&self) {
+    /// Closes the kept connections unused for the idle time, unless a check still holds one.
+    pub(super) async fn close_idle(&self) {
+        let idle = *locks::lock(&self.idle);
         let slots: Vec<(Uuid, Arc<tokio::sync::Mutex<Kept>>)> = locks::lock(&self.kept)
             .iter()
             .map(|(id, s)| (*id, Arc::clone(s)))
@@ -105,7 +144,9 @@ impl JumpConnections {
             let Ok(mut kept) = slot.try_lock() else {
                 continue;
             };
-            if kept.used.is_none_or(|used| used.elapsed() >= KEPT_IDLE) {
+            // A check running now holds a clone of the connection.
+            let in_use = kept.connection.as_ref().is_some_and(|c| Arc::strong_count(c) > 1);
+            if !in_use && kept.used.is_none_or(|used| used.elapsed() >= idle) {
                 if let Some(connection) = kept.connection.take() {
                     connection.close().await;
                 }

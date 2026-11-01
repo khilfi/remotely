@@ -229,7 +229,7 @@ impl TraceRequest {
 pub struct TraceHop {
     pub hop: u8,
     pub address: Option<IpAddr>,
-    pub name: Option<String>,
+    pub hostname: Option<String>,
     pub rtts_ms: Vec<Option<u32>>,
     /// The destination answered at this hop.
     pub reached: bool,
@@ -266,7 +266,7 @@ pub(super) async fn trace(
         let mut hop = TraceHop {
             hop: ttl,
             address: None,
-            name: None,
+            hostname: None,
             rtts_ms: Vec::new(),
             reached: false,
             note: None,
@@ -307,7 +307,7 @@ pub(super) async fn trace(
             }
         }
         if let (Some(names), Some(at)) = (names, hop.address) {
-            hop.name = tokio::select! {
+            hop.hostname = tokio::select! {
                 name = names.reverse(at) => name.map(|n| super::x509::clean(&n)),
                 () = cancel.cancelled() => None,
             };

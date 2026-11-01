@@ -81,6 +81,11 @@ function Report({ report }: { report: CertificateReport }) {
             The handshake failed after the certificate: {report.handshakeError}
           </p>
         )}
+        {report.unreadable.map((note) => (
+          <p key={note} className="text-sm text-muted-foreground">
+            Couldn&apos;t read {note}
+          </p>
+        ))}
       </div>
       {leaf && <Details cert={leaf} />}
       {report.chain.length > 1 && (

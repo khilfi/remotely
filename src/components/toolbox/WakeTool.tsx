@@ -8,7 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { HelpTip } from "@/components/HelpTip";
-import { useReadOnlyReason } from "@/components/Presentation";
+import { usePresentation, useReadOnlyReason } from "@/components/Presentation";
 import { WhyDisabled } from "@/components/WhyDisabled";
 import { api, errorMessage, type SubmitOutcome, type TargetRef, type WakeSpec } from "@/lib/api";
 import { normalizeMac, wakeAddress, type ToolTarget } from "@/lib/toolbox";
@@ -56,6 +56,7 @@ export function WakeTool({
   const [error, setError] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
   const readOnly = useReadOnlyReason();
+  const { presenting } = usePresentation();
 
   const ref = target.kind === "address" ? null : targetRef(target);
   const refKey = JSON.stringify(ref);
@@ -147,8 +148,9 @@ export function WakeTool({
             value={mac}
             onChange={(e) => setMac(e.target.value)}
           />
+          {/* FD-03: a native dropdown is out of the masker's reach, so none while presenting. */}
           <datalist id="wake-mac-known">
-            {[...(options?.macs.map((m) => m.mac) ?? []), ...recent].map((v, i) => (
+            {(presenting ? [] : [...(options?.macs.map((m) => m.mac) ?? []), ...recent]).map((v, i) => (
               <option key={`${v}-${i}`} value={v} />
             ))}
           </datalist>

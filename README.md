@@ -867,8 +867,9 @@ compose stacks as a whole (the Compose project shows on each container), creatin
 
 ### Toolbox
 
-FD-09 (0.7.0): network tools in the sidebar's Remote group, opened from Ctrl+K or a session's or VM's **Toolbox**
-menu, which fills in the target. Each tab keeps its last 20 inputs in the window's local storage.
+FD-09 (0.7.0): network tools in the sidebar's Remote group, opened from Ctrl+K, a session's **Toolbox** menu, or the
+wrench in a VM's details, which fill in the target. Each tab keeps its last 20 inputs per workspace in the window's
+local storage, and offers none while presenting.
 
 - **Reads only**: ping (Windows' ICMP API, no administrator rights), trace route (30 hops, 3 requests each, names only
   when asked), DNS lookups (A, AAAA, CNAME, MX, TXT, NS, SOA, PTR, SRV, CAA through Windows' resolver or a server you

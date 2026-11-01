@@ -159,6 +159,13 @@ fn page_loaded<R: Runtime>(webview: &Webview<R>, payload: &PageLoadPayload<'_>) 
     if loads == 0 {
         return;
     }
+    // FD-09: the old page's toolbox runs (a ping of 1000 requests, say) stop with it.
+    if let Some(runs) = webview.try_state::<toolbox::ToolRuns>() {
+        let stopped = runs.cancel_all();
+        if stopped > 0 {
+            tracing::info!(stopped, "the window reloaded; stopped its toolbox runs");
+        }
+    }
     let Some(state) = webview.try_state::<AppState>() else {
         return;
     };

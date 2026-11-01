@@ -64,8 +64,9 @@ export interface HistoryStorage {
   setItem(key: string, value: string): void;
 }
 
-function key(tool: ToolboxTool): string {
-  return `remotely.toolbox.recent.${tool}`;
+/** FD-02: each workspace keeps its own list, so one customer's hosts are never offered in another's workspace. */
+function key(tool: ToolboxTool, workspace: string): string {
+  return `remotely.toolbox.recent.${workspace}.${tool}`;
 }
 
 function windowStorage(): HistoryStorage | null {
@@ -76,11 +77,15 @@ function windowStorage(): HistoryStorage | null {
   }
 }
 
-/** The tool's last inputs, newest first. Nothing when storage can't be read. */
-export function recentInputs(tool: ToolboxTool, storage: HistoryStorage | null = windowStorage()): string[] {
-  if (!storage) return [];
+/** The tool's last inputs in `workspace`, newest first. Nothing when storage can't be read or the workspace isn't known yet. */
+export function recentInputs(
+  tool: ToolboxTool,
+  workspace: string | null,
+  storage: HistoryStorage | null = windowStorage(),
+): string[] {
+  if (!storage || !workspace) return [];
   try {
-    const raw = storage.getItem(key(tool));
+    const raw = storage.getItem(key(tool, workspace));
     if (!raw) return [];
     const list: unknown = JSON.parse(raw);
     if (!Array.isArray(list)) return [];
@@ -90,23 +95,49 @@ export function recentInputs(tool: ToolboxTool, storage: HistoryStorage | null =
   }
 }
 
-/** Keeps `input` first in the tool's list (once, any letter case), at most HISTORY_LIMIT. Returns the new list. */
+/**
+ * Keeps `input` first in the tool's list in `workspace` (once, any letter case), at most HISTORY_LIMIT. Returns the
+ * new list. With no workspace known yet nothing is saved.
+ */
 export function rememberInput(
   tool: ToolboxTool,
+  workspace: string | null,
   input: string,
   storage: HistoryStorage | null = windowStorage(),
 ): string[] {
   const value = input.trim();
-  const before = recentInputs(tool, storage);
+  const before = recentInputs(tool, workspace, storage);
   if (!value || value.length > 300) return before;
   const list = [value, ...before.filter((v) => v.toLowerCase() !== value.toLowerCase())].slice(0, HISTORY_LIMIT);
-  if (!storage) return list;
+  if (!storage || !workspace) return list;
   try {
-    storage.setItem(key(tool), JSON.stringify(list));
+    storage.setItem(key(tool, workspace), JSON.stringify(list));
   } catch {
     // Storage full or blocked: the list lasts as long as the page.
   }
   return list;
+}
+
+// The workspace whose lists the tools show: the Toolbox page sets it once it knows (the window loads again after a
+// switch, so it changes only from null to the shown workspace).
+let scope: string | null = null;
+const scopeListeners = new Set<() => void>();
+
+export function recentScope(): string | null {
+  return scope;
+}
+
+export function setRecentScope(workspace: string): void {
+  if (scope === workspace) return;
+  scope = workspace;
+  for (const listener of scopeListeners) listener();
+}
+
+export function subscribeRecentScope(listener: () => void): () => void {
+  scopeListeners.add(listener);
+  return () => {
+    scopeListeners.delete(listener);
+  };
 }
 
 // ---- Words ----

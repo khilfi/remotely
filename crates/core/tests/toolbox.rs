@@ -170,7 +170,7 @@ async fn a_trace_lists_each_hop_until_the_host_answers() {
     assert!(summary.reached);
     assert_eq!(summary.hops.len(), 4);
     assert_eq!(summary.hops[0].address.unwrap().to_string(), "198.51.100.1");
-    assert_eq!(summary.hops[0].name.as_deref(), Some("edge.example.net"));
+    assert_eq!(summary.hops[0].hostname.as_deref(), Some("edge.example.net"));
     assert_eq!(summary.hops[1].address, None, "a router that doesn't answer");
     assert_eq!(summary.hops[1].rtts_ms, [None, None, None]);
     assert!(summary.hops[3].reached);
@@ -289,11 +289,14 @@ async fn dns_lookups_give_records_or_say_why_not() {
     let core = core_with(Arc::clone(&tools), FakeNetwork::default()).await;
     let mx = core
         .toolbox
-        .dns(&DnsRequest {
-            name: "example.com".into(),
-            record_type: RecordType::Mx,
-            server: None,
-        })
+        .dns(
+            &DnsRequest {
+                name: "example.com".into(),
+                record_type: RecordType::Mx,
+                server: None,
+            },
+            &CancellationToken::new(),
+        )
         .await
         .unwrap();
     assert_eq!(mx.records[0].data, "10 mail.example.com");
@@ -304,14 +307,17 @@ async fn dns_lookups_give_records_or_say_why_not() {
     );
     let ptr = core
         .toolbox
-        .dns(&DnsRequest {
-            name: "192.0.2.10".into(),
-            record_type: RecordType::Ptr,
-            server: Some("198.51.100.53".into()),
-        })
+        .dns(
+            &DnsRequest {
+                name: "192.0.2.10".into(),
+                record_type: RecordType::Ptr,
+                server: Some("198.51.100.53".into()),
+            },
+            &CancellationToken::new(),
+        )
         .await
         .unwrap();
-    assert_eq!(ptr.name, "10.2.0.192.in-addr.arpa");
+    assert_eq!(ptr.query_name, "10.2.0.192.in-addr.arpa");
     assert_eq!(ptr.records[0].data, "web01.example.com");
     assert_eq!(
         tools.dns_queries().last().unwrap().server.unwrap().to_string(),
@@ -319,31 +325,40 @@ async fn dns_lookups_give_records_or_say_why_not() {
     );
     let empty = core
         .toolbox
-        .dns(&DnsRequest {
-            name: "empty.example.com".into(),
-            record_type: RecordType::Txt,
-            server: None,
-        })
+        .dns(
+            &DnsRequest {
+                name: "empty.example.com".into(),
+                record_type: RecordType::Txt,
+                server: None,
+            },
+            &CancellationToken::new(),
+        )
         .await
         .unwrap();
     assert_eq!(empty.failure, Some(DnsFailure::NoRecords));
     let missing = core
         .toolbox
-        .dns(&DnsRequest {
-            name: "nope.example.com".into(),
-            record_type: RecordType::A,
-            server: None,
-        })
+        .dns(
+            &DnsRequest {
+                name: "nope.example.com".into(),
+                record_type: RecordType::A,
+                server: None,
+            },
+            &CancellationToken::new(),
+        )
         .await
         .unwrap();
     assert_eq!(missing.failure, Some(DnsFailure::NoSuchName));
     let bad_server = core
         .toolbox
-        .dns(&DnsRequest {
-            name: "example.com".into(),
-            record_type: RecordType::A,
-            server: Some("dns.example.com".into()),
-        })
+        .dns(
+            &DnsRequest {
+                name: "example.com".into(),
+                record_type: RecordType::A,
+                server: Some("dns.example.com".into()),
+            },
+            &CancellationToken::new(),
+        )
         .await
         .unwrap_err()
         .to_string();
@@ -978,4 +993,191 @@ async fn the_real_ping_reaches_this_pc() {
         .unwrap();
     assert_eq!(summary.received, 1);
     assert!(matches!(summary.replies[0].echo, Echo::Reply { .. }));
+}
+
+// ---- Review fixes ------------------------------------------------------------------------------------------------
+
+/// A bastion test server with a saved, trusted session, and a session behind it at 127.0.0.1 (which the bastion
+/// reaches), on the real russh adapter with the app's vault.
+async fn jump_lab() -> (Core, TestSshServer, Uuid, Uuid) {
+    let password = format!("pw-{}", Uuid::new_v4().simple());
+    let bastion = TestSshServer::start().await.with_password("alice", &password);
+    let core = Setup::new(FakeVmware::default())
+        .with_real_vault()
+        .with_ssh()
+        .with_network_tools(Arc::new(FakeNetworkTools::new()))
+        .build()
+        .await;
+    let secret = core
+        .vault
+        .add(
+            &core.ctx(),
+            SecretKind::Password,
+            "bastion",
+            SecretString::new(&password),
+        )
+        .await
+        .unwrap()
+        .id;
+    let mut jump = session_input("bastion", "127.0.0.1", bastion.port(), None, Environment::Lab);
+    jump.auth = SessionAuth::Password {
+        password_id: Some(secret),
+    };
+    let jump = core.sessions.create(&core.ctx(), jump).await.unwrap();
+    core.known_hosts
+        .trust(
+            &core.ctx(),
+            &HostKey {
+                host: "127.0.0.1".into(),
+                port: bastion.port(),
+                key_type: "ssh-ed25519".into(),
+                fingerprint: bastion.host_key_fingerprint(),
+            },
+            None,
+        )
+        .await
+        .unwrap();
+    let behind = core
+        .sessions
+        .create(
+            &core.ctx(),
+            session_input("local", "127.0.0.1", 22, Some(jump.id), Environment::Lab),
+        )
+        .await
+        .unwrap();
+    (core, bastion, jump.id, behind.id)
+}
+
+async fn check_port(core: &Core, session_id: Uuid, port: u16) -> remotely_core::toolbox::PortSummary {
+    core.toolbox
+        .ports(
+            &core.ctx(),
+            &PortRequest {
+                target: ProbeTarget::Session { session_id },
+                ports: port.to_string(),
+                timeout_ms: 5000,
+                banner: false,
+            },
+            &CancellationToken::new(),
+            &|_| {},
+        )
+        .await
+        .unwrap()
+}
+
+// Review: a terminal open to the jump host lends its connection, and its wrapper must pass the channel through.
+#[tokio::test]
+async fn checks_behind_a_jump_host_go_through_an_open_terminal_to_it() {
+    use remotely_core::adapters::remote::{AgentSource, PtySize};
+    use remotely_core::terminal::TerminalTuning;
+    let (core, bastion, jump, behind) = jump_lab().await;
+    core.terminals.set_tuning(TerminalTuning {
+        connect_timeout: Duration::from_secs(5),
+        agent: AgentSource::NamedPipe(format!(r"\\.\pipe\remotely-test-none-{}", Uuid::new_v4())),
+        host_key_wait: Duration::from_secs(10),
+        ..TerminalTuning::default()
+    });
+    let _terminal = core
+        .terminals
+        .open(&core.ctx(), jump, PtySize { cols: 80, rows: 24 })
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(15), async {
+        while core.terminals.commands_for(jump).is_none() {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the terminal connects");
+    assert_eq!(bastion.connections(), 1, "the terminal's");
+
+    let open = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let port = open.local_addr().unwrap().port();
+    let summary = check_port(&core, behind, port).await;
+    assert_eq!(summary.via.as_deref(), Some("bastion"));
+    assert_eq!(summary.results[0].state, PortState::Open, "{:?}", summary.results[0]);
+    assert_eq!(
+        bastion.connections(),
+        1,
+        "no login of its own: the terminal's connection"
+    );
+    assert_eq!(core.toolbox.kept_jump_connections(), 0);
+    core.terminals.close_all().await;
+}
+
+// Review: a kept connection to a jump host closes once idle, by itself, so QL-04 checks that host again.
+#[tokio::test]
+async fn a_kept_jump_host_connection_closes_when_idle_without_another_check() {
+    let (core, bastion, _jump, behind) = jump_lab().await;
+    core.toolbox.set_jump_idle(Duration::from_millis(200));
+    let open = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let port = open.local_addr().unwrap().port();
+    assert_eq!(check_port(&core, behind, port).await.results[0].state, PortState::Open);
+    assert_eq!(core.toolbox.kept_jump_connections(), 1);
+    assert_eq!(bastion.connections(), 1);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while core.toolbox.kept_jump_connections() > 0 {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("the sweep closes it, with no check to start it");
+    // The next check logs in again.
+    assert_eq!(check_port(&core, behind, port).await.results[0].state, PortState::Open);
+    assert_eq!(bastion.connections(), 2);
+}
+
+// Review (for F2): a certificate after the leaf that can't be read is noted; the leaf's report still stands. FD-03:
+// the names the report shows are listed for the presentation masker.
+#[tokio::test]
+async fn an_unreadable_certificate_after_the_leaf_is_noted_and_the_rest_is_shown() {
+    use base64::Engine;
+    let (_, _, der) = tls_server(&["files.example.com", "intranet"]).await;
+    let folder = temp_folder("toolbox-chain");
+    let block = |bytes: &[u8]| {
+        format!(
+            "-----BEGIN CERTIFICATE-----\n{}\n-----END CERTIFICATE-----\n",
+            base64::engine::general_purpose::STANDARD.encode(bytes)
+        )
+    };
+    let path = folder.join("chain.pem");
+    std::fs::write(&path, format!("{}{}", block(&der), block(b"not a certificate"))).unwrap();
+    let core = core_with(Arc::new(FakeNetworkTools::new()), FakeNetwork::default()).await;
+    let report = core.toolbox.certificate_file(&path).await.unwrap();
+    assert_eq!(report.chain.len(), 1);
+    assert_eq!(report.chain[0].subject, "CN=files.example.com");
+    assert_eq!(report.unreadable.len(), 1);
+    assert!(
+        report.unreadable[0].starts_with("the 2nd certificate sent"),
+        "{:?}",
+        report.unreadable
+    );
+    assert_eq!(report.hosts, ["files.example.com", "intranet"]);
+    std::fs::remove_dir_all(folder).ok();
+}
+
+#[tokio::test]
+async fn a_server_report_names_its_host_for_the_masker() {
+    let (at, _, _) = tls_server(&["intranet"]).await;
+    let tools = Arc::new(FakeNetworkTools::new().with_port("192.0.2.10", 443, FakePort::Forward(at)));
+    let core = core_with(tools, FakeNetwork::default().with_name("intranet", "192.0.2.10")).await;
+    let report = core
+        .toolbox
+        .certificate(
+            &core.ctx(),
+            &CertRequest {
+                target: address("intranet"),
+                port: 443,
+                server_name: None,
+                timeout_ms: 5000,
+            },
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(report.host.as_deref(), Some("intranet"));
+    assert_eq!(report.hosts, ["intranet"]);
+    let json = serde_json::to_value(&report).unwrap();
+    assert_eq!(json["host"], "intranet");
+    assert_eq!(json["serverName"], "intranet");
 }

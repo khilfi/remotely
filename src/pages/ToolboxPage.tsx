@@ -5,7 +5,7 @@
 // Every tool but Wake up only reads (no tier, not audited, allowed while presenting with the read-only lock). Each
 // tab keeps its last 20 inputs in the window's local storage (lib/toolbox.ts).
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   ActivityIcon,
   CalculatorIcon,
@@ -23,7 +23,8 @@ import { DnsTool, PingTool, PortsTool, TraceTool, type Incoming } from "@/compon
 import { SubnetTool } from "@/components/toolbox/SubnetTool";
 import { WakeTool } from "@/components/toolbox/WakeTool";
 import type { SubmitOutcome } from "@/lib/api";
-import { TOOLBOX_TOOLS, type ToolboxTool, type ToolTarget } from "@/lib/toolbox";
+import { recentScope, setRecentScope, TOOLBOX_TOOLS, type ToolboxTool, type ToolTarget } from "@/lib/toolbox";
+import { workspacesApi } from "@/lib/workspaces-api";
 
 /** A tool asked for from a row, a link or the palette; `n` counts the asks. */
 export interface ToolboxRequest {
@@ -67,6 +68,15 @@ interface Props {
 }
 
 export function ToolboxPage({ active, request, onSubmitted }: Props) {
+  // FD-02: the recent inputs are the shown workspace's; it is read once the page first shows (the window loads again
+  // after a switch).
+  useEffect(() => {
+    if (!active || recentScope()) return;
+    workspacesApi.current().then(
+      (w) => setRecentScope(w.id),
+      () => undefined,
+    );
+  }, [active]);
   const [tab, setTab] = useState<ToolboxTool>(request?.tool ?? "ping");
   const [handled, setHandled] = useState(request?.n ?? 0);
   // What each tool was handed last, so each tab takes only its own.

@@ -51,7 +51,8 @@ export interface TraceRequest {
 export interface TraceHop {
   hop: number;
   address: string | null;
-  name: string | null;
+  /** Its reverse DNS name, when asked. */
+  hostname: string | null;
   rttsMs: (number | null)[];
   reached: boolean;
   note: string | null;
@@ -100,7 +101,8 @@ export type DnsFailure = { kind: "noSuchName" } | { kind: "noRecords" } | { kind
 export type DnsServerUsed = { kind: "windows"; servers: string[] } | { kind: "chosen"; address: string };
 
 export interface DnsResult {
-  name: string;
+  /** The name asked for (a PTR's arpa name). */
+  queryName: string;
   recordType: RecordType;
   records: DnsRecord[];
   failure: DnsFailure | null;
@@ -173,6 +175,12 @@ export interface CertificateReport {
   nameMatches: boolean | null;
   daysLeft: number | null;
   handshakeError: string | null;
+  /** Certificates sent after the leaf that couldn't be read, in words. */
+  unreadable: string[];
+  /** The host checked; null for a file. */
+  host: string | null;
+  /** The names the report shows that may be a customer's hosts, for the presentation masker. */
+  hosts: string[];
 }
 
 export interface WakeAdapter {
@@ -198,7 +206,7 @@ export type ProbeProgress =
 export const toolboxApi = {
   ping: (run: string, request: PingRequest) => invoke<PingSummary>("toolbox_ping", { run, request }),
   trace: (run: string, request: TraceRequest) => invoke<TraceSummary>("toolbox_trace", { run, request }),
-  dns: (request: DnsRequest) => invoke<DnsResult>("toolbox_dns", { request }),
+  dns: (run: string, request: DnsRequest) => invoke<DnsResult>("toolbox_dns", { run, request }),
   ports: (run: string, request: PortRequest) => invoke<PortSummary>("toolbox_ports", { run, request }),
   certificate: (run: string, request: CertRequest) =>
     invoke<CertificateReport>("toolbox_certificate", { run, request }),

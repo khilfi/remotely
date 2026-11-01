@@ -51,6 +51,7 @@ import { HYPERVISORS, toolsName, vmLocation } from "@/lib/hypervisors";
 import { formatPct, HOST_SHARE_HINT, type Thresholds } from "@/lib/metrics";
 import { viewOfTab, VM_TABS, vmTabOf, type VmTab } from "@/lib/vm-page";
 import { approvalHint, PROTECTED_REASON, takeReason, type VmView } from "@/lib/vm-snapshots";
+import { ToolboxIconMenu } from "@/components/toolbox/ToolboxMenu";
 
 interface Props {
   vm: VmRecord;
@@ -171,6 +172,7 @@ export function VmDetailsPanel(props: Props) {
           onClick={props.onOpenConsole}
         />
         <IconAction label="Actions: power and protection" icon={<ZapIcon />} onClick={onActions} />
+        <ToolboxIconMenu target={{ kind: "vm", vmKey: vm.vmxPath, label: vm.displayName }} />
         <IconAction label="Close the details" icon={<XIcon />} onClick={onClose} />
       </div>
 

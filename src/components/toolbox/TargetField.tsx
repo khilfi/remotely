@@ -1,18 +1,35 @@
 // FD-09: what a Toolbox tool is pointed at: a session or VM handed over from its row (shown by name, with a way back
 // to typing), or a host typed in, with the tool's last inputs offered as you type.
 
-import { useCallback, useState, type ReactNode } from "react";
+import { useCallback, useState, useSyncExternalStore, type ReactNode } from "react";
 import { XIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { recentInputs, rememberInput, type ToolboxTool, type ToolTarget } from "@/lib/toolbox";
+import { usePresentation } from "@/components/Presentation";
+import {
+  recentInputs,
+  recentScope,
+  rememberInput,
+  subscribeRecentScope,
+  type ToolboxTool,
+  type ToolTarget,
+} from "@/lib/toolbox";
 
-/** The tool's last inputs, and a way to add one. */
+/**
+ * The tool's last inputs in the shown workspace, and a way to add one. None are offered while presenting (FD-03): a
+ * native dropdown is out of the page masker's reach.
+ */
 export function useRecent(tool: ToolboxTool): [string[], (input: string) => void] {
-  const [recent, setRecent] = useState(() => recentInputs(tool));
-  const remember = useCallback((input: string) => setRecent(rememberInput(tool, input)), [tool]);
-  return [recent, remember];
+  const workspace = useSyncExternalStore(subscribeRecentScope, recentScope);
+  const { presenting } = usePresentation();
+  const [saved, setSaved] = useState<{ workspace: string | null; list: string[] } | null>(null);
+  const remember = useCallback(
+    (input: string) => setSaved({ workspace, list: rememberInput(tool, workspace, input) }),
+    [tool, workspace],
+  );
+  const list = saved && saved.workspace === workspace ? saved.list : recentInputs(tool, workspace);
+  return [presenting ? [] : list, remember];
 }
 
 interface Props {
@@ -56,7 +73,7 @@ export function TargetField({ id, target, onChange, onSubmit, recent, placeholde
       <Input
         id={id}
         data-mask="host"
-        list={`${id}-recent`}
+        list={recent.length > 0 ? `${id}-recent` : undefined}
         autoComplete="off"
         spellCheck={false}
         placeholder={placeholder ?? "Host name or IP address"}

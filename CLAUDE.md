@@ -443,7 +443,9 @@ crates/core/          remotely-core: all app logic
                       `.crt`, `.cer` or `.pem` file after untrusted::path_refusal, 1 MB), x509.rs (a bounds-checked DER
                       reader: names in RFC 4514's order, alternative names, key, signature, fingerprints, RFC 6125 name
                       match), jump.rs (SS-07: an open terminal's connection to the jump host, else a kept one through
-                      login_guard's parks and caps, closed when idle, on a vault lock and a workspace switch), wake.rs
+                      login_guard's parks and caps, closed by a sweep after 2 minutes idle (never while a check holds
+                      it), on a vault lock and a workspace switch; every ExecSession wrapper forwards open_direct, the
+                      terminal's ScrubbedCommands included), wake.rs
                       (WakeSpec: MAC, an adapter's subnet broadcast or a typed address, port 9; the magic packet;
                       Command::WakeOnLan is Low, Medium on Prod, audited; one target: the session, the VM, or
                       TargetRef::App named "MAC ..." for a MAC typed alone)
@@ -641,7 +643,9 @@ src/                  React + TypeScript UI
                       PageHeader, HelpTip, Term, SelectionBar, RowMenu, EmptyState, Tip and ShowTipsAgainButton,
                       RefreshButton; FD-09 toolbox/: the Toolbox's tabs (ProbeTools: Ping, Trace route, DNS lookup,
                       Check ports; CertificateTool, SubnetTool, WakeTool), TargetField and ToolboxMenu, the "Toolbox"
-                      submenu of session rows and the palette's VM and session views)
+                      submenu of session rows and the palette's VM and session views, and ToolboxIconMenu in the VM
+                      details panel's header; no recent inputs are offered while presenting, since a native dropdown
+                      is out of the masker's reach)
   pages/              one file per page (bulk execution is in TerminalPage: Type in all tabs (MultiExec) and Compare
                       hosts; QL-14 VmsPage
                       is VMs and snapshots, with the selection's bulk snapshot actions and the details panel;
@@ -745,7 +749,8 @@ src/                  React + TypeScript UI
                       navigation-api.ts,
                       density.ts (QL-24 `--spacing` and `--radius` through `data-density`), shortcuts.ts (QL-24 every
                       shortcut), first-run.ts (QL-23); FD-09 toolbox.ts (the tools, row targets, the last 20 inputs
-                      per tool in local storage, every access in try/catch, result wording), toolbox-api.ts (wrappers
+                      per tool and workspace in local storage, every access in try/catch, result wording),
+                      toolbox-api.ts (wrappers
                       and types), subnet.ts (the subnet calculator, IPv4 and IPv6 with BigInt) and
                       hooks/use-probe-run.ts (a run's id, progress and Stop); pure helpers with
                       *.test.ts

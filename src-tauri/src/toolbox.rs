@@ -32,6 +32,19 @@ type IpcResult<T> = Result<T, IpcError>;
 #[derive(Default)]
 pub struct ToolRuns(Mutex<HashMap<Uuid, CancellationToken>>);
 
+impl ToolRuns {
+    /// Stops every run: the page that started them reloaded, or another workspace opened. Returns how many.
+    pub fn cancel_all(&self) -> usize {
+        let Ok(map) = self.0.lock() else {
+            return 0;
+        };
+        for token in map.values() {
+            token.cancel();
+        }
+        map.len()
+    }
+}
+
 /// A run's entry, taken out when the run ends.
 struct Running<'a> {
     runs: &'a ToolRuns,
@@ -108,8 +121,14 @@ pub async fn toolbox_trace(
 
 /// A DNS lookup. A read.
 #[tauri::command]
-pub async fn toolbox_dns(state: State<'_, AppState>, request: DnsRequest) -> IpcResult<DnsResult> {
-    Ok(state.core.toolbox.dns(&request).await?)
+pub async fn toolbox_dns(
+    state: State<'_, AppState>,
+    runs: State<'_, ToolRuns>,
+    run: Uuid,
+    request: DnsRequest,
+) -> IpcResult<DnsResult> {
+    let running = Running::start(&runs, run);
+    Ok(state.core.toolbox.dns(&request, &running.token).await?)
 }
 
 /// A port check, through the session's jump host when it has one. A read.
@@ -197,4 +216,22 @@ pub async fn toolbox_wake_options(state: State<'_, AppState>, target: Option<Tar
     let core = &state.core;
     let (adapters, macs) = core.toolbox.wake_options(&core.ctx(), target.as_ref()).await?;
     Ok(WakeOptions { adapters, macs })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cancel_all_stops_every_run_and_a_finished_run_leaves_the_list() {
+        let runs = ToolRuns::default();
+        let (a, b) = (Uuid::new_v4(), Uuid::new_v4());
+        let first = Running::start(&runs, a);
+        let second = Running::start(&runs, b);
+        assert_eq!(runs.cancel_all(), 2);
+        assert!(first.token.is_cancelled() && second.token.is_cancelled());
+        drop(first);
+        drop(second);
+        assert_eq!(runs.cancel_all(), 0, "ended runs are gone");
+    }
 }
