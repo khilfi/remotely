@@ -165,7 +165,7 @@ Schedules (0.5.0, VM-14 and VM-27, `docs/plan-0.5.md` "Approval tiers"):
 | A run after the schedule was edited, a VM became Prod or protected, got its tag or joined its stack, or the rules that rated it changed | Doesn't run: the schedule pauses and asks again |
 | Creating, editing, pausing, resuming and deleting schedules; the snapshot chain warnings' limits | No tier beyond the schedule's approval; audited |
 
-Support bundles (0.7.0, FD-04, `docs/plan-0.7.md` "Approval tiers"). The hosts are saved sessions; a Prod-labelled one moves the bundle up one tier, and protected ones are skipped:
+Support bundles (0.7.0, FD-04, `docs/plan-0.7.md` "Approval tiers"). The hosts are saved SSH sessions (SS-12: an RDP, VNC, Telnet or serial session is refused); a Prod-labelled one moves the bundle up one tier, and protected ones are skipped:
 
 | Action | Tier |
 | --- | --- |

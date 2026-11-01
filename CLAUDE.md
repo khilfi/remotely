@@ -500,7 +500,8 @@ crates/core/          remotely-core: all app logic
                       puts a file and its manifest record in together; manifest.json); runner.rs BundleRunner, the job
                       runner's BundleActions (begin, collect, each host's end, save and audit `data_exported`; a
                       cancelled job saves nothing); mod.rs SupportBundles (Core.bundles: presets, preview, check,
-                      submit, saved_at for Show folder); spec.rs zip_path (a name given `.zip` never replaces a file
+                      submit, saved_at for Show folder; SS-12 SSH sessions only, another kind refused by name,
+                      HOSTS_NEED); spec.rs zip_path (a name given `.zip` never replaces a file
                       unasked). The policy engine rates a bundle's commands as a Compare hosts run
                       (Command::rated_script). FD-03: presentation.ts masks the workspace in a bundle's file name
     multiexec_groups.rs QL-19 saved MultiExec groups (Core.groups): named sets of saved sessions in order (1 to 60

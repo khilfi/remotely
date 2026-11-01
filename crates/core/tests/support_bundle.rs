@@ -18,6 +18,7 @@ use async_trait::async_trait;
 use common::{temp_folder, Setup};
 use remotely_core::adapters::exec_output::OutputCollector;
 use remotely_core::adapters::remote::{AgentSource, ExecResult};
+use remotely_core::bulk::TargetPicks;
 use remotely_core::command_bus::{ApprovalAnswers, Command, Rollout, SubmitOutcome};
 use remotely_core::domain::{Environment, Target, TargetRef};
 use remotely_core::error::Result as CoreResult;
@@ -26,6 +27,7 @@ use remotely_core::fakes::{FakeFiles, FakeRemote, FakeVmware};
 use remotely_core::jobs::{ExecTuning, JobEvent, JobStatus};
 use remotely_core::known_hosts::HostKey;
 use remotely_core::policy::{ApprovalStep, Tier};
+use remotely_core::sessions::kinds::{RdpOptions, TelnetOptions};
 use remotely_core::sessions::{SessionAuth, SessionInput, SessionKind};
 use remotely_core::support_bundle::collect::collect_host;
 use remotely_core::support_bundle::spec::entry_names;
@@ -432,6 +434,78 @@ async fn a_cancelled_bundle_leaves_no_file() {
     assert_eq!(std::fs::read_dir(&folder).unwrap().count(), 0, "no .part left");
     assert!(core.bundles.saved_at(&core.ctx(), job_id).await.is_err());
     let _ = std::fs::remove_dir_all(folder);
+}
+
+#[tokio::test]
+async fn only_ssh_sessions_are_hosts_of_a_bundle() {
+    let core = Setup::new(FakeVmware::default()).build().await;
+    let ctx = core.ctx();
+    let ssh = core
+        .sessions
+        .create(&ctx, fake_session("web01.example.com"))
+        .await
+        .unwrap()
+        .id;
+    let mut telnet = fake_session("switch01.example.com");
+    telnet.port = 23;
+    telnet.kind = SessionKind::Telnet(TelnetOptions::default());
+    let telnet = core.sessions.create(&ctx, telnet).await.unwrap().id;
+    let mut rdp = fake_session("win01.example.com");
+    rdp.port = 3389;
+    rdp.kind = SessionKind::Rdp(RdpOptions::default());
+    let rdp = core.sessions.create(&ctx, rdp).await.unwrap().id;
+
+    let output = temp_folder("bundle-kinds").join("bundle.zip");
+    std::fs::create_dir_all(output.parent().unwrap()).unwrap();
+    for (other, name) in [(telnet, "switch01"), (rdp, "win01")] {
+        let request = BundleRequest {
+            session_ids: vec![ssh, other],
+            presets: vec![PresetId::System],
+            ..BundleRequest::default()
+        };
+        for err in [
+            core.bundles.check(&ctx, &request).await.unwrap_err(),
+            core.bundles.preview(&ctx, &request).await.unwrap_err(),
+            core.bundles.submit(&ctx, &request, &output).await.unwrap_err(),
+        ] {
+            assert_eq!(err.code(), "wrong_session_kind", "{err}");
+            let text = err.to_string();
+            assert!(text.contains(name) && text.contains("SSH sessions only"), "{text}");
+        }
+    }
+    assert!(
+        core.store.recent_jobs(&ctx, 10).await.unwrap().is_empty(),
+        "nothing submitted"
+    );
+    assert!(!output.exists());
+
+    // An SSH session alone is a host.
+    let request = BundleRequest {
+        session_ids: vec![ssh],
+        presets: vec![PresetId::System],
+        ..BundleRequest::default()
+    };
+    core.bundles.check(&ctx, &request).await.unwrap();
+
+    // The dialog's picker leaves the others out, saying why without naming another feature.
+    let resolved = core
+        .bulk
+        .resolve(
+            &ctx,
+            &TargetPicks {
+                session_ids: vec![ssh, telnet, rdp],
+                ..TargetPicks::default()
+            },
+        )
+        .await
+        .unwrap();
+    let hosts: Vec<Uuid> = resolved.hosts.iter().map(|h| h.session_id).collect();
+    assert_eq!(hosts, vec![ssh]);
+    assert_eq!(resolved.notes.len(), 2, "{:?}", resolved.notes);
+    for note in &resolved.notes {
+        assert!(note.contains("over SSH only") && !note.contains("Compare"), "{note}");
+    }
+    let _ = std::fs::remove_dir_all(output.parent().unwrap());
 }
 
 #[tokio::test]

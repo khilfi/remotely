@@ -1395,11 +1395,12 @@ impl BulkRuns {
             }
         }
 
-        // SS-12: Compare hosts runs over SSH: a Telnet, serial, RDP or VNC session is left out, saying so.
+        // SS-12: every run on these targets (Compare hosts, a key push, a support bundle) is over SSH: a Telnet,
+        // serial, RDP or VNC session is left out, saying so without naming one of them.
         for s in picked.sessions.iter().filter_map(|id| by_id.get(id)) {
             if !s.kind.is_ssh() {
                 picked.notes.push(format!(
-                    "'{}' is a {} session, so it was left out: Compare hosts runs over SSH only.",
+                    "'{}' is a {} session, so it was left out: this works over SSH only.",
                     s.name,
                     s.kind.label()
                 ));

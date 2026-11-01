@@ -3,6 +3,7 @@
 //! `manifest.json` with every command, exit code, size, SHA-256 and what was redacted or cut.
 //!
 //! * Hosts are BX-01's targets (saved sessions; a VM only through a chosen or confirmed link), picked in the UI.
+//!   SS-12: SSH sessions only ([`HOSTS_NEED`]); an RDP, VNC, Telnet or serial session is refused, named.
 //! * What is collected: presets ([`presets`]: System, Logs, Containers, Network) and custom commands and files, all
 //!   expanded into the spec before the bus rates it, so what is approved is what runs ([`spec::BundleSpec`]).
 //! * The policy engine rates the commands as in Compare hosts: the presets only read, so they are Low (Medium on
@@ -37,6 +38,10 @@ use crate::error::{CoreError, Result};
 use crate::save_guard::{self, Saved};
 use crate::store::Store;
 use crate::vault::SecretId;
+
+/// SS-12: why a session of another kind can't be a host: "'console' is a Telnet session, and <this>". F8 widens the
+/// rule for WinRM sessions.
+pub const HOSTS_NEED: &str = "a support bundle collects from SSH sessions only";
 
 /// What the dialog asks for: the hosts (sessions BX-01 resolved), presets, custom commands and files, and how to run.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
@@ -108,6 +113,12 @@ impl SupportBundles {
 
     /// The command the request becomes, saving to `output`.
     async fn command(&self, ctx: &Context, request: &BundleRequest, output: &Path) -> Result<Command> {
+        // SS-12: refused before the bus rates anything. The job's login refuses one again (`Store::session_spec`)
+        // if a session changed kind after the approval.
+        let sessions = self.store.list_sessions(ctx).await?;
+        for session in sessions.iter().filter(|s| request.session_ids.contains(&s.id)) {
+            session.require_ssh(HOSTS_NEED)?;
+        }
         let mut presets = request.presets.clone();
         presets.sort();
         presets.dedup();
