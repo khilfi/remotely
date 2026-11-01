@@ -514,7 +514,7 @@ export const HELP = {
     title: "Edit several sessions",
     body: [
       "Set the folder, port, user, login, jump host or environment of every selected session at once, and add or remove tags. Fields left as they are stay as each session has them.",
-      "You see each session before and after first. If a login would send a vault password somewhere new, the vault password is asked once.",
+      "You see each session before and after first. If a login would send a vault password somewhere new, the vault password is asked once. Only SSH sessions take a login, and Telnet and serial take no jump host, so they keep theirs.",
     ],
   },
   workspaces: {

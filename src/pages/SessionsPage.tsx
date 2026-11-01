@@ -10,8 +10,9 @@
 // UX-01, UX-02, UX-12: the page header holds the search and filters, New session (its one primary) and "⋯" (import and
 // export); rows and folders have one "⋯" menu each; the Environment column shows the environment that applies (a Prod
 // VM the session reaches makes it Prod) and where it comes from when it is not the session's own.
-// 0.7.0: QL-28 rows can be selected (the selection bar's Edit changes them all at once), QL-26 a star on each row, FD-06
-// a session's and a folder's note in their menus, and QL-27 a delete's toast offers Undo (the item is in the trash).
+// 0.7.0: QL-28 rows can be selected (the selection bar's Edit changes them all at once, and FD-04 its Support bundle
+// collects from the SSH ones), QL-26 a star on each row, FD-06 a session's and a folder's note in their menus, and
+// QL-27 a delete's toast offers Undo (the item is in the trash).
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
@@ -72,7 +73,7 @@ import { SessionDialog } from "@/components/SessionDialog";
 import { TransferImportDialog } from "@/components/TransferImportDialog";
 import { SessionVmLink } from "@/components/VmLinkControls";
 import { ToolboxMenu } from "@/components/toolbox/ToolboxMenu";
-import { ReasonLine } from "@/components/WhyDisabled";
+import { ReasonLine, WhyDisabled } from "@/components/WhyDisabled";
 import {
   api,
   errorMessage,
@@ -316,6 +317,7 @@ export function SessionsPage({
 
   const newSession = () => setDialog({ kind: "editSession" });
   const selectedSessions = all.filter((s) => selected.has(s.id));
+  const selectedSsh = selectedSessions.filter((s) => kindOf(s).protocol === "ssh");
   const allShownSelected = shown.length > 0 && shown.every((s) => selected.has(s.id));
   function toggleSelected(id: string) {
     setSelected((prev) => {
@@ -379,6 +381,18 @@ export function SessionsPage({
               <PencilIcon data-icon="inline-start" />
               Edit…
             </Button>
+            {/* Bundles collect over SSH; the dialog leaves other kinds out with a note. */}
+            <WhyDisabled reason={selectedSsh.length === 0 ? "Support bundles collect from SSH sessions only" : null}>
+              <Button
+                variant="ghost"
+                size="sm"
+                disabled={selectedSsh.length === 0}
+                onClick={() => onSupportBundle(selectedSsh.map((s) => s.id))}
+              >
+                <PackageIcon data-icon="inline-start" />
+                Support bundle…
+              </Button>
+            </WhyDisabled>
           </SelectionBar>
         ) : (
           <>

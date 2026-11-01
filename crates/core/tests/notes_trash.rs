@@ -23,7 +23,10 @@ use remotely_core::forwards::ForwardInput;
 use remotely_core::multiexec_groups::GroupInput;
 use remotely_core::notes::{NoteInput, NoteKind, NoteLink, NoteTarget};
 use remotely_core::presentation::Presentation;
-use remotely_core::sessions::{BulkEdit, FolderChoice, JumpChoice, SessionAuth, SessionInput, UserChoice};
+use remotely_core::sessions::kinds::{
+    LineEnding, RdpOptions, RdpScreen, SerialOptions, TelnetOptions, SERIAL_PORT_COLUMN,
+};
+use remotely_core::sessions::{BulkEdit, FolderChoice, JumpChoice, SessionAuth, SessionInput, SessionKind, UserChoice};
 use remotely_core::snippets::FavouriteInput;
 use remotely_core::stacks::{Readiness, StackInput, StackStep};
 use remotely_core::stars::{RecentKind, StarKind, MAX_RECENTS};
@@ -68,7 +71,7 @@ fn session(name: &str, host: &str) -> SessionInput {
         color: None,
         tags: vec![],
         vm_id: None,
-        kind: Default::default(),
+        kind: SessionKind::Ssh,
     }
 }
 
@@ -541,6 +544,105 @@ async fn a_restored_jump_host_says_which_sessions_still_go_without_it() {
 }
 
 #[tokio::test]
+async fn a_restored_session_comes_back_as_its_kind_with_its_options() {
+    let core = core().await;
+    let ctx = core.ctx();
+    let bastion = core
+        .sessions
+        .create(&ctx, session("bastion", "bastion.example.com"))
+        .await
+        .unwrap();
+    let rdp = SessionKind::Rdp(RdpOptions {
+        screen: RdpScreen::Window {
+            width: 1280,
+            height: 800,
+        },
+        drives: true,
+        admin: true,
+        ..RdpOptions::default()
+    });
+    let mut input = session("desk01", "desk01.example.com");
+    input.port = 3389;
+    input.kind = rdp;
+    input.jump_session_id = Some(bastion.id);
+    let desk = core.sessions.create(&ctx, input).await.unwrap();
+    let telnet = SessionKind::Telnet(TelnetOptions {
+        line_ending: LineEnding::Lf,
+    });
+    let mut input = session("switch01", "switch01.example.com");
+    input.port = 23;
+    input.kind = telnet;
+    let switch = core.sessions.create(&ctx, input).await.unwrap();
+    let serial = SessionKind::Serial(SerialOptions {
+        speed: 115_200,
+        local_echo: true,
+        ..SerialOptions::default()
+    });
+    let mut input = session("console", "com3");
+    input.kind = serial;
+    let console = core.sessions.create(&ctx, input).await.unwrap();
+    for id in [desk.id, switch.id, console.id] {
+        core.sessions.delete(&ctx, id).await.unwrap();
+    }
+
+    for (id, kind, host, port) in [
+        (desk.id, rdp, "desk01.example.com", 3389),
+        (switch.id, telnet, "switch01.example.com", 23),
+        (console.id, serial, "COM3", SERIAL_PORT_COLUMN),
+    ] {
+        let report = core
+            .trash
+            .undo(&ctx, TrashKind::Session, &id.to_string(), None)
+            .await
+            .unwrap();
+        assert!(report.notes.is_empty(), "{:?}", report.notes);
+        let back = core.sessions.get(&ctx, id).await.unwrap();
+        assert_eq!(back.kind, kind, "{}", back.name);
+        assert_eq!((back.host.as_str(), back.port), (host, port));
+    }
+    assert_eq!(
+        core.sessions.get(&ctx, desk.id).await.unwrap().jump_session_id,
+        Some(bastion.id),
+        "a remote desktop goes on through its jump host's tunnel"
+    );
+}
+
+#[tokio::test]
+async fn a_restore_leaves_out_a_jump_host_that_is_no_longer_ssh() {
+    let core = core().await;
+    let ctx = core.ctx();
+    let gateway = core
+        .sessions
+        .create(&ctx, session("gateway", "gateway.example.com"))
+        .await
+        .unwrap();
+    let mut input = session("web01", "web01.example.com");
+    input.jump_session_id = Some(gateway.id);
+    let web = core.sessions.create(&ctx, input).await.unwrap();
+    let mut telnet = session("gateway", "gateway.example.com");
+    telnet.port = 23;
+    telnet.kind = SessionKind::Telnet(TelnetOptions::default());
+    let err = core
+        .sessions
+        .update(&ctx, gateway.id, telnet.clone())
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("a jump host is an SSH session"), "{err}");
+
+    // Once web01 is in the trash, nothing goes through it, so it may become Telnet.
+    core.sessions.delete(&ctx, web.id).await.unwrap();
+    core.sessions.update(&ctx, gateway.id, telnet).await.unwrap();
+    let report = core
+        .trash
+        .undo(&ctx, TrashKind::Session, &web.id.to_string(), None)
+        .await
+        .unwrap();
+    let notes = report.notes.join(" | ");
+    assert!(notes.contains("its jump host is a Telnet session now"), "{notes}");
+    assert_eq!(core.sessions.get(&ctx, web.id).await.unwrap().jump_session_id, None);
+}
+
+#[tokio::test]
 async fn a_restore_that_sends_a_vault_password_somewhere_new_asks_for_the_vault_password() {
     let core = core().await;
     let ctx = core.ctx();
@@ -948,4 +1050,108 @@ async fn a_bulk_edit_that_sends_a_vault_password_somewhere_new_asks_once() {
         .unwrap();
     assert_eq!(core.sessions.get(&ctx, b.id).await.unwrap().port, 2200);
     assert!(audit(&core).await[0].detail.as_deref().unwrap_or("").contains("AP-06"));
+}
+
+#[tokio::test]
+async fn a_bulk_edit_keeps_to_what_each_kind_of_session_takes() {
+    let core = core().await;
+    let ctx = core.ctx();
+    let password = secret(&core, "web root", "pw-value-5").await;
+    let bastion = core
+        .sessions
+        .create(&ctx, session("bastion", "bastion.example.com"))
+        .await
+        .unwrap();
+    let web = core
+        .sessions
+        .create(&ctx, session("web01", "web01.example.com"))
+        .await
+        .unwrap();
+    let mut input = session("desk01", "desk01.example.com");
+    input.port = 3389;
+    input.kind = SessionKind::Rdp(RdpOptions::default());
+    let desk = core.sessions.create(&ctx, input).await.unwrap();
+    let mut input = session("switch01", "switch01.example.com");
+    input.port = 23;
+    input.kind = SessionKind::Telnet(TelnetOptions::default());
+    let switch = core.sessions.create(&ctx, input).await.unwrap();
+    let mut input = session("console", "COM3");
+    input.kind = SessionKind::Serial(SerialOptions::default());
+    let console = core.sessions.create(&ctx, input).await.unwrap();
+
+    let edit = BulkEdit {
+        port: Some(2200),
+        auth: Some(SessionAuth::Password {
+            password_id: Some(password),
+        }),
+        jump: Some(JumpChoice::Session { id: bastion.id }),
+        ..BulkEdit::default()
+    };
+    let ids = [web.id, desk.id, switch.id, console.id];
+    let preview = core.sessions.bulk_preview(&ctx, &ids, &edit).await.unwrap();
+    let row = |id: Uuid| preview.rows.iter().find(|r| r.id == id).unwrap();
+    let fields = |id: Uuid| row(id).changes.iter().map(|c| c.field.clone()).collect::<Vec<_>>();
+    // The preview is what is saved: each kind keeps only what it takes.
+    assert_eq!(fields(web.id), vec!["Port", "Login", "Jump host"]);
+    assert!(row(web.id).skipped.is_empty());
+    assert_eq!(fields(desk.id), vec!["Port", "Jump host"]);
+    assert_eq!(
+        row(desk.id).skipped,
+        vec!["Login stays as it is: a remote desktop (RDP) session takes none"]
+    );
+    assert_eq!(fields(switch.id), vec!["Port"]);
+    assert_eq!(
+        row(switch.id).skipped,
+        vec![
+            "Login stays as it is: a Telnet session takes none",
+            "Jump host stays as it is: a Telnet session takes none"
+        ]
+    );
+    assert!(fields(console.id).is_empty(), "{:?}", fields(console.id));
+    assert_eq!(row(console.id).skipped.len(), 3, "{:?}", row(console.id).skipped);
+    assert_eq!(preview.changed, 3);
+
+    // web01 sends the vault password somewhere new; the others send none.
+    core.sessions
+        .bulk_edit(&ctx, &ids, &edit, Some(&SecretString::new(VAULT_PASSWORD)))
+        .await
+        .unwrap();
+    let web = core.sessions.get(&ctx, web.id).await.unwrap();
+    assert_eq!((web.port, web.jump_session_id), (2200, Some(bastion.id)));
+    assert_eq!(
+        web.auth,
+        SessionAuth::Password {
+            password_id: Some(password)
+        }
+    );
+    let desk = core.sessions.get(&ctx, desk.id).await.unwrap();
+    assert_eq!((desk.port, desk.jump_session_id), (2200, Some(bastion.id)));
+    assert_eq!(desk.auth, SessionAuth::Password { password_id: None });
+    assert!(matches!(desk.kind, SessionKind::Rdp(_)));
+    let switch = core.sessions.get(&ctx, switch.id).await.unwrap();
+    assert_eq!((switch.port, switch.jump_session_id), (2200, None));
+    assert_eq!(switch.auth, SessionAuth::Password { password_id: None });
+    let console = core.sessions.get(&ctx, console.id).await.unwrap();
+    assert_eq!(console.port, SERIAL_PORT_COLUMN);
+    let detail = audit(&core).await[0].detail.clone().unwrap_or_default();
+    assert!(detail.contains("3 sessions changed"), "{detail}");
+    assert!(
+        detail.contains("3 sessions kept a field its kind doesn't take"),
+        "{detail}"
+    );
+
+    // A jump host is an SSH session.
+    let err = core
+        .sessions
+        .bulk_preview(
+            &ctx,
+            &[web.id],
+            &BulkEdit {
+                jump: Some(JumpChoice::Session { id: desk.id }),
+                ..BulkEdit::default()
+            },
+        )
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("a jump host is an SSH session"), "{err}");
 }

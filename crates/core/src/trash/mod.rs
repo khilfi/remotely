@@ -793,12 +793,12 @@ impl Trash {
     ) -> Result<SessionFix> {
         let mut notes = Vec::new();
         let folders = self.store.session_folders(ctx).await?;
-        let sessions: HashMap<Uuid, String> = self
+        let sessions: HashMap<Uuid, crate::sessions::SessionKind> = self
             .store
             .list_sessions(ctx)
             .await?
             .into_iter()
-            .map(|s| (s.id, s.name))
+            .map(|s| (s.id, s.kind))
             .collect();
         let vault: HashSet<Uuid> = self.store.vault_items(ctx).await?.into_iter().map(|m| m.id.0).collect();
         let row = &mut snap.row;
@@ -809,9 +809,20 @@ impl Trash {
             }
         }
         if let Some(jump) = uuid_in(row, "jump_session_id") {
-            if !sessions.contains_key(&jump) {
-                row.insert("jump_session_id".into(), Value::Null);
-                notes.push("its jump host is gone, so it was left out".to_owned());
+            match sessions.get(&jump) {
+                None => {
+                    row.insert("jump_session_id".into(), Value::Null);
+                    notes.push("its jump host is gone, so it was left out".to_owned());
+                }
+                // SS-12: a jump host is an SSH session; this one became another kind while this was in the trash.
+                Some(kind) if !kind.is_ssh() => {
+                    row.insert("jump_session_id".into(), Value::Null);
+                    notes.push(format!(
+                        "its jump host is a {} session now, so it was left out",
+                        kind.label()
+                    ));
+                }
+                Some(_) => {}
             }
         }
         for column in ["credential_id", "key_passphrase_id"] {

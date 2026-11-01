@@ -123,6 +123,8 @@ export interface BulkEditRow {
   id: string;
   name: string;
   changes: FieldChange[];
+  /** The edit's fields this session's kind doesn't take ("Login stays as it is: a Telnet session takes none"). */
+  skipped: string[];
 }
 
 export interface BulkEditPreview {

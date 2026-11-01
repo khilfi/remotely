@@ -463,6 +463,10 @@ pub struct BulkEditRow {
     pub id: Uuid,
     pub name: String,
     pub changes: Vec<FieldChange>,
+    /// SS-12: the edit's fields its kind doesn't take, which stay as they are ("Login stays as it is: a Telnet
+    /// session takes none"): only SSH logs in with a login of the app's, Telnet and serial take no jump host, serial
+    /// has no port.
+    pub skipped: Vec<String>,
 }
 
 /// QL-28: before and after for each picked session.
@@ -1323,6 +1327,13 @@ impl SessionLibrary {
             .collect();
         let mut detail = self.describe_bulk(ctx, edit).await?;
         detail.push(format!("{} changed", plural(changed.len(), "session")));
+        let skipped = plan.preview.rows.iter().filter(|r| !r.skipped.is_empty()).count();
+        if skipped > 0 {
+            detail.push(format!(
+                "{} kept a field its kind doesn't take",
+                plural(skipped, "session")
+            ));
+        }
         if let Some(how) = asked {
             detail.push(how.into());
         }
@@ -1449,6 +1460,8 @@ impl SessionLibrary {
             .collect();
         check_jump_loops(&after, |s| unique.contains(&s.id))?;
         let (folders, sessions) = self.names(ctx).await?;
+        // The preview compares the saved sessions with the checked inputs, so it shows what `tidy` keeps of the edit
+        // for each kind, not what was asked.
         let rows = unique
             .iter()
             .filter_map(|id| {
@@ -1458,6 +1471,7 @@ impl SessionLibrary {
                     id: *id,
                     name: a.name.clone(),
                     changes: bulk_changes(&folders, &sessions, a, b),
+                    skipped: skipped_for_kind(&a.kind, edit),
                 })
             })
             .collect::<Vec<_>>();
@@ -2351,6 +2365,24 @@ fn resolved_after(
 
 /// QL-28: what a bulk edit changes on one session (`a` before, `b` after, both resolved), field by field; a value it
 /// has from a folder says which.
+/// QL-28, SS-12: the fields of a bulk edit a session of this kind doesn't take, which [`tidy`] leaves as they are.
+fn skipped_for_kind(kind: &SessionKind, edit: &BulkEdit) -> Vec<String> {
+    let mut out = Vec::new();
+    for (asked, applies, field, verb) in [
+        (edit.port.is_some(), kind.has_port(), "Port", "has"),
+        (edit.auth.is_some(), kind.is_ssh(), "Login", "takes"),
+        (edit.jump.is_some(), kind.takes_jump_host(), "Jump host", "takes"),
+    ] {
+        if asked && !applies {
+            out.push(format!(
+                "{field} stays as it is: a {} session {verb} none",
+                kind.label()
+            ));
+        }
+    }
+    out
+}
+
 fn bulk_changes(
     folders: &HashMap<Uuid, String>,
     sessions: &HashMap<Uuid, String>,

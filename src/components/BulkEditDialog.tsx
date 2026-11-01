@@ -27,6 +27,7 @@ import { flattenFolders, folderPath } from "@/lib/folders";
 import { plural } from "@/lib/format";
 import { isReauthCancelled } from "@/lib/reauth";
 import { withVaultPassword } from "@/lib/reauth-prompt";
+import { kindOf } from "@/lib/session-kinds";
 
 const TOP = "__top";
 
@@ -122,8 +123,11 @@ export function BulkEditDialog({ sessions, all, folders, secrets, onSaved, onClo
 
   const passwords = secrets.filter((s) => s.kind === "password");
   const keys = secrets.filter((s) => s.kind === "privateKey");
-  const jumpHosts = all.filter((s) => !ids.includes(s.id));
+  // A jump host is an SSH session.
+  const jumpHosts = all.filter((s) => !ids.includes(s.id) && kindOf(s).protocol === "ssh");
   const changedRows = preview?.result.rows.filter((r) => r.changes.length > 0) ?? [];
+  // Also the sessions whose kind doesn't take a ticked field, which keep it.
+  const shownRows = preview?.result.rows.filter((r) => r.changes.length > 0 || r.skipped.length > 0) ?? [];
 
   return (
     <Dialog open onOpenChange={(open) => !open && !busy && onClose()}>
@@ -249,7 +253,7 @@ export function BulkEditDialog({ sessions, all, folders, secrets, onSaved, onClo
 
         {preview && (
           <div className="max-h-96 overflow-auto rounded-lg border">
-            {changedRows.length === 0 ? (
+            {shownRows.length === 0 ? (
               <p className="p-3 text-sm text-muted-foreground">Nothing changes: they already are like that.</p>
             ) : (
               <Table>
@@ -262,8 +266,8 @@ export function BulkEditDialog({ sessions, all, folders, secrets, onSaved, onClo
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {changedRows.flatMap((row) =>
-                    row.changes.map((c, i) => (
+                  {shownRows.flatMap((row) => [
+                    ...row.changes.map((c, i) => (
                       <TableRow key={`${row.id}-${c.field}`}>
                         <TableCell className="font-medium">{i === 0 ? row.name : ""}</TableCell>
                         <TableCell>{c.field}</TableCell>
@@ -271,7 +275,21 @@ export function BulkEditDialog({ sessions, all, folders, secrets, onSaved, onClo
                         <TableCell className="whitespace-normal">{c.after}</TableCell>
                       </TableRow>
                     )),
-                  )}
+                    ...(row.skipped.length > 0
+                      ? [
+                          <TableRow key={`${row.id}-skipped`}>
+                            <TableCell className="font-medium">{row.changes.length === 0 ? row.name : ""}</TableCell>
+                            <TableCell colSpan={3} className="whitespace-normal text-muted-foreground">
+                              {row.skipped.map((s) => (
+                                <span key={s} className="block">
+                                  {s}.
+                                </span>
+                              ))}
+                            </TableCell>
+                          </TableRow>,
+                        ]
+                      : []),
+                  ])}
                 </TableBody>
               </Table>
             )}

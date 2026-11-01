@@ -350,21 +350,24 @@ crates/core/          remotely-core: all app logic
                       (a terminal's session notes itself in Store::record_session_opened); per workspace, not audited,
                       not locked, kept by key so a restored session keeps its star
     trash/            QL-27 (migration 0033): mod.rs Trash (Core.trash): move_to_trash, in the delete's transaction, for
-                      a session (with its port forwards, container marks, saved group places, secret grants, its own
-                      QL-17 highlight rules (reloaded on restore), tags, note, where it went and what it sent, SentThen,
-                      and the sessions and folders whose jump host it was, named on restore), a favourite command, size, image, launch template or
-                      stack (SessionLibrary, Snippets, Catalog and Stacks call it); restore under the item's own id (a
-                      new one if taken), " (restored)" for a taken name, gone folders, jump hosts, VMs, vault items and
-                      groups left out with notes, AP-06 confirm when a restored session would send a vault password
-                      somewhere new; undo (a delete's toast), delete_now, empty, purge (KEEP_DAYS 30, daily, every
-                      workspace; run); audited trash_restored, trash_deleted, trash_emptied, trash_purged;
-                      Change::Trash; never in FD-07; rows.rs rows as JSON column by column (TABLES only; a restore
-                      writes the columns the table has now, names quoted)
+                      a session (its whole row, SS-12's protocol and kind_options too, with its port forwards, container
+                      marks, saved group places, secret grants, its own QL-17 highlight rules (reloaded on restore),
+                      tags, note, where it went and what it sent, SentThen, and the sessions and folders whose jump host
+                      it was, named on restore), a favourite command, size, image, launch template or stack
+                      (SessionLibrary, Snippets, Catalog and Stacks call it); restore under the item's own id (a new one
+                      if taken), " (restored)" for a taken name, gone folders, jump hosts (or one that is no longer an
+                      SSH session), VMs, vault items and groups left out with notes, AP-06 confirm when a restored
+                      session would send a vault password somewhere new; undo (a delete's toast), delete_now, empty,
+                      purge (KEEP_DAYS 30, daily, every workspace; run); audited trash_restored, trash_deleted,
+                      trash_emptied, trash_purged; Change::Trash; never in FD-07; rows.rs rows as JSON column by column
+                      (TABLES only; a restore writes the columns the table has now, names quoted)
     sessions.rs       SS-01 session library, SS-06 labels (audited, no approval tier); QL-28 bulk_preview and
                       bulk_edit (BulkEdit: folder, port, user, login, jump host, environment, tags added or removed;
-                      each checked like an edit, Store::update_sessions in one transaction, one audit entry naming
-                      every session, confirm_folder_change once for AP-06); rate_startup rates a startup
-                      command like a run on the session (editor, SS-02 and FD-07 previews, audit); startup_on_reconnect
+                      each checked like an edit, so the preview shows what `tidy` keeps for each kind and
+                      BulkEditRow.skipped names the fields a kind doesn't take; Store::update_sessions in one
+                      transaction, one audit entry naming every session, confirm_folder_change once for AP-06);
+                      rate_startup rates a startup command like a run on the session (editor, SS-02 and FD-07
+                      previews, audit); startup_on_reconnect
                       and prompt_hook per session (migration 0015); sessions/tree.rs the QL-04 tree (by folder, tag
                       or label) for the Terminal page; sessions/defaults.rs QL-16 folder defaults (user, login, jump
                       host, label, tags; migration 0021) and Folders::resolve, the one resolver: a session's own
@@ -734,7 +737,8 @@ src/                  React + TypeScript UI
                       details panel's header; no recent inputs are offered while presenting, since a native dropdown
                       is out of the masker's reach; 0.7.0 F5: NoteSheet (FD-06, hosted once by App and opened by a `note` AppLink;
                       the core's HTML, the web link confirm, Send to terminal), StarButton (QL-26), TrashCard (QL-27,
-                      Settings › Privacy and data), BulkEditDialog (QL-28, the Sessions page's selection bar)
+                      Settings › Privacy and data), BulkEditDialog (QL-28, the Sessions page's selection bar, which
+                      also has FD-04's Support bundle for the SSH sessions picked)
   pages/              one file per page (bulk execution is in TerminalPage: Type in all tabs (MultiExec) and Compare
                       hosts; QL-14 VmsPage
                       is VMs and snapshots, with the selection's bulk snapshot actions and the details panel;
