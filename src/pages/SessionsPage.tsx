@@ -24,6 +24,7 @@ import {
   LaptopIcon,
   LibraryIcon,
   ListTreeIcon,
+  PackageIcon,
   PlusIcon,
   SearchIcon,
   ShieldIcon,
@@ -93,6 +94,8 @@ interface Props {
   onOpenVault: () => void;
   /** SS-03: opens the session in a new terminal tab. */
   onConnect: (sessionId: string) => void;
+  /** FD-04: the support bundle dialog, with these sessions picked (a selection's; none from the "⋯" menu). */
+  onSupportBundle: (sessionIds: string[]) => void;
   /** True while the page is shown, so the lists are read again when the user comes back. */
   active: boolean;
   /** R10: a session to show (a search result, a map node): the filters cleared, its row scrolled to and lit. */
@@ -128,7 +131,15 @@ function FromNote({ text }: { text: string }) {
   return <div className="text-xs text-muted-foreground">{text}</div>;
 }
 
-export function SessionsPage({ vault, onVaultChanged, onOpenVault, onConnect, active, focus = null }: Props) {
+export function SessionsPage({
+  vault,
+  onVaultChanged,
+  onOpenVault,
+  onConnect,
+  onSupportBundle,
+  active,
+  focus = null,
+}: Props) {
   const presentation = usePresentation();
   const [all, setAll] = useState<SessionRecord[]>([]);
   const [shown, setShown] = useState<SessionRecord[]>([]);
@@ -323,6 +334,15 @@ export function SessionsPage({ vault, onVaultChanged, onOpenVault, onConnect, ac
               <span>
                 Export to another laptop…
                 <ReasonLine reason={all.length === 0 ? "No sessions to export yet" : null} />
+              </span>
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem disabled={all.length === 0} onSelect={() => onSupportBundle([])}>
+              <PackageIcon />
+              <span className="grid">
+                Collect a support bundle…
+                <span className="text-xs text-muted-foreground">Logs and settings from hosts, in one zip</span>
+                <ReasonLine reason={all.length === 0 ? "No sessions to collect from yet" : null} />
               </span>
             </DropdownMenuItem>
           </>

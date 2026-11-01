@@ -49,6 +49,7 @@ import {
   HardDriveIcon,
   ImportIcon,
   NetworkIcon,
+  PackageIcon,
   Rows3Icon,
   RocketIcon,
   LayoutDashboardIcon,
@@ -98,6 +99,7 @@ import logo from "@/assets/remotely-logo.png";
 import { ApprovalDialog } from "@/components/ApprovalDialog";
 import { DeployDialog } from "@/components/DeployDialog";
 import { VmExportDialog } from "@/components/VmExportDialog";
+import { SupportBundleDialog } from "@/components/SupportBundleDialog";
 import { VmImportDialog } from "@/components/VmImportDialog";
 import { CommandPalette, type PaletteAction } from "@/components/CommandPalette";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
@@ -307,6 +309,9 @@ export default function App() {
   const [deploying, setDeploying] = useState<{ templateId: string | null } | null>(null);
   const openDeploy = useCallback((templateId?: string) => setDeploying({ templateId: templateId ?? null }), []);
   const openDeployBlank = useCallback(() => setDeploying({ templateId: null }), []);
+  // FD-04: the support bundle dialog, on hosts picked already (the Sessions page) or none (the palette).
+  const [bundling, setBundling] = useState<{ sessionIds: string[] } | null>(null);
+  const openSupportBundle = useCallback((sessionIds: string[]) => setBundling({ sessionIds }), []);
   // CV-01: the Import dialog (on a file Image tools inspected, or none); VM-17: the Export dialog on a VM.
   const [importing, setImporting] = useState<{ path: string | null } | null>(null);
   // A path only when it is one (a click handler may pass its event).
@@ -940,6 +945,14 @@ export default function App() {
       },
     },
     {
+      // FD-04.
+      id: "support-bundle",
+      label: "Collect a support bundle from hosts…",
+      icon: PackageIcon,
+      keywords: "logs diagnostics zip collect journal dmesg syslog files sosreport many hosts",
+      run: () => openSupportBundle([]),
+    },
+    {
       id: "multiexec",
       label: "Type in all tabs: send your typing to several terminals",
       icon: RadioTowerIcon,
@@ -1288,6 +1301,7 @@ export default function App() {
                   onVaultChanged={setVault}
                   onOpenVault={show.vault}
                   onConnect={openTerminal}
+                  onSupportBundle={openSupportBundle}
                   active={page === "sessions"}
                   focus={sessionsFocus}
                 />
@@ -1358,6 +1372,22 @@ export default function App() {
         <VmImportDialog initialPath={importing.path} onSubmitted={submitted} onClose={() => setImporting(null)} />
       )}
       {exporting && <VmExportDialog vmKey={exporting} onSubmitted={submitted} onClose={() => setExporting(null)} />}
+      {bundling && (
+        <SupportBundleDialog
+          sessionIds={bundling.sessionIds}
+          vault={vault}
+          onSubmit={submitted}
+          onOpenSessions={() => {
+            setBundling(null);
+            show.sessions();
+          }}
+          onOpenVault={() => {
+            setBundling(null);
+            show.vault();
+          }}
+          onClose={() => setBundling(null)}
+        />
+      )}
       {approval && (
         <ApprovalDialog
           request={approval.request}
