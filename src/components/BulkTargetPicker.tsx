@@ -5,7 +5,9 @@
 // Tools without SSH (VM-09) comes in a later version. A4, H11: a VM linked only automatically (by the
 // address its guest reports, which a hostile guest can make up) is reached once the user confirms the link.
 // SS-12: only SSH sessions are listed for a key push, which goes over SSH; BX-13: a support bundle lists WinRM
-// sessions too (`winrm`). The core leaves out any other kind a tag brings in, saying so.
+// sessions too (`winrm`). The core leaves out any other kind a tag brings in, saying so. F6's Ansible inventory picks
+// with `purpose="export"`: nothing runs, so WinRM sessions are listed too, protected hosts are counted (they go in, in
+// their own group) and nothing picked is every SSH and WinRM session.
 
 import { useEffect, useMemo, useState } from "react";
 import {
@@ -50,6 +52,11 @@ interface Props {
   onOpenSessions: () => void;
   /** BX-13: WinRM sessions are hosts too (a support bundle); off for the key push. */
   winrm?: boolean;
+  /**
+   * What the hosts are for: commands run on them (the default: protected hosts are skipped), or an export (F6's
+   * Ansible inventory: protected hosts go in, in their own group, and nothing picked is every SSH session).
+   */
+  purpose?: "run" | "export";
 }
 
 type Kind = "sessionIds" | "vmPaths" | "tags" | "filterIds";
@@ -68,15 +75,26 @@ function sessionAddress(s: SessionRecord) {
   return `${s.username ? `${s.username}@` : ""}${s.host}:${s.port}`;
 }
 
-export function BulkTargetPicker({ active, picks, onPicksChange, resolved, onOpenSessions, winrm = false }: Props) {
+export function BulkTargetPicker({
+  active,
+  picks,
+  onPicksChange,
+  resolved,
+  onOpenSessions,
+  winrm = false,
+  purpose = "run",
+}: Props) {
+  const exporting = purpose === "export";
   const [allSessions, setSessions] = useState<SessionRecord[]>([]);
+  // An export (the Ansible inventory) and a support bundle (BX-13) also take WinRM sessions; the key push goes over SSH.
+  const withWinrm = winrm || exporting;
   const sessions = useMemo(
     () =>
       allSessions.filter((s) => {
         const protocol = kindOf(s).protocol;
-        return protocol === "ssh" || (winrm && protocol === "winrm");
+        return protocol === "ssh" || (withWinrm && protocol === "winrm");
       }),
-    [allSessions, winrm],
+    [allSessions, withWinrm],
   );
   const otherKinds = allSessions.length - sessions.length;
   const [vms, setVms] = useState<VmRecord[]>([]);
@@ -203,7 +221,7 @@ export function BulkTargetPicker({ active, picks, onPicksChange, resolved, onOpe
               sessions.length > 0
                 ? "No session matches."
                 : otherKinds > 0
-                  ? winrm
+                  ? withWinrm
                     ? "No SSH or WinRM sessions yet."
                     : "No SSH sessions yet."
                   : "No saved sessions yet."
@@ -229,9 +247,11 @@ export function BulkTargetPicker({ active, picks, onPicksChange, resolved, onOpe
           </PickList>
           {otherKinds > 0 && (
             <p className="mt-2 text-xs text-muted-foreground">
-              {winrm
-                ? `${plural(otherKinds, "remote desktop, VNC, Telnet or serial session")} not listed: this works over SSH and WinRM only.`
-                : `${plural(otherKinds, "session")} not listed: this works over SSH only.`}
+              {exporting
+                ? `${plural(otherKinds, "remote desktop, VNC, Telnet or serial session")} not listed: the inventory takes SSH and WinRM sessions.`
+                : winrm
+                  ? `${plural(otherKinds, "remote desktop, VNC, Telnet or serial session")} not listed: this works over SSH and WinRM only.`
+                  : `${plural(otherKinds, "session")} of other kinds not listed: this works over SSH only.`}
             </p>
           )}
         </TabsContent>
@@ -312,10 +332,16 @@ export function BulkTargetPicker({ active, picks, onPicksChange, resolved, onOpe
       )}
 
       <div className="flex flex-wrap items-center gap-2 text-sm">
-        <span className="font-medium">{plural(hosts.length - skipped.length, "host")}</span>
+        {exporting && !anyPicked ? (
+          <span className="text-muted-foreground">Nothing picked, so every SSH and WinRM session goes in</span>
+        ) : (
+          <span className="font-medium">
+            {plural(exporting ? hosts.length : hosts.length - skipped.length, "host")}
+          </span>
+        )}
         {skipped.length > 0 && (
           <Badge variant="outline" className="font-normal">
-            {skipped.length} protected, skipped
+            {exporting ? `${skipped.length} protected` : `${skipped.length} protected, skipped`}
           </Badge>
         )}
         {prod.length > 0 && (
@@ -334,10 +360,13 @@ export function BulkTargetPicker({ active, picks, onPicksChange, resolved, onOpe
         <Alert>
           <TriangleAlertIcon className="text-tier-medium" />
           <AlertTitle>
-            {plural(without.length, "VM")} can&apos;t run commands yet: {without.map((v) => v.name).join(", ")}
+            {plural(without.length, "VM")} {exporting ? "left out" : "can't run commands yet"}:{" "}
+            {without.map((v) => v.name).join(", ")}
           </AlertTitle>
           <AlertDescription>
-            Commands reach a VM over SSH, through a session linked to it: edit a session and choose the VM it reaches.
+            {exporting
+              ? "A VM goes in through a session linked to it: edit a session and choose the VM it reaches."
+              : "Commands reach a VM over SSH, through a session linked to it: edit a session and choose the VM it reaches."}
           </AlertDescription>
           <AlertAction>
             <Button size="sm" variant="outline" onClick={onOpenSessions}>
@@ -349,7 +378,10 @@ export function BulkTargetPicker({ active, picks, onPicksChange, resolved, onOpe
       {unconfirmed.length > 0 && (
         <Alert>
           <LinkIcon className="text-tier-medium" />
-          <AlertTitle>{plural(unconfirmed.length, "VM")} linked only automatically, so not reached yet</AlertTitle>
+          <AlertTitle>
+            {plural(unconfirmed.length, "VM")} linked only automatically, so {exporting ? "left out" : "not reached"}{" "}
+            yet
+          </AlertTitle>
           <AlertDescription>
             <p>
               These links follow the IP address each guest reports about itself, and a guest can report any address,

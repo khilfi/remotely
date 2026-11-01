@@ -59,3 +59,11 @@ test("values learnt in one go are one rescan", () => {
   assert.equal(batch.size, 0);
   assert.equal(batch.add({ kind: "user", value: "bob" }), true, "a new batch after the rescan");
 });
+
+test("F6: a workspace learnt later finds its file name and Ansible group forms too", () => {
+  const batch = new LearnedBatch();
+  batch.add({ kind: "workspace", value: "Acme Lab 2" });
+  const mentions = mentionsAny(batch.take());
+  assert.ok(mentions?.('"workspace_acme_lab_2":'));
+  assert.ok(mentions?.("Saved remotely-ansible-Acme-Lab-2-2026-11-01.yml"));
+});

@@ -432,21 +432,25 @@ pub fn zip_path(chosen: &Path) -> Result<std::path::PathBuf> {
 }
 
 /// The zip's name the save dialog offers: `remotely-bundle-<workspace>-<UTC time>.zip`, the workspace's name made
-/// safe for a file name (`remotely-bundle-Acme-Lab-20261101T143000Z.zip`).
-pub fn default_file_name(workspace: &str, now: time::OffsetDateTime) -> String {
-    let words: Vec<String> = workspace
-        .split(|c: char| !c.is_alphanumeric())
-        .filter(|w| !w.is_empty())
-        .map(str::to_owned)
-        .collect();
-    let workspace = if words.is_empty() {
-        "workspace".to_owned()
-    } else {
-        words.join("-").chars().take(40).collect()
-    };
+/// safe for a file name (`remotely-bundle-Acme-Lab-20261101T143000Z.zip`). FD-03: `None` while presenting
+/// (`remotely-bundle-20261101T143000Z.zip`): the save dialog is out of the masker's reach.
+pub fn default_file_name(workspace: Option<&str>, now: time::OffsetDateTime) -> String {
+    let workspace = workspace.map(|workspace| {
+        let words: Vec<String> = workspace
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|w| !w.is_empty())
+            .map(str::to_owned)
+            .collect();
+        if words.is_empty() {
+            "workspace-".to_owned()
+        } else {
+            format!("{}-", words.join("-").chars().take(40).collect::<String>())
+        }
+    });
+    let workspace = workspace.unwrap_or_default();
     let now = now.to_offset(time::UtcOffset::UTC);
     format!(
-        "remotely-bundle-{workspace}-{:04}{:02}{:02}T{:02}{:02}{:02}Z.zip",
+        "remotely-bundle-{workspace}{:04}{:02}{:02}T{:02}{:02}{:02}Z.zip",
         now.year(),
         u8::from(now.month()),
         now.day(),
@@ -578,12 +582,17 @@ mod tests {
     fn the_file_name_names_the_workspace_and_the_utc_time() {
         let at = time::macros::datetime!(2026-11-01 15:30:00 +01:00);
         assert_eq!(
-            default_file_name("Acme / Lab", at),
+            default_file_name(Some("Acme / Lab"), at),
             "remotely-bundle-Acme-Lab-20261101T143000Z.zip"
         );
         assert_eq!(
-            default_file_name("…", at),
+            default_file_name(Some("…"), at),
             "remotely-bundle-workspace-20261101T143000Z.zip"
+        );
+        assert_eq!(
+            default_file_name(None, at),
+            "remotely-bundle-20261101T143000Z.zip",
+            "while presenting"
         );
     }
 

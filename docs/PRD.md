@@ -94,7 +94,7 @@ The key feature is grouped output: identical results collapse into one group, so
 | BX-09 | Rolling runs: one test host first, set batch size, stop when failures exceed a set percentage | v2 |
 | BX-10 | Bulk file upload and download with checksum check | v2 |
 | BX-11 | Scheduled and recurring jobs | v2 |
-| BX-12 | Export the selection as an Ansible inventory file; playbooks run outside the app | v2 |
+| BX-12 | Export the selection as an Ansible inventory file (0.7.0): YAML or INI from BX-01's targets, grouped by folder, tag, environment and workspace, with each host's address, port, user and jump hosts (ProxyJump); never a secret; playbooks run outside the app | 0.7.0 |
 | BX-13 | Windows in bulk (0.7.0): Compare hosts and Type in all tabs on WinRM hosts and PowerShell tabs, and support bundles from Windows hosts, rated by editable PowerShell rules (read-only commands Low, dangerous ones High, anything else, or anything the parser can't read, Medium); a selection with SSH and WinRM hosts rates each host by its own rules | 0.7.0 |
 
 ## Approvals and audit
@@ -185,6 +185,13 @@ Support bundles (0.7.0, FD-04, `docs/plan-0.7.md` "Approval tiers"). The hosts a
 | Windows hosts' presets (Windows system, Windows logs, Windows network: `Get-ComputerInfo`, `Get-HotFix`, `Get-Service`, `Get-WinEvent` errors, `ipconfig /all`, `Get-NetTCPConnection -State Listen`) and files (read by PowerShell as the sign-in user) | Low; Medium on Prod; their custom commands rated by the PowerShell rules |
 | Save the zip (audited `data_exported`, never into a Git working tree) | Part of the bundle's job |
 
+Exports and handover (0.7.0, FD-05, BX-12, FD-08, `docs/plan-0.7.md` "Approval tiers"). Each holds the shown workspace only, and its file's place comes from the shell's save dialog:
+
+| Action | Tier |
+| --- | --- |
+| Export the inventory to Excel, an Ansible inventory or a handover pack | No tier; audited (`data_exported`), allowed by the read-only lock like the other exports, never into a Git working tree |
+| "Read reachable hosts again first" (facts, listening ports, pending updates, installed packages: read-only commands only) | A read: not audited; logins with the saved login only, through the login guard's parks and hourly cap |
+
 Toolbox (0.7.0, FD-09, `docs/plan-0.7.md` "Approval tiers"). The tools run from this PC; a session behind a jump host has its ports and certificate checked from that jump host (SS-07). A Prod-labelled target moves Wake-on-LAN up one tier, and a protected one is skipped:
 
 | Action | Tier |
@@ -273,10 +280,10 @@ These features are for work at customer sites: keeping engagements apart, sharin
 | FD-02 | Customer workspaces (0.5.0): sessions, VMs, templates, stacks, schedules, vault items, jobs, audit log, rules and per-engagement settings kept separate per engagement; switched from the top bar; an FD-07 export holds one workspace | 0.5.0 |
 | FD-03 | Presentation mode: mask IPs, hostnames, usernames and secrets on screen; optional read-only lock | v2 |
 | FD-04 | Support bundle (0.7.0): collect logs, configs and system info from many hosts into one timestamped zip, with a folder per host and a manifest; presets and custom commands and files, secrets redacted, caps of 10 MB a file, 100 MB a host and 1 GB a bundle | 0.7.0 |
-| FD-05 | Inventory export (OS, IPs, MACs, CPU, RAM, packages, open ports) to Excel | v2 |
+| FD-05 | Inventory export to Excel (0.7.0): VMs, hosts (OS, kernel, CPU, RAM, disks, addresses, listening ports, pending updates), networks and health checks, an optional package list per host; from the stored facts, or read again first; every text a string, never a formula | 0.7.0 |
 | FD-06 | Markdown notes per host, linked to its credentials and runbooks | v2 |
 | FD-07 | Encrypted backup, export and import of sessions, settings and vault; also how sessions are shared with teammates | v2 |
-| FD-08 | Handover pack for the customer: inventory, topology diagram, job history | v3 |
+| FD-08 | Handover pack for the customer (0.7.0): a zip with one self-contained, printable `index.html` (cover, inventory, topology diagram, what was done in chosen dates with approvals and change IDs, health check uptime, notes marked for it), the inventory workbook and CSVs; no script, nothing fetched, secrets redacted | 0.7.0 |
 | FD-09 | Toolbox: ping, traceroute, DNS lookup, port check, subnet calculator, certificate viewer, Wake-on-LAN, quick TFTP and HTTP server | 0.7.0 |
 | FD-10 | Subnet discovery (ping sweep, port check) to add hosts quickly | v3 |
 | FD-11 | Portable mode: runs from a USB drive with a master-password vault | v3 |

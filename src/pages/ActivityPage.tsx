@@ -24,6 +24,7 @@ import {
   EraserIcon,
   FilterXIcon,
   ListChecksIcon,
+  PackageCheckIcon,
   ScrollTextIcon,
   SearchIcon,
   ShieldCheckIcon,
@@ -32,6 +33,7 @@ import {
 import { toast } from "sonner";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
+import { DropdownMenuItem } from "@/components/ui/dropdown-menu";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -110,11 +112,14 @@ export function ActivityPage({
   version,
   active,
   focusJob = null,
+  onHandover,
 }: {
   version: number;
   active: boolean;
   /** R10: a job to open (a notification, the status bar). */
   focusJob?: { jobId: string; n: number } | null;
+  /** FD-08: the handover pack's dialog, on the dates the filter shows. */
+  onHandover: (range: DateRange) => void;
 }) {
   const [jobs, setJobs] = useState<JobSummary[]>([]);
   const [audit, setAudit] = useState<AuditEntry[]>([]);
@@ -259,6 +264,16 @@ export function ActivityPage({
     <Tabs value={view} onValueChange={(v) => setView(v as View)} className="flex flex-col gap-4">
       <PageHeader
         page="activity"
+        toolsClassName="w-72"
+        tools={
+          <DropdownMenuItem onSelect={() => onHandover(filter.range)}>
+            <PackageCheckIcon />
+            <span className="grid">
+              Make a handover pack…
+              <span className="text-xs text-muted-foreground">What was done in these dates, for the customer</span>
+            </span>
+          </DropdownMenuItem>
+        }
         tabs={
           <TabsList>
             <TabsTrigger value="timeline">

@@ -14,10 +14,11 @@
 //! * Code blocks are `data-note-code="N"`, their text in [`RenderedNote::code_blocks`], so the window can offer "Send to
 //!   terminal" through the multi-line paste confirm (QL-05). Nothing runs by itself.
 //!
-//! [`LinkMode::Static`] is for a file read outside the app (F6's handover pack): the text goes through
-//! `export::redact_secrets` first (rule 7: a note that holds a password must not carry it into an unencrypted file),
-//! app links become their name, and web links ordinary links that a reader's browser opens when clicked (nothing is
-//! fetched to show them).
+//! [`LinkMode::Static`] is for a file read outside the app (F6's handover pack): each block's text goes through
+//! `export::redact_secrets` as it reads, not as its markdown is written (rule 7: a note that holds a password must not
+//! carry it into an unencrypted file; `redact_runs` says why), app links become their name, and a web link its text
+//! with the address after it in brackets, as text: the pack holds no address in any attribute (no `href`, no `title`),
+//! so nothing in it leads anywhere, and the address still prints.
 
 use std::collections::{HashMap, HashSet};
 
@@ -32,7 +33,8 @@ use crate::export;
 pub enum LinkMode {
     /// In the app: `data-note-link` and [`RenderedNote::links`].
     App,
-    /// In a file read elsewhere (F6's handover pack): web links as `<a href>`, app links as their name.
+    /// In a file read elsewhere (F6's handover pack): web links as their text and address, app links as their name;
+    /// no attribute holds an address.
     Static,
 }
 
@@ -102,9 +104,102 @@ impl LinkNames {
     }
 }
 
-/// Whether `text` holds something that looks like a secret.
+/// What a note is parsed with.
+fn options() -> Options {
+    Options::ENABLE_TABLES | Options::ENABLE_TASKLISTS | Options::ENABLE_STRIKETHROUGH
+}
+
+/// Whether `text` holds something that looks like a secret, in its markdown or in the text a reader reads (where
+/// `**Pass**word: x` or `password&#58; x` reads as `Password: x`).
 pub fn looks_secret(text: &str) -> bool {
-    export::redact_secrets(text).1
+    export::redact_secrets(text).1 || redact_runs(Parser::new_ext(text, options()), false).1
+}
+
+/// An event inside one block's text (a paragraph, heading, table cell, list item's text, code block or HTML block).
+fn in_text(event: &Event<'_>) -> bool {
+    matches!(
+        event,
+        Event::Text(_)
+            | Event::Code(_)
+            | Event::InlineHtml(_)
+            | Event::Html(_)
+            | Event::SoftBreak
+            | Event::HardBreak
+            | Event::Start(Tag::Emphasis | Tag::Strong | Tag::Strikethrough | Tag::Link { .. } | Tag::Image { .. })
+            | Event::End(TagEnd::Emphasis | TagEnd::Strong | TagEnd::Strikethrough | TagEnd::Link | TagEnd::Image)
+    )
+}
+
+/// A run's text as a reader reads it.
+fn run_text(run: &[Event<'_>]) -> String {
+    let mut text = String::new();
+    for event in run {
+        match event {
+            Event::Text(t) | Event::Code(t) | Event::InlineHtml(t) | Event::Html(t) => text.push_str(t),
+            Event::SoftBreak | Event::HardBreak => text.push('\n'),
+            _ => {}
+        }
+    }
+    text
+}
+
+/// What a block's text is redacted behind when the block before it ended with a secret's key (`Password:` above a
+/// list of one), so its first word is read as the value.
+const CARRIED_KEY: &str = "password: ";
+
+/// F6, rule 7: `export::redact_secrets` on each block's text as it reads, not as it is written. Markdown can split a
+/// secret's key from its value (`**Pass**word: x`), hide the separator (`password&#58; x`), or put the value in the
+/// next block (`Password:` then `- x`); and redacting the markdown itself can take its syntax for the value (the `-`
+/// of that list) and leave the secret. With `replace`, a block's text that holds one becomes its redacted text alone
+/// (its emphasis and links go with it). Returns the events and whether any block held one.
+fn redact_runs<'a>(events: impl Iterator<Item = Event<'a>>, replace: bool) -> (Vec<Event<'a>>, bool) {
+    struct Runs<'a> {
+        out: Vec<Event<'a>>,
+        run: Vec<Event<'a>>,
+        replace: bool,
+        /// The block before ended with a key and no value.
+        carry: bool,
+        found: bool,
+    }
+    impl<'a> Runs<'a> {
+        fn flush(&mut self) {
+            if self.run.is_empty() {
+                return;
+            }
+            let text = run_text(&self.run);
+            let (redacted, changed) = if self.carry {
+                let (r, changed) = export::redact_secrets(&format!("{CARRIED_KEY}{text}"));
+                (r.strip_prefix(CARRIED_KEY).map(str::to_owned).unwrap_or(r), changed)
+            } else {
+                export::redact_secrets(&text)
+            };
+            self.carry = export::ends_with_secret_key(&text);
+            self.found |= changed;
+            if changed && self.replace {
+                self.run.clear();
+                self.out.push(Event::Text(CowStr::from(redacted)));
+            } else {
+                self.out.append(&mut self.run);
+            }
+        }
+    }
+    let mut runs = Runs {
+        out: Vec::new(),
+        run: Vec::new(),
+        replace,
+        carry: false,
+        found: false,
+    };
+    for event in events {
+        if in_text(&event) {
+            runs.run.push(event);
+        } else {
+            runs.flush();
+            runs.out.push(event);
+        }
+    }
+    runs.flush();
+    (runs.out, runs.found)
 }
 
 /// `text`, `"` and `'` escaped for HTML text and attribute values.
@@ -207,26 +302,31 @@ pub fn classify(dest: &str, names: &LinkNames) -> NoteLink {
 enum Open {
     Anchor,
     Span,
+    /// [`LinkMode::Static`]: a web link's address follows its text, unless the text is the address.
+    Web {
+        url: String,
+        text: String,
+    },
 }
 
 /// The note as HTML, with its links and code blocks. `names` resolves app links in the workspace.
 pub fn render(text: &str, names: &LinkNames, mode: LinkMode) -> RenderedNote {
     let secret = looks_secret(text);
-    let redacted;
-    let text = match mode {
-        LinkMode::App => text,
-        LinkMode::Static => {
-            redacted = export::redact_secrets(text).0;
-            redacted.as_str()
-        }
+    let source = match mode {
+        LinkMode::App => Parser::new_ext(text, options()).collect::<Vec<_>>(),
+        // Each block's text as it reads; the addresses and a code block's language, which no block's text holds, are
+        // redacted where they are written below.
+        LinkMode::Static => redact_runs(Parser::new_ext(text, options()), true).0,
     };
-    let options = Options::ENABLE_TABLES | Options::ENABLE_TASKLISTS | Options::ENABLE_STRIKETHROUGH;
     let mut links: Vec<NoteLink> = Vec::new();
     let mut code_blocks: Vec<String> = Vec::new();
     let mut open_links: Vec<Open> = Vec::new();
     let mut code: Option<String> = None;
     let mut events: Vec<Event<'_>> = Vec::new();
-    for event in Parser::new_ext(text, options) {
+    for event in source {
+        if let (Event::Text(t) | Event::Code(t), Some(Open::Web { text, .. })) = (&event, open_links.last_mut()) {
+            text.push_str(t);
+        }
         if let Some(block) = code.as_mut() {
             match event {
                 Event::End(TagEnd::CodeBlock) => {
@@ -244,6 +344,10 @@ pub fn render(text: &str, names: &LinkNames, mode: LinkMode) -> RenderedNote {
                 let lang = match &kind {
                     CodeBlockKind::Fenced(info) => info.split_whitespace().next().unwrap_or("").to_owned(),
                     CodeBlockKind::Indented => String::new(),
+                };
+                let lang = match mode {
+                    LinkMode::App => lang,
+                    LinkMode::Static => export::redact_secrets(&lang).0,
                 };
                 let class = if lang.is_empty() {
                     String::new()
@@ -268,7 +372,8 @@ pub fn render(text: &str, names: &LinkNames, mode: LinkMode) -> RenderedNote {
             }
             Event::Start(Tag::Link { dest_url, title, .. }) => {
                 let link = classify(&dest_url, names);
-                let title = if title.is_empty() {
+                // A file read elsewhere carries no attribute text a reader didn't see (an address in a title).
+                let title = if title.is_empty() || mode == LinkMode::Static {
                     String::new()
                 } else {
                     format!(" title=\"{}\"", escape(&title))
@@ -276,8 +381,11 @@ pub fn render(text: &str, names: &LinkNames, mode: LinkMode) -> RenderedNote {
                 let (html, open) = match (mode, &link) {
                     (_, NoteLink::Refused { .. }) => (format!("<span class=\"note-link-refused\"{title}>"), Open::Span),
                     (LinkMode::Static, NoteLink::Web { url }) => (
-                        format!("<a href=\"{}\" rel=\"noopener noreferrer\"{title}>", escape(url)),
-                        Open::Anchor,
+                        "<span class=\"note-link\">".to_owned(),
+                        Open::Web {
+                            url: url.clone(),
+                            text: String::new(),
+                        },
                     ),
                     (LinkMode::Static, _) => (format!("<span class=\"note-link\"{title}>"), Open::Span),
                     (LinkMode::App, _) => (
@@ -296,8 +404,18 @@ pub fn render(text: &str, names: &LinkNames, mode: LinkMode) -> RenderedNote {
             }
             Event::End(TagEnd::Link) => {
                 let close = match open_links.pop() {
-                    Some(Open::Anchor) => "</a>",
-                    _ => "</span>",
+                    Some(Open::Anchor) => "</a>".to_owned(),
+                    Some(Open::Web { url, text }) => {
+                        let shown = text.trim();
+                        if shown == url || shown == url.trim_end_matches('/') {
+                            "</span>".to_owned()
+                        } else {
+                            // `https://alice:x@...` or `?token=x` in the address.
+                            let url = export::redact_secrets(&url).0;
+                            format!("</span> <span class=\"note-url\">({})</span>", escape(&url))
+                        }
+                    }
+                    _ => "</span>".to_owned(),
                 };
                 events.push(Event::Html(CowStr::from(close)));
             }
@@ -475,16 +593,65 @@ export API_KEY=Hunter2Hunter2!
     }
 
     #[test]
+    fn markdown_never_hides_a_secret_from_redaction() {
+        for text in [
+            "**Password:** Hunter2Hunter2",
+            "**Password**: Hunter2Hunter2",
+            "`password`: Hunter2Hunter2",
+            "Pass**word**: Hunter2Hunter2",
+            "password&#58; Hunter2Hunter2",
+            "- [ ] the *token* = Hunter2Hunter2",
+            "| what | value |\n|---|---|\n| db | **password:** Hunter2Hunter2 |",
+            "# Password: Hunter2Hunter2",
+            "> api_key:\n> Hunter2Hunter2",
+            "[admin](https://alice:Hunter2Hunter2@example.com/)",
+            "Password:\n- Hunter2Hunter2",
+            "Token:\n\n```\nHunter2Hunter2\n```",
+            "```password=Hunter2Hunter2\nx\n```",
+        ] {
+            assert!(looks_secret(text), "the editor warns: {text}");
+            let out = render(text, &names(), LinkMode::Static);
+            assert!(!out.html.contains("Hunter2"), "{text}: {}", out.html);
+            assert!(out.looks_secret, "{text}");
+        }
+        // A note with no secret keeps its markdown.
+        let plain = render(
+            "**Restart** nginx, then `systemctl status nginx`.",
+            &names(),
+            LinkMode::Static,
+        );
+        assert!(plain.html.contains("<strong>Restart</strong>"), "{}", plain.html);
+        assert!(
+            plain.html.contains("<code>systemctl status nginx</code>"),
+            "{}",
+            plain.html
+        );
+    }
+
+    #[test]
     fn static_links_are_plain_for_a_file_read_elsewhere() {
         let out = render(
             "[site](https://example.org/) [db](<vault:DB admin>) [x](javascript:alert(1))",
             &names(),
             LinkMode::Static,
         );
-        assert!(out
-            .html
-            .contains("<a href=\"https://example.org/\" rel=\"noopener noreferrer\">site</a>"));
+        // F6: the address is text after the link's, never an attribute.
+        assert!(
+            out.html.contains(
+                "<span class=\"note-link\">site</span> <span class=\"note-url\">(https://example.org/)</span>"
+            ),
+            "{}",
+            out.html
+        );
+        assert!(!out.html.contains("href"));
         assert!(out.html.contains("<span class=\"note-link\">db</span>"));
+        let bare = render(
+            "<https://example.org/x> [t](https://example.org/y \"https://example.org/z\")",
+            &names(),
+            LinkMode::Static,
+        );
+        assert!(bare.html.contains("<span class=\"note-link\">https://example.org/x</span> <span class=\"note-link\">t</span> <span class=\"note-url\">(https://example.org/y)</span>"), "{}", bare.html);
+        assert!(!bare.html.contains("title="), "{}", bare.html);
         assert!(!out.html.contains("data-note-link"));
         assert!(!out.html.contains("javascript"));
         assert!(!out.html.contains("data-note-code"));

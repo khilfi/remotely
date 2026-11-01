@@ -317,6 +317,8 @@ pub fn default_read_only_commands() -> Vec<String> {
         "dpkg -V",
         "dpkg --verify",
         "dpkg --get-selections",
+        // FD-05: the inventory's package list. dpkg-query only reads the package database: it has no writing form.
+        "dpkg-query",
         "apt-mark showhold",
         "apt-mark showmanual",
         "apt-mark showauto",

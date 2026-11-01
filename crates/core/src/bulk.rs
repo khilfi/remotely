@@ -122,11 +122,45 @@ pub struct ResolvedTargets {
     pub notes: Vec<String>,
 }
 
+/// Which sessions the picks may reach. The SS-09 key push goes over SSH; BX-13's Compare hosts runs and support
+/// bundles over SSH and WinRM ([`TargetPicks::winrm`]); F6's Ansible inventory, which runs nothing, also takes WinRM
+/// sessions (BX-12).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Reach {
+    #[default]
+    Ssh,
+    /// F6: the Ansible inventory.
+    SshAndWinrm,
+    /// BX-13: runs on SSH and WinRM hosts (a PowerShell tab picks its session).
+    SshAndWinrmRuns,
+}
+
+impl Reach {
+    fn keeps(self, kind: &crate::sessions::SessionKind) -> bool {
+        match self {
+            Reach::Ssh => kind.is_ssh(),
+            Reach::SshAndWinrm | Reach::SshAndWinrmRuns => kind.is_ssh() || kind.is_winrm(),
+        }
+    }
+
+    /// A tab of this kind picks its session.
+    fn keeps_tab(self, kind: PaneKind) -> bool {
+        kind == PaneKind::Ssh || (self != Reach::Ssh && kind == PaneKind::Powershell)
+    }
+
+    /// Why a session of another kind was left out.
+    fn only(self) -> &'static str {
+        match self {
+            Reach::Ssh => "this works over SSH only",
+            Reach::SshAndWinrm => "the inventory takes SSH and WinRM sessions",
+            Reach::SshAndWinrmRuns => "this works over SSH and WinRM only",
+        }
+    }
+}
+
 /// Collects picked sessions and VMs, keeping the order they were first picked and every reason.
 #[derive(Default)]
 struct Picked {
-    /// BX-13: WinRM sessions reach hosts too.
-    winrm: bool,
     sessions: Vec<Uuid>,
     via: HashMap<Uuid, Vec<String>>,
     vms: Vec<String>,
@@ -134,6 +168,7 @@ struct Picked {
     /// A4, H11: VMs reached only through an automatic link, with that session.
     unconfirmed: Vec<(String, Uuid)>,
     notes: Vec<String>,
+    reach: Reach,
 }
 
 impl Picked {
@@ -154,17 +189,18 @@ impl Picked {
         sessions: &HashMap<Uuid, &SessionRecord>,
         via: String,
     ) {
-        // BX-13: a VM's SSH and, where the run takes them, WinRM sessions reach it; a VM linked to both picks the SSH
-        // one (its own order puts SSH first), as before F8.
+        // BX-13: a VM's SSH and, where the picks take them (Compare hosts, a support bundle, F6's inventory), WinRM
+        // sessions reach it; a VM linked to both picks the SSH one, as before.
+        let reach = self.reach;
         let mut all: Vec<Uuid> = linked
             .get(&vm.id)
             .map(Vec::as_slice)
             .unwrap_or_default()
             .iter()
             .copied()
-            .filter(|id| sessions.get(id).is_some_and(|s| reaches(s, self.winrm)))
+            .filter(|id| sessions.get(id).is_some_and(|s| reach.keeps(&s.kind)))
             .collect();
-        all.sort_by_key(|id| sessions.get(id).is_some_and(|s| !s.kind.is_ssh()));
+        all.sort_by_key(|id| !sessions.get(id).is_some_and(|s| s.kind.is_ssh()));
         let all = all.as_slice();
         // A4, H11: only links the user chose or confirmed reach a VM.
         let confirmed: Vec<Uuid> = all
@@ -221,11 +257,6 @@ impl Picked {
             }
         }
     }
-}
-
-/// SS-12, BX-13: a session a run reaches: SSH, and WinRM where the run takes it.
-fn reaches(s: &SessionRecord, winrm: bool) -> bool {
-    s.kind.is_ssh() || (winrm && s.kind.is_winrm())
 }
 
 fn address(s: &SessionRecord) -> String {
@@ -1337,18 +1368,26 @@ impl BulkRuns {
 
     /// BX-01: the hosts a run on these picks reaches, and the picked VMs it can't reach.
     pub async fn resolve(&self, ctx: &Context, picks: &TargetPicks) -> Result<ResolvedTargets> {
+        // BX-13: Compare hosts and support bundles take WinRM hosts too; the key push doesn't.
+        let reach = if picks.winrm {
+            Reach::SshAndWinrmRuns
+        } else {
+            Reach::Ssh
+        };
+        self.resolve_reaching(ctx, picks, reach).await
+    }
+
+    /// [`Self::resolve`] keeping the sessions `reach` takes (F6's Ansible inventory: SSH and WinRM).
+    pub async fn resolve_reaching(&self, ctx: &Context, picks: &TargetPicks, reach: Reach) -> Result<ResolvedTargets> {
         let sessions = self.store.list_sessions(ctx).await?;
         let by_id: HashMap<Uuid, &SessionRecord> = sessions.iter().map(|s| (s.id, s)).collect();
         let vms = self.store.list_vms(ctx).await?;
         let vm_by_id: HashMap<&str, &VmRecord> = vms.iter().map(|v| (v.id.as_str(), v)).collect();
         let linked = self.store.sessions_by_vm(ctx).await?;
         let mut picked = Picked {
-            winrm: picks.winrm,
+            reach,
             ..Picked::default()
         };
-        // SS-12, BX-13: what the run reaches, in the words its notes use.
-        let over = if picks.winrm { "SSH and WinRM" } else { "SSH" };
-        let tab_reaches = |kind: PaneKind| kind == PaneKind::Ssh || (picks.winrm && kind == PaneKind::Powershell);
 
         for id in &picks.terminal_ids {
             let info = self.terminals.as_ref().and_then(|t| t.pane_info(*id));
@@ -1356,11 +1395,12 @@ impl BulkRuns {
                 // SS-12: a tunnel tab's connection is its jump host's, and a Telnet or serial tab is no shell:
                 // none of them is a host Compare hosts runs on. BX-13: a PowerShell tab's session is, where the run
                 // takes WinRM hosts.
-                Some(info) if !tab_reaches(info.kind) => {
+                Some(info) if !reach.keeps_tab(info.kind) => {
                     let note = format!(
-                        "{} is a {} tab, so it was left out: this works over {over} only.",
+                        "{} is a {} tab, so it was left out: {}.",
                         info.name,
-                        info.kind.label()
+                        info.kind.label(),
+                        reach.only()
                     );
                     if !picked.notes.contains(&note) {
                         picked.notes.push(note);
@@ -1430,11 +1470,12 @@ impl BulkRuns {
         // SS-12: every run on these targets is over SSH, or (BX-13: Compare hosts, a support bundle) WinRM: a Telnet,
         // serial, RDP or VNC session is left out, saying so without naming one of them.
         for s in picked.sessions.iter().filter_map(|id| by_id.get(id)) {
-            if !reaches(s, picks.winrm) {
+            if !reach.keeps(&s.kind) {
                 picked.notes.push(format!(
-                    "'{}' is a {} session, so it was left out: this works over {over} only.",
+                    "'{}' is a {} session, so it was left out: {}.",
                     s.name,
-                    s.kind.label()
+                    s.kind.label(),
+                    reach.only()
                 ));
             }
         }
@@ -1442,7 +1483,7 @@ impl BulkRuns {
             .sessions
             .iter()
             .filter_map(|id| by_id.get(id))
-            .filter(|s| reaches(s, picks.winrm))
+            .filter(|s| reach.keeps(&s.kind))
             .map(|s| {
                 let vm = s.vm_id.as_deref().and_then(|v| vm_by_id.get(v));
                 let environment = match vm {
