@@ -58,6 +58,13 @@ interface Props {
   jobId: string;
   /** A retry was submitted: the new job (or its approval) is the parent's to follow. */
   onRetry: (outcome: SubmitOutcome) => void;
+  /**
+   * FD-04: a support bundle's job. Its zip is its result, so it has no retry (a new bundle asks for its own file),
+   * group comparison or export; each host's output lists what it gave.
+   */
+  bundle?: boolean;
+  /** Shown after the actions (FD-04: Show folder). */
+  extraActions?: ReactNode;
 }
 
 const OPEN = new Set(["queued", "countdown", "running"]);
@@ -85,7 +92,7 @@ function bytes(n: number | null) {
   return `${(n / 1024 / 1024).toFixed(1)} MB`;
 }
 
-export function BulkResultsView({ jobId, onRetry }: Props) {
+export function BulkResultsView({ jobId, onRetry, bundle = false, extraActions }: Props) {
   const [results, setResults] = useState<BulkResults | null>(null);
   const [ignoreWs, setIgnoreWs] = useState(false);
   const [version, setVersion] = useState(0);
@@ -195,7 +202,7 @@ export function BulkResultsView({ jobId, onRetry }: Props) {
   const names = new Map(hosts.map((h) => [h.targetKey, h.name]));
   const done = counts.succeeded + counts.failed + counts.cancelled + counts.unknown + counts.skipped;
   const retries = retryChoices(counts);
-  const canRetry = !open && retries.failed > 0;
+  const canRetry = !bundle && !open && retries.failed > 0;
   // H9: the event may have come before this view opened; the results say whether the rest still wait.
   const waiting = canary ?? shown.canary;
   // BX-02, BX-04: the journal no longer holds the script as it ran (the core refuses the retry too).
@@ -233,7 +240,7 @@ export function BulkResultsView({ jobId, onRetry }: Props) {
               </Button>
             </WhyDisabled>
           )}
-          {!open && retries.withUnknown !== null && (
+          {!bundle && !open && retries.withUnknown !== null && (
             <WhyDisabled reason={busy ? "Submitting the retry…" : retryBlocked}>
               <Button
                 variant="outline"
@@ -247,33 +254,38 @@ export function BulkResultsView({ jobId, onRetry }: Props) {
               </Button>
             </WhyDisabled>
           )}
-          <WhyDisabled reason={diffReason(groups.length)}>
-            <Button
-              variant="outline"
-              size="sm"
-              disabled={groups.length < 2}
-              onClick={() => setComparing({ left: groups[0].label, right: groups[1].label })}
-            >
-              <GitCompareArrowsIcon data-icon="inline-start" />
-              Compare groups
-            </Button>
-          </WhyDisabled>
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <Button variant="outline" size="sm">
-                <DownloadIcon data-icon="inline-start" />
-                Export
+          {!bundle && (
+            <WhyDisabled reason={diffReason(groups.length)}>
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={groups.length < 2}
+                onClick={() => setComparing({ left: groups[0].label, right: groups[1].label })}
+              >
+                <GitCompareArrowsIcon data-icon="inline-start" />
+                Compare groups
               </Button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="end">
-              <DropdownMenuLabel>Save the results as</DropdownMenuLabel>
-              {EXPORTS.map((e) => (
-                <DropdownMenuItem key={e.format} onSelect={() => void exportAs(e.format)}>
-                  {e.label}
-                </DropdownMenuItem>
-              ))}
-            </DropdownMenuContent>
-          </DropdownMenu>
+            </WhyDisabled>
+          )}
+          {!bundle && (
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button variant="outline" size="sm">
+                  <DownloadIcon data-icon="inline-start" />
+                  Export
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end">
+                <DropdownMenuLabel>Save the results as</DropdownMenuLabel>
+                {EXPORTS.map((e) => (
+                  <DropdownMenuItem key={e.format} onSelect={() => void exportAs(e.format)}>
+                    {e.label}
+                  </DropdownMenuItem>
+                ))}
+              </DropdownMenuContent>
+            </DropdownMenu>
+          )}
+          {extraActions}
         </div>
       </div>
 

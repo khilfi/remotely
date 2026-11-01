@@ -193,6 +193,13 @@ pub enum Command {
         targets: Vec<TargetRef>,
         spec: Box<crate::convert::spec::ExportSpec>,
     },
+    /// FD-04: collect the same commands' output and files from many hosts (saved sessions) into one zip
+    /// ([`crate::support_bundle`]). Its commands are rated as a Compare hosts run's. Never built by the UI: the zip's
+    /// place comes from the shell's save dialog.
+    SupportBundle {
+        targets: Vec<TargetRef>,
+        spec: Box<crate::support_bundle::BundleSpec>,
+    },
     /// FD-09: a Wake-on-LAN magic packet from this PC ([`crate::toolbox::wake`]). The one target is the session or
     /// VM it wakes (its label rates it), or this app ([`TargetRef::App`]) for a MAC typed on its own.
     WakeOnLan {
@@ -569,7 +576,7 @@ pub struct Rollout {
 }
 
 impl Rollout {
-    fn validate(&self) -> Result<()> {
+    pub(crate) fn validate(&self) -> Result<()> {
         match self.stop_after_failures {
             Some(n) if !(1..=MAX_STOP_AFTER_FAILURES).contains(&n) => Err(CoreError::InvalidInput(format!(
                 "Stop after 1 to {MAX_STOP_AFTER_FAILURES} failures, or turn the stop off."
@@ -594,7 +601,7 @@ impl Rollout {
 }
 
 /// BX-02: a per-host time limit within bounds.
-fn validate_timeout(timeout_secs: Option<u64>) -> Result<()> {
+pub(crate) fn validate_timeout(timeout_secs: Option<u64>) -> Result<()> {
     if let Some(secs) = timeout_secs {
         if !(1..=MAX_EXEC_TIMEOUT_SECS).contains(&secs) {
             return Err(CoreError::InvalidInput(format!(
@@ -642,6 +649,10 @@ impl Command {
             Command::VmExport { .. } => "Exports start from a VM's Export, which asks for the folder.",
             // FD-09: the folders and the address are checked against this PC before the command is built.
             Command::FileServer { .. } => "The file server starts from the Toolbox's File server tab.",
+            // FD-04: the zip's place comes from a save dialog.
+            Command::SupportBundle { .. } => {
+                "Support bundles start from the support bundle dialog, which asks where to save the zip."
+            }
             _ => return Ok(()),
         };
         Err(CoreError::InvalidInput(refused.into()))
@@ -725,6 +736,7 @@ impl Command {
             Command::VmLifecycle { targets, op } => vm_ops::validate_lifecycle(targets, op),
             Command::Stack { targets, op } => op.validate(targets),
             Command::HostNetwork { targets, op } => net_ops::validate(targets, op),
+            Command::SupportBundle { targets, spec } => spec.validate(targets),
             Command::WakeOnLan { targets, wake } => {
                 crate::toolbox::WakeSpec::check_targets(targets)?;
                 wake.validate()
@@ -739,6 +751,31 @@ impl Command {
                 Ok(())
             }
             _ => Ok(()),
+        }
+    }
+
+    /// BX-06: the shell text the policy engine rates: a run's script, a MultiExec line, a support bundle's commands
+    /// (FD-04), one per line. `None` for the rest.
+    pub fn rated_script(&self) -> Option<std::borrow::Cow<'_, str>> {
+        match self {
+            Command::RemoteExec { script, .. } => Some(script.as_str().into()),
+            Command::TerminalLine { line, .. } => Some(line.as_str().into()),
+            Command::SupportBundle { spec, .. } => Some(spec.rated_script().into()),
+            _ => None,
+        }
+    }
+
+    /// BX-07: the vault password sudo gets, when the command runs with sudo and one was chosen (a run's or a support
+    /// bundle's). `None`: no sudo, or each session's own login password.
+    pub fn sudo_password_id(&self) -> Option<SecretId> {
+        match self {
+            Command::RemoteExec {
+                sudo: true,
+                sudo_password_id,
+                ..
+            } => *sudo_password_id,
+            Command::SupportBundle { spec, .. } if spec.sudo => spec.sudo_password_id,
+            _ => None,
         }
     }
 
@@ -780,11 +817,13 @@ impl Command {
             // SS-10: a line belongs to the moment it was typed; pressing Enter again later could run it
             // after something else. SS-07: a tunnel belongs to its terminal. VM-24: an added VM is its file.
             // VM-11: a forward belongs to its network or VM.
+            // FD-04: a bundle belongs to its zip; the hosts that failed go into a new one, with its own save dialog.
             // FD-09: a wake-up is for its one machine; a file server runs once, for its time.
             Command::AppUpdate { .. }
             | Command::TerminalLine { .. }
             | Command::OpenTunnel { .. }
             | Command::HostNetwork { .. }
+            | Command::SupportBundle { .. }
             | Command::WakeOnLan { .. }
             | Command::FileServer { .. }
             | Command::VmLifecycle {
@@ -816,7 +855,9 @@ impl Command {
             | Command::WakeOnLan { targets, .. }
             | Command::FileServer { targets, .. }
             | Command::Stack { targets, .. } => targets,
-            Command::ImageConvert { targets, .. } | Command::VmExport { targets, .. } => targets,
+            Command::ImageConvert { targets, .. }
+            | Command::VmExport { targets, .. }
+            | Command::SupportBundle { targets, .. } => targets,
             Command::AppUpdate { .. } => APP_TARGET,
         }
     }
@@ -844,6 +885,7 @@ impl Command {
             Command::HostNetwork { .. } => "hostNetwork",
             Command::ImageConvert { .. } => "imageConvert",
             Command::VmExport { .. } => "vmExport",
+            Command::SupportBundle { .. } => "supportBundle",
             Command::WakeOnLan { .. } => "wakeOnLan",
             Command::FileServer { .. } => "fileServer",
         }
@@ -865,6 +907,12 @@ impl Command {
             Command::RemoteExec { script, .. } => clean(script),
             // The keys hold a paste's later lines too.
             Command::TerminalLine { line, keys, .. } => clean(line) | clean(keys),
+            // FD-04: every command of a bundle.
+            Command::SupportBundle { spec, .. } => {
+                let (redacted, changed) = spec.for_journal();
+                **spec = redacted;
+                changed
+            }
             _ => false,
         };
         (kept, changed)
@@ -979,6 +1027,7 @@ impl Command {
             Command::HostNetwork { targets, op } => op.summary(targets),
             Command::ImageConvert { spec, .. } => spec.summary(),
             Command::VmExport { spec, .. } => spec.summary(),
+            Command::SupportBundle { spec, .. } => spec.summary(target_count),
             Command::WakeOnLan { wake, .. } => wake.summary(),
             Command::FileServer { spec, .. } => spec.summary(),
         }
@@ -1040,6 +1089,39 @@ pub struct ApprovalRequest {
     pub capacity: Option<Box<crate::capacity_plan::DeployCapacity>>,
     /// VM-14, VM-27: for a schedule's approval, when it runs and what each run does.
     pub standing: Option<Box<StandingDetails>>,
+    /// FD-04: for a support bundle, the files each host gives and where the zip goes (its commands are in `exec`).
+    pub bundle: Option<Box<BundleDetails>>,
+}
+
+/// FD-04: a support bundle as the approval dialog shows it, besides its commands.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BundleDetails {
+    /// The presets' names.
+    pub presets: Vec<String>,
+    /// Files read over SFTP as the login user.
+    pub files: Vec<String>,
+    /// Where the zip is saved.
+    pub output: String,
+    pub limits: crate::support_bundle::BundleLimits,
+}
+
+impl BundleDetails {
+    fn of(command: &Command) -> Option<Box<Self>> {
+        let Command::SupportBundle { spec, .. } = command else {
+            return None;
+        };
+        Some(Box::new(Self {
+            presets: spec
+                .presets
+                .iter()
+                .map(|id| crate::support_bundle::presets::preset(*id).label.to_owned())
+                .collect(),
+            files: spec.files().map(str::to_owned).collect(),
+            output: spec.output.clone(),
+            limits: crate::support_bundle::LIMITS,
+        }))
+    }
 }
 
 /// What [`CommandBus`] read about the targets before asking (AP-02).
@@ -1344,19 +1426,14 @@ impl CommandBus {
     /// the vault password in its approval (one confirm and the password, even for a Low command), and
     /// says so. Approved, those sessions may use it from now on.
     async fn ask_for_sudo_places(&self, ctx: &Context, command: &Command, decision: &mut Decision) -> Result<()> {
-        let Command::RemoteExec {
-            sudo: true,
-            sudo_password_id: Some(secret),
-            ..
-        } = command
-        else {
+        let Some(secret) = command.sudo_password_id() else {
             return Ok(());
         };
-        let new = self.new_sudo_places(ctx, *secret, &decision.targets).await?;
+        let new = self.new_sudo_places(ctx, secret, &decision.targets).await?;
         if new.is_empty() {
             return Ok(());
         }
-        let what = self.bindings().describe(ctx, *secret).await?;
+        let what = self.bindings().describe(ctx, secret).await?;
         let names: Vec<String> = new.iter().take(5).map(|(_, name)| format!("'{name}'")).collect();
         let more = new.len().saturating_sub(names.len());
         let names = if more > 0 {
@@ -1400,18 +1477,13 @@ impl CommandBus {
     /// SS-04, AP-06: after an approval that asked for the vault password, the sessions the run's sudo
     /// password was new to may use it from now on (audited `vault_secret_allowed`).
     async fn allow_sudo_places(&self, ctx: &Context, command: &Command, targets: &[Target]) -> Result<()> {
-        let Command::RemoteExec {
-            sudo: true,
-            sudo_password_id: Some(secret),
-            ..
-        } = command
-        else {
+        let Some(secret) = command.sudo_password_id() else {
             return Ok(());
         };
         let bindings = self.bindings();
-        for (session_id, name) in self.new_sudo_places(ctx, *secret, targets).await? {
+        for (session_id, name) in self.new_sudo_places(ctx, secret, targets).await? {
             bindings
-                .allow(ctx, session_id, &name, *secret, crate::vault::bindings::ASKED_NOW)
+                .allow(ctx, session_id, &name, secret, crate::vault::bindings::ASKED_NOW)
                 .await?;
         }
         Ok(())
@@ -1726,12 +1798,10 @@ impl CommandBus {
         let (mut decision, dangerous) = {
             let policy = locks::read(&self.policy);
             let decision = policy.evaluate(command, &targets);
-            let dangerous = match command {
-                Command::RemoteExec { script, .. } | Command::TerminalLine { line: script, .. } => {
-                    policy.dangerous_details(script)
-                }
-                _ => Vec::new(),
-            };
+            let dangerous = command
+                .rated_script()
+                .map(|script| policy.dangerous_details(&script))
+                .unwrap_or_default();
             (decision, dangerous)
         };
         self.apply_change_id_rule(ctx, &mut decision).await?;
@@ -1811,40 +1881,47 @@ impl CommandBus {
                 rollout: Rollout::default(),
             })));
         }
-        let Command::RemoteExec {
-            script,
-            sudo,
-            sudo_password_id,
-            trust_new_host_keys,
-            timeout_secs,
-            rollout,
-            ..
-        } = command
-        else {
-            return Ok(None);
+        // FD-04: a bundle's commands, one per line, run on each host like a run's script.
+        let (script, sudo, trust_new_host_keys, timeout_secs, rollout) = match command {
+            Command::RemoteExec {
+                script,
+                sudo,
+                trust_new_host_keys,
+                timeout_secs,
+                rollout,
+                ..
+            } => (script.clone(), *sudo, *trust_new_host_keys, *timeout_secs, *rollout),
+            Command::SupportBundle { spec, .. } => (
+                spec.rated_script(),
+                spec.sudo,
+                spec.trust_new_host_keys,
+                spec.timeout_secs,
+                spec.rollout,
+            ),
+            _ => return Ok(None),
         };
-        let sudo_password_label = match (sudo, sudo_password_id) {
-            (true, Some(id)) => self
+        let sudo_password_label = match command.sudo_password_id() {
+            Some(id) => self
                 .vault
                 .list(ctx)
                 .await?
                 .into_iter()
-                .find(|s| s.id == *id)
+                .find(|s| s.id == id)
                 .map(|s| s.label),
-            _ => None,
+            None => None,
         };
         Ok(Some(Box::new(ExecDetails {
-            script: script.clone(),
-            sudo: *sudo,
+            dangerous: locks::read(&self.policy).dangerous_details(&script),
+            script,
+            sudo,
             sudo_password_label,
-            trust_new_host_keys: *trust_new_host_keys,
-            timeout_secs: *timeout_secs,
-            dangerous: locks::read(&self.policy).dangerous_details(script),
+            trust_new_host_keys,
+            timeout_secs,
             retry_of,
             multi_exec: false,
             unreliable: false,
             run_key: None,
-            rollout: *rollout,
+            rollout,
         })))
     }
 
@@ -1869,13 +1946,8 @@ impl CommandBus {
 
     /// BX-07: a sudo password chosen from the vault must be a password that is there.
     async fn check_sudo_password(&self, ctx: &Context, command: &Command) -> Result<()> {
-        if let Command::RemoteExec {
-            sudo: true,
-            sudo_password_id: Some(id),
-            ..
-        } = command
-        {
-            match self.store.vault_item_kind(ctx, *id).await? {
+        if let Some(id) = command.sudo_password_id() {
+            match self.store.vault_item_kind(ctx, id).await? {
                 Some(SecretKind::Password) => {}
                 Some(other) => {
                     return Err(CoreError::InvalidInput(format!(
@@ -2243,6 +2315,7 @@ impl CommandBus {
             stack: stack.map(Box::new),
             capacity: capacity.map(Box::new),
             standing: None,
+            bundle: BundleDetails::of(command),
         })
     }
 
@@ -2682,7 +2755,36 @@ mod tests {
                     },
                 },
             },
+            Command::SupportBundle {
+                targets: vec![],
+                spec: Box::new(crate::support_bundle::BundleSpec {
+                    presets: vec![crate::support_bundle::PresetId::System],
+                    items: vec![
+                        crate::support_bundle::BundleItem::command("uname -a"),
+                        crate::support_bundle::BundleItem::file("/etc/os-release"),
+                    ],
+                    sudo: false,
+                    sudo_password_id: None,
+                    trust_new_host_keys: false,
+                    timeout_secs: None,
+                    rollout: Rollout::default(),
+                    output: r"C:\Users\alice\Documents\bundle.zip".into(),
+                    workspace: "Lab".into(),
+                }),
+            },
         ]
+    }
+
+    #[test]
+    fn a_support_bundle_only_comes_from_its_dialog_and_is_never_retried() {
+        let bundle = every_kind().pop().unwrap();
+        assert!(matches!(bundle, Command::SupportBundle { .. }));
+        assert!(
+            bundle.check_from_ui().is_err(),
+            "the zip's place comes from a save dialog"
+        );
+        assert!(bundle.with_targets(vec![]).is_none());
+        assert_eq!(bundle.rated_script().as_deref(), Some("uname -a"));
     }
 
     #[test]

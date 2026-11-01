@@ -118,8 +118,9 @@ crates/core/          remotely-core: all app logic
                       clock), Purge now, audited journal_purged; secure_delete, a WAL checkpoint and VACUUM after a big
                       purge; the read-only lock refuses the setting and Purge now, never the schedule
     save_guard.rs     No save path writes into a Git working tree (audit CSV, Compare and MultiExec exports, saved
-                      output, session logs, downloads, FD-07 exports, FD-09's upload folder); write_atomically (a
-                      `.part` file, renamed)
+                      output, session logs, downloads, FD-07 exports, FD-04 bundles, FD-09's upload folder);
+                      write_atomically (a `.part` file, renamed), and AtomicFile, the same for a file written bit by bit
+                      (a bundle's zip; its `.part` goes on every failure, a failed commit's too)
     adapters/         vmware.rs (VM-23 also the .vmx's backup, atomic write and restore, vdiskmanager and vmware.exe
                       found beside vmrun, vmrun_change; VM-21 ovftool found like vmrun, Workstation's default VM
                       folder), vmx_file.rs (VM-23 a .vmx as its lines: unknown keys, order,
@@ -512,6 +513,26 @@ crates/core/          remotely-core: all app logic
                       BX-05 exports: the Terminal page's Compare output (running is RemoteExec on the bus); QL-12
                       recorded MultiExec lines group (group_with_output), diff and export (export_recorded, audited
                       multiexec_exported) through the same code
+    support_bundle/   FD-04 support bundles (no migration): spec.rs BundleSpec (Command::SupportBundle; presets expanded
+                      into its items before the bus rates them; refused from the UI: the zip's place comes from the
+                      shell's save dialog; never retried), its checks, entry names safe for Windows and the file name
+                      `remotely-bundle-<workspace>-<UTC time>.zip`; presets.rs PRESETS (System, Logs, Containers,
+                      Network) by HostKind, every command read-only by the default rules (policy/bundle_tests.rs);
+                      collect.rs the BundleHost trait (SshHost: commands on a kept connection's exec channels, sudo
+                      through BX-07; files over SFTP on the same connection as the login user, ExecSession::files; F8
+                      adds Windows) and collect_host (caps 10 MB a file, 100 MB a host, 1 GB a bundle; ItemLimits: a
+                      command 60 s, a file read 180 s, then the item is noted as timed out and the host goes on;
+                      exec_output's scrubber, redact_secrets and private keys: PEM and PGP blocks, a key whose BEGIN was
+                      cut away, PuTTY's private lines, kubeconfig's client-key-data; a file with a NUL byte left out);
+                      writer.rs OpenBundle (the zip through save_guard::AtomicFile, written as hosts give files, on
+                      blocking threads; Reservation gives an item's bytes of the cap back however it ends; add_file
+                      puts a file and its manifest record in together; manifest.json); runner.rs BundleRunner, the job
+                      runner's BundleActions (begin, collect, each host's end, save and audit `data_exported`; a
+                      cancelled job saves nothing); mod.rs SupportBundles (Core.bundles: presets, preview, check,
+                      submit, saved_at for Show folder; SS-12 SSH sessions only, another kind refused by name,
+                      HOSTS_NEED); spec.rs zip_path (a name given `.zip` never replaces a file
+                      unasked). The policy engine rates a bundle's commands as a Compare hosts run
+                      (Command::rated_script). FD-03: presentation.ts masks the workspace in a bundle's file name
     multiexec_groups.rs QL-19 saved MultiExec groups (Core.groups): named sets of saved sessions in order (1 to 60
                       characters, 1 to 100 sessions, 200 groups); audited multiexec_group_changed with the member
                       sessions as targets, refused by the read-only lock (Change::MultiExecGroups); a deleted session
@@ -608,7 +629,8 @@ crates/core/          remotely-core: all app logic
                       host_networks.rs: VM-11; vm_insight.rs: VM-25; waste.rs: VM-16, VM-14; schedules.rs: VM-14,
                       VM-27 on a FakeClock, no sleeping; stacks.rs: VM-08 and VM-26 on the fakes and FakeStackClock;
                       conversion.rs: CV-01 to CV-03, VM-17; workspaces.rs: FD-02 isolation of every service and
-                      switching; change_ids.rs: AP-08; toolbox.rs: FD-09 on FakeNetworkTools, a TLS server with an
+                      switching; change_ids.rs: AP-08; support_bundle.rs: FD-04 on the test SSH server, zips in the
+                      temp folder; toolbox.rs: FD-09 on FakeNetworkTools, a TLS server with an
                       rcgen certificate made at run time, jump hosts through the test SSH server, Wake-on-LAN to
                       127.0.0.1; consoles.rs: SS-12 RDP, VNC, Telnet, serial and tunnel tabs; file_server.rs: FD-09
                       TFTP and HTTP on 127.0.0.1 with port 0 and the test's own clients, folders made in the temp
@@ -649,11 +671,12 @@ src-tauri/            Tauri 2 shell: window, IPC commands (ipc.rs), terminal bri
                       file dialog, Inspect, Convert's options and its save dialog, Verify with `convert://verify`
                       progress, Export's options and folder dialog, Import's analysis, check and submit, QEMU's page
                       after checked_qemu_site; Settings' qemu-img path in ipc.rs); FD-02, AP-08 workspaces.rs (the
-                      switcher's commands, Unassigned VMs, the change ID rule, FD-07 import into a new workspace); FD-09
-                      toolbox.rs (each tool's run under an id the UI chose, `toolbox://progress` events, toolbox_cancel,
-                      the certificate file dialog, Wake up's adapters and MACs), file_server.rs (the File server tab's
-                      options, file and folder dialogs, start, Stop and status, `fileserver://event`); lib.rs
-                      and schedules.rs pass job and schedule events to the window only for the shown workspace
+                      switcher's commands, Unassigned VMs, the change ID rule, FD-07 import into a new workspace); FD-04
+                      support_bundle.rs (presets, the tier preview, the zip's save dialog in Downloads, Show folder by
+                      job id); FD-09 toolbox.rs (each tool's run under an id the UI chose, `toolbox://progress` events,
+                      toolbox_cancel, the certificate file dialog, Wake up's adapters and MACs), file_server.rs (the File
+                      server tab's options, file and folder dialogs, start, Stop and status, `fileserver://event`);
+                      lib.rs and schedules.rs pass job and schedule events to the window only for the shown workspace
 src/                  React + TypeScript UI
   components/ui/      shadcn/ui components (generated)
   components/         app components (approval dialog, badges, Compare panel with its one-shot and MultiExec views
@@ -693,7 +716,10 @@ src/                  React + TypeScript UI
                       NotificationSources (QL-25: jobs and MO-07 alerts kept whatever page shows), ShortcutSheet
                       (QL-24, Ctrl+/), FirstRunWizard (QL-23: the Vault page's SetupCard, the import dialog); VM-14,
                       VM-27 ScheduleDialog (the core's preview of next runs and warnings), ScheduleRunsSheet,
-                      VmSchedulesTab (a VM's Schedules tab and chain), ApprovalDialog's StandingSummary; FD-02
+                      VmSchedulesTab (a VM's Schedules tab and chain), ApprovalDialog's StandingSummary; FD-04
+                      SupportBundleDialog (hosts, presets, commands and files, options; then BulkResultsView's bundle
+                      mode with Show folder; the Sessions page's "⋯" and Ctrl+K open it) and ApprovalDialog's
+                      BundleSummary; FD-02
                       WorkspaceSwitcher (the top bar's menu, the switch, edit and manage dialogs; the window loads again
                       after a switch), UnassignedVmsSheet; AP-08 ChangeIdSetting (ChangeIdCard.tsx, a row of the
                       approval rules' card) and the approval dialog's one reason or change ID field; UX-10 Settings:
@@ -795,6 +821,7 @@ src/                  React + TypeScript UI
                       addresses as `mac-N`; FD-02 workspace names, `data-mask="workspace"`, learnWorkspace),
                       workspaces.ts and workspaces-api.ts (FD-02 checks and texts; wrappers that teach the masker every
                       workspace name), rollout.ts (H9 canary, stop after failures, retry choices),
+                      support-bundle.ts (FD-04 the dialog's typed lines, item count, QL-08 reasons and caps),
                       key-options.ts (SS-09 expiry-time and from for a pushed key),
                       presentation-dom.ts (masks every text node and text attribute before paint, `data-mask` fields,
                       `data-presentation-skip` for terminals; a value learnt later re-masks only the text that
@@ -1128,6 +1155,8 @@ ovftool 5.0, VirtualBox 7.2.22 and qemu-img 10.1 on images of a few MB.
   never an image on a network share. The opt-in `conversion_it.rs` runs the real tools on 64 MB images in the temp
   folder and exports an `it-` Workstation VM made of files there, never registered; it checks VirtualBox's media
   list is as it was.
+- Support bundles (FD-04): tests collect from `TestSshServer` (its exec shell and SFTP) or in-memory hosts, and write
+  their zips to the system temp folder, never the repo (`tests/support_bundle.rs`).
 - Containers (CT-01, CT-02): never start, stop, remove or prune real containers. Bus and policy tests use
   `fakes::FakeContainers` (`tests/containers.rs`); end-to-end tests use the test server's `docker` and `podman`
   (`with_containers(engine, Fixture::sample())`, `without_docker_group()` for sudo; `tests/containers_ssh.rs`).

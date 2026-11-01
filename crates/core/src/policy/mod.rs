@@ -12,6 +12,8 @@
 //! A target labelled Prod moves the action up one tier. Protected targets (AP-04) are skipped.
 //! The rules are data ([`PolicyRules`]) so they can be edited and saved.
 
+#[cfg(test)]
+mod bundle_tests;
 mod commands;
 #[cfg(test)]
 mod convert_tests;
@@ -1191,6 +1193,16 @@ impl PolicyEngine {
             Command::Deploy { .. } => ActionKind::VmDeploy,
             Command::ImageConvert { .. } => ActionKind::ImageConvert,
             Command::VmExport { .. } => ActionKind::VmExport,
+            // FD-04: its commands, rated together as a Compare hosts run's script; its files are read over SFTP as
+            // the login user, which only reads, so a bundle of files alone is read-only.
+            Command::SupportBundle { spec, .. } => {
+                let script = spec.rated_script();
+                if script.trim().is_empty() {
+                    ActionKind::ExecReadOnly
+                } else {
+                    self.classify_script(&script)
+                }
+            }
             Command::WakeOnLan { .. } => ActionKind::WakeOnLan,
             // FD-09: accepting uploads lets other computers write files onto this PC.
             Command::FileServer { spec, .. } if spec.uploads.is_some() => ActionKind::FileServerUploads,
@@ -1252,7 +1264,28 @@ impl PolicyEngine {
             }
         }
 
-        if let Command::RemoteExec { script, .. } | Command::TerminalLine { line: script, .. } = command {
+        // FD-04: what a support bundle does on each host, for the dialog and the audit log.
+        if let Command::SupportBundle { spec, .. } = command {
+            let commands = spec.commands().count();
+            let files = spec.files().count();
+            let mut what = Vec::new();
+            if commands > 0 {
+                what.push(match commands {
+                    1 => "its 1 command is rated as a Compare hosts run".to_owned(),
+                    n => format!("its {n} commands are rated together as a Compare hosts run"),
+                });
+            }
+            if files > 0 {
+                what.push(match files {
+                    1 => "its 1 file is read over SFTP as the login user, never with sudo".to_owned(),
+                    n => format!("its {n} files are read over SFTP as the login user, never with sudo"),
+                });
+            }
+            reasons.push(format!("support bundle: {}", what.join("; ")));
+        }
+
+        if let Some(script) = command.rated_script() {
+            let script = script.as_ref();
             let hits = self.dangerous_matches(script);
             if !hits.is_empty() {
                 reasons.push(format!("flagged dangerous: {}", hits.join(", ")));
@@ -1553,6 +1586,8 @@ pub fn safety_snapshot_applies(command: &Command) -> bool {
         // CV-03, VM-17: the source is only read.
         | Command::ImageConvert { .. }
         | Command::VmExport { .. }
+        // FD-04: commands on hosts, never VMs.
+        | Command::SupportBundle { .. }
         // FD-09: a wake-up starts a machine that is off; there is nothing in it to lose. The file server runs on this
         // PC.
         | Command::WakeOnLan { .. }
