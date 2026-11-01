@@ -62,7 +62,16 @@ interface Props {
 }
 
 type Section =
-  "sessions" | "folderDefaults" | "knownHosts" | "secrets" | "favourites" | "groups" | "sizes" | "images" | "templates";
+  | "sessions"
+  | "folderDefaults"
+  | "knownHosts"
+  | "secrets"
+  | "favourites"
+  | "groups"
+  | "checks"
+  | "sizes"
+  | "images"
+  | "templates";
 /** VM-19 to VM-21: the catalogue's sections, shown only when the file has some. */
 const CATALOG_SECTIONS = new Set<Section>(["sizes", "images", "templates"]);
 
@@ -80,6 +89,9 @@ function itemsOf(preview: TransferPreview, section: Section): TransferItem[] {
       return preview.folderDefaults ?? [];
     case "groups":
       return preview.groups ?? [];
+    // MO-08: files from before 0.7.0 have none.
+    case "checks":
+      return preview.checks ?? [];
     default:
       return preview[section];
   }
@@ -107,6 +119,7 @@ const SECTIONS: { key: Section; title: string; empty: string }[] = [
   { key: "secrets", title: "Vault secrets", empty: "" },
   { key: "favourites", title: "Favourite commands", empty: "No favourite commands in the file." },
   { key: "groups", title: "Saved groups", empty: "No saved groups in the file." },
+  { key: "checks", title: "Health checks", empty: "No health checks in the file." },
   { key: "sizes", title: "VM sizes", empty: "" },
   { key: "images", title: "Images", empty: "" },
   { key: "templates", title: "Launch templates", empty: "" },
@@ -124,6 +137,7 @@ function defaults(preview: TransferPreview): Choices {
     templates: of("templates"),
     folderDefaults: of("folderDefaults"),
     groups: of("groups"),
+    checks: of("checks"),
   };
 }
 
@@ -143,6 +157,7 @@ function counts(report: TransferReport) {
     part("Secrets", report.secrets),
     part("Favourite commands", report.favourites),
     part("Saved groups", report.groups),
+    report.checks && part("Health checks", report.checks),
     report.catalog && part("VM sizes", report.catalog.sizes),
     report.catalog && part("Images", report.catalog.images),
     report.catalog && part("Launch templates", report.catalog.templates),
@@ -167,6 +182,7 @@ export function TransferImportDialog({ vault, onVaultChanged, onImported, onClos
     secrets: {},
     favourites: {},
     groups: {},
+    checks: {},
     sizes: {},
     images: {},
     templates: {},
@@ -250,6 +266,7 @@ export function TransferImportDialog({ vault, onVaultChanged, onImported, onClos
         favourites: list("favourites"),
         folderDefaults: list("folderDefaults"),
         groups: list("groups"),
+        checks: list("checks"),
         catalog: { sizes: list("sizes"), images: list("images"), templates: list("templates") },
         keepStartup: [...keepStartup].sort((a, b) => a - b),
         keepForwards: [...keepForwards].sort((a, b) => a - b),

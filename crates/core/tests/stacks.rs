@@ -1208,6 +1208,7 @@ fn commit_all(preview_id: Uuid, stacks: Vec<ItemChoice>) -> TransferCommit {
         vault_password: None,
         folder_defaults: vec![],
         groups: vec![],
+        checks: vec![],
     }
 }
 

@@ -29,16 +29,25 @@ pub enum AlertMetric {
     Unreachable,
     /// A VM whose process went away with no Remotely job on it: powered off, suspended or crashed outside the app.
     Stopped,
+    /// MO-08: a health check that failed as many runs in a row as it allows (a state).
+    CheckDown,
+    /// MO-08: a health check whose last run took longer than the threshold, in milliseconds.
+    CheckSlow,
+    /// MO-08: a certificate check whose certificate has fewer days left than the threshold.
+    CertExpiring,
 }
 
 impl AlertMetric {
-    pub const ALL: [AlertMetric; 6] = [
+    pub const ALL: [AlertMetric; 9] = [
         AlertMetric::Cpu,
         AlertMetric::Memory,
         AlertMetric::Disk,
         AlertMetric::Swap,
         AlertMetric::Unreachable,
         AlertMetric::Stopped,
+        AlertMetric::CheckDown,
+        AlertMetric::CheckSlow,
+        AlertMetric::CertExpiring,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -49,6 +58,9 @@ impl AlertMetric {
             AlertMetric::Swap => "swap",
             AlertMetric::Unreachable => "unreachable",
             AlertMetric::Stopped => "stopped",
+            AlertMetric::CheckDown => "checkDown",
+            AlertMetric::CheckSlow => "checkSlow",
+            AlertMetric::CertExpiring => "certExpiring",
         }
     }
 
@@ -56,11 +68,20 @@ impl AlertMetric {
         Self::ALL.into_iter().find(|m| m.as_str() == text)
     }
 
-    /// CPU, memory, disk and swap are percentages with a threshold; the others are states.
+    /// CPU, memory, disk and swap are percentages with a threshold, a check's time is milliseconds and a
+    /// certificate's days left are days; the others are states.
     pub fn has_threshold(self) -> bool {
+        !matches!(
+            self,
+            AlertMetric::Unreachable | AlertMetric::Stopped | AlertMetric::CheckDown
+        )
+    }
+
+    /// MO-08: watched on health checks (only check scopes take them).
+    pub fn on_checks(self) -> bool {
         matches!(
             self,
-            AlertMetric::Cpu | AlertMetric::Memory | AlertMetric::Disk | AlertMetric::Swap
+            AlertMetric::CheckDown | AlertMetric::CheckSlow | AlertMetric::CertExpiring
         )
     }
 
@@ -72,7 +93,28 @@ impl AlertMetric {
             AlertMetric::Swap => "Swap",
             AlertMetric::Unreachable => "Unreachable",
             AlertMetric::Stopped => "Stopped",
+            AlertMetric::CheckDown => "Check down",
+            AlertMetric::CheckSlow => "Check slow",
+            AlertMetric::CertExpiring => "Certificate expiring",
         }
+    }
+
+    /// A threshold in its unit: "90%", "500 ms", "14 days".
+    pub fn threshold_text(self, value: f64) -> String {
+        match self {
+            AlertMetric::CheckSlow => format!("{value:.0} ms"),
+            AlertMetric::CertExpiring => days_text(value),
+            _ => pct(value),
+        }
+    }
+}
+
+/// "1 day", "14 days".
+fn days_text(value: f64) -> String {
+    if (value - 1.0).abs() < f64::EPSILON {
+        "1 day".into()
+    } else {
+        format!("{value:.0} days")
     }
 }
 
@@ -119,6 +161,12 @@ pub enum AlertScope {
     /// Every watched host.
     AllHosts,
     ThisPc,
+    /// MO-08: every health check of the workspace.
+    AllChecks,
+    /// MO-08: one health check.
+    Check {
+        check_id: Uuid,
+    },
 }
 
 impl AlertScope {
@@ -130,6 +178,8 @@ impl AlertScope {
             AlertScope::Host { .. } => "host",
             AlertScope::AllHosts => "allHosts",
             AlertScope::ThisPc => "thisPc",
+            AlertScope::AllChecks => "allChecks",
+            AlertScope::Check { .. } => "check",
         }
     }
 
@@ -138,7 +188,8 @@ impl AlertScope {
             AlertScope::Vm { key } => Some(key.clone()),
             AlertScope::Tag { tag } => Some(tag.clone()),
             AlertScope::Host { session_id } => Some(session_id.to_string()),
-            AlertScope::AllVms | AlertScope::AllHosts | AlertScope::ThisPc => None,
+            AlertScope::Check { check_id } => Some(check_id.to_string()),
+            AlertScope::AllVms | AlertScope::AllHosts | AlertScope::ThisPc | AlertScope::AllChecks => None,
         }
     }
 
@@ -152,13 +203,20 @@ impl AlertScope {
             },
             "allHosts" => AlertScope::AllHosts,
             "thisPc" => AlertScope::ThisPc,
+            "allChecks" => AlertScope::AllChecks,
+            "check" => AlertScope::Check {
+                check_id: Uuid::parse_str(&key?).ok()?,
+            },
             _ => return None,
         })
     }
 
-    /// Whether `metric` means anything for this scope's targets.
+    /// Whether `metric` means anything for this scope's targets. Checks' metrics only on checks (MO-08), and
+    /// nothing else on them.
     pub fn allows(&self, metric: AlertMetric) -> bool {
         match self {
+            AlertScope::AllChecks | AlertScope::Check { .. } => metric.on_checks(),
+            _ if metric.on_checks() => false,
             AlertScope::ThisPc => matches!(metric, AlertMetric::Cpu | AlertMetric::Memory | AlertMetric::Swap),
             AlertScope::Host { .. } | AlertScope::AllHosts => metric != AlertMetric::Stopped,
             AlertScope::AllVms | AlertScope::Vm { .. } | AlertScope::Tag { .. } => true,
@@ -176,7 +234,8 @@ pub struct AlertRule {
     pub name: String,
     pub metric: AlertMetric,
     pub scope: AlertScope,
-    /// Percent (above it fires), for CPU, memory, disk and swap; `None` for unreachable and stopped.
+    /// Percent (above it fires), for CPU, memory, disk and swap; milliseconds (above it fires) for a slow check;
+    /// days (below it fires) for an expiring certificate; `None` for the states.
     pub threshold: Option<f64>,
     /// How long the condition must hold before the alert fires.
     pub for_secs: u64,
@@ -237,6 +296,7 @@ pub enum BuiltinScope {
     AllVms,
     AllHosts,
     ThisPc,
+    AllChecks,
 }
 
 impl Builtin {
@@ -248,6 +308,7 @@ impl Builtin {
                 BuiltinScope::AllVms => AlertScope::AllVms,
                 BuiltinScope::AllHosts => AlertScope::AllHosts,
                 BuiltinScope::ThisPc => AlertScope::ThisPc,
+                BuiltinScope::AllChecks => AlertScope::AllChecks,
             },
             threshold: self.threshold,
             for_secs: self.for_secs,
@@ -258,8 +319,9 @@ impl Builtin {
     }
 }
 
-/// The built-in rules (see the module's comment for why some are on and some off).
-pub const BUILTINS: [Builtin; 7] = [
+/// The built-in rules (see the module's comment for why some are on and some off). MO-08: a health check down and a
+/// certificate with under 14 days left are on: a check exists because its owner wants to know.
+pub const BUILTINS: [Builtin; 9] = [
     Builtin {
         key: "vm-stopped",
         name: "A VM stopped without a Remotely action",
@@ -337,6 +399,28 @@ pub const BUILTINS: [Builtin; 7] = [
         notify: true,
         enabled: false,
     },
+    Builtin {
+        key: "check-down",
+        name: "A health check is down",
+        metric: AlertMetric::CheckDown,
+        scope: BuiltinScope::AllChecks,
+        threshold: None,
+        for_secs: 0,
+        severity: Severity::Critical,
+        notify: true,
+        enabled: true,
+    },
+    Builtin {
+        key: "cert-expiring",
+        name: "A certificate expires in under 14 days",
+        metric: AlertMetric::CertExpiring,
+        scope: BuiltinScope::AllChecks,
+        threshold: Some(14.0),
+        for_secs: 0,
+        severity: Severity::Warning,
+        notify: true,
+        enabled: true,
+    },
 ];
 
 pub fn builtin(key: &str) -> Option<&'static Builtin> {
@@ -350,6 +434,12 @@ pub const MAX_SCOPE_KEY: usize = 1024;
 
 /// The longest duration a rule may wait: a day.
 pub const MAX_FOR_SECS: u64 = 24 * 60 * 60;
+
+/// MO-08: the highest "slow" threshold, in milliseconds (10 minutes).
+pub const MAX_SLOW_MS: f64 = 600_000.0;
+
+/// MO-08: the most days left an expiring certificate's rule may watch for.
+pub const MAX_CERT_DAYS: f64 = 365.0;
 
 /// The rule as it is saved: the name trimmed, a threshold only where it means something. Refused with a
 /// reason the editor shows when it can't be saved.
@@ -379,15 +469,29 @@ pub fn checked(mut input: AlertRuleInput) -> Result<AlertRuleInput> {
                 return invalid("Choose the VM or tag the rule watches.".into());
             }
         }
-        AlertScope::AllVms | AlertScope::Host { .. } | AlertScope::AllHosts | AlertScope::ThisPc => {}
+        AlertScope::AllVms
+        | AlertScope::Host { .. }
+        | AlertScope::AllHosts
+        | AlertScope::ThisPc
+        | AlertScope::AllChecks
+        | AlertScope::Check { .. } => {}
     }
-    if input.metric.has_threshold() {
-        match input.threshold {
-            Some(t) if t.is_finite() && t > 0.0 && t < 100.0 => {}
-            _ => return invalid("The threshold must be more than 0% and less than 100%.".into()),
+    match (input.metric, input.threshold) {
+        (metric, _) if !metric.has_threshold() => input.threshold = None,
+        (AlertMetric::CheckSlow, Some(t)) if t.is_finite() && (1.0..=MAX_SLOW_MS).contains(&t) => {
+            input.threshold = Some(t.round());
         }
-    } else {
-        input.threshold = None;
+        (AlertMetric::CheckSlow, _) => {
+            return invalid("A check's time must be 1 to 600,000 ms (10 minutes).".into());
+        }
+        (AlertMetric::CertExpiring, Some(t)) if t.is_finite() && (1.0..=MAX_CERT_DAYS).contains(&t) => {
+            input.threshold = Some(t.round());
+        }
+        (AlertMetric::CertExpiring, _) => {
+            return invalid("The days left must be 1 to 365.".into());
+        }
+        (_, Some(t)) if t.is_finite() && t > 0.0 && t < 100.0 => {}
+        _ => return invalid("The threshold must be more than 0% and less than 100%.".into()),
     }
     if input.for_secs > MAX_FOR_SECS {
         return invalid("A rule can wait at most a day before it fires.".into());
@@ -405,6 +509,8 @@ pub fn scope_text(scope: &AlertScope) -> String {
         AlertScope::Host { .. } => "a watched host".into(),
         AlertScope::AllHosts => "every watched host".into(),
         AlertScope::ThisPc => "this PC".into(),
+        AlertScope::AllChecks => "every health check".into(),
+        AlertScope::Check { .. } => "a health check".into(),
     }
 }
 
@@ -434,21 +540,41 @@ fn pct(value: f64) -> String {
     }
 }
 
-/// What a rule says when it fires: "CPU at 97%, above 90% for 5 minutes".
-pub fn message(rule: &AlertRule, value: Option<f64>, mount: Option<&str>) -> String {
+/// What a rule says when it fires: "CPU at 97%, above 90% for 5 minutes". `extra` is the fullest disk's mount for
+/// disk, and the last run's detail for a check that is down.
+pub fn message(rule: &AlertRule, value: Option<f64>, extra: Option<&str>) -> String {
     let held = if rule.for_secs > 0 {
         format!(" for {}", duration_text(rule.for_secs))
     } else {
         String::new()
     };
-    let threshold = rule.threshold.map(pct).unwrap_or_default();
+    let threshold = rule
+        .threshold
+        .map(|t| rule.metric.threshold_text(t))
+        .unwrap_or_default();
     let now = value.map(pct).unwrap_or_else(|| "—".into());
     match rule.metric {
         AlertMetric::Cpu => format!("CPU at {now}, above {threshold}{held}"),
         AlertMetric::Memory => format!("Memory at {now}, above {threshold}{held}"),
-        AlertMetric::Disk => match mount {
+        AlertMetric::Disk => match extra {
             Some(mount) => format!("Disk {now} full on {mount}, above {threshold}{held}"),
             None => format!("Disk {now} full, above {threshold}{held}"),
+        },
+        AlertMetric::CheckDown => match extra.filter(|d| !d.is_empty()) {
+            Some(detail) => format!("Down{held}: {detail}"),
+            None => format!("Down{held}"),
+        },
+        AlertMetric::CheckSlow => {
+            let took = value.map_or_else(|| "—".to_owned(), |v| format!("{v:.0} ms"));
+            format!("Took {took}, above {threshold}{held}")
+        }
+        AlertMetric::CertExpiring => match value {
+            Some(days) if days < 0.0 => format!(
+                "The certificate expired {} ago (warns under {threshold})",
+                days_text(-days)
+            ),
+            Some(days) => format!("The certificate expires in {}, under {threshold}", days_text(days)),
+            None => format!("The certificate expires in under {threshold}"),
         },
         AlertMetric::Swap => format!("Swap at {now}, above {threshold}{held}"),
         AlertMetric::Unreachable => format!("Not reachable{held}"),
@@ -470,7 +596,9 @@ pub fn describe(rule: &AlertRuleInput) -> String {
     let what = match (rule.metric, rule.threshold) {
         (AlertMetric::Unreachable, _) => "unreachable".to_owned(),
         (AlertMetric::Stopped, _) => "stopped without a Remotely action".to_owned(),
-        (metric, Some(t)) => format!("{} above {}", metric.label(), pct(t)),
+        (AlertMetric::CheckDown, _) => "down".to_owned(),
+        (AlertMetric::CertExpiring, Some(t)) => format!("certificate expiring in under {}", days_text(t)),
+        (metric, Some(t)) => format!("{} above {}", metric.label(), metric.threshold_text(t)),
         (metric, None) => metric.label().to_owned(),
     };
     let held = if rule.for_secs > 0 {
@@ -481,6 +609,7 @@ pub fn describe(rule: &AlertRuleInput) -> String {
     let scope = match &rule.scope {
         AlertScope::Vm { key } => format!("the VM {key}"),
         AlertScope::Host { session_id } => format!("the watched host {session_id}"),
+        AlertScope::Check { check_id } => format!("the health check {check_id}"),
         other => scope_text(other),
     };
     format!(
@@ -550,8 +679,80 @@ mod tests {
             assert_eq!(checked(input.clone()).unwrap(), input, "{}", b.key);
         }
         let on: Vec<&str> = BUILTINS.iter().filter(|b| b.enabled).map(|b| b.key).collect();
-        assert_eq!(on, ["vm-stopped", "host-disk", "host-unreachable", "this-pc-memory"]);
+        assert_eq!(
+            on,
+            [
+                "vm-stopped",
+                "host-disk",
+                "host-unreachable",
+                "this-pc-memory",
+                "check-down",
+                "cert-expiring"
+            ]
+        );
         assert!(builtin("vm-cpu").is_some_and(|b| !b.enabled));
+        let expiring = builtin("cert-expiring").unwrap();
+        assert_eq!(expiring.threshold, Some(14.0));
+    }
+
+    #[test]
+    fn check_metrics_go_only_on_checks_with_their_own_units() {
+        let refused = |i: AlertRuleInput| checked(i).unwrap_err().to_string();
+        let one = AlertScope::Check {
+            check_id: Uuid::new_v4(),
+        };
+        assert!(checked(input(AlertMetric::CheckDown, AlertScope::AllChecks, Some(5.0)))
+            .unwrap()
+            .threshold
+            .is_none());
+        let slow = checked(input(AlertMetric::CheckSlow, one.clone(), Some(750.4))).unwrap();
+        assert_eq!(slow.threshold, Some(750.0), "whole milliseconds");
+        assert!(refused(input(AlertMetric::CheckSlow, one.clone(), Some(0.0))).contains("600,000"));
+        assert!(refused(input(AlertMetric::CheckSlow, one.clone(), None)).contains("ms"));
+        assert!(checked(input(AlertMetric::CertExpiring, one.clone(), Some(30.0))).is_ok());
+        assert!(refused(input(AlertMetric::CertExpiring, one.clone(), Some(400.0))).contains("365"));
+        // Checks' metrics on other targets, and other metrics on checks, mean nothing.
+        assert!(refused(input(AlertMetric::CheckDown, AlertScope::AllVms, None)).contains("every VM"));
+        assert!(refused(input(AlertMetric::Cpu, AlertScope::AllChecks, Some(50.0))).contains("health check"));
+        assert!(refused(input(AlertMetric::Unreachable, one, None)).contains("health check"));
+    }
+
+    #[test]
+    fn check_alerts_say_what_happened() {
+        let mut rule = AlertRule {
+            id: Uuid::nil(),
+            builtin: None,
+            name: "Down".into(),
+            metric: AlertMetric::CheckDown,
+            scope: AlertScope::AllChecks,
+            threshold: None,
+            for_secs: 0,
+            severity: Severity::Critical,
+            notify: true,
+            enabled: true,
+            updated_at: String::new(),
+        };
+        assert_eq!(
+            message(&rule, None, Some("port 443: closed (connection refused)")),
+            "Down: port 443: closed (connection refused)"
+        );
+        rule.metric = AlertMetric::CheckSlow;
+        rule.threshold = Some(500.0);
+        assert_eq!(message(&rule, Some(812.0), None), "Took 812 ms, above 500 ms");
+        rule.metric = AlertMetric::CertExpiring;
+        rule.threshold = Some(14.0);
+        assert_eq!(
+            message(&rule, Some(9.0), None),
+            "The certificate expires in 9 days, under 14 days"
+        );
+        assert_eq!(
+            message(&rule, Some(-1.0), None),
+            "The certificate expired 1 day ago (warns under 14 days)"
+        );
+        assert_eq!(
+            describe(&rule.input()),
+            "'Down': certificate expiring in under 14 days on every health check, critical, notifies, on"
+        );
     }
 
     #[test]
@@ -600,6 +801,8 @@ mod tests {
             AlertScope::Host { session_id: id },
             AlertScope::AllHosts,
             AlertScope::ThisPc,
+            AlertScope::AllChecks,
+            AlertScope::Check { check_id: id },
         ] {
             assert_eq!(
                 AlertScope::from_parts(scope.kind_str(), scope.key()),

@@ -206,6 +206,17 @@ export const GLOSSARY = {
     term: "Vault",
     definition: "Where Remotely keeps passwords and keys, encrypted on this PC; it locks itself when you're away.",
   },
+  healthCheck: {
+    term: "Health check",
+    definition:
+      "A ping, port, web page, certificate, DNS name or service Remotely checks on a schedule, alerting you when it goes down.",
+    aliases: ["check", "uptime", "monitor"],
+  },
+  checkDown: {
+    term: "Down",
+    definition: "A health check that failed as many runs in a row as it allows (two by default).",
+    aliases: ["failing check"],
+  },
 } as const satisfies Record<string, GlossaryEntry>;
 
 export type TermKey = keyof typeof GLOSSARY;

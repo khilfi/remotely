@@ -1,6 +1,6 @@
 //! MO-13, MO-14: the test server's view of itself, for host details. With
 //! [`super::TestSshServer::with_host_facts`] its exec shell has `uname`, `lscpu`, `lsblk`, `df -PT`,
-//! `systemd-detect-virt`, `systemctl list-units`, `ss`, `who`, `last`, `ps`, `stat` and `apt` or `dnf`,
+//! `systemd-detect-virt`, `systemctl list-units` and `is-active` (MO-08), `ss`, `who`, `last`, `ps`, `stat` and `apt` or `dnf`,
 //! printing what a real host prints (the samples in `host_details::linux` and `host_details::admin`),
 //! and files `/etc/os-release`, `/proc/cpuinfo` and `/proc/swaps`.
 
@@ -151,7 +151,35 @@ pub fn run(host: &HostFixture, program: &str, args: &[String]) -> Option<Ran> {
                 ok(host.running.clone())
             }
         }
-        "systemctl" => fail("systemctl: only list-units here", 1),
+        // MO-08: a service check's `systemctl is-active <unit>`, from the running units (`nginx` names
+        // `nginx.service`); systemctl's exit status 3 for a unit that isn't active.
+        "systemctl" if args.first().is_some_and(|a| a == "is-active") && args.len() == 2 => {
+            let unit = &args[1];
+            let full = if unit.contains('.') {
+                unit.clone()
+            } else {
+                format!("{unit}.service")
+            };
+            let failed = host.failed.lines().any(|l| l.split_whitespace().any(|w| w == full));
+            let running = host
+                .running
+                .lines()
+                .any(|l| l.split_whitespace().next() == Some(full.as_str()));
+            match (running, failed) {
+                (true, _) => ok("active\n"),
+                (false, true) => Ran {
+                    stdout: "failed\n".into(),
+                    stderr: String::new(),
+                    status: 3,
+                },
+                (false, false) => Ran {
+                    stdout: "inactive\n".into(),
+                    stderr: String::new(),
+                    status: 3,
+                },
+            }
+        }
+        "systemctl" => fail("systemctl: only list-units and is-active here", 1),
         "ss" => ok(host.ss.clone()),
         "who" if has("-b") => ok(host.boot.clone()),
         "who" => ok(host.who.clone()),

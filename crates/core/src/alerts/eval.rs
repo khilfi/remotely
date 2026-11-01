@@ -45,6 +45,15 @@ pub struct Reading {
     pub swap: Option<f64>,
     /// `Some(true)` while its watched guest can't be reached, `Some(false)` while it answers, `None` otherwise.
     pub unreachable: Option<bool>,
+    /// MO-08, a health check: `Some(true)` while it is down, `Some(false)` while it is up or failing but not down yet,
+    /// `None` before its first result or while Remotely can't check.
+    pub check_down: Option<bool>,
+    /// MO-08: the time its last run took, in milliseconds, when that run passed.
+    pub check_ms: Option<f64>,
+    /// MO-08: a certificate check's days left, from its last run that read the certificate.
+    pub cert_days: Option<f64>,
+    /// MO-08: the last run's one-line detail, for a down alert's message.
+    pub check_detail: Option<String>,
 }
 
 /// A VM whose process a round saw.
@@ -134,6 +143,19 @@ pub fn covers(scope: &AlertScope, target: &AlertTarget, tags: &[String], session
         AlertScope::Host { session_id } => session == Some(*session_id),
         AlertScope::AllHosts => session.is_some(),
         AlertScope::ThisPc => target.kind == AlertTargetKind::ThisPc,
+        AlertScope::AllChecks => target.kind == AlertTargetKind::Check,
+        AlertScope::Check { check_id } => {
+            target.kind == AlertTargetKind::Check && target.key.eq_ignore_ascii_case(&check_id.to_string())
+        }
+    }
+}
+
+/// A state as a condition: `Some(true)` breaches, `Some(false)` is clear, `None` unknown.
+fn state(value: Option<bool>) -> Condition {
+    match value {
+        Some(true) => Condition::Breach(None),
+        Some(false) => Condition::Clear,
+        None => Condition::Unknown,
     }
 }
 
@@ -143,19 +165,32 @@ fn condition(rule: &AlertRule, reading: &Reading) -> Condition {
         AlertMetric::Memory => reading.memory,
         AlertMetric::Disk => reading.disk,
         AlertMetric::Swap => reading.swap,
-        AlertMetric::Unreachable => {
-            return match reading.unreachable {
-                Some(true) => Condition::Breach(None),
-                Some(false) => Condition::Clear,
-                None => Condition::Unknown,
+        AlertMetric::CheckSlow => reading.check_ms,
+        AlertMetric::Unreachable => return state(reading.unreachable),
+        AlertMetric::CheckDown => return state(reading.check_down),
+        AlertMetric::Stopped => return Condition::Unknown,
+        // Fewer days left than the threshold breaches.
+        AlertMetric::CertExpiring => {
+            return match (reading.cert_days.filter(|v| v.is_finite()), rule.threshold) {
+                (Some(v), Some(t)) if v < t => Condition::Breach(Some(v)),
+                (Some(_), Some(_)) => Condition::Clear,
+                _ => Condition::Unknown,
             };
         }
-        AlertMetric::Stopped => return Condition::Unknown,
     };
     match (value.filter(|v| v.is_finite()), rule.threshold) {
         (Some(v), Some(t)) if v > t => Condition::Breach(Some(v)),
         (Some(_), Some(_)) => Condition::Clear,
         _ => Condition::Unknown,
+    }
+}
+
+/// What a firing alert's message adds: the fullest disk's mount, or a down check's last detail.
+fn extra(metric: AlertMetric, reading: &Reading) -> Option<&str> {
+    match metric {
+        AlertMetric::Disk => reading.disk_mount.as_deref(),
+        AlertMetric::CheckDown => reading.check_detail.as_deref(),
+        _ => None,
     }
 }
 
@@ -166,8 +201,10 @@ pub fn rfc3339(ms: i64) -> String {
         .unwrap_or_else(|_| at.unix_timestamp().to_string())
 }
 
-fn worse(a: Option<f64>, b: Option<f64>) -> Option<f64> {
+/// The worse of two readings: the higher one, but the fewer days left for a certificate.
+fn worse(metric: AlertMetric, a: Option<f64>, b: Option<f64>) -> Option<f64> {
     match (a, b) {
+        (Some(a), Some(b)) if metric == AlertMetric::CertExpiring => Some(a.min(b)),
         (Some(a), Some(b)) => Some(a.max(b)),
         (a, b) => a.or(b),
     }
@@ -236,13 +273,13 @@ impl Evaluator {
                         track.clear_since = None;
                         let since = *track.breach_since.get_or_insert(now);
                         if let Some(firing) = track.firing.as_mut() {
-                            firing.peak = worse(firing.peak, value);
+                            firing.peak = worse(rule.metric, firing.peak, value);
                         } else if now - since >= ms(rule.for_secs) {
                             let alert = Box::new(new_alert(
                                 rule,
                                 &reading.target,
                                 value,
-                                reading.disk_mount.as_deref(),
+                                extra(rule.metric, reading),
                                 now,
                             ));
                             track.firing = Some(Firing {
@@ -398,7 +435,7 @@ fn resolved(firing: Firing, resolution: Resolution, now: i64) -> Transition {
     }
 }
 
-fn new_alert(rule: &AlertRule, target: &AlertTarget, value: Option<f64>, mount: Option<&str>, now: i64) -> Alert {
+fn new_alert(rule: &AlertRule, target: &AlertTarget, value: Option<f64>, extra: Option<&str>, now: i64) -> Alert {
     Alert {
         id: Uuid::new_v4(),
         rule_id: rule.id,
@@ -410,7 +447,7 @@ fn new_alert(rule: &AlertRule, target: &AlertTarget, value: Option<f64>, mount: 
         for_secs: rule.for_secs,
         value,
         peak: value,
-        message: message(rule, value, mount),
+        message: message(rule, value, extra),
         fired_at: rfc3339(now),
         resolved_at: None,
         resolution: None,

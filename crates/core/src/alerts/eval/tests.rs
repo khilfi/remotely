@@ -394,3 +394,105 @@ fn scopes_cover_what_they_name() {
     assert!(covers(&AlertScope::ThisPc, &this_pc, &[], None));
     assert!(!covers(&AlertScope::Tag { tag: "web".into() }, &this_pc, &tags, None));
 }
+
+/// MO-08: a health check as the checks service reads it to the rules.
+fn check(name: &str, down: Option<bool>, ms: Option<f64>, days: Option<f64>) -> Reading {
+    Reading {
+        target: AlertTarget {
+            kind: AlertTargetKind::Check,
+            key: format!("00000000-0000-0000-0000-00000000000{}", name.len()),
+            name: name.into(),
+        },
+        check_down: down,
+        check_ms: ms,
+        cert_days: days,
+        check_detail: Some("port 443: closed (connection refused)".into()),
+        ..Reading::default()
+    }
+}
+
+#[test]
+fn a_check_down_fires_at_once_and_resolves_a_minute_after_it_is_up() {
+    let rules = [rule(AlertMetric::CheckDown, AlertScope::AllChecks, None, 0)];
+    let mut eval = Evaluator::default();
+    let (out, t) = run(&mut eval, &rules, T0, 3, |_| {
+        vec![check("web", Some(false), Some(20.0), None)]
+    });
+    assert!(out.is_empty(), "{out:?}");
+    let (out, t) = run(&mut eval, &rules, t, 1, |_| vec![check("web", Some(true), None, None)]);
+    assert_eq!(fired(&out), [("web", true)]);
+    let Transition::Fired { alert, .. } = &out[0] else {
+        panic!("not fired")
+    };
+    assert_eq!(alert.message, "Down: port 443: closed (connection refused)");
+    // No result (Remotely could not check) leaves it as it is.
+    let (out, t) = run(&mut eval, &rules, t, 20, |_| vec![check("web", None, None, None)]);
+    assert!(out.is_empty(), "{out:?}");
+    let (out, _) = run(&mut eval, &rules, t, 13, |_| {
+        vec![check("web", Some(false), Some(12.0), None)]
+    });
+    assert_eq!(resolutions(&out), [Resolution::Cleared]);
+    // Rules on VMs and hosts never see a check.
+    let vm_rules = [rule(AlertMetric::Unreachable, AlertScope::AllHosts, None, 0)];
+    let (out, _) = run(&mut Evaluator::default(), &vm_rules, T0, 3, |_| {
+        vec![check("web", Some(true), None, None)]
+    });
+    assert!(out.is_empty());
+}
+
+#[test]
+fn slow_checks_fire_above_and_certificates_below_their_threshold() {
+    let one = check("web", Some(false), Some(900.0), Some(10.0));
+    let rules = [
+        rule(AlertMetric::CheckSlow, AlertScope::AllChecks, Some(500.0), 0),
+        rule(AlertMetric::CertExpiring, AlertScope::AllChecks, Some(14.0), 0),
+    ];
+    let mut eval = Evaluator::default();
+    let out = eval.evaluate(&rules, &snap(T0, vec![one.clone()]), &HashSet::new());
+    assert_eq!(fired(&out).len(), 2);
+    // The peak of an expiring certificate is its fewest days left.
+    let fewer = check("web", Some(false), Some(100.0), Some(8.0));
+    eval.evaluate(&rules, &snap(T0 + ROUND, vec![fewer]), &HashSet::new());
+    let renewed = check("web", Some(false), Some(100.0), Some(90.0));
+    let (out, _) = run(&mut eval, &rules, T0 + 2 * ROUND, 14, |_| vec![renewed.clone()]);
+    let peaks: Vec<Option<f64>> = out
+        .iter()
+        .filter_map(|t| match t {
+            Transition::Resolved { peak, .. } => Some(*peak),
+            Transition::Fired { .. } => None,
+        })
+        .collect();
+    assert_eq!(peaks.len(), 2, "{out:?}");
+    assert!(peaks.contains(&Some(8.0)), "{peaks:?}");
+    assert!(peaks.contains(&Some(900.0)), "{peaks:?}");
+}
+
+#[test]
+fn a_check_scope_covers_that_check_only_and_a_paused_check_resolves_as_gone() {
+    let web = check("web", Some(true), None, None);
+    let id = Uuid::parse_str(&web.target.key).unwrap();
+    assert!(covers(&AlertScope::Check { check_id: id }, &web.target, &[], None));
+    assert!(!covers(
+        &AlertScope::Check {
+            check_id: Uuid::new_v4()
+        },
+        &web.target,
+        &[],
+        None
+    ));
+    assert!(covers(&AlertScope::AllChecks, &web.target, &[], None));
+    assert!(!covers(&AlertScope::AllVms, &web.target, &[], None));
+    let rules = [rule(
+        AlertMetric::CheckDown,
+        AlertScope::Check { check_id: id },
+        None,
+        0,
+    )];
+    let mut eval = Evaluator::default();
+    assert_eq!(
+        fired(&eval.evaluate(&rules, &snap(T0, vec![web]), &HashSet::new())).len(),
+        1
+    );
+    let out = eval.evaluate(&rules, &snap(T0 + ROUND, Vec::new()), &HashSet::new());
+    assert_eq!(resolutions(&out), [Resolution::Gone]);
+}

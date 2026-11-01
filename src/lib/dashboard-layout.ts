@@ -58,6 +58,14 @@ export const WIDGET_CHOICES: WidgetChoice[] = [
     h: 2,
   },
   {
+    kind: "checks",
+    label: "Health checks",
+    description: "How many checks are up, failing and down, and the ones that need a look",
+    single: true,
+    w: 2,
+    h: 2,
+  },
+  {
     kind: "services",
     label: "Services of a host",
     description: "A watched host's running and failed services, read every minute",

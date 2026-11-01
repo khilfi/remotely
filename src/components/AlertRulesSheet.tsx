@@ -2,6 +2,7 @@
 // threshold, duration, severity and notification changed, and reset to Remotely's defaults; their name, metric and
 // scope stay. The owner's own rules can be added, edited and deleted. Every change is audited by the core and refused
 // while presenting with the read-only lock. Desktop only: a rule notifies through Windows, never by email or chat.
+// MO-08: rules on health checks (down, slow, a certificate expiring) have their own scopes and units.
 
 import { useEffect, useMemo, useState } from "react";
 import { BellIcon, BellOffIcon, EllipsisIcon, PencilIcon, PlusIcon, RotateCcwIcon, Trash2Icon } from "lucide-react";
@@ -32,20 +33,24 @@ import { HelpTip } from "@/components/HelpTip";
 import { useReadOnlyReason } from "@/components/Presentation";
 import { WhyDisabled } from "@/components/WhyDisabled";
 import { api, errorMessage, type SessionRecord, type Tag, type VmRecord } from "@/lib/api";
+import { checksApi, type HealthCheck } from "@/lib/checks-api";
 import {
   cleanRuleInput,
   conditionText,
+  defaultThreshold,
   DURATIONS,
   durationText,
   hasThreshold,
   METRICS,
   newRuleInput,
+  onChecks,
   ruleProblem,
   scopeAllows,
   scopeOfKind,
   SCOPES,
   scopeText,
   SEVERITIES,
+  thresholdUnit,
 } from "@/lib/alerts";
 import {
   dashboardApi,
@@ -60,6 +65,8 @@ interface Directory {
   vms: VmRecord[];
   sessions: SessionRecord[];
   tags: Tag[];
+  /** MO-08. */
+  checks: HealthCheck[];
 }
 
 function RuleDialog({
@@ -129,7 +136,12 @@ function RuleDialog({
                 disabled={builtin}
                 onValueChange={(v) => {
                   const metric = v as AlertMetric;
-                  set({ metric, scope: scopeAllows(scope.kind, metric) ? scope : { kind: "allVms" } });
+                  const fallback = onChecks(metric) ? ({ kind: "allChecks" } as const) : ({ kind: "allVms" } as const);
+                  set({ metric, scope: scopeAllows(scope.kind, metric) ? scope : fallback });
+                  // Another unit (percent, milliseconds, days): start from its usual threshold.
+                  if (thresholdUnit(metric) !== thresholdUnit(input.metric)) {
+                    setThreshold(String(defaultThreshold(metric) ?? ""));
+                  }
                 }}
               >
                 <SelectTrigger id="rule-metric" className="w-full">
@@ -231,16 +243,43 @@ function RuleDialog({
               </p>
             </div>
           )}
+          {scope.kind === "check" && (
+            <div className="grid gap-1.5">
+              <Label htmlFor="rule-check">Health check</Label>
+              <Select
+                value={scope.checkId || undefined}
+                disabled={builtin}
+                onValueChange={(checkId) => set({ scope: { kind: "check", checkId } })}
+              >
+                <SelectTrigger id="rule-check" className="w-full">
+                  <SelectValue placeholder="Choose a check" />
+                </SelectTrigger>
+                <SelectContent>
+                  {directory.checks.map((c) => (
+                    <SelectItem key={c.id} value={c.id}>
+                      {c.name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+          )}
           <div className="grid grid-cols-3 gap-3">
             {hasThreshold(input.metric) && (
               <div className="grid gap-1.5">
-                <Label htmlFor="rule-threshold">Above (%)</Label>
+                <Label htmlFor="rule-threshold">
+                  {input.metric === "checkSlow"
+                    ? "Slower than (ms)"
+                    : input.metric === "certExpiring"
+                      ? "Under (days left)"
+                      : "Above (%)"}
+                </Label>
                 <Input
                   id="rule-threshold"
                   type="number"
                   min={1}
-                  max={99}
-                  step="any"
+                  max={input.metric === "checkSlow" ? 600000 : input.metric === "certExpiring" ? 365 : 99}
+                  step={onChecks(input.metric) ? 1 : "any"}
                   value={threshold}
                   onChange={(e) => setThreshold(e.target.value)}
                 />
@@ -312,7 +351,7 @@ function RuleDialog({
 
 export function AlertRulesSheet({ open, onClose }: { open: boolean; onClose: () => void }) {
   const [rules, setRules] = useState<AlertRule[] | null>(null);
-  const [directory, setDirectory] = useState<Directory>({ vms: [], sessions: [], tags: [] });
+  const [directory, setDirectory] = useState<Directory>({ vms: [], sessions: [], tags: [], checks: [] });
   const [editing, setEditing] = useState<AlertRule | "new" | null>(null);
   const [deleting, setDeleting] = useState<AlertRule | null>(null);
   const readOnly = useReadOnlyReason();
@@ -323,8 +362,9 @@ export function AlertRulesSheet({ open, onClose }: { open: boolean; onClose: () 
   useEffect(() => {
     if (!open) return;
     load();
-    Promise.all([api.vmList(), api.sessions(), api.tags()]).then(
-      ([vms, sessions, tags]) => setDirectory({ vms, sessions, tags }),
+    Promise.all([api.vmList(), api.sessions(), api.tags(), checksApi.overview("1h")]).then(
+      ([vms, sessions, tags, overview]) =>
+        setDirectory({ vms, sessions, tags, checks: overview.rows.map((r) => r.check) }),
       () => undefined,
     );
   }, [open]);
@@ -332,7 +372,12 @@ export function AlertRulesSheet({ open, onClose }: { open: boolean; onClose: () 
   const names = useMemo(() => {
     const vms = new Map(directory.vms.map((v) => [v.vmxPath.toLowerCase(), v.displayName]));
     const sessions = new Map(directory.sessions.map((s) => [s.id, s.name]));
-    return { vm: (key: string) => vms.get(key.toLowerCase()), session: (id: string) => sessions.get(id) };
+    const checks = new Map(directory.checks.map((c) => [c.id, c.name]));
+    return {
+      vm: (key: string) => vms.get(key.toLowerCase()),
+      session: (id: string) => sessions.get(id),
+      check: (id: string) => checks.get(id),
+    };
   }, [directory]);
 
   async function toggle(rule: AlertRule, enabled: boolean) {

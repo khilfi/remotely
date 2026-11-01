@@ -309,17 +309,40 @@ impl Toolbox {
 
     /// How a connecting probe reaches the route: from this PC, or through the session's jump host.
     pub(crate) async fn reach(&self, ctx: &Context, route: &Route) -> Result<Reach> {
+        self.reach_held(ctx, route, None).await
+    }
+
+    /// MO-08: the same for a health check, whose kept connection to the jump host is held open for `hold` (until its
+    /// next run) so a check every minute logs in once, not on every run.
+    pub(crate) async fn reach_held(&self, ctx: &Context, route: &Route, hold: Option<Duration>) -> Result<Reach> {
         match &route.via {
             None => Ok(Reach::Direct {
                 tools: Arc::clone(&self.inner.tools),
                 address: self.address_of(&route.host).await?,
             }),
             Some(jump) => Ok(Reach::Jump {
-                connection: self.inner.jumps.connection(ctx, jump.session_id).await?,
+                connection: self.inner.jumps.connection_held(ctx, jump.session_id, hold).await?,
                 jump: jump.name.clone(),
                 host: route.host.clone(),
             }),
         }
+    }
+
+    /// MO-08: a session's own SSH connection for a service check: an open terminal's, else a kept one logged in with
+    /// the saved login only through [`crate::login_guard`] (parks and the hourly cap), held for `hold`.
+    pub(crate) async fn session_connection(
+        &self,
+        ctx: &Context,
+        session_id: Uuid,
+        hold: Option<Duration>,
+    ) -> Result<Arc<dyn ExecSession>> {
+        self.inner.jumps.connection_held(ctx, session_id, hold).await
+    }
+
+    /// MO-08: the health checks let go of every kept connection they no longer need (`keep`: the sessions their active
+    /// checks still use); those close once idle.
+    pub(crate) async fn release_holds(&self, keep: &std::collections::HashSet<Uuid>) {
+        self.inner.jumps.release_holds(keep).await;
     }
 
     /// Ping: echo requests from this PC, each reply reported as it comes.

@@ -70,6 +70,21 @@ test("a metric alert keeps its rule and target, critical as an error, and links 
   assert.equal(fromAlertEvent({ kind: "acknowledged", ids: ["a1"] }), null);
 });
 
+test("MO-08: one rule's alerts on every check are one line, fired apart from resolved", () => {
+  const on = (key: string, name: string) => ({
+    ...alert,
+    ruleId: "down",
+    target: { kind: "check" as const, key, name },
+  });
+  const web = fromAlertEvent({ kind: "fired", alert: on("c1", "web"), notify: true });
+  const db = fromAlertEvent({ kind: "fired", alert: on("c2", "db"), notify: true });
+  assert.equal(web?.group, "alert:down:check:fired");
+  assert.equal(db?.group, web?.group, "a lost network is one line, not one per check");
+  const back = fromAlertEvent({ kind: "resolved", alert: on("c1", "web") });
+  assert.equal(back?.group, "alert:down:check:resolved");
+  assert.equal(web?.title, "Warning: Disk above 85% on web");
+});
+
 test("a terminal alert keeps the rule, terminal and sample, and links to its terminal", () => {
   const raw: TerminalAlert = {
     ruleId: "error",
