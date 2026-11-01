@@ -51,6 +51,8 @@ import { StateBadge, TierBadge } from "@/components/Badges";
 import { glossaryEntry, isTermKey, type TermKey } from "@/lib/glossary";
 import { toolsName } from "@/lib/hypervisors";
 import type { AppLink } from "@/lib/links";
+import type { ToolTarget } from "@/lib/toolbox";
+import { TOOLBOX_ROW_ITEMS } from "@/components/toolbox/ToolboxMenu";
 import { groupRanked, rankItems, type SearchItem } from "@/lib/search";
 import { SEARCH_PROVIDERS, loadSearchItems } from "@/lib/search-providers";
 import { splitActions, typedForBulk } from "@/lib/palette";
@@ -286,6 +288,26 @@ export function CommandPalette({
     setSearch("");
   }
 
+  /** FD-09: the Toolbox's tools on this VM or session. */
+  function toolboxGroup(target: ToolTarget) {
+    return (
+      <CommandGroup heading="Toolbox">
+        {TOOLBOX_ROW_ITEMS.map(({ tool, label, icon: Icon }) => (
+          <CommandItem
+            key={tool}
+            value={`toolbox ${label}`}
+            onSelect={() => {
+              close();
+              onOpenLink({ kind: "toolbox", tool, target });
+            }}
+          >
+            <Icon /> {label}
+          </CommandItem>
+        ))}
+      </CommandGroup>
+    );
+  }
+
   async function run(command: Command) {
     close();
     await onSubmit(command);
@@ -496,6 +518,8 @@ export function CommandPalette({
                     </CommandItem>
                   ))}
               </CommandGroup>
+              <CommandSeparator />
+              {toolboxGroup({ kind: "vm", vmKey: vm.vmxPath, label: vm.displayName })}
             </>
           )}
 
@@ -542,6 +566,12 @@ export function CommandPalette({
                 </CommandItem>
               )}
             </CommandGroup>
+          )}
+          {view.kind === "session" && session && (
+            <>
+              <CommandSeparator />
+              {toolboxGroup({ kind: "session", sessionId: session.id, label: session.name })}
+            </>
           )}
 
           {view.kind === "term" && (

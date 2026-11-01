@@ -254,6 +254,24 @@ test("terminal: the session's own values are masked as bare words, the same widt
   assert.equal(out.length, "drwxr-x--- 2 carol carol 4096 dbserver01\r\n".length);
 });
 
+test("FD-09: the Toolbox's server names, DNS names and a certificate's list of names are learnt", () => {
+  const m = new Masker();
+  learnFields(m, {
+    source: "intranet (intranet:443)",
+    serverName: "intranet",
+    hosts: ["files", "wiki"],
+    result: { queryName: "db01" },
+    hops: [{ hostname: "edge7", address: "192.0.2.1" }],
+    chain: [{ alternativeNames: ["DNS:files"] }],
+  });
+  assert.equal(m.text("intranet (intranet:443)"), "host-1 (host-1:443)");
+  assert.equal(m.text("files and wiki"), "host-2 and host-3");
+  assert.equal(m.text("db01 via edge7"), "host-4 via host-5");
+  // A list of anything but strings is walked as objects, never learnt as one value.
+  learnFields(m, { hosts: [{ host: "nas" }] });
+  assert.equal(m.text("nas"), "host-6");
+});
+
 test("command variables named like a host or user hold one", () => {
   for (const name of ["host", "target_ip", "dbServer", "user", "jump-host", "IP", "node2"]) {
     assert.ok(namesAHost(name), name);

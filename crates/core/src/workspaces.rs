@@ -449,6 +449,8 @@ impl crate::Core {
             .await;
         self.containers.close_all().await;
         self.host_details.close_all().await;
+        // FD-09: the toolbox's kept connections to jump hosts.
+        self.toolbox.close_all().await;
         self.metrics.leave_workspace().await;
         self.transfer.closer().close();
         self.bindings.vault_locked();

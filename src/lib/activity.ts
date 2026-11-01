@@ -179,6 +179,8 @@ export function kindOfAction(action: string): ActivityKind {
     return "containers";
   }
   if (action === "appUpdate") return "app";
+  // FD-09: a wake-up is for a machine on the network, as often a host as a VM.
+  if (action === "wakeOnLan") return "sessions";
   return "vms";
 }
 

@@ -59,6 +59,7 @@ import {
 import { formatWhen } from "@/lib/format";
 import { sessionAddress } from "@/lib/terminal-session";
 import { cn } from "@/lib/utils";
+import { ToolboxMenu } from "@/components/toolbox/ToolboxMenu";
 
 const GROUPING_KEY = "remotely.terminal.treeGrouping";
 const OPEN_KEY = "remotely.terminal.treeOpen";
@@ -511,6 +512,7 @@ function SessionRow({
           Copy the address
         </DropdownMenuItem>
         {onHostDetails && <DropdownMenuItem onSelect={onHostDetails}>Host details…</DropdownMenuItem>}
+        <ToolboxMenu target={{ kind: "session", sessionId: session.id, label: session.name }} />
       </RowMenu>
     </div>
   );

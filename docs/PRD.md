@@ -165,6 +165,14 @@ Schedules (0.5.0, VM-14 and VM-27, `docs/plan-0.5.md` "Approval tiers"):
 | A run after the schedule was edited, a VM became Prod or protected, got its tag or joined its stack, or the rules that rated it changed | Doesn't run: the schedule pauses and asks again |
 | Creating, editing, pausing, resuming and deleting schedules; the snapshot chain warnings' limits | No tier beyond the schedule's approval; audited |
 
+Toolbox (0.7.0, FD-09, `docs/plan-0.7.md` "Approval tiers"). The tools run from this PC; a session behind a jump host has its ports and certificate checked from that jump host (SS-07). A Prod-labelled target moves Wake-on-LAN up one tier, and a protected one is skipped:
+
+| Action | Tier |
+| --- | --- |
+| Ping, trace route, DNS lookup, port check (up to 100 ports a run), view a certificate, the subnet calculator | Not a command: no tier, not audited (reads), allowed by the read-only lock |
+| Wake-on-LAN: one magic packet for a session's, a VM's or a typed MAC | Low |
+| Wake-on-LAN for a session or VM labelled Prod | Medium |
+
 | ID | Requirement | Phase |
 | --- | --- | --- |
 | AP-01 | A policy engine classes every state-changing action into a tier; tier rules are editable | MVP |
@@ -212,7 +220,7 @@ These features are for work at customer sites: keeping engagements apart, sharin
 | FD-06 | Markdown notes per host, linked to its credentials and runbooks | v2 |
 | FD-07 | Encrypted backup, export and import of sessions, settings and vault; also how sessions are shared with teammates | v2 |
 | FD-08 | Handover pack for the customer: inventory, topology diagram, job history | v3 |
-| FD-09 | Toolbox: ping, traceroute, DNS lookup, port check, subnet calculator, certificate viewer, Wake-on-LAN, quick TFTP and HTTP server | v3 |
+| FD-09 | Toolbox: ping, traceroute, DNS lookup, port check, subnet calculator, certificate viewer, Wake-on-LAN, quick TFTP and HTTP server | 0.7.0 |
 | FD-10 | Subnet discovery (ping sweep, port check) to add hosts quickly | v3 |
 | FD-11 | Portable mode: runs from a USB drive with a master-password vault | v3 |
 | FD-12 | PowerShell or Python plugins and a CLI for the app itself, both going through the policy engine | v3 |
