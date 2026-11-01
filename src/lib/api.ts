@@ -1030,6 +1030,10 @@ export interface Settings {
   qemuImgPathSaved: string | null;
   /** CV-03: the qemu-img.exe in use; null: not installed, so qcow2 and VHDX conversions can't run. */
   qemuImgPathInUse: string | null;
+  /** SS-12: the VNC viewer chosen; null: REMOTELY_VNC_VIEWER, then the viewers' default folders. */
+  vncViewerPathSaved: string | null;
+  /** SS-12: the VNC viewer in use; null: none found, so VNC sessions can't open. */
+  vncViewerPathInUse: string | null;
 }
 
 /** SS-04. */
@@ -1105,9 +1109,83 @@ export interface SessionInput {
   environment: Environment;
   color: SessionColor | null;
   tags: string[];
-  /** BX-01: the VM this session reaches (its id), so a bulk run can pick the VM. */
+  /** BX-01: the VM this session reaches (its id), so a bulk run can pick the VM. SSH sessions only. */
   vmId: string | null;
+  /** SS-12: what it opens, with that kind's own fields (SSH when left out). */
+  kind?: SessionKind;
 }
+
+// ---- SS-12 session kinds ----
+
+/** What Enter sends on a Telnet or serial line. */
+export type LineEnding = "cr" | "lf" | "crLf";
+
+/** An RDP window's size: full screen, full screen on every monitor, or a window. */
+export type RdpScreen = { mode: "full" } | { mode: "allMonitors" } | { mode: "window"; width: number; height: number };
+
+export interface RdpOptions {
+  screen: RdpScreen;
+  clipboard: boolean;
+  drives: boolean;
+  printers: boolean;
+  /** Sound played here; off: not played. */
+  audio: boolean;
+  /** The administrative (console) session. */
+  admin: boolean;
+}
+
+export interface VncOptions {
+  viewOnly: boolean;
+}
+
+export interface TelnetOptions {
+  lineEnding: LineEnding;
+}
+
+export type Parity = "none" | "odd" | "even" | "mark" | "space";
+export type StopBits = "one" | "onePointFive" | "two";
+export type FlowControl = "none" | "xonXoff" | "rtsCts" | "dsrDtr";
+
+/** A serial session's line; its COM port is the session's host. */
+export interface SerialOptions {
+  speed: number;
+  dataBits: number;
+  parity: Parity;
+  stopBits: StopBits;
+  flowControl: FlowControl;
+  lineEnding: LineEnding;
+  localEcho: boolean;
+}
+
+/** SS-12: what a session opens, with its kind's own fields. */
+export type SessionKind =
+  | { protocol: "ssh" }
+  | ({ protocol: "rdp" } & RdpOptions)
+  | ({ protocol: "vnc" } & VncOptions)
+  | ({ protocol: "telnet" } & TelnetOptions)
+  | ({ protocol: "serial" } & SerialOptions);
+
+export type SessionProtocol = SessionKind["protocol"];
+
+/** SS-12: a COM port of this PC. */
+export interface ComPort {
+  /** COM3. */
+  name: string;
+  /** The driver's device, to tell ports apart (\Device\USBSER000). */
+  device: string;
+}
+
+/** SS-12: what a tunnel tab's window is doing. */
+export type WindowState = { state: "waiting" } | { state: "open"; at: string } | { state: "failed"; message: string };
+
+/** SS-12: what opening an RDP or VNC window started. */
+export interface WindowOpened {
+  protocol: "rdp" | "vnc";
+  address: string;
+}
+
+/** SS-12: what a terminal pane is for. */
+export type PaneKind = "ssh" | "telnet" | "serial" | "tunnel";
 
 /** QL-16: the folder a value comes from. */
 export interface FromFolder {
@@ -1156,6 +1234,8 @@ export interface Effective {
 export interface SessionRecord extends SessionInput {
   id: string;
   protocol: string;
+  /** SS-12: always there on a saved session. */
+  kind: SessionKind;
   own: OwnValues;
   inherited: Inherited;
   /** AP-04: bulk actions skip it. */
@@ -1282,7 +1362,9 @@ export type TerminalEvent =
   /** SS-11: the session log could not be written (a full disk, say), so it stopped. */
   | { event: "logStopped"; path: string; reason: string }
   /** QL-17: an alert rule matched (one event per burst of matching lines). */
-  | { event: "alert"; alert: TerminalAlert };
+  | { event: "alert"; alert: TerminalAlert }
+  /** SS-12: a tunnel tab's remote desktop or VNC window opened (closing it closes the tab) or failed. */
+  | { event: "window"; window: WindowState };
 
 // ---- SS-07 port forwards and tunnels ----
 
@@ -1796,6 +1878,8 @@ export interface ImportCandidate {
   tags: string[];
   /** What the import left out or changed. */
   notes: string[];
+  /** SS-12: what it opens (a serial one's host is its COM port). */
+  kind?: SessionKind;
 }
 
 export type ImportRowStatus =
@@ -3642,6 +3726,14 @@ export const api = {
   },
   terminalWrite: (id: string, data: Uint8Array) =>
     invoke<void>("terminal_write", data, { headers: { "x-terminal-id": id } }),
+  /** SS-12: opens an RDP or VNC session's window (one behind a jump host opens with terminalOpen, as a tunnel tab). */
+  consoleOpenWindow: (sessionId: string) => invoke<WindowOpened>("console_open_window", { sessionId }),
+  /** SS-12: this PC's COM ports. */
+  serialPorts: () => invoke<ComPort[]>("serial_ports_list"),
+  /** SS-12: Send Break on a serial (or Telnet) pane. */
+  terminalSendBreak: (id: string) => invoke<void>("terminal_send_break", { id }),
+  /** SS-12: the VNC viewer; null or empty finds it again. */
+  setVncViewerPath: (path: string | null) => invoke<Settings>("settings_set_vnc_viewer_path", { path }),
   /** SS-10: turns MultiExec on for these terminals, or changes them. */
   multiExecSetTargets: (terminalIds: string[]) => invoke<MultiExecStatus>("multiexec_set_targets", { terminalIds }),
   /** SS-10: off; a line waiting for approval gets Ctrl+C. */

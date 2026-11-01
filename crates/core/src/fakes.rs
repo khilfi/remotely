@@ -5,6 +5,7 @@
 //! tests in `tests/`. The app never enables that feature.
 
 pub mod clock;
+pub mod consoles;
 pub mod containers;
 pub mod disk_images;
 pub mod disk_tools;
@@ -12,6 +13,7 @@ pub mod github_server;
 pub mod host_networks;
 pub mod ssh_server;
 pub mod stack_clock;
+pub mod telnet_server;
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -1175,8 +1177,10 @@ fn find_snapshot(tree: &SnapshotTree, name: &str) -> Option<u32> {
     found
 }
 
+pub use consoles::{FakeLauncher, FakeSerialDevice, FakeSerialPorts};
 pub use containers::FakeContainers;
 pub use disk_tools::FakeDiskTools;
+pub use telnet_server::TelnetTestServer;
 
 /// VM-18: VirtualBox in memory. VMs are registered with a UUID, a name and a state; power calls
 /// change the state and snapshot calls the tree the way VBoxManage would, through the same checks as
@@ -2764,7 +2768,7 @@ pub fn loopback_shell_with(files: FakeFiles, shell: Option<PromptShell>) -> Shel
         while let Some(msg) = input_rx.recv().await {
             let bytes = match msg {
                 ShellInput::Close => break,
-                ShellInput::Resize { .. } => continue,
+                ShellInput::Resize { .. } | ShellInput::Break => continue,
                 ShellInput::Data(bytes) => bytes,
             };
             let mut out = Vec::new();

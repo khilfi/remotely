@@ -36,6 +36,8 @@ export const EVENT_LABELS: Record<string, string> = {
   host_key_changed: "Host key changed: blocked",
   host_key_removed: "Host key forgotten",
   terminal_opened: "Terminal opened",
+  rdp_opened: "Remote desktop opened",
+  vnc_opened: "VNC viewer opened",
   terminal_closed: "Terminal closed",
   terminal_output_saved: "Output saved",
   terminal_output_printed: "Output printed",

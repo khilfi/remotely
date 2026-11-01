@@ -4,12 +4,14 @@
 //! whole. Status changes, host facts (QL-03) and host key questions (SS-05) go out on a second, JSON
 //! channel.
 //!
-//! QL-02 quick connect, QL-04 the session tree and reachability, and SS-11 output are here too. Save
+//! QL-02 quick connect, QL-04 the session tree and reachability, SS-11 output and SS-12 consoles (RDP and VNC windows,
+//! COM ports, Send Break) are here too. Save
 //! dialogs open here, not in the UI, so files are only written where the user chose.
 
 use std::path::PathBuf;
 
 use remotely_core::adapters::remote::PtySize;
+use remotely_core::adapters::serial::ComPort;
 use remotely_core::known_hosts::KnownHost;
 use remotely_core::reachability::ReachabilityUpdate;
 use remotely_core::sessions::tree::{SessionTree, TreeGrouping};
@@ -17,7 +19,7 @@ use remotely_core::sessions::{SessionFilter, SessionRecord};
 use remotely_core::terminal::log::local_now;
 use remotely_core::terminal::output::{self, SaveLayout, SavedOutput, TerminalText};
 use remotely_core::terminal::quick::{QuickConnect, QuickConnectEntry, QuickOpened};
-use remotely_core::terminal::{TerminalEvent, TerminalHandle, TerminalSettings};
+use remotely_core::terminal::{TerminalEvent, TerminalHandle, TerminalSettings, WindowOpened};
 use remotely_core::{Core, CoreError};
 use serde::Serialize;
 use std::sync::Arc;
@@ -376,4 +378,26 @@ pub async fn terminal_log_start(
 pub async fn terminal_log_stop(state: State<'_, AppState>, id: Uuid) -> IpcResult<bool> {
     let core = &state.core;
     Ok(core.terminals.stop_log(&core.ctx(), id).await?)
+}
+
+// ---- SS-12 consoles ----------------------------------------------------------------------------------
+
+/// SS-12: opens an RDP or VNC session's window (mstsc.exe or the VNC viewer, which asks for the password). Audited.
+/// A session behind a jump host opens with `terminal_open` instead, as a tunnel tab.
+#[tauri::command]
+pub async fn console_open_window(state: State<'_, AppState>, session_id: Uuid) -> IpcResult<WindowOpened> {
+    let core = &state.core;
+    Ok(core.terminals.open_window(&core.ctx(), session_id).await?)
+}
+
+/// SS-12: this PC's COM ports, for the session editor.
+#[tauri::command]
+pub async fn serial_ports_list(state: State<'_, AppState>) -> IpcResult<Vec<ComPort>> {
+    Ok(state.core.terminals.serial_ports().await?)
+}
+
+/// SS-12: Send Break on a serial (or Telnet) pane.
+#[tauri::command]
+pub async fn terminal_send_break(state: State<'_, AppState>, id: Uuid) -> IpcResult<()> {
+    Ok(state.core.terminals.send_break(id).await?)
 }

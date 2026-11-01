@@ -63,7 +63,7 @@ use crate::policy::PolicyEngine;
 use crate::presentation::Change;
 use crate::sessions::{
     rate_startup, FolderDefaults, Folders, OwnValues, Reauth, SessionAuth, SessionColor, SessionFolder, SessionInput,
-    SessionLibrary, SessionRecord, StartupRating,
+    SessionKind, SessionLibrary, SessionRecord, StartupRating,
 };
 use crate::snippets::{FavouriteInput, Snippets};
 use crate::ssh_keys::PublicKeyInfo;
@@ -75,7 +75,7 @@ use crate::vault::{
 use crate::vm_links::VmLink;
 
 pub use catalog::{CatalogChoices, CatalogCounts, CatalogPreview, CatalogReport};
-pub use file::{FORMAT, FORMAT_VERSION, FORMAT_VERSION_PLAIN, MAX_FILE_BYTES};
+pub use file::{FORMAT, FORMAT_VERSION, FORMAT_VERSION_FOLDERS, FORMAT_VERSION_PLAIN, MAX_FILE_BYTES};
 
 /// The export file's extension.
 pub const FILE_EXTENSION: &str = "remotely";
@@ -187,16 +187,24 @@ struct SessionEntry {
     /// CT-01: the container engines it is marked with. Files from before 0.4.0 have none.
     #[serde(default)]
     containers: Vec<ContainerEntry>,
+    /// SS-12: what it opens, with that kind's fields. Files from before 0.7.0 have none: SSH.
+    #[serde(default, skip_serializing_if = "SessionKind::is_ssh")]
+    kind: SessionKind,
 }
 
 impl Payload {
     /// QL-16: format 2 when a folder sets defaults or a session takes its login from its folders, which 0.4.x would
     /// drop (a session would lose its folder's user, login or Prod label there); otherwise format 1, which 0.4.x imports.
+    ///
+    /// SS-12: format 3 when a session is not SSH, which an older version would import as an SSH session.
     fn format_version(&self) -> u32 {
+        if self.sessions.iter().any(|s| !s.kind.is_ssh()) {
+            return file::FORMAT_VERSION;
+        }
         let uses_folder_defaults = self.folders.iter().any(|f| !f.defaults.is_empty())
             || self.sessions.iter().any(|s| s.auth == SessionAuth::Folder);
         if uses_folder_defaults {
-            file::FORMAT_VERSION
+            file::FORMAT_VERSION_FOLDERS
         } else {
             file::FORMAT_VERSION_PLAIN
         }
@@ -1400,6 +1408,7 @@ impl Transfer {
                 tags: s.own.tags,
                 vm,
                 imported_from: s.imported_from,
+                kind: s.kind,
                 forwards: forwards
                     .remove(&s.id)
                     .unwrap_or_default()
@@ -2535,6 +2544,7 @@ impl Transfer {
                 color: entry.color,
                 tags: entry.tags.clone(),
                 vm_id,
+                kind: entry.kind,
             },
             missing,
         ))
@@ -2669,6 +2679,7 @@ mod tests {
             imported_from: None,
             forwards: vec![],
             containers: vec![],
+            kind: SessionKind::Ssh,
         }
     }
 
@@ -2680,6 +2691,49 @@ mod tests {
         let entry: SessionEntry = serde_json::from_str(old).unwrap();
         assert!(entry.forwards.is_empty());
         assert_eq!(entry.name, "web01");
+        // SS-12: and no kind, so SSH.
+        assert_eq!(entry.kind, SessionKind::Ssh);
+    }
+
+    #[test]
+    fn session_kinds_travel_and_make_the_file_format_3() {
+        use crate::sessions::kinds::{SerialOptions, TelnetOptions};
+        let mut payload: Payload = serde_json::from_str(r#"{"exportedAt":"2026-11-01T00:00:00Z"}"#).unwrap();
+        payload.sessions = vec![entry("web01", None)];
+        assert_eq!(
+            payload.format_version(),
+            file::FORMAT_VERSION_PLAIN,
+            "SSH only: the format 0.4.x reads"
+        );
+        let mut serial = entry("console", None);
+        serial.kind = SessionKind::Serial(SerialOptions {
+            speed: 115_200,
+            ..SerialOptions::default()
+        });
+        payload.sessions.push(serial);
+        assert_eq!(
+            payload.format_version(),
+            file::FORMAT_VERSION,
+            "0.6.x would import it as SSH"
+        );
+        // An SSH session leaves the kind out; another kind carries its fields.
+        let json = serde_json::to_value(&payload.sessions).unwrap();
+        assert!(json[0].get("kind").is_none());
+        assert_eq!(json[1]["kind"]["protocol"], "serial");
+        assert_eq!(json[1]["kind"]["speed"], 115_200);
+        let back: Vec<SessionEntry> = serde_json::from_value(json).unwrap();
+        assert_eq!(back[1].kind, payload.sessions[1].kind);
+        let telnet: SessionEntry = serde_json::from_str(
+            r#"{"id":"7d1f0f0e-63f8-4a5b-9f3a-2f9d8f1d2c3b","name":"sw01","host":"sw01.example.com","port":23,
+               "auth":{"method":"password","passwordId":null},"kind":{"protocol":"telnet","lineEnding":"cr"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            telnet.kind,
+            SessionKind::Telnet(TelnetOptions {
+                line_ending: crate::sessions::kinds::LineEnding::Cr
+            })
+        );
     }
 
     #[test]

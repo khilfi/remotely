@@ -160,6 +160,7 @@ async fn the_log_file_never_holds_a_secret() {
             color: None,
             tags: vec![],
             vm_id: None,
+            kind: Default::default(),
         };
         sessions.push(core.sessions.create(&core.ctx(), input).await.unwrap().id);
         servers.push(server);

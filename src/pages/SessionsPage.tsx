@@ -82,6 +82,9 @@ import { withVaultPassword } from "@/lib/reauth-prompt";
 import { reveal } from "@/lib/reveal";
 import { appliedEnvironment, environmentText, sourceText, vmsById } from "@/lib/session-environment";
 import { cn } from "@/lib/utils";
+import { openSessionWindow } from "@/lib/console-open";
+import { kindAddress, kindLabel, kindOf, opensWindow } from "@/lib/session-kinds";
+import { usePresentation } from "@/components/Presentation";
 
 interface Props {
   vault: VaultInfo | null;
@@ -113,7 +116,9 @@ const LABELS: { value: Environment; label: string; className: string }[] = [
   { value: "prod", label: "Prod", className: "data-[state=on]:text-env-prod" },
 ];
 
+/** Where it connects; SS-12: another kind's own port, or a serial session's COM port and line. */
 function address(s: SessionRecord) {
+  if (kindOf(s).protocol !== "ssh") return kindAddress(s);
   return `${s.username ? `${s.username}@` : ""}${s.host}${s.port === 22 ? "" : `:${s.port}`}`;
 }
 
@@ -123,6 +128,7 @@ function FromNote({ text }: { text: string }) {
 }
 
 export function SessionsPage({ vault, onVaultChanged, onOpenVault, onConnect, active, focus = null }: Props) {
+  const presentation = usePresentation();
   const [all, setAll] = useState<SessionRecord[]>([]);
   const [shown, setShown] = useState<SessionRecord[]>([]);
   const [folders, setFolders] = useState<SessionFolder[]>([]);
@@ -258,8 +264,16 @@ export function SessionsPage({ vault, onVaultChanged, onOpenVault, onConnect, ac
     }
   }
 
-  /** SS-07: a session behind jump hosts connects through them; the terminal says how. */
+  /**
+   * SS-07: a session behind jump hosts connects through them; the terminal says how. SS-12: an RDP or VNC session with
+   * no jump host opens its window from here; behind one, a tunnel tab on the Terminal page opens it.
+   */
   function connect(session: SessionRecord) {
+    const kind = kindOf(session);
+    if (opensWindow(kind) && !session.jumpSessionId) {
+      openSessionWindow({ id: session.id, name: session.name, kind }, presentation.presenting);
+      return;
+    }
     onConnect(session.id);
   }
 
@@ -549,7 +563,14 @@ export function SessionsPage({ vault, onVaultChanged, onOpenVault, onConnect, ac
                           )}
                         </TableCell>
                         <TableCell className="font-mono text-xs">
-                          <span data-mask="address">{address(s)}</span>
+                          {kindOf(s).protocol === "serial" ? (
+                            <span>{address(s)}</span>
+                          ) : (
+                            <span data-mask="address">{address(s)}</span>
+                          )}
+                          {kindOf(s).protocol !== "ssh" && (
+                            <div className="font-sans text-muted-foreground">{kindLabel(kindOf(s).protocol)}</div>
+                          )}
                           {(s.lastHostname || s.lastIp) && (
                             <div
                               className="font-sans text-muted-foreground"

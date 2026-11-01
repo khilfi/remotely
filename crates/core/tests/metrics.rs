@@ -311,6 +311,7 @@ async fn linked_session(core: &Core, name: &str, port: u16, password: Option<&st
                 color: None,
                 tags: vec![],
                 vm_id,
+                kind: Default::default(),
             },
         )
         .await

@@ -1383,10 +1383,21 @@ impl BulkRuns {
             }
         }
 
+        // SS-12: Compare hosts runs over SSH: a Telnet, serial, RDP or VNC session is left out, saying so.
+        for s in picked.sessions.iter().filter_map(|id| by_id.get(id)) {
+            if !s.kind.is_ssh() {
+                picked.notes.push(format!(
+                    "'{}' is a {} session, so it was left out: Compare hosts runs over SSH only.",
+                    s.name,
+                    s.kind.label()
+                ));
+            }
+        }
         let mut hosts: Vec<BulkHost> = picked
             .sessions
             .iter()
             .filter_map(|id| by_id.get(id))
+            .filter(|s| s.kind.is_ssh())
             .map(|s| {
                 let vm = s.vm_id.as_deref().and_then(|v| vm_by_id.get(v));
                 let environment = match vm {

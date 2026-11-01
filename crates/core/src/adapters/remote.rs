@@ -302,7 +302,12 @@ pub struct ExecResult {
 #[derive(Debug)]
 pub enum ShellInput {
     Data(Vec<u8>),
-    Resize { cols: u16, rows: u16 },
+    Resize {
+        cols: u16,
+        rows: u16,
+    },
+    /// SS-12: a serial line's break (Telnet sends IAC BRK); an SSH shell ignores it.
+    Break,
     Close,
 }
 
@@ -1787,6 +1792,8 @@ fn pump_pty(
                         Some(ShellInput::Resize { cols, rows }) => {
                             let _ = channel.window_change(u32::from(cols), u32::from(rows), 0, 0).await;
                         }
+                        // SS-12: a serial line's break; an SSH shell has none.
+                        Some(ShellInput::Break) => {}
                         Some(ShellInput::Close) | None => {
                             let _ = channel.close().await;
                             break ShellEnd::Exited { status: exit_status };

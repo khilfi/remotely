@@ -232,6 +232,14 @@ impl MultiExecGroups {
                 if missing == 1 { "is" } else { "are" }
             )));
         }
+        // SS-12: a group is for typing in all its tabs, which SSH sessions only do.
+        if let Some(other) = members
+            .iter()
+            .filter_map(|id| sessions.get(id))
+            .find(|s| !s.kind.is_ssh())
+        {
+            other.require_ssh("a saved group's tabs are SSH terminals")?;
+        }
         Ok((name, members, groups, sessions))
     }
 

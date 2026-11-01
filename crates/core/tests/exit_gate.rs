@@ -296,6 +296,7 @@ async fn every_high_and_critical_action_is_logged_from_approval_to_finish() {
                     color: None,
                     tags: vec![],
                     vm_id: None,
+                    kind: Default::default(),
                 },
             )
             .await

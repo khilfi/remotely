@@ -274,6 +274,7 @@ mod tests {
                 tags: tags.iter().map(|t| (*t).to_owned()).collect(),
             },
             inherited: super::super::Inherited::default(),
+            kind: Default::default(),
         }
     }
 

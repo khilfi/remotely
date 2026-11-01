@@ -27,7 +27,8 @@ use serde::Serialize;
 
 use crate::domain::Environment;
 use crate::sessions::{
-    SessionColor, MAX_FOLDER_NAME, MAX_HOST_LEN, MAX_SESSION_NAME, MAX_STARTUP_COMMAND, MAX_TAGS, MAX_USERNAME_LEN,
+    SessionColor, SessionKind, MAX_FOLDER_NAME, MAX_HOST_LEN, MAX_SESSION_NAME, MAX_STARTUP_COMMAND, MAX_TAGS,
+    MAX_USERNAME_LEN,
 };
 use crate::store::MAX_TAG_LEN;
 
@@ -62,12 +63,16 @@ pub struct Candidate {
     pub tags: Vec<String>,
     /// What the import left out or changed, shown in the preview, e.g. "the proxy setting was not imported".
     pub notes: Vec<String>,
+    /// SS-12: what it opens (SSH unless the source says Telnet, serial, RDP or VNC). A serial session's host is its
+    /// COM port.
+    pub kind: SessionKind,
 }
 
 impl Candidate {
     /// A candidate with the defaults: port 22, password asked when connecting, top level, no label.
     pub fn new(name: impl Into<String>, host: impl Into<String>) -> Self {
         Self {
+            kind: SessionKind::Ssh,
             name: name.into(),
             host: host.into(),
             port: DEFAULT_PORT,
@@ -154,6 +159,40 @@ impl Parsed {
 pub fn finish(mut c: Candidate) -> Result<Candidate, Skipped> {
     c.host = c.host.trim().to_owned();
     c.name = clean(&c.name);
+    // SS-12: the kind's own rules (a serial session's host is its COM port; only SSH logs in with a key, a startup
+    // command or a jump host of the app's, and Telnet and serial never go through a jump host).
+    let kind = c.kind;
+    if !kind.is_ssh() {
+        let label = if c.name.is_empty() {
+            c.host.clone()
+        } else {
+            c.name.clone()
+        };
+        let mut port = c.port;
+        if let Err(err) = kind.tidy(&mut c.host, &mut port) {
+            return Err(Skipped::new(label, err.to_string()));
+        }
+        c.port = port;
+        if c.auth != CandidateAuth::Password {
+            c.auth = CandidateAuth::Password;
+            c.notes.push(format!(
+                "a {} session asks for its login itself, so its key was not imported",
+                kind.label()
+            ));
+        }
+        if c.startup_command.take().is_some() {
+            c.notes.push(format!(
+                "a {} session has no startup command, so it was not imported",
+                kind.label()
+            ));
+        }
+        if !kind.takes_jump_host() && c.jump.take().is_some() {
+            c.notes.push(format!(
+                "a {} session has no jump host, so it was not imported",
+                kind.label()
+            ));
+        }
+    }
     let label = if !c.name.is_empty() {
         shorten(&c.name, MAX_SESSION_NAME)
     } else if !c.host.is_empty() {

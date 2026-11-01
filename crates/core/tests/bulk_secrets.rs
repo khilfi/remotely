@@ -160,6 +160,7 @@ async fn the_sudo_password_never_leaks() {
             color: None,
             tags: vec![],
             vm_id: None,
+            kind: Default::default(),
         };
         ids.push(core.sessions.create(&core.ctx(), input).await.unwrap().id);
         servers.push(server);

@@ -186,8 +186,14 @@ fn putty_guide() -> (&'static str, &'static [&'static str], Vec<GuideSection>) {
         row(&["PortNumber", "The port (a dword)"]),
         row(&[
             "Protocol",
-            "Only ssh is imported; telnet, serial and the others are left out",
+            "ssh, telnet and serial come in as SSH, Telnet and serial sessions; rlogin, raw and the others are left out",
         ]),
+        row(&["TelnetRet", "Telnet: 1 (the default) makes Enter send CR LF, 0 a CR"]),
+        row(&[
+            "SerialLine, SerialSpeed, SerialDataBits, SerialParity, SerialStopHalfbits, SerialFlowControl",
+            "Serial: the COM port and its line settings",
+        ]),
+        row(&["LocalEcho", "Serial: 1 shows what is typed (local echo)"]),
         row(&["UserName", "The user"]),
         row(&["PublicKeyFile", "Despite the name, the private key (.ppk): key login"]),
         row(&["RemoteCommand", "The startup command, typed in the shell after login"]),
@@ -248,13 +254,16 @@ fn mobaxterm_guide() -> (&'static str, &'static [&'static str], Vec<GuideSection
         ),
         section(
             "Left out",
-            &["[Passwords] and [Credentials] hold saved passwords: they are never read."],
+            &[
+                "[Passwords] and [Credentials] hold saved passwords: they are never read.",
+                "Telnet, RDP, VNC and serial sessions bring their host, port and (RDP) user, or their COM port and speed; their other MobaXterm settings get Remotely's defaults.",
+            ],
             None,
         ),
     ];
     (
         "MobaXterm sessions (.mxtsessions)",
-        &["An export of MobaXterm's sessions: an INI file (MobaXterm.ini has the same sections). Only SSH sessions are imported, with their folders."],
+        &["An export of MobaXterm's sessions: an INI file (MobaXterm.ini has the same sections). SSH, Telnet, RDP, VNC and serial sessions are imported, with their folders."],
         sections,
     )
 }
@@ -386,6 +395,20 @@ const PUTTY_SAMPLE: &str = r#"Windows Registry Editor Version 5.00
 "HostName"="switch01.test"
 "PortNumber"=dword:00000017
 "Protocol"="telnet"
+"TelnetRet"=dword:00000001
+
+[HKEY_CURRENT_USER\Software\SimonTatham\PuTTY\Sessions\console01]
+"Protocol"="serial"
+"SerialLine"="COM3"
+"SerialSpeed"=dword:0001c200
+"SerialDataBits"=dword:00000008
+"SerialStopHalfbits"=dword:00000002
+"SerialParity"=dword:00000000
+"SerialFlowControl"=dword:00000000
+
+[HKEY_CURRENT_USER\Software\SimonTatham\PuTTY\Sessions\old01]
+"HostName"="old01.test"
+"Protocol"="rlogin"
 "#;
 
 const MOBAXTERM_SAMPLE: &str = r#"[Bookmarks]
@@ -403,6 +426,14 @@ SubRep=Customer A\DB
 ImgNum=41
 db01=#109#0%192.0.2.20%2222%bob%%-1%-1%sudo -i__PTVIRG__ uptime%bastion.example.org%22%alice%0%0%0%_ProfileDir_\.ssh\id_ed25519%%-1%0%0%0%%1080%%0%0%1#MobaFont%10#0# #-1
 rdp01=#91#4%198.51.100.30%3389%alice%0%-1%-1#MobaFont%10#0# #-1
+
+[Bookmarks_3]
+SubRep=Customer A\Network
+ImgNum=41
+switch01=#98#1%switch01.test%23%%%-1#MobaFont%10#0# #-1
+vnc01=#128#5%198.51.100.31%5901%%-1#MobaFont%10#0# #-1
+console01=#131#8%-1%115200%3%0%0%1%2%COM3  (USB Serial Port (COM3))%0#MobaFont%10#0# #-1
+ftp01=#140#6%ftp.example.com%21%alice#MobaFont%10#0# #-1
 "#;
 
 const OPENSSH_SAMPLE: &str = "# A Remotely sample OpenSSH config. Every Host without wildcards becomes a session.
