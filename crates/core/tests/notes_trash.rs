@@ -16,10 +16,12 @@ use remotely_core::adapters::hypervisor::Hypervisor;
 use remotely_core::adapters::remote::forward::ForwardKind;
 use remotely_core::catalog::sizes::{DiskSpec, Provisioning, SizeInput};
 use remotely_core::catalog::{AfterDeploy, CloneMode, HashProgress, ImageInput, Network, SourceInput, TemplateInput};
+use remotely_core::checks::{CheckInput, CheckSpec};
 use remotely_core::containers::{MarkInput, SudoMode};
 use remotely_core::domain::Environment;
 use remotely_core::fakes::FakeVmware;
 use remotely_core::forwards::ForwardInput;
+use remotely_core::metrics::history::HistoryRange;
 use remotely_core::multiexec_groups::GroupInput;
 use remotely_core::notes::{NoteInput, NoteKind, NoteLink, NoteTarget};
 use remotely_core::presentation::Presentation;
@@ -32,6 +34,7 @@ use remotely_core::stacks::{Readiness, StackInput, StackStep};
 use remotely_core::stars::{RecentKind, StarKind, MAX_RECENTS};
 use remotely_core::store::AuditEntry;
 use remotely_core::terminal::rules::{RuleScope, RuleStyle, TerminalRuleInput};
+use remotely_core::toolbox::ProbeTarget;
 use remotely_core::trash::TrashKind;
 use remotely_core::vault::{SecretId, SecretKind, SecretString};
 use remotely_core::{Core, CoreError};
@@ -1154,4 +1157,77 @@ async fn a_bulk_edit_keeps_to_what_each_kind_of_session_takes() {
         .await
         .unwrap_err();
     assert!(err.to_string().contains("a jump host is an SSH session"), "{err}");
+}
+
+#[tokio::test]
+async fn a_deleted_sessions_health_checks_go_to_the_trash_and_come_back() {
+    let core = core().await;
+    let ctx = core.ctx();
+    let web = core
+        .sessions
+        .create(&ctx, session("web01", "web01.example.com"))
+        .await
+        .unwrap();
+    let check = |name: &str, target: ProbeTarget, spec: CheckSpec| CheckInput {
+        name: name.into(),
+        target,
+        spec,
+        interval_secs: 60,
+        timeout_secs: 5,
+        failures_before_down: 2,
+        paused: false,
+    };
+    let on_web = ProbeTarget::Session { session_id: web.id };
+    let ping = core
+        .checks
+        .create(check("ping web01", on_web.clone(), CheckSpec::Ping))
+        .await
+        .unwrap();
+    core.checks
+        .create(check("ssh port", on_web.clone(), CheckSpec::Tcp { port: 22 }))
+        .await
+        .unwrap();
+    core.checks
+        .create(check(
+            "ping db01",
+            ProbeTarget::Address {
+                host: "db01.example.com".into(),
+            },
+            CheckSpec::Ping,
+        ))
+        .await
+        .unwrap();
+    let running = || async { core.checks.overview(HistoryRange::Hour).await.unwrap().rows.len() };
+    assert_eq!(running().await, 3);
+
+    // No check is left pointing at a deleted session: they wait in the trash with it.
+    core.sessions.delete(&ctx, web.id).await.unwrap();
+    let left: Vec<String> = core.checks.list().await.unwrap().into_iter().map(|c| c.name).collect();
+    assert_eq!(left, vec!["ping db01"]);
+    assert_eq!(running().await, 1, "the runner no longer runs them");
+    let entry = core.trash.list(&ctx).await.unwrap().pop().unwrap();
+    assert!(entry.detail.contains("2 health checks"), "{}", entry.detail);
+    assert!(
+        audit(&core).await[0]
+            .detail
+            .as_deref()
+            .unwrap_or("")
+            .contains("2 health checks"),
+        "the delete's audit entry says what went with it"
+    );
+
+    // Undo brings them back under their own ids, on the session, running again.
+    core.trash
+        .undo(&ctx, TrashKind::Session, &web.id.to_string(), None)
+        .await
+        .unwrap();
+    let back = core.checks.list().await.unwrap();
+    assert_eq!(back.len(), 3);
+    assert_eq!(back.iter().find(|c| c.id == ping.id).unwrap().target, on_web);
+    assert_eq!(running().await, 3);
+
+    // Deleted for good, they go for good too.
+    core.sessions.delete(&ctx, web.id).await.unwrap();
+    core.trash.empty(&ctx).await.unwrap();
+    assert_eq!(core.checks.list().await.unwrap().len(), 1);
 }

@@ -714,7 +714,8 @@ impl Core {
                 .with_bindings(bindings.clone()),
             sessions: SessionLibrary::new(store.clone(), Arc::clone(&links))
                 .with_policy(bus.policy())
-                .with_bindings(bindings.clone()),
+                .with_bindings(bindings.clone())
+                .with_checks(checks.clone()),
             forwards: Forwards::new(store.clone()),
             links,
             import: Importer::new(store.clone()).with_policy(bus.policy()),
@@ -743,7 +744,8 @@ impl Core {
             stars: stars::Stars::new(store.clone()),
             trash: trash::Trash::new(store.clone(), current.clone())
                 .with_bindings(bindings.clone())
-                .with_terminal_rules(terminal_rules.clone()),
+                .with_terminal_rules(terminal_rules.clone())
+                .with_checks(checks.clone()),
             host_details,
             toolbox,
             checks,

@@ -773,8 +773,9 @@ impl Checks {
     }
 
     /// Reads the checks again after an edit: a check whose target, kind, timing or pause changed starts over (it runs
-    /// at the next tick); a renamed one keeps its state. Then the holds no active check needs end.
-    async fn reload(&self, ctx: Context) -> Result<()> {
+    /// at the next tick); a renamed one keeps its state. Then the holds no active check needs end. QL-27 calls it too
+    /// when a session's checks go to the trash with it or come back.
+    pub(crate) async fn reload(&self, ctx: Context) -> Result<()> {
         let _loading = self.inner.loading.lock().await;
         if locks::lock(&self.inner.board).ctx != Some(ctx) {
             return Ok(());

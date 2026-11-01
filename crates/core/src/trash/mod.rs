@@ -275,6 +275,21 @@ pub(crate) async fn move_to_trash(store: &Store, ctx: &Context, item: TrashItem<
                 .fetch_all(&mut *tx)
                 .await?;
         note = notes.first().map(rows::to_json).transpose()?;
+        // MO-08: its health checks, so none is left pointing at a deleted session. Their results stay out of the
+        // trash (a check every minute keeps 10,000 a week) and go with them.
+        let checks = sqlx::query(
+            "SELECT * FROM health_checks WHERE workspace_id = ? AND target_kind = 'session' AND target_key = ?",
+        )
+        .bind(&ws)
+        .bind(item.item_id)
+        .fetch_all(&mut *tx)
+        .await?;
+        for row in &checks {
+            attached.push(Attached {
+                table: "health_checks".to_owned(),
+                row: rows::to_json(row)?,
+            });
+        }
     }
     let count = |table: &str| attached.iter().filter(|a| a.table == table).count();
     let mut came = Vec::new();
@@ -293,6 +308,10 @@ pub(crate) async fn move_to_trash(store: &Store, ctx: &Context, item: TrashItem<
     match count("terminal_rules") {
         0 => {}
         n => came.push(plural(n, "highlight rule")),
+    }
+    match count("health_checks") {
+        0 => {}
+        n => came.push(plural(n, "health check")),
     }
     if note.is_some() {
         came.push("its note".to_owned());
@@ -335,6 +354,11 @@ pub(crate) async fn move_to_trash(store: &Store, ctx: &Context, item: TrashItem<
             .execute(&mut *tx)
             .await?;
         sqlx::query("DELETE FROM notes WHERE workspace_id = ? AND target_kind = 'session' AND target_key = ?")
+            .bind(&ws)
+            .bind(item.item_id)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM health_checks WHERE workspace_id = ? AND target_kind = 'session' AND target_key = ?")
             .bind(&ws)
             .bind(item.item_id)
             .execute(&mut *tx)
@@ -464,6 +488,8 @@ pub struct Trash {
     bindings: Option<SecretBindings>,
     /// QL-17: reloaded when a restored session brings its own highlight and alert rules back.
     terminal_rules: Option<crate::terminal::rules::TerminalRules>,
+    /// MO-08: reloaded when a restored session brings its health checks back.
+    checks: Option<crate::checks::Checks>,
     purging: Arc<tokio::sync::Mutex<()>>,
 }
 
@@ -476,6 +502,8 @@ struct SessionFix {
     confirmed: Vec<SecretId>,
     /// Its own highlight rules came back.
     rules: bool,
+    /// Its health checks came back.
+    checks: bool,
 }
 
 /// "'web01' and folder 'Prod' used it as their jump host and still connect without it; choose it again there".
@@ -500,8 +528,15 @@ impl Trash {
             current,
             bindings: None,
             terminal_rules: None,
+            checks: None,
             purging: Arc::new(tokio::sync::Mutex::new(())),
         }
+    }
+
+    /// MO-08: a restored session's health checks run again at once.
+    pub fn with_checks(mut self, checks: crate::checks::Checks) -> Self {
+        self.checks = Some(checks);
+        self
     }
 
     /// QL-17: a restored session's own highlight and alert rules reach open panes at once.
@@ -675,6 +710,7 @@ impl Trash {
         let mut confirmed: Vec<SecretId> = Vec::new();
         let mut asked: Option<&'static str> = None;
         let mut rules_back = false;
+        let mut checks_back = false;
         match kind {
             TrashKind::Session => {
                 let fix = self
@@ -684,6 +720,7 @@ impl Trash {
                 asked = fix.asked;
                 confirmed = fix.confirmed;
                 rules_back = fix.rules;
+                checks_back = fix.checks;
             }
             TrashKind::Command => {
                 let folder = rows::text(&snap.row, "folder").unwrap_or("").to_owned();
@@ -740,6 +777,14 @@ impl Trash {
             if let Some(rules) = &self.terminal_rules {
                 if let Err(err) = rules.switch_to(ctx).await {
                     tracing::warn!(error = %err, "could not reload the highlight rules after a restore");
+                }
+            }
+        }
+        // MO-08: its health checks run again from the next tick.
+        if checks_back {
+            if let Some(checks) = &self.checks {
+                if let Err(err) = checks.reload(*ctx).await {
+                    tracing::warn!(error = %err, "could not reload the health checks after a restore");
                 }
             }
         }
@@ -870,6 +915,8 @@ impl Trash {
         let rule_ids: HashSet<String> = rules.iter().map(|(id, _, _)| id.to_lowercase()).collect();
         let mut rule_position = rules.iter().map(|(_, _, p)| *p).max().unwrap_or(-1);
         let mut restored_rules = false;
+        let mut checks_here = self.store.count_checks(ctx).await?;
+        let mut restored_checks = false;
         let mut kept = Vec::new();
         let mut sends: Vec<SecretId> = effective.sent_secret().into_iter().collect();
         for mut attached in std::mem::take(&mut snap.attached) {
@@ -931,6 +978,25 @@ impl Trash {
                     rules_here += 1;
                     restored_rules = true;
                 }
+                "health_checks" => {
+                    // MO-08: under the workspace's cap, on the session as it comes back, under its own id if free.
+                    if checks_here >= crate::checks::spec::MAX_CHECKS {
+                        notes.push("a health check was left out: the workspace holds as many as it can".into());
+                        continue;
+                    }
+                    r.insert("target_key".into(), Value::String(item_id.to_owned()));
+                    if let Some(check_id) = rows::text(r, "id").map(str::to_owned) {
+                        let taken: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM health_checks WHERE id = ?")
+                            .bind(&check_id)
+                            .fetch_one(self.store.pool())
+                            .await?;
+                        if taken > 0 {
+                            r.insert("id".into(), Value::String(Uuid::new_v4().to_string()));
+                        }
+                    }
+                    checks_here += 1;
+                    restored_checks = true;
+                }
                 "session_secret_grants" => {
                     let Some(secret) = uuid_in(r, "secret_id") else {
                         continue;
@@ -960,6 +1026,7 @@ impl Trash {
                 asked: None,
                 confirmed: Vec::new(),
                 rules: restored_rules,
+                checks: restored_checks,
             });
         };
         let already: Vec<SecretId> = if same_place {
@@ -985,6 +1052,7 @@ impl Trash {
                 asked: None,
                 confirmed,
                 rules: restored_rules,
+                checks: restored_checks,
             });
         }
         let reason = format!(
@@ -1006,6 +1074,7 @@ impl Trash {
             asked: Some(how),
             confirmed,
             rules: restored_rules,
+            checks: restored_checks,
         })
     }
 

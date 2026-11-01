@@ -743,6 +743,8 @@ pub struct SessionLibrary {
     /// SS-04, AP-06: a session that would send a vault password somewhere it doesn't go yet asks for
     /// the master password first.
     bindings: Option<SecretBindings>,
+    /// MO-08, QL-27: a deleted session's health checks go to the trash with it; the runner then reads them again.
+    checks: Option<crate::checks::Checks>,
 }
 
 impl SessionLibrary {
@@ -752,7 +754,14 @@ impl SessionLibrary {
             links,
             policy: None,
             bindings: None,
+            checks: None,
         }
+    }
+
+    /// MO-08: the health checks, read again once a deleted session's checks went to the trash with it.
+    pub fn with_checks(mut self, checks: crate::checks::Checks) -> Self {
+        self.checks = Some(checks);
+        self
     }
 
     /// SS-04, AP-06: the checks before a session sends a vault password to a new place.
@@ -1171,6 +1180,12 @@ impl SessionLibrary {
         let Some(trashed) = crate::trash::move_to_trash(&self.store, ctx, item).await? else {
             return Err(CoreError::UnknownTarget(format!("session {id}")));
         };
+        // MO-08: its checks are in the trash now, so the runner stops running them.
+        if let Some(checks) = &self.checks {
+            if let Err(err) = checks.reload(*ctx).await {
+                tracing::warn!(error = %err, "could not reload the health checks after a delete");
+            }
+        }
         let mut detail = session.address();
         if !trashed.detail.is_empty() {
             detail.push_str(&format!("; with {}", trashed.detail));

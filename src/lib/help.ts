@@ -505,7 +505,7 @@ export const HELP = {
   trash: {
     title: "Trash",
     body: [
-      "A deleted session, favourite command, size, image, launch template or stack waits here for 30 days, with what came with it, such as a session's port forwards and note. Then it is deleted for good.",
+      "A deleted session, favourite command, size, image, launch template or stack waits here for 30 days, with what came with it, such as a session's port forwards, health checks and note. Then it is deleted for good.",
       "Restore puts it back. A name taken since gets (restored); a folder or jump host that is gone is left out.",
     ],
     link: { label: "Open the trash", to: { kind: "setting", section: "trash" } },

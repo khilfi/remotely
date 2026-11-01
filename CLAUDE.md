@@ -354,8 +354,10 @@ crates/core/          remotely-core: all app logic
     trash/            QL-27 (migration 0033): mod.rs Trash (Core.trash): move_to_trash, in the delete's transaction, for
                       a session (its whole row, SS-12's protocol and kind_options too, with its port forwards, container
                       marks, saved group places, secret grants, its own QL-17 highlight rules (reloaded on restore),
-                      tags, note, where it went and what it sent, SentThen, and the sessions and folders whose jump host
-                      it was, named on restore), a favourite command, size, image, launch template or stack
+                      its MO-08 health checks (without their results; Checks reloaded on delete and restore, under
+                      MAX_CHECKS), tags, note, where it went and what it sent, SentThen, and the sessions and folders
+                      whose jump host it was, named on restore), a favourite command, size, image, launch template or
+                      stack
                       (SessionLibrary, Snippets, Catalog and Stacks call it); restore under the item's own id (a new one
                       if taken), " (restored)" for a taken name, gone folders, jump hosts (or one that is no longer an
                       SSH session), VMs, vault items and groups left out with notes, AP-06 confirm when a restored
