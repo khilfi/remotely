@@ -177,6 +177,8 @@ editor and `sessions.rs`, and F1 and F9 the Toolbox page; the later one merges m
   their approvals, change IDs and results, grouped as Activity groups them; outputs left out unless chosen; everything
   through `export::redact_secrets`), the checks' uptime (F2) and the notes marked for it (F5). CSVs follow A10's rules.
 - All three save through `save_guard` and are audited `data_exported`; one workspace each (rule 8).
+- F6 merged before F4, so BX-12 takes SSH sessions only for now: F4 adds WinRM hosts in
+  `reports::ansible::connection_vars`, and Windows facts in the inventory's hosts sheet.
 
 ## F7: support bundle (FD-04)
 

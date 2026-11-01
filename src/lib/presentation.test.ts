@@ -323,3 +323,21 @@ test("FD-04: the workspace in a support bundle's file name is masked, known or n
   // Anything else that looks alike is left alone.
   assert.equal(m.text("remotely-bundle-notes.txt"), "remotely-bundle-notes.txt");
 });
+
+test("F6: the workspace in an export's file name is masked too", () => {
+  const m = new Masker();
+  assert.ok(m.learnWorkspace("Acme Lab 2"));
+  const top = m.text("Acme Lab 2");
+  for (const [what, ext] of [
+    ["inventory", "xlsx"],
+    ["ansible", "yml"],
+    ["handover", "zip"],
+  ]) {
+    const saved = m.text(`Saved remotely-${what}-Acme-Lab-2-2026-11-01.${ext}: 2 VMs.`);
+    assert.doesNotMatch(saved, /Acme/i, what);
+    assert.equal(saved, `Saved remotely-${what}-${top}-2026-11-01.${ext}: 2 VMs.`, what);
+  }
+  const unknown = m.text("Saved remotely-handover-Globex-2026-11-01.zip");
+  assert.doesNotMatch(unknown, /Globex/);
+  assert.equal(m.text("remotely-inventory-notes.txt"), "remotely-inventory-notes.txt");
+});

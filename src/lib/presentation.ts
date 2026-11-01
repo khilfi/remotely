@@ -115,10 +115,12 @@ const PROFILE_RE =
 const HOME_RE = /(?<![\w.~-])\/home\/([A-Za-z0-9_][A-Za-z0-9._-]{0,63})(?![\w-])/g;
 const STAND_IN_RE = /^(?:host|ip|user|mac|workspace)-\d+$/;
 /**
- * FD-04: a support bundle's file name, `remotely-bundle-<workspace>-<UTC time>.zip`. The workspace's name is in it as
- * its words joined by hyphens (`workspaceSlug`), which the phrase matcher can't see, so this finds it by its place.
+ * FD-04: a support bundle's file name, `remotely-bundle-<workspace>-<UTC time>.zip`, and 0.7.0 F6's exports',
+ * `remotely-<inventory|ansible|handover>-<workspace>-<YYYY-MM-DD>.<ext>`. The workspace's name is in them as its words
+ * joined by hyphens (`workspaceSlug`), which the phrase matcher can't see, so this finds it by its place.
  */
-const BUNDLE_NAME_RE = /(?<![\p{L}\p{N}_.-])remotely-bundle-([\p{L}\p{N}-]{1,80}?)-\d{8}T\d{6}Z/gu;
+const BUNDLE_NAME_RE =
+  /(?<![\p{L}\p{N}_.-])(remotely-(?:bundle|inventory|ansible|handover)-)([\p{L}\p{N}-]{1,80}?)-(?:\d{8}T\d{6}Z|\d{4}-\d{2}-\d{2}(?=\.))/gu;
 /** MO-13: six hex pairs split by colons or by hyphens (not mixed). */
 const MAC_RE = /(?<![\w:.-])[0-9A-Fa-f]{2}([:-])(?:[0-9A-Fa-f]{2}\1){4}[0-9A-Fa-f]{2}(?![\w:.-])/g;
 
@@ -504,11 +506,11 @@ export class Masker {
    */
   private bundleNames(text: string, found: Candidate[]) {
     for (const m of text.matchAll(BUNDLE_NAME_RE)) {
-      const slug = m[1] ?? "";
+      const slug = m[2] ?? "";
       if (this.issued.has(slug)) continue;
       const known = [...this.known.workspace].find((w) => workspaceSlug(w).toLowerCase() === slug.toLowerCase());
       const at = m.index ?? 0;
-      const start = at + "remotely-bundle-".length;
+      const start = at + (m[1] ?? "").length;
       found.push({
         start: at,
         end: start + slug.length,
