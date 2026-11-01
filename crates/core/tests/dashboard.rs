@@ -616,6 +616,7 @@ async fn the_services_widget_reads_on_the_dashboards_connection_and_never_logs_i
                 color: None,
                 tags: vec![],
                 vm_id: None,
+                kind: Default::default(),
             },
         )
         .await

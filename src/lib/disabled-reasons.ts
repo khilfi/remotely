@@ -40,10 +40,17 @@ export function compareRunReason(input: {
 }
 
 /** SS-10: the MultiExec switch. */
-export function multiExecReason(input: { tabs: number; on: boolean; readOnly?: boolean }): string | null {
+export function multiExecReason(input: {
+  tabs: number;
+  on: boolean;
+  readOnly?: boolean;
+  /** SS-12: the tabs with an SSH terminal (Telnet, serial and tunnel tabs never join). */
+  sshTabs?: number;
+}): string | null {
   if (input.on) return null;
   if (input.readOnly) return READ_ONLY_REASON;
   if (input.tabs === 0) return "Open a terminal first: Type in all tabs needs open tabs";
+  if (input.sshTabs === 0) return "Only SSH tabs join: Telnet, serial and tunnel tabs are for one device each";
   return null;
 }
 

@@ -50,6 +50,9 @@ test("Compare runs only once there is something to run on and something to run",
 test("MultiExec needs an open terminal, and says when no picked one gets the keys", () => {
   assert.equal(multiExecReason({ tabs: 0, on: false }), "Open a terminal first: Type in all tabs needs open tabs");
   assert.equal(multiExecReason({ tabs: 1, on: false }), null);
+  // SS-12: Telnet, serial and tunnel tabs never join.
+  assert.match(multiExecReason({ tabs: 2, on: false, sshTabs: 0 }) ?? "", /Only SSH tabs join/);
+  assert.equal(multiExecReason({ tabs: 2, on: false, sshTabs: 1 }), null);
   assert.equal(multiExecReason({ tabs: 0, on: true }), null, "it can always be turned off");
   assert.equal(multiExecIdleReason([]), "No tab is picked: Ctrl+click tabs, or pick them by folder or environment");
   assert.equal(

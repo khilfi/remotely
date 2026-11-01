@@ -173,6 +173,14 @@ Toolbox (0.7.0, FD-09, `docs/plan-0.7.md` "Approval tiers"). The tools run from 
 | Wake-on-LAN: one magic packet for a session's, a VM's or a typed MAC | Low |
 | Wake-on-LAN for a session or VM labelled Prod | Medium |
 
+Remote desktop and consoles (0.7.0, SS-12, `docs/plan-0.7.md` "Approval tiers"). Opening one changes nothing on the host, so it is audited like opening a terminal; mstsc and the VNC viewer ask for the password themselves, and a vault password typed into a Telnet terminal asks for the vault password again on each connection:
+
+| Action | Tier |
+| --- | --- |
+| Open an RDP window (mstsc on a `.rdp` file), a VNC viewer, or a Telnet or serial terminal | No tier; audited (`rdp_opened`, `vnc_opened`, or `terminal_opened`) before it starts |
+| Send a break on a serial (or Telnet) line (it can halt a running console) | No tier; audited (`terminal_break_sent`); a confirm first on a Prod or protected session |
+| Open an RDP or VNC session behind a jump host: a tunnel tab to the jump host, then the window | The tunnel at SS-07's tier (a loopback local forward: Low; Medium when the jump host or the session is Prod), audited `tunnel_opened`; the window as above |
+
 | ID | Requirement | Phase |
 | --- | --- | --- |
 | AP-01 | A policy engine classes every state-changing action into a tier; tier rules are editable | MVP |

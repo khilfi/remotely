@@ -1250,6 +1250,7 @@ impl Deployer {
             color: None,
             tags: spec.tags.clone(),
             vm_id,
+            kind: Default::default(),
         };
         match self.sessions.create(ctx, input).await {
             Ok(session) if linked => format!("session '{}' made and linked to the VM", session.name),

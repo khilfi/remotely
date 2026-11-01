@@ -126,6 +126,7 @@ async fn host(core: &Core, echo: u16, environment: Environment) -> (TestSshServe
                 color: None,
                 tags: vec![],
                 vm_id: None,
+                kind: Default::default(),
             },
         )
         .await

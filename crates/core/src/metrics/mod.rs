@@ -1040,6 +1040,10 @@ impl Metrics {
             .get_session(ctx, session_id)
             .await?
             .ok_or(crate::error::CoreError::UnknownTarget(session_id.to_string()))?;
+        // SS-12: guest metrics are read over SSH.
+        if watch {
+            session.require_ssh("the dashboard reads a guest's metrics over SSH only")?;
+        }
         let mut watched = self.guest.watched().await?;
         if watched.contains(&session_id) == watch {
             return Ok(watched);
