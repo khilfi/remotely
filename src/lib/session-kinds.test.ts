@@ -97,14 +97,28 @@ test("SSH and PowerShell tabs join typing in all tabs and Compare hosts, one kin
   assert.equal(joinReason("powershell"), null);
   assert.ok(joinsTyping("powershell") && joinsTyping("ssh") && !joinsTyping("telnet"));
   // The current tab's kind leads; a tab of the other kind is left out and says why.
-  assert.equal(typingKind(["powershell"], ["ssh", "powershell"]), "powershell");
-  assert.equal(typingKind(["telnet"], ["serial", "ssh"]), "ssh");
-  assert.equal(typingKind([], ["tunnel"]), null);
+  assert.equal(typingKind({ active: "powershell", panes: ["powershell"] }, ["ssh", "powershell"]), "powershell");
+  assert.equal(typingKind({ active: "telnet", panes: ["telnet"] }, ["serial", "ssh"]), "ssh");
+  assert.equal(typingKind({ active: null, panes: [] }, ["tunnel"]), null);
   assert.match(typingKindReason("ssh", "powershell") ?? "", /PowerShell tabs now/);
   assert.equal(typingKindReason("ssh", "ssh"), null);
   assert.equal(typingKindReason("telnet", "ssh"), null);
   assert.equal(paneKindOf(defaultKind("rdp"), true), "tunnel");
   assert.equal(paneKindOf(defaultKind("telnet"), false), "telnet");
+});
+
+test("in a split tab, typing goes to the active pane's kind, as the tab's bar says", () => {
+  // Review D6: an SSH pane first, the PowerShell pane active: PowerShell, not the first pane's SSH, so the bar's
+  // word for the active pane (typingKindReason) and the kind typed into agree.
+  const typing = typingKind({ active: "powershell", panes: ["ssh", "powershell"] }, ["ssh"]);
+  assert.equal(typing, "powershell");
+  assert.equal(typingKindReason("powershell", typing), null);
+  assert.equal(typingKind({ active: "ssh", panes: ["powershell", "ssh"] }, ["powershell"]), "ssh");
+  // An active pane that doesn't join (a Telnet pane beside them): the tab's first pane that does.
+  assert.equal(typingKind({ active: "telnet", panes: ["telnet", "powershell", "ssh"] }, ["ssh"]), "powershell");
+  // No active pane known: the tab's first that joins, then the first picked one's.
+  assert.equal(typingKind({ active: null, panes: ["serial", "ssh"] }, ["powershell"]), "ssh");
+  assert.equal(typingKind({ active: null, panes: [] }, ["serial", "powershell"]), "powershell");
 });
 
 test("WinRM: a PowerShell tab, its sign-in, its port and Basic only over HTTPS", () => {
