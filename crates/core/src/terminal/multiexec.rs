@@ -32,7 +32,9 @@
 //!     passphrase or one-time code prompt ([`super::activity::is_secret_prompt`]: sudo, su, ssh, PAM's
 //!     two-factor modules, in English and translated), its keys and its Enter go only to the targets that
 //!     show one too. So a password never lands in a shell, the journal or the audit log, and a command
-//!     never at a password prompt.
+//!     never at a password prompt. BX-13: in PowerShell tabs each console checks again as the keys arrive
+//!     and drops them once its statement has ended ([`crate::adapters::remote::ShellInput::IfRunning`]),
+//!     so a prompt that came back in between never runs them as a statement.
 //!   - a full-screen program (xterm's alternate screen buffer: vim, less, top): keys go only to the
 //!     targets that have one open too. What is typed there (vim's `:!command`) is not rated.
 //! * A password typed ahead of its prompt (a slow host showed the prompt only after the line started):
@@ -942,7 +944,16 @@ struct Shared {
     events: broadcast::Sender<MultiExecEvent>,
     /// QL-12.
     recorder: Recorder,
+    /// Tests only (BX-13): [`MultiExec::set_password_keys_hook`].
+    #[cfg(any(test, feature = "fakes"))]
+    password_keys_hook: std::sync::Mutex<Option<PasswordKeysHook>>,
 }
+
+/// Tests only (BX-13): what runs between Type in all tabs' check that every PowerShell tab still runs its statement and
+/// the password keys going out, so a test can bring a prompt back right there.
+#[cfg(any(test, feature = "fakes"))]
+pub type PasswordKeysHook =
+    Arc<dyn Fn() -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> + Send + Sync>;
 
 /// SS-10 (see the module comment). One per app: the Terminal page is the only place to type.
 #[derive(Clone)]
@@ -982,7 +993,24 @@ impl MultiExec {
                 state: Mutex::new(State::default()),
                 recorder: Recorder::new(events.clone()),
                 events,
+                #[cfg(any(test, feature = "fakes"))]
+                password_keys_hook: std::sync::Mutex::new(None),
             }),
+        }
+    }
+
+    /// Tests only (BX-13): runs `hook` each time password keys are about to go to PowerShell tabs, after the check
+    /// that every console still runs its statement.
+    #[cfg(any(test, feature = "fakes"))]
+    pub fn set_password_keys_hook(&self, hook: Option<PasswordKeysHook>) {
+        *crate::locks::lock(&self.shared.password_keys_hook) = hook;
+    }
+
+    #[cfg(any(test, feature = "fakes"))]
+    async fn before_password_keys(&self) {
+        let hook = crate::locks::lock(&self.shared.password_keys_hook).clone();
+        if let Some(hook) = hook {
+            hook().await;
         }
     }
 
@@ -1395,12 +1423,27 @@ impl MultiExec {
     }
 
     async fn send(&self, to: &[Uuid], bytes: &[u8], left_out: &mut Vec<LeftOut>) -> Vec<Uuid> {
+        self.deliver(to, bytes, left_out, false).await
+    }
+
+    /// BX-13: password keys for PowerShell tabs' running statements: each console takes them only if its statement
+    /// still runs when they arrive ([`Terminals::send_keys_if_running`]).
+    async fn send_if_running(&self, to: &[Uuid], bytes: &[u8], left_out: &mut Vec<LeftOut>) -> Vec<Uuid> {
+        self.deliver(to, bytes, left_out, true).await
+    }
+
+    async fn deliver(&self, to: &[Uuid], bytes: &[u8], left_out: &mut Vec<LeftOut>, if_running: bool) -> Vec<Uuid> {
         let mut reached = Vec::with_capacity(to.len());
         if bytes.is_empty() {
             return to.to_vec();
         }
         for id in to {
-            match self.shared.terminals.send_keys(*id, bytes).await {
+            let sent = if if_running {
+                self.shared.terminals.send_keys_if_running(*id, bytes).await
+            } else {
+                self.shared.terminals.send_keys(*id, bytes).await
+            };
+            match sent {
                 Ok(()) => reached.push(*id),
                 Err(_) => {
                     if !left_out.iter().any(|l| l.terminal_id == *id) {
@@ -1481,7 +1524,15 @@ impl MultiExec {
                         .map(|i| at + i + 1);
                     let stop = end.unwrap_or(data.len());
                     let mut left_out = current.left_out.clone();
-                    let reached = self.send(&current.to, &data[at..stop], &mut left_out).await;
+                    // A statement can still end between that check and the keys reaching a console: each console checks
+                    // again as they arrive, and drops them once its prompt is back ([`ShellInput::IfRunning`]).
+                    let reached = if current.powershell {
+                        #[cfg(any(test, feature = "fakes"))]
+                        self.before_password_keys().await;
+                        self.send_if_running(&current.to, &data[at..stop], &mut left_out).await
+                    } else {
+                        self.send(&current.to, &data[at..stop], &mut left_out).await
+                    };
                     if end.is_some() {
                         state.current = None;
                     }

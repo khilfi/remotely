@@ -895,10 +895,14 @@ export function TerminalPage({
 
   const pickedTabs = multiExec ? tabs.filter((t) => selection.keys.includes(t.key)) : [];
   // SS-12: Type in all tabs and Compare hosts take SSH and (BX-13) PowerShell panes (Telnet, serial and tunnel tabs
-  // say why); typing goes to one kind at a time, the current tab's when it joins.
+  // say why); typing goes to one kind at a time, the current tab's when it joins: its active pane's (review D6: the
+  // one its bar speaks of), else its first pane that joins.
   const currentPicked = current && pickedTabs.some((t) => t.key === current.key) ? current : null;
   const typing = typingKind(
-    currentPicked ? allPanes(currentPicked.layout).map((p) => p.kind) : [],
+    {
+      active: currentPicked ? (findPane(currentPicked.layout, currentPicked.activePane)?.kind ?? null) : null,
+      panes: currentPicked ? allPanes(currentPicked.layout).map((p) => p.kind) : [],
+    },
     pickedTabs.flatMap((t) => allPanes(t.layout)).map((p) => p.kind),
   );
   const pickedPanes = pickedTabs.flatMap((t) => allPanes(t.layout)).filter((p) => p.kind === typing);

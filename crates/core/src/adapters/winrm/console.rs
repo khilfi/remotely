@@ -17,6 +17,9 @@
 //! * **While a statement runs**, a line typed goes to its stdin as it is (`Read-Host`), shown as `*`: PowerShell shows
 //!   no `Read-Host` prompt while its stdin is a pipe, so a password it asks for can't be told apart. Ctrl+C sends
 //!   WinRM's ctrl_c signal, then a marker. Enter on an empty line asks for a fresh prompt.
+//! * BX-13: keys Type in all tabs passes straight through at a password prompt ([`ShellInput::IfRunning`]) are taken
+//!   only while a statement still runs when they arrive, one line at most; xterm.js's replies to queries in the output
+//!   ([`ShellInput::Reply`]) are dropped. Neither can become part of a statement.
 //! * The statement's state lives in that one PowerShell: a new connection starts a new one (the pane says so).
 
 use std::collections::VecDeque;
@@ -270,7 +273,18 @@ impl Console {
                             break Some(ShellEnd::Lost { reason: err.to_string() });
                         }
                     }
-                    Some(ShellInput::Resize { .. } | ShellInput::Break) => {}
+                    // BX-13: checked here, where the prompt marker is read, so the prompt can't come back in between.
+                    Some(ShellInput::IfRunning(bytes)) => {
+                        let secret = (self.secret_prompt)();
+                        let actions = self.editor.keys_if_running(&bytes, secret);
+                        if let Err(err) = self.act(actions).await {
+                            break Some(ShellEnd::Lost { reason: err.to_string() });
+                        }
+                    }
+                    // BX-13: xterm.js's reply to a query in the output. Nothing on the host reads it (PowerShell's stdin
+                    // is a pipe, not a terminal), and its text (DECRQSS's `1$r0m`, an OSC colour) would join the line,
+                    // so a statement: dropped.
+                    Some(ShellInput::Reply(_) | ShellInput::Resize { .. } | ShellInput::Break) => {}
                 },
                 got = received.recv() => match got {
                     Some(Ok(got)) => {
@@ -377,6 +391,9 @@ pub struct Editor {
     after_cr: bool,
     /// The line being typed was typed while a statement ran, so it shows as `*` and isn't shown again at the prompt.
     masked: bool,
+    /// BX-13: the pane was told that keys for a statement that had ended were dropped ([`Editor::keys_if_running`]);
+    /// once until the next statement.
+    dropped_said: bool,
     /// Pasted lines that came while a statement ran: each goes at the prompt after it, as if typed then.
     queued: VecDeque<String>,
     /// Pasted lines were left out (more than [`MAX_QUEUED`]).
@@ -407,6 +424,7 @@ impl Editor {
             partial: Vec::new(),
             after_cr: false,
             masked: false,
+            dropped_said: false,
             queued: VecDeque::new(),
             queue_overflow: false,
             held: Vec::new(),
@@ -461,13 +479,46 @@ impl Editor {
     /// runs, what is typed (for it) shows as `*`: Windows PowerShell shows no `Read-Host` prompt while its stdin is a
     /// pipe, so a password it asks for can't be told apart.
     pub fn keys(&mut self, bytes: &[u8], secret: bool) -> Vec<Action> {
+        // Review F4 #9: two lines or more at once are a paste: lines of it that come while a statement runs wait, and
+        // go one statement per prompt. A line typed alone while a statement runs is its input (Read-Host). (A part of a
+        // character held from the last keys holds no line ending.)
+        let paste = line_endings(bytes) >= 2;
+        self.keys_as(bytes, secret, paste)
+    }
+
+    /// BX-13: keys Type in all tabs passed straight through at a password prompt ([`ShellInput::IfRunning`]): the
+    /// running statement's input, taken only while that statement runs. Type in all tabs checks every console before
+    /// it sends them, but a statement can end in between, and at its prompt the keys would be typed there and run as a
+    /// statement, unrated. So here, where the prompt marker is read, a console that is not running a statement (back
+    /// at its prompt, or not at its first one yet) drops them, and says so once until the next statement. One line at
+    /// most: keys after the first Enter or Ctrl+C are dropped too (a second line would wait in PowerShell's stdin and
+    /// run as the next statement), and never as a paste.
+    pub fn keys_if_running(&mut self, bytes: &[u8], secret: bool) -> Vec<Action> {
+        if self.state != State::Running {
+            let mut out = Vec::new();
+            if !std::mem::replace(&mut self.dropped_said, true) {
+                let mut note =
+                    b"\r\n(keys typed in all tabs for a statement that had ended were not sent)\r\n".to_vec();
+                if self.state == State::Idle {
+                    note.extend_from_slice(format!("{}{}", self.prompt(), self.line).as_bytes());
+                }
+                out.push(Action::Show(note));
+            }
+            self.publish();
+            return out;
+        }
+        let end = bytes
+            .iter()
+            .position(|b| matches!(*b, b'\r' | b'\n' | 0x03))
+            .map_or(bytes.len(), |at| at + 1);
+        self.keys_as(&bytes[..end], secret, false)
+    }
+
+    fn keys_as(&mut self, bytes: &[u8], secret: bool, paste: bool) -> Vec<Action> {
         let mut out = Vec::new();
         let mut shown = Vec::new();
         let mut data = std::mem::take(&mut self.partial);
         data.extend_from_slice(bytes);
-        // Review F4 #9: two lines or more at once are a paste: lines of it that come while a statement runs wait, and
-        // go one statement per prompt. A line typed alone while a statement runs is its input (Read-Host).
-        let paste = line_endings(&data) >= 2;
         let mut at = 0;
         while at < data.len() {
             let byte = data[at];
@@ -659,6 +710,7 @@ impl Editor {
                 self.open.clear();
                 self.syntax = Syntax::default();
                 self.state = State::Running;
+                self.dropped_said = false;
                 out.push(Action::Show(std::mem::take(shown)));
                 out.push(Action::Send(text));
             }
@@ -1045,6 +1097,54 @@ mod tests {
         let secret = editor.secret(b"s3cret\r");
         assert_eq!(sent(&secret), vec!["s3cret\r\n".to_owned()]);
         assert!(!shown(&secret).contains("s3cret"));
+    }
+
+    #[test]
+    fn keys_for_a_running_statement_are_dropped_once_its_prompt_is_back() {
+        // BX-13: Type in all tabs checked that the statement runs; it ended before the keys came. At the prompt they
+        // would be typed and run as a statement: dropped, and the pane told once.
+        let mut editor = Editor::new("n1".into());
+        ready(&mut editor);
+        editor.keys(b"Read-Host 'Password'\r", false);
+        editor.output(b"Password: ");
+        let taken = editor.keys_if_running(b"hunter2\r", true);
+        assert_eq!(sent(&taken), vec!["hunter2\r\n".to_owned()], "the statement's input");
+        assert!(!shown(&taken).contains("hunter2"), "never shown at a password prompt");
+
+        // Another statement asks, then ends on its own (its marker comes) just before the password's keys arrive.
+        editor.output(b"\x1b]7790;n1;C:\\\x07\r\n");
+        editor.keys(b"Read-Host 'Password'\r", false);
+        editor.output(b"Password: \x1b]7790;n1;C:\\\x07\r\n");
+        editor.keys(b"Get-", false);
+        let dropped = editor.keys_if_running(b"hunter2\r", true);
+        assert!(sent(&dropped).is_empty(), "nothing goes to the host: {dropped:?}");
+        let note = shown(&dropped);
+        assert!(
+            note.contains("were not sent") && note.ends_with("PS C:\\> Get-"),
+            "{note:?}"
+        );
+        assert!(!note.contains("hunter2"));
+        assert_eq!(editor.status().view().line, "Get-", "the prompt's line is untouched");
+        // Said once; the line typed at the prompt goes on as typed.
+        assert!(editor.keys_if_running(b"x", true).is_empty());
+        let typed = editor.keys(b"Date\r", false);
+        assert!(sent(&typed)[0].contains("Create('Get-Date')"), "{typed:?}");
+        // Not at the first prompt yet either.
+        let mut starting = Editor::new("n2".into());
+        assert!(sent(&starting.keys_if_running(b"hunter2\r", true)).is_empty());
+    }
+
+    #[test]
+    fn keys_for_a_running_statement_are_one_line_never_a_paste() {
+        // Two lines at once would be a paste whose second line runs as the next statement: only the first goes.
+        let mut editor = Editor::new("n1".into());
+        ready(&mut editor);
+        editor.keys(b"Read-Host 'Password'\r", false);
+        let taken = editor.keys_if_running(b"pw\r\nStop-Computer\r", true);
+        assert_eq!(sent(&taken), vec!["pw\r\n".to_owned()]);
+        editor.output(b"pw\r\n\x1b]7790;n1;C:\\\x07\r\n");
+        assert!(sent(&editor.after_prompt()).is_empty(), "nothing waits for the prompt");
+        assert_eq!(editor.status().view().line, "");
     }
 
     #[test]

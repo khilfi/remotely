@@ -2779,8 +2779,8 @@ pub fn loopback_shell_with(files: FakeFiles, shell: Option<PromptShell>) -> Shel
         while let Some(msg) = input_rx.recv().await {
             let bytes = match msg {
                 ShellInput::Close => break,
-                ShellInput::Resize { .. } | ShellInput::Break => continue,
-                ShellInput::Data(bytes) | ShellInput::Secret(bytes) => bytes,
+                ShellInput::Resize { .. } | ShellInput::Break | ShellInput::IfRunning(_) => continue,
+                ShellInput::Data(bytes) | ShellInput::Secret(bytes) | ShellInput::Reply(bytes) => bytes,
             };
             let mut out = Vec::new();
             for byte in bytes {

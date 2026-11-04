@@ -92,10 +92,10 @@ pub fn serial_shell(
         let end = 'run: loop {
             loop {
                 match input_rx.try_recv() {
-                    Ok(input @ (ShellInput::Data(_) | ShellInput::Secret(_))) => {
+                    Ok(input @ (ShellInput::Data(_) | ShellInput::Secret(_) | ShellInput::Reply(_))) => {
                         let (bytes, typed_secret) = match input {
                             ShellInput::Secret(bytes) => (Zeroizing::new(bytes), true),
-                            ShellInput::Data(bytes) => (Zeroizing::new(bytes), false),
+                            ShellInput::Data(bytes) | ShellInput::Reply(bytes) => (Zeroizing::new(bytes), false),
                             _ => continue,
                         };
                         let mut out = Zeroizing::new(Vec::with_capacity(bytes.len()));
@@ -120,7 +120,8 @@ pub fn serial_shell(
                             break 'run Some(lost(err));
                         }
                     }
-                    Ok(ShellInput::Resize { .. }) => {}
+                    // BX-13: only a PowerShell console can tell whether a statement still runs.
+                    Ok(ShellInput::Resize { .. } | ShellInput::IfRunning(_)) => {}
                     Ok(ShellInput::Close) | Err(mpsc::error::TryRecvError::Disconnected) => {
                         break 'run Some(ShellEnd::Exited { status: None });
                     }

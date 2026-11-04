@@ -307,10 +307,15 @@ export function joinsTyping(kind: PaneKind): boolean {
 
 /**
  * The kind of tab Type in all tabs types into: SSH or PowerShell, one at a time, since a shell and the PowerShell
- * console read the same keys differently. The current tab's kind when it joins, else the first picked one's.
+ * console read the same keys differently. The current tab's active pane's kind when it joins (so it agrees with what
+ * the tab's bar says of that pane), else the current tab's first pane that joins, else the first picked one's.
  */
-export function typingKind(current: PaneKind[], picked: PaneKind[]): PaneKind | null {
-  return current.find(joinsTyping) ?? picked.find(joinsTyping) ?? null;
+export function typingKind(
+  current: { active: PaneKind | null; panes: PaneKind[] },
+  picked: PaneKind[],
+): PaneKind | null {
+  if (current.active !== null && joinsTyping(current.active)) return current.active;
+  return current.panes.find(joinsTyping) ?? picked.find(joinsTyping) ?? null;
 }
 
 /** Why a picked pane gets no typing while tabs of the other kind do, or null. */

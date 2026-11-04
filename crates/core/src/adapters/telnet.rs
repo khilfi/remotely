@@ -420,10 +420,10 @@ impl Session {
         let end = loop {
             tokio::select! {
                 msg = input.recv() => match msg {
-                    Some(input @ (ShellInput::Data(_) | ShellInput::Secret(_))) => {
+                    Some(input @ (ShellInput::Data(_) | ShellInput::Secret(_) | ShellInput::Reply(_))) => {
                         let (bytes, typed_secret) = match input {
                             ShellInput::Secret(bytes) => (Zeroizing::new(bytes), true),
-                            ShellInput::Data(bytes) => (Zeroizing::new(bytes), false),
+                            ShellInput::Data(bytes) | ShellInput::Reply(bytes) => (Zeroizing::new(bytes), false),
                             _ => continue,
                         };
                         if self.echo_here() {
@@ -447,6 +447,8 @@ impl Session {
                     Some(ShellInput::Break) => {
                         let _ = writer.write_all(&[IAC, BRK]).await;
                     }
+                    // BX-13: only a PowerShell console can tell whether a statement still runs.
+                    Some(ShellInput::IfRunning(_)) => {}
                     Some(ShellInput::Close) | None => {
                         let _ = writer.shutdown().await;
                         break Some(ShellEnd::Exited { status: None });

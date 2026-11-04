@@ -3878,6 +3878,9 @@ export const api = {
   },
   terminalWrite: (id: string, data: Uint8Array) =>
     invoke<void>("terminal_write", data, { headers: { "x-terminal-id": id } }),
+  /** SS-10, BX-13: xterm.js's reply to the host's query, to that pane alone (a PowerShell console drops it). */
+  terminalReply: (id: string, data: Uint8Array) =>
+    invoke<void>("terminal_reply", data, { headers: { "x-terminal-id": id } }),
   /** SS-12: opens an RDP or VNC session's window (one behind a jump host opens with terminalOpen, as a tunnel tab). */
   consoleOpenWindow: (sessionId: string) => invoke<WindowOpened>("console_open_window", { sessionId }),
   /** SS-12: this PC's COM ports. */

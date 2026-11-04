@@ -16,7 +16,8 @@
 // typed; QL-06: a vault password is typed by the core, which never hands it to the UI; QL-07: the core reports a long
 // command that finished, and the page decides whether to notify. SS-10: with MultiExec on, a picked pane's input
 // (keys, pastes, mouse reports) goes to `inputRouter` instead (see multiexec.ts); xterm.js's replies to the host's
-// queries go to this pane's own connection only (terminal-input.ts tells them apart). OSC 8 links from the host are
+// queries go to this pane's own connection only (terminal-input.ts tells them apart; BX-13: on their own call,
+// `terminalReply`, so a PowerShell console can drop them). OSC 8 links from the host are
 // never opened: a click hands the address to `onLink` (the page shows it, to copy). SS-08: the core says which
 // folder the shell is in (`folder`), and a right-click on a file name in the output goes to `onFileWord` (the page
 // offers to download it) instead of pasting.
@@ -284,7 +285,8 @@ export class PaneSession {
   private closed = false;
   private snapshot: PaneSnapshot;
   private readonly listeners = new Set<() => void>();
-  private pending: Uint8Array[] = [];
+  /** What waits to go to the core, in order: typed keys, and (BX-13) xterm.js's replies, which go on their own call. */
+  private pending: { bytes: Uint8Array; reply: boolean }[] = [];
   private writing = false;
   /** SS-10: each terminal's input told from its replies (the real one, and the masked one while presenting). */
   private readonly origins = new WeakMap<Terminal, InputOrigin>();
@@ -987,34 +989,39 @@ export class PaneSession {
       this.inputRouter(this, bytes);
       return;
     }
-    this.pending.push(bytes);
+    this.pending.push({ bytes, reply: false });
     this.flush();
   }
 
   /**
    * SS-10: xterm.js's reply to the host's query (cursor position, device attributes, colours, focus): to this pane's
-   * own connection only, never through MultiExec. The core still counts it as text MultiExec did not see on the line.
+   * own connection only, never through MultiExec. The core still counts it as text MultiExec did not see on the line
+   * of a shell; BX-13: a PowerShell console drops it, so its text never joins a statement.
    */
   private reply(bytes: Uint8Array) {
-    this.pending.push(bytes);
+    this.pending.push({ bytes, reply: true });
     this.flush();
   }
 
-  /** One write in flight at a time, so keystrokes arrive in order; the rest is batched. */
+  /**
+   * One write in flight at a time, so keystrokes and replies arrive in order; the rest is batched, keys and replies
+   * apart.
+   */
   private flush() {
     if (this.writing || !this.coreId || this.pending.length === 0) return;
-    const parts = this.pending;
-    this.pending = [];
-    const size = parts.reduce((n, p) => n + p.length, 0);
+    const reply = this.pending[0].reply;
+    let count = 0;
+    while (count < this.pending.length && this.pending[count].reply === reply) count++;
+    const parts = this.pending.splice(0, count);
+    const size = parts.reduce((n, p) => n + p.bytes.length, 0);
     const data = new Uint8Array(size);
     let at = 0;
     for (const p of parts) {
-      data.set(p, at);
-      at += p.length;
+      data.set(p.bytes, at);
+      at += p.bytes.length;
     }
     this.writing = true;
-    api
-      .terminalWrite(this.coreId, data)
+    (reply ? api.terminalReply(this.coreId, data) : api.terminalWrite(this.coreId, data))
       .catch((err) => console.warn("terminal write failed", err))
       .finally(() => {
         this.writing = false;
