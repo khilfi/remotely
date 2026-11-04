@@ -643,6 +643,7 @@ fn commands() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         terminal::terminal_quick_connect,
         terminal::terminal_open_like,
         terminal::terminal_write,
+        terminal::terminal_reply,
         terminal::terminal_resize,
         terminal::terminal_reconnect,
         terminal::terminal_close,

@@ -155,6 +155,23 @@ pub async fn terminal_write(state: State<'_, AppState>, request: Request<'_>) ->
     Ok(())
 }
 
+/// BX-13: xterm.js's reply to a query in a pane's output (cursor report, colours, DECRQSS), told from typed keys by
+/// the window (`terminal-input.ts`), raw like `terminal_write`. To that pane alone; a PowerShell console drops it.
+#[tauri::command]
+pub async fn terminal_reply(state: State<'_, AppState>, request: Request<'_>) -> IpcResult<()> {
+    let id = request
+        .headers()
+        .get(TERMINAL_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| Uuid::parse_str(v).ok())
+        .ok_or_else(|| CoreError::InvalidInput("terminal_reply needs the terminal's id".into()))?;
+    let InvokeBody::Raw(bytes) = request.body() else {
+        return Err(CoreError::InvalidInput("terminal_reply takes raw bytes".into()).into());
+    };
+    state.core.terminals.reply(id, bytes.clone()).await;
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn terminal_resize(state: State<'_, AppState>, id: Uuid, cols: u16, rows: u16) -> IpcResult<()> {
     state.core.terminals.resize(id, cols, rows).await;

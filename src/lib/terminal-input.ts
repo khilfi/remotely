@@ -16,8 +16,10 @@
 //
 // Mouse reports (and xterm's binary `onBinary`, which carries only mouse reports) are input: they went through
 // MultiExec before this and still do, so a click in a full-screen program reaches every terminal with one open, at
-// the same cell. Replies written to the pane alone still tell the core the line may hold text MultiExec did not see
-// (Terminals::write), so the next MultiExec line is rated as unreliable, as it was when replies went through it.
+// the same cell. Replies go to the pane alone on their own call (`terminalReply`, Terminals::reply): to a shell they
+// still tell the core the line may hold text MultiExec did not see, so the next MultiExec line is rated as unreliable,
+// as it was when replies went through it; BX-13: a PowerShell console drops them, since nothing on the host reads them
+// and their text (DECRQSS's, an OSC colour's) would otherwise join the line, and so a statement.
 
 import type { Terminal } from "@xterm/xterm";
 

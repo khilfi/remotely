@@ -181,7 +181,9 @@ crates/core/          remotely-core: all app logic
                       BX-13 statement_ends, statements and statement_ranges (what the console sends for typed lines,
                       shared by the Editor, MultiExec and the PowerShell rules) and ConsoleStatus (at the prompt or
                       running, lines held open; published by the Editor, read through PaneInfo.console);
-                      MAX_SHELLS 4 a connection),
+                      ShellInput::IfRunning (Type in all tabs' password keys: taken only while a statement still runs
+                      when they arrive, one line at most, Editor::keys_if_running) and ShellInput::Reply (xterm.js's
+                      replies, dropped); MAX_SHELLS 4 a connection),
                       exec_output.rs (BX-02/BX-07 output cap, hashes,
                       secret scrubbing), host_counters.rs (MO-01 VM processes: vmware-vmx.exe, VirtualBoxVM.exe,
                       VBoxHeadless.exe; MO-15 `paging()`), paging.rs (MO-15 this PC's paging files and commit charge:
@@ -511,7 +513,8 @@ crates/core/          remotely-core: all app logic
                       as every line from the statement's first (ps_open); consoles_hold: every tab's console at its
                       prompt holding what MultiExec followed, else the line is unreliable and never sent unrated (a tab
                       running a statement takes a typed line as input and may run it next: rated, passed straight
-                      through only at a password prompt); record.rs QL-12 MultiExec recording: each sent line's
+                      through only at a password prompt, as Terminals::send_keys_if_running, which each console checks
+                      again as the keys arrive); record.rs QL-12 MultiExec recording: each sent line's
                       output per terminal from Enter until the prompt is back (TextRenderer drops escapes and replays line
                       redraws; RecordSlot handed to the pane through its input before the Enter; Recorder keeps the
                       session's lines in memory with caps, grouped and diffed through bulk.rs); folder.rs SS-08 the
@@ -962,7 +965,8 @@ src/                  React + TypeScript UI
                       through paste.ts, every selection copy scrubbed by the core, OSC 8 links never opened), paste.ts (QL-05 paste cleaning, the
                       multi-line confirm's preview; TerminalSettings.confirm_multiline_paste, on by default),
                       terminal-input.ts (SS-10 input told from xterm.js's replies to the host, which skip MultiExec:
-                      xterm's internal onUserInput, checked by a test), session-kinds.ts (SS-12 each kind's defaults,
+                      xterm's internal onUserInput, checked by a test; BX-13 replies go on `terminal_reply`,
+                      Terminals::reply, which a PowerShell console drops), session-kinds.ts (SS-12 each kind's defaults,
                       ports, checks, one-line summaries; BX-13 joinsTyping and typingKind: SSH or PowerShell panes join
                       Type in all tabs, one kind at a time, and why a tab can't), console-open.ts (SS-12 an RDP or VNC
                       window from the Terminal or Sessions page; the presenting notice), multiexec.ts,

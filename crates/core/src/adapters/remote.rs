@@ -370,6 +370,14 @@ pub enum ShellInput {
     /// QL-06: a vault secret typed at a prompt, then Enter: sent like `Data`, but never echoed locally (SS-12's
     /// Telnet and serial local echo).
     Secret(Vec<u8>),
+    /// BX-13: xterm.js's reply to a query in the output (a cursor report, a colour, DECRQSS). A shell on a terminal
+    /// takes it like `Data` (the program that asked reads it); a PowerShell console drops it, since nothing on the
+    /// host reads it and its text would join the line being typed, and so a statement.
+    Reply(Vec<u8>),
+    /// BX-13: keys Type in all tabs passes straight through at a password prompt in a PowerShell tab: the running
+    /// statement's input. The console takes them only if a statement still runs when they arrive, and drops them once
+    /// its prompt is back, so they never run as a statement. Nothing else is sent these; any other shell drops them.
+    IfRunning(Vec<u8>),
     Resize {
         cols: u16,
         rows: u16,
@@ -1885,10 +1893,12 @@ fn pump_pty(
                         }
                     }
                     msg = input_rx.recv() => match msg {
-                        Some(ShellInput::Data(bytes) | ShellInput::Secret(bytes)) => {
+                        Some(ShellInput::Data(bytes) | ShellInput::Secret(bytes) | ShellInput::Reply(bytes)) => {
                             // A failed write shows up as the channel closing below.
                             let _ = channel.data_bytes(bytes).await;
                         }
+                        // BX-13: only a PowerShell console can tell whether a statement still runs.
+                        Some(ShellInput::IfRunning(_)) => {}
                         Some(ShellInput::Resize { cols, rows }) => {
                             let _ = channel.window_change(u32::from(cols), u32::from(rows), 0, 0).await;
                         }

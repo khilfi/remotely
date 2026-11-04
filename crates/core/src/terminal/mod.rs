@@ -461,6 +461,12 @@ pub enum TerminalInput {
     /// SS-10: keys for the live shell only (MultiExec). Dropped while the pane is not connected, so
     /// Enter never means "reconnect", and never given to a login prompt.
     Keys(Vec<u8>),
+    /// BX-13: like `Keys`, for a PowerShell pane's running statement only (MultiExec at a password prompt): its console
+    /// drops them once its prompt is back ([`ShellInput::IfRunning`]). Any other pane drops them.
+    KeysIfRunning(Vec<u8>),
+    /// BX-13: xterm.js's reply to a query in the output, for the live shell only: an SSH, Telnet or serial pane sends
+    /// it like typed keys, a PowerShell console drops it ([`ShellInput::Reply`]). Never given to a login prompt.
+    Reply(Vec<u8>),
     /// QL-12: record the MultiExec line whose Enter comes next in `Keys`, until the prompt is back.
     Record(Arc<RecordSlot>),
     /// QL-06: a vault secret to type, followed by Enter, if the terminal shows a password prompt (or
@@ -1399,6 +1405,20 @@ impl Terminals {
         }
     }
 
+    /// BX-13: xterm.js's reply to a query in the pane's output (a cursor report, a colour, DECRQSS), told from typed
+    /// keys by the window. To this pane's live shell only, never through MultiExec; a PowerShell console drops it,
+    /// so it can't become part of a statement ([`TerminalInput::Reply`]).
+    pub async fn reply(&self, id: Uuid, data: Vec<u8>) {
+        if let Some(control) = self.control(id) {
+            // SS-10: a shell may put it on its line, which MultiExec then can't know; a PowerShell console doesn't.
+            if control.kind != PaneKind::Powershell {
+                let dirty = leaves_text(control.dirty.load(Ordering::SeqCst), &data);
+                control.dirty.store(dirty, Ordering::SeqCst);
+            }
+            let _ = control.input.send(TerminalInput::Reply(data)).await;
+        }
+    }
+
     // ---- SS-10: MultiExec -------------------------------------------------------------------------------
 
     /// What MultiExec and the command bus need to know about an open pane; `None` once it has closed.
@@ -1428,6 +1448,22 @@ impl Terminals {
     /// SS-10: keys typed into several terminals at once go to each live shell here. Fails when the
     /// terminal has closed or is not connected.
     pub async fn send_keys(&self, id: Uuid, keys: &[u8]) -> Result<()> {
+        self.send_live(id, TerminalInput::Keys(keys.to_vec())).await
+    }
+
+    /// BX-13: keys for a PowerShell pane's running statement only (MultiExec at a password prompt): its console takes
+    /// them if the statement still runs when they arrive, and drops them once its prompt is back. Fails like
+    /// [`Self::send_keys`], and for any other kind of pane.
+    pub(crate) async fn send_keys_if_running(&self, id: Uuid, keys: &[u8]) -> Result<()> {
+        if self.control(id).is_some_and(|c| c.kind != PaneKind::Powershell) {
+            return Err(CoreError::InvalidInput(
+                "Only a PowerShell tab can take keys for a running statement.".into(),
+            ));
+        }
+        self.send_live(id, TerminalInput::KeysIfRunning(keys.to_vec())).await
+    }
+
+    async fn send_live(&self, id: Uuid, input: TerminalInput) -> Result<()> {
         let control = self
             .control(id)
             .ok_or_else(|| CoreError::UnknownTarget(format!("terminal {id} has closed")))?;
@@ -1439,7 +1475,7 @@ impl Terminals {
         }
         control
             .input
-            .send(TerminalInput::Keys(keys.to_vec()))
+            .send(input)
             .await
             .map_err(|_| CoreError::UnknownTarget(format!("terminal {id} has closed")))
     }
@@ -3340,7 +3376,16 @@ impl Pane {
                 msg = self.input.recv() => {
                     // SS-08: the user's keys never mix with the hook: before it went out it is given up,
                     // and a prompt it held is shown first.
-                    if matches!(msg, Some(TerminalInput::Data(_) | TerminalInput::Keys(_) | TerminalInput::TypeSecret { .. })) {
+                    if matches!(
+                        msg,
+                        Some(
+                            TerminalInput::Data(_)
+                                | TerminalInput::Keys(_)
+                                | TerminalInput::KeysIfRunning(_)
+                                | TerminalInput::Reply(_)
+                                | TerminalInput::TypeSecret { .. }
+                        )
+                    ) {
                         let shown = live.hook.input();
                         if !self.pass(shown, &mut live).await {
                             let _ = live.input.send(ShellInput::Close).await;
@@ -3353,7 +3398,16 @@ impl Pane {
                             let _ = live.input.send(ShellInput::Close).await;
                             return Pump::Closed;
                         }
-                        Some(TerminalInput::Data(bytes)) => {
+                        // BX-13: a PowerShell console drops a reply, so it is not typed text there.
+                        Some(TerminalInput::Reply(bytes)) if self.control.kind == PaneKind::Powershell => {
+                            let _ = live.input.send(ShellInput::Reply(bytes)).await;
+                        }
+                        Some(input @ (TerminalInput::Data(_) | TerminalInput::Reply(_))) => {
+                            let (bytes, reply) = match input {
+                                TerminalInput::Data(bytes) => (bytes, false),
+                                TerminalInput::Reply(bytes) => (bytes, true),
+                                _ => continue,
+                            };
                             // A settings change while waiting applies to this Enter already.
                             live.watch.set_config(self.watch_config());
                             let was_running = live.watch.is_running();
@@ -3363,9 +3417,19 @@ impl Pane {
                             }
                             live.users.input(&bytes);
                             self.note_enter(&bytes);
-                            let _ = live.input.send(ShellInput::Data(bytes)).await;
+                            let input = if reply { ShellInput::Reply(bytes) } else { ShellInput::Data(bytes) };
+                            let _ = live.input.send(input).await;
                         }
-                        Some(TerminalInput::Keys(bytes)) => {
+                        Some(input @ (TerminalInput::Keys(_) | TerminalInput::KeysIfRunning(_))) => {
+                            let (bytes, if_running) = match input {
+                                TerminalInput::Keys(bytes) => (bytes, false),
+                                TerminalInput::KeysIfRunning(bytes) => (bytes, true),
+                                _ => continue,
+                            };
+                            // BX-13: only a PowerShell console can tell whether a statement still runs.
+                            if if_running && self.control.kind != PaneKind::Powershell {
+                                continue;
+                            }
                             live.watch.set_config(self.watch_config());
                             let was_running = live.watch.is_running();
                             live.watch.input(&bytes, Instant::now());
@@ -3378,7 +3442,8 @@ impl Pane {
                             let control = &self.control;
                             let quiet = self.watch_config().quiet;
                             live.record_keys(&bytes, || control.known_secrets(), quiet);
-                            let _ = live.input.send(ShellInput::Data(bytes)).await;
+                            let input = if if_running { ShellInput::IfRunning(bytes) } else { ShellInput::Data(bytes) };
+                            let _ = live.input.send(input).await;
                         }
                         Some(TerminalInput::Record(slot)) => {
                             if let Some(old) = live.armed.replace(slot) {
@@ -3595,7 +3660,13 @@ impl Pane {
                 self.size = PtySize { cols, rows };
                 None
             }
-            Some(TerminalInput::Data(_) | TerminalInput::Keys(_) | TerminalInput::Break) => None,
+            Some(
+                TerminalInput::Data(_)
+                | TerminalInput::Keys(_)
+                | TerminalInput::KeysIfRunning(_)
+                | TerminalInput::Reply(_)
+                | TerminalInput::Break,
+            ) => None,
             Some(TerminalInput::Record(slot)) => {
                 slot.not_sent("not connected");
                 None
@@ -3722,8 +3793,15 @@ impl Prompter for PanePrompter<'_> {
                     *self.size = PtySize { cols, rows };
                     continue;
                 }
-                // SS-10: keys typed into several terminals are not answers to this login.
-                Some(TerminalInput::Reconnect | TerminalInput::Keys(_) | TerminalInput::Break) => continue,
+                // SS-10: keys typed into several terminals are not answers to this login, nor (BX-13) is xterm.js's
+                // reply to a query in the output.
+                Some(
+                    TerminalInput::Reconnect
+                    | TerminalInput::Keys(_)
+                    | TerminalInput::KeysIfRunning(_)
+                    | TerminalInput::Reply(_)
+                    | TerminalInput::Break,
+                ) => continue,
                 Some(TerminalInput::Record(slot)) => {
                     slot.not_sent("still logging in");
                     continue;

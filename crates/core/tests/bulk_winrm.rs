@@ -1,7 +1,8 @@
 //! BX-13 Windows in bulk, end to end: Compare hosts on WinRM hosts (alone and with SSH hosts, each rated by its own
 //! rules), its results, retry and certificate rule; Type in all tabs on PowerShell tabs (a line held and rated as a
 //! PowerShell statement, a statement left open sent whole, a running statement's input passing through, recording
-//! and one notice per line); MultiExec groups of WinRM sessions; and support bundles from Windows hosts.
+//! and one notice per line; password keys a console drops once its prompt is back, and xterm.js's replies never on a
+//! line); MultiExec groups of WinRM sessions; and support bundles from Windows hosts.
 //!
 //! WinRM goes to `fakes::WinrmTestServer` (HTTPS with Basic and a run-time certificate) and SSH to
 //! `fakes::ssh_server::TestSshServer`, both on 127.0.0.1 with passwords made at run time. No packet leaves 127.0.0.1;
@@ -12,8 +13,11 @@
 mod common;
 
 use std::collections::BTreeMap;
+use std::future::Future;
 use std::io::Read;
 use std::path::Path;
+use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -1289,6 +1293,158 @@ async fn a_mouse_report_while_typing_does_not_run_a_bare_line() {
         "the host ran nothing: {:?}",
         fleet.stdin(0)
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn password_keys_are_dropped_by_a_console_whose_prompt_came_back_after_the_check() {
+    // BX-13 (KeysIf): before it passes a password line straight through, Type in all tabs checks that every console
+    // still runs its statement. A statement can still end between that check and the keys reaching its console, which
+    // would then type them at its prompt and run them as a statement, unrated. The hook ends tab 1's statement right
+    // there; its console, back at its prompt, drops the keys as they arrive.
+    let mut fleet = Fleet::new(2).await;
+    let mut events = fleet.core.multiexec.subscribe();
+
+    fleet.type_in(0, "Read-Host 'Password'").await;
+    let (line, _, request) = held(fleet.type_in(0, "\r").await);
+    fleet
+        .core
+        .multiexec
+        .approve(line, answers(&request.unwrap()))
+        .await
+        .unwrap();
+    assert!(line_done(&mut events, line).await);
+    for pane in &mut fleet.panes {
+        pane.expect("Password: ").await;
+    }
+
+    // Between the check and the keys going out, tab 1's Read-Host ends from outside Type in all tabs, and its prompt
+    // is back before the keys reach it.
+    let terminals = fleet.core.terminals.clone();
+    let tab1 = fleet.panes[1].id;
+    let fired = Arc::new(AtomicBool::new(false));
+    let once = Arc::clone(&fired);
+    fleet
+        .core
+        .multiexec
+        .set_password_keys_hook(Some(Arc::new(move || -> Pin<Box<dyn Future<Output = ()> + Send>> {
+            let terminals = terminals.clone();
+            let once = Arc::clone(&once);
+            Box::pin(async move {
+                if once.swap(true, Ordering::SeqCst) {
+                    return;
+                }
+                terminals.write(tab1, b"\r".to_vec()).await;
+                timeout(WAIT, async {
+                    while !terminals
+                        .pane_info(tab1)
+                        .and_then(|info| info.console)
+                        .is_some_and(|c| c.at_prompt)
+                    {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .expect("tab 1's prompt came back");
+            })
+        })));
+
+    let outcome = fleet.type_in(0, "Stop-Computer -Force\r").await;
+    assert!(
+        fired.load(Ordering::SeqCst),
+        "the prompt came back between the check and the send"
+    );
+    assert!(
+        matches!(outcome, InputOutcome::Typed { mode: LineMode::Password, ref reached, .. } if reached.len() == 2),
+        "both tabs were at the password prompt when checked: {outcome:?}"
+    );
+
+    // Tab 0's statement read the line as its input; tab 1's console dropped it and said so.
+    assert!(
+        fleet.wait_stdin(0, "Stop-Computer -Force").await,
+        "tab 0's Read-Host got its answer: {:?}",
+        fleet.stdin(0)
+    );
+    assert!(
+        !fleet.wait_stdin(1, "Stop-Computer").await,
+        "nothing reached tab 1's host, as a line or a statement: {:?}",
+        fleet.stdin(1)
+    );
+    fleet.panes[1].expect("were not sent").await;
+    let console = fleet.core.terminals.pane_info(tab1).and_then(|i| i.console).unwrap();
+    assert!(console.at_prompt && console.line.is_empty(), "{console:?}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_xterm_reply_never_becomes_part_of_a_powershell_statement() {
+    // BX-13: xterm.js answers queries in the output by itself (DECRQSS, OSC colours, cursor reports), to that pane
+    // alone. A PowerShell console's line editor would take a DECRQSS reply's `1$r0m` as typed text, so a reply that came
+    // mid-line, or while a line waited for its approval, would run with the statement. The console drops replies.
+    const DECRQSS: &[u8] = b"\x1bP1$r0m\x1b\\";
+    const OSC_11: &[u8] = b"\x1b]11;rgb:0000/0000/0000\x1b\\";
+    let mut fleet = Fleet::new(2).await;
+    let mut events = fleet.core.multiexec.subscribe();
+
+    // Mid-line: a reply in each tab between the keys. The consoles hold what was typed, so the line is rated and runs.
+    fleet.type_in(0, "hostn").await;
+    for pane in &fleet.panes {
+        fleet.core.terminals.reply(pane.id, DECRQSS.to_vec()).await;
+    }
+    fleet.type_in(0, "ame").await;
+    let (line, tier, _) = held(fleet.type_in(0, "\r").await);
+    assert_eq!(tier, Tier::Low);
+    assert!(line_done(&mut events, line).await);
+    for pane in &mut fleet.panes {
+        pane.expect("WIN01").await;
+        pane.expect("PS C:\\Users\\alice> ").await;
+    }
+
+    // While a line waits for its approval: replies can't change what its Enter runs.
+    fleet.type_in(0, "Restart-Service Spooler").await;
+    let (line, tier, request) = held(fleet.type_in(0, "\r").await);
+    assert_eq!(tier, Tier::Medium);
+    for pane in &fleet.panes {
+        fleet.core.terminals.reply(pane.id, DECRQSS.to_vec()).await;
+        fleet.core.terminals.reply(pane.id, OSC_11.to_vec()).await;
+    }
+    fleet
+        .core
+        .multiexec
+        .approve(line, answers(&request.unwrap()))
+        .await
+        .unwrap();
+    assert!(line_done(&mut events, line).await);
+    for i in 0..2 {
+        fleet.panes[i].expect("PS C:\\Users\\alice> ").await;
+        let sent = fleet.statements(i);
+        assert!(sent.iter().any(|s| s.contains("Create('hostname')")), "{sent:?}");
+        assert!(
+            sent.iter().any(|s| s.contains("Create('Restart-Service Spooler')")),
+            "the approved statement, as rated: {sent:?}"
+        );
+    }
+
+    // In a tab typed into alone, too.
+    fleet.core.multiexec.stop().await.unwrap();
+    let alone = fleet.panes[0].id;
+    fleet.core.terminals.write(alone, b"Get-".to_vec()).await;
+    fleet.core.terminals.reply(alone, DECRQSS.to_vec()).await;
+    fleet.core.terminals.write(alone, b"Date\r".to_vec()).await;
+    fleet.panes[0].expect("Sunday").await;
+    assert!(
+        fleet.statements(0).iter().any(|s| s.contains("Create('Get-Date')")),
+        "{:?}",
+        fleet.statements(0)
+    );
+    for i in 0..2 {
+        assert!(
+            !fleet
+                .stdin(i)
+                .iter()
+                .any(|l| l.contains("1$r0m") || l.contains("rgb:0000")),
+            "no reply reached host {i}: {:?}",
+            fleet.stdin(i)
+        );
+    }
 }
 
 // ---- Support bundles from Windows hosts -------------------------------------------------------------------
