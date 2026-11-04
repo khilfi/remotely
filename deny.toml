@@ -21,6 +21,14 @@ ignore = [
   # rsa (Marvin attack: RSA decryption timing). Remotely only signs with RSA (SSH user keys, SS-09)
   # and never decrypts with it, and no rsa release fixes it yet. Revisit when one does.
   { id = "RUSTSEC-2023-0071", reason = "rsa timing side channel affects decryption; Remotely only signs" },
+  # zip 4 (symlinks and Unix permissions when extracting an archive), through tauri-plugin-updater.
+  # The plugin unpacks an update only if it is a zip, and only after its signature checked out
+  # against the app's key; Remotely's updates are the NSIS installer itself, never a zip. No
+  # tauri-plugin-updater 2.x release uses zip 9 yet. Drop these when one does, or when the app turns
+  # off the plugin's `zip` feature.
+  { id = "RUSTSEC-2026-0367", reason = "zip extraction; updates are signed .exe files, never zips" },
+  { id = "RUSTSEC-2026-0368", reason = "zip extraction; updates are signed .exe files, never zips" },
+  { id = "RUSTSEC-2026-0369", reason = "zip extraction; updates are signed .exe files, never zips" },
 ]
 
 [bans]
