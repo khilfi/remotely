@@ -7,7 +7,8 @@ use std::sync::Arc;
 use tokio::sync::watch;
 
 use super::{
-    SecretBindings, SecretId, SecretKind, SecretMeta, SecretString, UnlockMethod, Vault, VaultInfo, VaultStatus,
+    SecretBindings, SecretId, SecretKind, SecretMeta, SecretString, UnlockMethod, Vault, VaultInfo, VaultResetDone,
+    VaultResetPreview, VaultStatus,
 };
 use crate::domain::Context;
 use crate::error::{CoreError, Result};
@@ -175,6 +176,71 @@ impl VaultService {
         Ok(self.info())
     }
 
+    /// SS-04: what [`Self::reset`] would delete: counts only, locked or unlocked.
+    pub async fn reset_preview(&self, ctx: &Context) -> Result<VaultResetPreview> {
+        if self.vault.status() == VaultStatus::NotSetUp {
+            return Err(CoreError::VaultNotSetUp);
+        }
+        let counts = self.store.vault_item_counts(ctx).await?;
+        Ok(VaultResetPreview {
+            secrets: counts.iter().map(|(_, n)| n).sum(),
+            here: counts
+                .iter()
+                .find(|(workspace, _)| *workspace == ctx.workspace_id)
+                .map_or(0, |(_, n)| *n),
+            workspaces: u64::try_from(counts.len()).unwrap_or(u64::MAX),
+        })
+    }
+
+    /// SS-04: a forgotten vault password ([`Vault::reset`]): every secret in every workspace is deleted and the vault
+    /// is set up again with `password`, unlocked. Like a lock, whoever asks may not be who was here: secrets added
+    /// before ask like any other and a recent right answer no longer covers the next step ([`SecretBindings`]);
+    /// [`crate::Core::reset_vault`] also closes what a lock closes. Parked logins get one more try and every WinRM
+    /// account gate reopens. Audited in the workspace shown, and in every other workspace that lost secrets without
+    /// naming this one (FD-02).
+    pub async fn reset(&self, ctx: &Context, password: SecretString, windows_login: bool) -> Result<VaultResetDone> {
+        self.store.read_only().check(Change::Vault)?;
+        let lost = self.vault.reset(ctx, password, windows_login).await?;
+        if let Some(bindings) = &self.bindings {
+            bindings.vault_locked();
+        }
+        self.vault_unlocked();
+        let total: u64 = lost.iter().map(|(_, n)| n).sum();
+        let here = lost
+            .iter()
+            .find(|(workspace, _)| *workspace == ctx.workspace_id)
+            .map_or(0, |(_, n)| *n);
+        let unlocks = if windows_login {
+            "it unlocks with the Windows login or the new vault password"
+        } else {
+            "it unlocks with the new vault password only"
+        };
+        let detail = format!(
+            "{} deleted in all workspaces, {here} of them here; {unlocks}",
+            secrets(total)
+        );
+        let action = "Reset the vault and set a new vault password";
+        // QL-15: the secrets are gone whatever happens next, so a failing audit write is logged and the reset is
+        // still reported done (as jobs do), rather than an error for a reset that went through.
+        if let Err(err) = self.audit(ctx, "vault_changed", action, Some(&detail)).await {
+            tracing::error!(error = %err, "could not audit the vault reset");
+        }
+        for (workspace, n) in lost.iter().filter(|(workspace, _)| *workspace != ctx.workspace_id) {
+            let there = Context {
+                workspace_id: *workspace,
+                user_id: ctx.user_id,
+            };
+            let detail = format!("from another workspace: {} of this workspace deleted", secrets(*n));
+            if let Err(err) = self.audit(&there, "vault_changed", action, Some(&detail)).await {
+                tracing::error!(error = %err, "could not audit the vault reset in another workspace");
+            }
+        }
+        Ok(VaultResetDone {
+            info: self.info(),
+            secrets_deleted: total,
+        })
+    }
+
     pub async fn list(&self, ctx: &Context) -> Result<Vec<SecretMeta>> {
         self.vault.list(ctx).await
     }
@@ -272,6 +338,15 @@ impl VaultService {
             )
             .await
             .map(drop)
+    }
+}
+
+/// "1 secret", "3 secrets".
+fn secrets(count: u64) -> String {
+    if count == 1 {
+        "1 secret".to_owned()
+    } else {
+        format!("{count} secrets")
     }
 }
 

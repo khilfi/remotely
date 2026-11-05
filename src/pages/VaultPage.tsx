@@ -7,6 +7,9 @@
 // and pushing a pasted key are in its "⋯". The vault's state shows once, in the status bar: the page shows it only
 // when it is locked, with the unlock form. The Windows-login switch and its warning are in one place, the Unlocking
 // card; how secrets are kept (AES-256-GCM, Argon2id) is behind "?".
+//
+// SS-04: a forgotten vault password can't be recovered or replaced while the secrets stay, so "Reset the vault…"
+// (the "⋯", the Unlocking card, and the unlock form while locked) deletes every secret and sets a new password.
 
 import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
@@ -16,8 +19,10 @@ import {
   KeySquareIcon,
   LockIcon,
   PlusIcon,
+  RotateCcwIcon,
   ShieldAlertIcon,
   ShieldCheckIcon,
+  TriangleAlertIcon,
   UploadIcon,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
@@ -58,7 +63,15 @@ import { SecretDialog } from "@/components/SecretDialog";
 import { SshKeysCard, type SshKeyRequest } from "@/components/SshKeysCard";
 import { VaultUnlock } from "@/components/VaultUnlock";
 import { WhyDisabled } from "@/components/WhyDisabled";
-import { api, errorMessage, type SecretKind, type SecretMeta, type SubmitOutcome, type VaultInfo } from "@/lib/api";
+import {
+  api,
+  errorMessage,
+  type SecretKind,
+  type SecretMeta,
+  type SubmitOutcome,
+  type VaultInfo,
+  type VaultResetPreview,
+} from "@/lib/api";
 import { formatWhen, plural } from "@/lib/format";
 import { usePasswordStrength } from "@/hooks/use-password-strength";
 
@@ -85,7 +98,11 @@ type DialogState =
   | { kind: "delete"; secret: SecretMeta }
   | { kind: "windowsLogin"; enable: boolean }
   | { kind: "password" }
+  | { kind: "reset" }
   | null;
+
+/** What the reset dialog asks to be typed, so a reset is never one stray click. */
+const RESET_PHRASE = "reset";
 
 const ADD: { kind: SecretKind; label: string }[] = [
   { kind: "password", label: "Password" },
@@ -161,6 +178,15 @@ export function VaultPage({ tab, onTabChange, active, ...props }: Props) {
               <DropdownMenuItem onSelect={() => open("push")}>
                 <UploadIcon />
                 Push a pasted public key…
+              </DropdownMenuItem>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem
+                variant="destructive"
+                disabled={readOnly !== null}
+                onSelect={() => open({ kind: "reset" })}
+              >
+                <RotateCcwIcon />
+                Reset the vault…
               </DropdownMenuItem>
             </>
           ) : undefined
@@ -245,8 +271,21 @@ function VaultSecrets({
                 : "Sessions that log in with a saved password or key need it."}
             </CardDescription>
           </CardHeader>
-          <CardContent>
+          <CardContent className="grid gap-3">
             <VaultUnlock info={vault} onUnlocked={onVaultChanged} />
+            <div className="flex items-center gap-1 text-sm text-muted-foreground">
+              Forgot the vault password?
+              <WhyDisabled reason={readOnly}>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  disabled={readOnly !== null}
+                  onClick={() => setDialog({ kind: "reset" })}
+                >
+                  Reset the vault…
+                </Button>
+              </WhyDisabled>
+            </div>
           </CardContent>
         </Card>
       )}
@@ -343,6 +382,7 @@ function VaultSecrets({
       <UnlockingCard
         vault={vault}
         onChangePassword={() => setDialog({ kind: "password" })}
+        onReset={() => setDialog({ kind: "reset" })}
         onWindowsLogin={(enable) => {
           // SS-04: turning it off removes a way in, so it needs no password; turning it on does.
           if (enable) setDialog({ kind: "windowsLogin", enable });
@@ -412,6 +452,14 @@ function VaultSecrets({
       )}
       {dialog?.kind === "password" && (
         <ChangePasswordDialog onVaultChanged={onVaultChanged} onClose={() => setDialog(null)} />
+      )}
+      {dialog?.kind === "reset" && (
+        <ResetVaultDialog
+          vault={vault}
+          onVaultChanged={onVaultChanged}
+          onReset={reload}
+          onClose={() => setDialog(null)}
+        />
       )}
     </div>
   );
@@ -522,10 +570,13 @@ export function SetupCard({ vault, onDone }: { vault: VaultInfo; onDone: (info: 
 function UnlockingCard({
   vault,
   onChangePassword,
+  onReset,
   onWindowsLogin,
 }: {
   vault: VaultInfo;
   onChangePassword: () => void;
+  /** SS-04: a forgotten vault password. */
+  onReset: () => void;
   onWindowsLogin: (enable: boolean) => void;
 }) {
   const readOnly = useReadOnlyReason();
@@ -571,19 +622,172 @@ function UnlockingCard({
             <HelpTip topic="vaultReauth" />
           </span>
           <WhyDisabled reason={readOnly}>
-            <Button
-              variant="outline"
-              size="sm"
-              className="ml-auto"
-              disabled={readOnly !== null}
-              onClick={onChangePassword}
-            >
+            <Button variant="ghost" size="sm" className="ml-auto" disabled={readOnly !== null} onClick={onReset}>
+              Reset the vault…
+            </Button>
+          </WhyDisabled>
+          <WhyDisabled reason={readOnly}>
+            <Button variant="outline" size="sm" disabled={readOnly !== null} onClick={onChangePassword}>
               Change the password…
             </Button>
           </WhyDisabled>
         </div>
       </CardContent>
     </Card>
+  );
+}
+
+/**
+ * SS-04: a forgotten vault password. It can't be replaced while the secrets stay (anyone at an unlocked PC could then
+ * set the password Critical actions ask for), so a reset deletes every secret, in every workspace, and sets a new
+ * password; sessions and everything else stay. Works locked or unlocked; typing "reset" confirms it.
+ */
+function ResetVaultDialog({
+  vault,
+  onVaultChanged,
+  onReset,
+  onClose,
+}: {
+  vault: VaultInfo;
+  onVaultChanged: (info: VaultInfo) => void;
+  /** The secrets list is read again. */
+  onReset: () => void;
+  onClose: () => void;
+}) {
+  const [preview, setPreview] = useState<VaultResetPreview | null>(null);
+  const [next, setNext] = useState("");
+  const [repeat, setRepeat] = useState("");
+  const [windowsLogin, setWindowsLogin] = useState(vault.windowsLogin && vault.windowsLoginAvailable);
+  const [typed, setTyped] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const strength = usePasswordStrength(next);
+  const weak = !strength?.acceptable;
+  const mismatch = repeat.length > 0 && repeat !== next;
+  const confirmed = typed.trim().toLowerCase() === RESET_PHRASE;
+
+  useEffect(() => {
+    api.vaultResetPreview().then(setPreview, (err) => setError(errorMessage(err)));
+  }, []);
+
+  async function reset() {
+    setBusy(true);
+    setError(null);
+    try {
+      const done = await api.vaultReset(next, windowsLogin);
+      setNext("");
+      setRepeat("");
+      onVaultChanged(done.info);
+      onReset();
+      toast.success(
+        done.secretsDeleted === 0
+          ? "The vault is reset"
+          : `The vault is reset: ${plural(done.secretsDeleted, "secret")} deleted`,
+        { description: "Give your sessions their passwords again in the session editor." },
+      );
+      onClose();
+    } catch (err) {
+      setError(errorMessage(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const count = preview?.secrets ?? 0;
+  const deleted =
+    preview === null
+      ? null
+      : count === 0
+        ? "The vault holds no secrets."
+        : preview.workspaces > 1
+          ? `${plural(count, "secret")} will be deleted, ${preview.here} of them in this workspace.`
+          : `${plural(count, "secret")} will be deleted.`;
+
+  return (
+    <Dialog open onOpenChange={(open) => !open && !busy && onClose()}>
+      <DialogContent className="sm:max-w-md">
+        <form
+          className="grid gap-4"
+          onSubmit={(e) => {
+            e.preventDefault();
+            if (preview && next && repeat && !weak && !mismatch && confirmed) void reset();
+          }}
+        >
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-1">
+              Reset the vault?
+              <HelpTip topic="vaultReset" />
+            </DialogTitle>
+            <DialogDescription>
+              For a forgotten vault password: every saved password and key goes. Sessions and everything else stay.
+            </DialogDescription>
+          </DialogHeader>
+          {deleted && (
+            <p className="flex items-center gap-1.5 text-sm text-destructive" role="status">
+              <TriangleAlertIcon className="size-4 shrink-0" aria-hidden />
+              {deleted}
+            </p>
+          )}
+          <NewPasswordField
+            id="vault-reset-password"
+            label="New vault password"
+            value={next}
+            onChange={setNext}
+            onGenerated={setRepeat}
+            strength={strength}
+            description={`At least ${MIN_PASSWORD} characters. Keep it somewhere safe.`}
+          />
+          <div className="grid gap-2">
+            <Label htmlFor="vault-reset-repeat">Type it again</Label>
+            <Input
+              id="vault-reset-repeat"
+              type="password"
+              autoComplete="new-password"
+              value={repeat}
+              onChange={(e) => setRepeat(e.currentTarget.value)}
+              aria-invalid={mismatch || undefined}
+            />
+            {mismatch && <p className="text-sm text-destructive">The two passwords differ.</p>}
+          </div>
+          <div className="flex items-center gap-3">
+            <Switch
+              id="vault-reset-windows-login"
+              checked={windowsLogin}
+              onCheckedChange={setWindowsLogin}
+              disabled={!vault.windowsLoginAvailable}
+            />
+            <Label htmlFor="vault-reset-windows-login">Also unlock with my Windows login</Label>
+            <HelpTip topic="windowsUnlock" />
+          </div>
+          <div className="grid gap-2">
+            <Label htmlFor="vault-reset-confirm">Type &ldquo;{RESET_PHRASE}&rdquo; to confirm</Label>
+            <Input
+              id="vault-reset-confirm"
+              autoComplete="off"
+              value={typed}
+              onChange={(e) => setTyped(e.currentTarget.value)}
+            />
+          </div>
+          {error && (
+            <p className="text-sm text-destructive" role="alert">
+              {error}
+            </p>
+          )}
+          <DialogFooter>
+            <Button type="button" variant="outline" onClick={onClose} disabled={busy}>
+              Cancel
+            </Button>
+            <Button
+              type="submit"
+              variant="destructive"
+              disabled={!preview || !next || !repeat || weak || mismatch || !confirmed || busy}
+            >
+              {count === 0 ? "Reset the vault" : `Delete ${plural(count, "secret")} and reset`}
+            </Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
   );
 }
 

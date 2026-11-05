@@ -174,6 +174,85 @@ impl Store {
         Ok(())
     }
 
+    /// SS-04: how many secrets each workspace of the user holds (FD-02: they share the vault's key), for a reset's
+    /// preview. Workspaces without any are left out.
+    pub(crate) async fn vault_item_counts(&self, ctx: &Context) -> Result<Vec<(WorkspaceId, u64)>> {
+        let rows = sqlx::query(
+            "SELECT workspace_id, COUNT(*) AS n FROM vault_items
+             WHERE workspace_id IN (SELECT id FROM workspaces WHERE user_id = ?)
+             GROUP BY workspace_id ORDER BY workspace_id",
+        )
+        .bind(ctx.user_id.to_string())
+        .fetch_all(&self.pool)
+        .await?;
+        rows.iter()
+            .map(|r| {
+                let workspace: String = r.try_get("workspace_id")?;
+                let n: i64 = r.try_get("n")?;
+                Ok((
+                    WorkspaceId(super::parse_uuid(&workspace)?),
+                    u64::try_from(n).unwrap_or(0),
+                ))
+            })
+            .collect()
+    }
+
+    /// SS-04: a reset ([`crate::vault::Vault::reset`]). In one transaction: every item of every workspace of the user
+    /// is deleted (sessions, folders and container hosts lose them as when each is deleted; SSH key records and
+    /// secret grants go with them, through the foreign keys), and `vault_meta` gets the new master-password copy of a
+    /// new data key and the new DPAPI copy (`None`: none). Returns how many items each workspace lost.
+    pub(crate) async fn reset_vault(
+        &self,
+        ctx: &Context,
+        kdf_salt: &[u8],
+        kdf_params: &KdfParams,
+        wrapped_key: &[u8],
+        dpapi_key: Option<&[u8]>,
+    ) -> Result<Vec<(WorkspaceId, u64)>> {
+        let mut tx = self.pool.begin().await?;
+        let rows = sqlx::query(
+            "SELECT workspace_id, COUNT(*) AS n FROM vault_items
+             WHERE workspace_id IN (SELECT id FROM workspaces WHERE user_id = ?)
+             GROUP BY workspace_id ORDER BY workspace_id",
+        )
+        .bind(ctx.user_id.to_string())
+        .fetch_all(&mut *tx)
+        .await?;
+        let mut lost = Vec::with_capacity(rows.len());
+        for r in &rows {
+            let workspace: String = r.try_get("workspace_id")?;
+            let n: i64 = r.try_get("n")?;
+            lost.push((
+                WorkspaceId(super::parse_uuid(&workspace)?),
+                u64::try_from(n).unwrap_or(0),
+            ));
+        }
+        sqlx::query("DELETE FROM vault_items WHERE workspace_id IN (SELECT id FROM workspaces WHERE user_id = ?)")
+            .bind(ctx.user_id.to_string())
+            .execute(&mut *tx)
+            .await?;
+        let done = sqlx::query(
+            "UPDATE vault_meta SET kdf_salt = ?, kdf_params = ?, wrapped_key = ?, unlock_method = ?, dpapi_key = ?,
+                                   user_id = ?, updated_at = ?
+             WHERE workspace_id = ?",
+        )
+        .bind(kdf_salt)
+        .bind(serde_json::to_string(kdf_params)?)
+        .bind(wrapped_key)
+        .bind(unlock_method(dpapi_key))
+        .bind(dpapi_key)
+        .bind(ctx.user_id.to_string())
+        .bind(now_rfc3339())
+        .bind(ctx.workspace_id.to_string())
+        .execute(&mut *tx)
+        .await?;
+        if done.rows_affected() != 1 {
+            return Err(CoreError::VaultNotSetUp);
+        }
+        tx.commit().await?;
+        Ok(lost)
+    }
+
     /// Every item's ciphertext in every workspace of the user (FD-02: they share the key), for a new data key.
     pub(crate) async fn vault_ciphers(&self, ctx: &Context) -> Result<Vec<(WorkspaceId, SecretId, VaultCipher)>> {
         let rows = sqlx::query(

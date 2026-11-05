@@ -1143,6 +1143,21 @@ export interface VaultInfo {
   locksInSecs: number | null;
 }
 
+/** SS-04: what resetting the vault would delete: every secret, in every workspace (they share the vault). */
+export interface VaultResetPreview {
+  secrets: number;
+  /** Of them, in the workspace shown. */
+  here: number;
+  /** Workspaces holding at least one. */
+  workspaces: number;
+}
+
+/** SS-04: a reset that went through. */
+export interface VaultResetDone {
+  info: VaultInfo;
+  secretsDeleted: number;
+}
+
 /** SS-04, FD-07: how hard a new vault password or export passphrase is to guess. The core checks again on submit. */
 export interface PasswordStrength {
   /** 0 (guessed at once) to 4 (very hard to guess); at most 2 while the length is wrong. */
@@ -3652,6 +3667,11 @@ export const api = {
     invoke<VaultInfo>("vault_set_windows_login", { password, enabled }),
   /** SS-04: one click, no password: the Windows login stops unlocking the vault. */
   vaultTurnOffWindowsLogin: () => invoke<VaultInfo>("vault_turn_off_windows_login"),
+  /** SS-04: counts only, locked or unlocked. */
+  vaultResetPreview: () => invoke<VaultResetPreview>("vault_reset_preview"),
+  /** SS-04: a forgotten vault password: every saved password and key is deleted and the vault set up again. */
+  vaultReset: (password: string, windowsLogin: boolean) =>
+    invoke<VaultResetDone>("vault_reset", { password, windowsLogin }),
   /** SS-04: the user typed or clicked; the idle lock counts from now (background reads never count). QL-22: the
    * answer carries the new countdown. */
   vaultActivity: () => invoke<VaultInfo>("vault_activity"),

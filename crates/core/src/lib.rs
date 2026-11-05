@@ -170,7 +170,7 @@ use terminal::multiexec::MultiExec;
 use terminal::rules::TerminalRules;
 use terminal::{TerminalSettings, Terminals, TERMINAL_SETTINGS_KEY};
 use transfer::Transfer;
-use vault::{Dpapi, LocalVault, SecretBindings, Vault, VaultOptions, VaultService, VaultStatus};
+use vault::{Dpapi, LocalVault, SecretBindings, SecretString, Vault, VaultOptions, VaultService, VaultStatus};
 use vm_links::VmLinks;
 
 pub use error::{CoreError, Result};
@@ -414,7 +414,8 @@ struct LockParts {
 }
 
 impl LockParts {
-    async fn vault_locked(&self) {
+    /// `why`: what happened, for the log ("the vault locked", "the vault was reset").
+    async fn vault_locked(&self, why: &'static str) {
         self.bindings.vault_locked();
         self.terminals.forget_logins();
         let open = self.jobs.file_server_jobs(None);
@@ -425,7 +426,7 @@ impl LockParts {
             toolbox::file_server::StopReason::VaultLocked,
         );
         if !open.is_empty() {
-            tracing::info!("the vault locked: the file server stops");
+            tracing::info!(why, "the file server stops");
         }
         let file_closed = self.transfer_closed.close();
         self.containers.close_all().await;
@@ -436,8 +437,9 @@ impl LockParts {
             metrics.guest().close_all().await;
         }
         tracing::info!(
+            why,
             file_closed,
-            "the vault locked: background connections closed, typed login passwords forgotten"
+            "background connections closed, typed login passwords forgotten"
         );
     }
 }
@@ -863,7 +865,21 @@ impl Core {
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {
             return;
         };
-        let parts = LockParts {
+        let parts = self.lock_parts();
+        runtime.spawn(async move {
+            let mut was = *status.borrow_and_update();
+            while status.changed().await.is_ok() {
+                let now = *status.borrow_and_update();
+                if was == VaultStatus::Unlocked && now == VaultStatus::Locked {
+                    parts.vault_locked("the vault locked").await;
+                }
+                was = now;
+            }
+        });
+    }
+
+    fn lock_parts(&self) -> LockParts {
+        LockParts {
             guest: Arc::downgrade(&self.metrics),
             containers: self.containers.clone(),
             host_details: self.host_details.clone(),
@@ -874,17 +890,16 @@ impl Core {
             checks: self.checks.clone(),
             file_server: Arc::clone(self.file_server.runner()),
             jobs: Arc::clone(&self.jobs),
-        };
-        runtime.spawn(async move {
-            let mut was = *status.borrow_and_update();
-            while status.changed().await.is_ok() {
-                let now = *status.borrow_and_update();
-                if was == VaultStatus::Unlocked && now == VaultStatus::Locked {
-                    parts.vault_locked().await;
-                }
-                was = now;
-            }
-        });
+        }
+    }
+
+    /// SS-04: a forgotten vault password ([`vault::VaultService::reset`]): every secret is deleted and the vault set up
+    /// again with `password`. Then, as when the vault locks, whoever is here may not be who was: kept connections
+    /// close, terminals forget typed login passwords, the file server stops and an opened FD-07 file closes.
+    pub async fn reset_vault(&self, password: SecretString, windows_login: bool) -> Result<vault::VaultResetDone> {
+        let done = self.vault.reset(&self.ctx(), password, windows_login).await?;
+        self.lock_parts().vault_locked("the vault was reset").await;
+        Ok(done)
     }
 
     /// VM-21: how the deploy runner waits for a guest's IP and for VirtualBox to let go of a VM; tests shorten it.

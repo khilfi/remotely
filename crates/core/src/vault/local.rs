@@ -14,7 +14,7 @@ use super::{
     check_master_password, check_secret, clean_label, SecretId, SecretKind, SecretMeta, SecretString, UnlockMethod,
     Vault, VaultInfo, VaultStatus,
 };
-use crate::domain::Context;
+use crate::domain::{Context, WorkspaceId};
 use crate::error::{CoreError, Result};
 use crate::locks;
 use crate::store::{Store, VaultMetaRow};
@@ -447,6 +447,37 @@ impl Vault for LocalVault {
         locks::lock(&inner.state).windows_login = Some(false);
         inner.store.vault_checkpoint().await;
         Ok(true)
+    }
+
+    /// SS-04: a new data key under `password`, and every item deleted, in one transaction; nothing changes when a
+    /// check fails first (a weak password, no Windows login on this PC, no vault). The old key, if it was in memory,
+    /// is replaced, so nothing sealed with it is read again; the checkpoint and secure_delete leave no old item or
+    /// wrapped key in the database files.
+    async fn reset(
+        &self,
+        ctx: &Context,
+        password: SecretString,
+        windows_login: bool,
+    ) -> Result<Vec<(WorkspaceId, u64)>> {
+        let inner = &self.inner;
+        inner.check_ctx(ctx)?;
+        check_master_password(&password)?;
+        let _writes = inner.writes.lock().await;
+        inner.meta().await?;
+        let key = Key::generate()?;
+        let dpapi_key = if windows_login {
+            Some(inner.protect_with_dpapi(&key).await?)
+        } else {
+            None
+        };
+        let (salt, wrapped) = inner.wrap_with_password(&key, password).await?;
+        let lost = inner
+            .store
+            .reset_vault(&inner.ctx, &salt, &inner.options.kdf, &wrapped, dpapi_key.as_deref())
+            .await?;
+        inner.open_with(key, windows_login);
+        inner.store.vault_checkpoint().await;
+        Ok(lost)
     }
 
     fn note_activity(&self) {

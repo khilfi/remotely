@@ -11,14 +11,17 @@ use std::time::Duration;
 
 use common::{fake_private_key, temp_folder, Setup, VAULT_PASSWORD};
 use remotely_core::command_bus::{ApprovalAnswers, Command, PowerOp, StopMode, SubmitOutcome};
-use remotely_core::domain::{Context, TargetRef};
+use remotely_core::domain::{Context, Environment, TargetRef};
 use remotely_core::fakes::{FakeKeyProtector, FakeVmware};
 use remotely_core::jobs::JobStatus;
+use remotely_core::presentation::Presentation;
+use remotely_core::sessions::{SessionAuth, SessionInput};
 use remotely_core::store::Store;
 use remotely_core::vault::{
     KeyProtector, LocalVault, SecretKind, SecretString, UnlockMethod, Vault, VaultOptions, VaultService, VaultStatus,
     IDLE_TIMEOUT,
 };
+use remotely_core::workspaces::WorkspaceInput;
 use remotely_core::CoreError;
 
 const PASSWORD: &str = "violet harbor anvil kettle";
@@ -786,4 +789,212 @@ async fn a_new_vault_set_up_without_the_windows_login_keeps_no_dpapi_copy() {
     assert!(audit
         .iter()
         .any(|e| e.detail.as_deref() == Some("unlocks with the vault password only")));
+}
+
+// ---- SS-04: a forgotten vault password: reset ----------------------------------------------------------------
+
+const NEW_PASSWORD: &str = "lantern orchard pebble violin";
+
+#[tokio::test]
+async fn a_reset_deletes_every_secret_and_only_the_new_password_opens_the_vault() {
+    let (store, ctx, protector, vault) = ready().await;
+    let id = vault
+        .put(&ctx, SecretKind::Password, "web01 root", pw("s3cret-1"))
+        .await
+        .unwrap();
+    // A weak new password changes nothing.
+    assert!(matches!(
+        vault.reset(&ctx, pw("short"), false).await,
+        Err(CoreError::InvalidInput(_))
+    ));
+    assert_eq!(vault.get(&ctx, id).await.unwrap().expose(), "s3cret-1");
+
+    // Locked, and without the old password: the reset still goes through, since it reveals nothing.
+    vault.lock();
+    let (salt_before, wrapped_before, _) = meta_row(&store).await;
+    let lost = vault.reset(&ctx, pw(NEW_PASSWORD), false).await.unwrap();
+    assert_eq!(lost, vec![(ctx.workspace_id, 1)]);
+    let info = vault.info();
+    assert_eq!(info.status, VaultStatus::Unlocked);
+    assert!(!info.windows_login);
+    assert!(vault.list(&ctx).await.unwrap().is_empty());
+    assert!(ciphertexts(&store).await.is_empty(), "no item is left in the database");
+    assert!(matches!(vault.get(&ctx, id).await, Err(CoreError::UnknownTarget(_))));
+    let (salt_after, wrapped_after, dpapi_after) = meta_row(&store).await;
+    assert_ne!(salt_before, salt_after);
+    assert_ne!(
+        wrapped_before, wrapped_after,
+        "a new data key, wrapped by the new password"
+    );
+    assert!(dpapi_after.is_none(), "the Windows login no longer unlocks it");
+    assert!(!vault.verify_password(&pw(PASSWORD)).await.unwrap());
+    assert!(vault.verify_password(&pw(NEW_PASSWORD)).await.unwrap());
+
+    // New secrets go into the reset vault as usual.
+    let fresh = vault
+        .put(&ctx, SecretKind::Password, "web01 root", pw("s3cret-2"))
+        .await
+        .unwrap();
+
+    // After a restart only the new password opens it.
+    let restarted = open(&store, ctx, protector).await;
+    assert_eq!(restarted.status(), VaultStatus::Locked);
+    assert!(restarted.unlock(UnlockMethod::WindowsLogin).await.is_err());
+    assert!(matches!(
+        restarted.unlock(UnlockMethod::MasterPassword(pw(PASSWORD))).await,
+        Err(CoreError::WrongVaultPassword)
+    ));
+    restarted
+        .unlock(UnlockMethod::MasterPassword(pw(NEW_PASSWORD)))
+        .await
+        .unwrap();
+    assert_eq!(restarted.get(&ctx, fresh).await.unwrap().expose(), "s3cret-2");
+}
+
+#[tokio::test]
+async fn a_reset_can_keep_the_windows_login_with_the_new_key() {
+    let (store, ctx, protector, vault) = ready().await;
+    let (_, _, dpapi_before) = meta_row(&store).await;
+    vault.reset(&ctx, pw(NEW_PASSWORD), true).await.unwrap();
+    assert!(vault.info().windows_login);
+    let (_, _, dpapi_after) = meta_row(&store).await;
+    assert!(dpapi_after.is_some());
+    assert_ne!(dpapi_before, dpapi_after, "the Windows login's copy is of the new key");
+    let restarted = open(&store, ctx, protector).await;
+    restarted.unlock(UnlockMethod::WindowsLogin).await.unwrap();
+    assert_eq!(restarted.status(), VaultStatus::Unlocked);
+}
+
+#[tokio::test]
+async fn a_vault_never_set_up_has_nothing_to_reset() {
+    let (store, ctx) = store().await;
+    let vault = open(&store, ctx, Arc::new(FakeKeyProtector::new())).await;
+    assert!(matches!(
+        vault.reset(&ctx, pw(NEW_PASSWORD), false).await,
+        Err(CoreError::VaultNotSetUp)
+    ));
+    assert_eq!(vault.status(), VaultStatus::NotSetUp);
+}
+
+#[tokio::test]
+async fn a_reset_empties_every_workspace_keeps_the_sessions_and_is_audited_in_each() {
+    let core = Setup::new(FakeVmware::default()).with_real_vault().build().await;
+    let home = core.ctx();
+    let globex = core
+        .workspaces
+        .create(WorkspaceInput {
+            name: "Globex".into(),
+            color: Some("teal".into()),
+        })
+        .await
+        .unwrap();
+    let there = Context {
+        workspace_id: globex.id,
+        user_id: home.user_id,
+    };
+    let login = core
+        .vault
+        .add(&home, SecretKind::Password, "web login", pw("s3cret-1"))
+        .await
+        .unwrap();
+    core.vault
+        .add(&home, SecretKind::Passphrase, "key pass", pw("phrase"))
+        .await
+        .unwrap();
+    core.vault
+        .add(&there, SecretKind::Password, "db login", pw("s3cret-2"))
+        .await
+        .unwrap();
+    let session = core
+        .sessions
+        .create(
+            &home,
+            SessionInput {
+                name: "web01".into(),
+                folder_id: None,
+                host: "web01.example.com".into(),
+                port: 22,
+                username: Some("alice".into()),
+                auth: SessionAuth::Password {
+                    password_id: Some(login.id),
+                },
+                jump_session_id: None,
+                jump_direct: false,
+                startup_command: None,
+                startup_on_reconnect: false,
+                prompt_hook: None,
+                environment: Environment::Lab,
+                color: None,
+                tags: vec![],
+                vm_id: None,
+                kind: Default::default(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        core.sessions.get(&home, session.id).await.unwrap().auth.credential_id(),
+        Some(login.id)
+    );
+
+    let preview = core.vault.reset_preview(&home).await.unwrap();
+    assert_eq!((preview.secrets, preview.here, preview.workspaces), (3, 2, 2));
+    // The old password was just given: for 5 minutes the next new place would not ask again.
+    common::vault_password_given(&core).await;
+
+    // The read-only lock refuses it, and nothing is deleted.
+    core.presentation
+        .set(Presentation {
+            enabled: true,
+            read_only: true,
+        })
+        .await
+        .unwrap();
+    assert!(matches!(
+        core.reset_vault(pw(NEW_PASSWORD), false).await,
+        Err(CoreError::ReadOnlyLock { .. })
+    ));
+    assert_eq!(core.vault.reset_preview(&home).await.unwrap().secrets, 3);
+    core.presentation.set(Presentation::default()).await.unwrap();
+
+    let done = core.reset_vault(pw(NEW_PASSWORD), true).await.unwrap();
+    assert_eq!(done.secrets_deleted, 3);
+    assert_eq!(done.info.status, VaultStatus::Unlocked);
+    assert!(done.info.windows_login);
+    assert!(core.vault.list(&home).await.unwrap().is_empty());
+    assert!(core.vault.list(&there).await.unwrap().is_empty());
+
+    // The session stays, without its saved password, as when the password is deleted.
+    let kept = core.sessions.get(&home, session.id).await.unwrap();
+    assert_eq!(kept.name, "web01");
+    assert_eq!(kept.auth.credential_id(), None);
+
+    // Like a lock, the reset ends that grace: whoever reset it may not be who gave the old password.
+    assert!(matches!(
+        core.secret_bindings()
+            .confirm(&home, None, "test", "a vault password to a new place")
+            .await,
+        Err(CoreError::ReauthRequired { .. })
+    ));
+
+    // AP-06: Critical actions now ask for the new password.
+    assert!(core.vault.vault().verify_password(&pw(NEW_PASSWORD)).await.unwrap());
+    assert!(!core.vault.vault().verify_password(&pw(VAULT_PASSWORD)).await.unwrap());
+
+    // Audited here with the counts, and in the other workspace without naming this one.
+    let action = "Reset the vault and set a new vault password";
+    let here = core.store.recent_audit(&home, 5).await.unwrap();
+    let entry = here.iter().find(|e| e.action == action).expect("audited here");
+    assert_eq!(
+        entry.detail.as_deref(),
+        Some("3 secrets deleted in all workspaces, 2 of them here; it unlocks with the Windows login or the new vault password")
+    );
+    let elsewhere = core.store.recent_audit(&there, 5).await.unwrap();
+    let entry = elsewhere.iter().find(|e| e.action == action).expect("audited there");
+    assert_eq!(
+        entry.detail.as_deref(),
+        Some("from another workspace: 1 secret of this workspace deleted")
+    );
+    assert!(core.store.verify_audit_chain(&home).await.unwrap().ok);
+    assert!(core.store.verify_audit_chain(&there).await.unwrap().ok);
 }

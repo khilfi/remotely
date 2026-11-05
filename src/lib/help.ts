@@ -174,7 +174,15 @@ export const HELP = {
     title: "Why the vault password is asked again",
     body: [
       "Critical actions ask for the vault password again, however the vault was unlocked. So does sending a saved password to a host it hasn't gone to before.",
-      "A right answer covers the next 5 minutes, until the vault locks.",
+      "A right answer covers the next 5 minutes, until the vault locks. Forgot it? Reset the vault from the Vault page.",
+    ],
+    link: { label: "Open the Vault", to: { kind: "vault" } },
+  },
+  vaultReset: {
+    title: "Resetting the vault",
+    body: [
+      "The vault password can't be recovered, and it can't be replaced while the secrets stay: otherwise anyone at your unlocked PC could set the password that Critical actions ask for.",
+      "A reset deletes every saved password and key, in every workspace, and sets a new vault password. Sessions, folders and everything else stay; enter their passwords again, or pick new ones in the session editor.",
     ],
   },
   presentationMode: {
