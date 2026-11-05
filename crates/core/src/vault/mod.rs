@@ -19,6 +19,10 @@
 //! * The master password is what Critical actions ask for again (AP-06), whichever way the vault is
 //!   unlocked. It is checked by unwrapping the data key with it, so nothing that could be compared
 //!   against is stored besides the wrapped key itself.
+//! * A forgotten master password can't be recovered or replaced while the secrets stay: that would let
+//!   anyone at an unlocked Windows session set the password Critical actions ask for. A reset
+//!   ([`Vault::reset`]) deletes every secret instead, in every workspace, and sets the vault up again
+//!   with a new password; sessions and everything else stay, without their saved passwords and keys.
 //! * A new master password, like an FD-07 export passphrase, needs 10 characters and must be hard to
 //!   guess ([`strength`]); Remotely can make one up ([`generate_passphrase`]). An existing vault keeps
 //!   the password it has.
@@ -51,7 +55,7 @@ use tokio::sync::watch;
 use uuid::Uuid;
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
-use crate::domain::Context;
+use crate::domain::{Context, WorkspaceId};
 use crate::error::{CoreError, Result};
 
 pub use bindings::{Destination, SecretBindings, REAUTH_GRACE};
@@ -188,6 +192,27 @@ pub struct VaultInfo {
     pub locks_in_secs: Option<u64>,
 }
 
+/// SS-04: what a reset would delete ([`Vault::reset`]): every secret of the vault, in every workspace, since they
+/// share its key. Counts only; never a label from another workspace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VaultResetPreview {
+    /// Secrets in every workspace.
+    pub secrets: u64,
+    /// Of them, in the workspace shown.
+    pub here: u64,
+    /// Workspaces that hold at least one.
+    pub workspaces: u64,
+}
+
+/// SS-04: a reset that went through: the vault as it is now, and how many secrets went.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VaultResetDone {
+    pub info: VaultInfo,
+    pub secrets_deleted: u64,
+}
+
 /// A secret as the UI sees it: never its value.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -241,6 +266,19 @@ pub trait Vault: Send + Sync {
     /// SS-04: stops the Windows login from unlocking the vault: the DPAPI copy of the key is deleted
     /// (overwritten on disk). Needs no password, since it only removes a way in. True when there was one.
     async fn turn_off_windows_login(&self) -> Result<bool>;
+
+    /// SS-04: for a forgotten master password. Deletes every secret in every workspace of the user and sets the
+    /// vault up again with `password` and a new data key (`windows_login`: the Windows login unlocks it too), unlocked,
+    /// locked or unlocked before. Needs no password: it reveals nothing, it only throws the secrets away, while a reset
+    /// that kept them would let anyone at an unlocked Windows session replace the password Critical actions ask for.
+    /// Sessions and folders lose their saved passwords and keys as when each is deleted (the foreign keys set NULL).
+    /// Returns how many secrets each workspace lost.
+    async fn reset(
+        &self,
+        ctx: &Context,
+        password: SecretString,
+        windows_login: bool,
+    ) -> Result<Vec<(WorkspaceId, u64)>>;
 
     /// SS-04: the user did something (typed, clicked, started an action), so the idle lock starts again.
     /// Reading a secret ([`Vault::get`]) doesn't count: background reads must not keep the vault open.

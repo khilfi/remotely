@@ -29,7 +29,10 @@ use remotely_core::ssh_keys::{self, GenerateKey, PublicKeyInfo, SshKey};
 use remotely_core::store::{AuditEntry, ChainCheck, JobSummary, JobTargetRecord, SavedFilter, Tag, VmRecord};
 use remotely_core::transfer::{self, ExportReport, ExportRequest, TransferCommit, TransferPreview, TransferReport};
 use remotely_core::updates::{UpdateCheck, UpdateTokenInfo};
-use remotely_core::vault::{SecretId, SecretKind, SecretMeta, SecretString, UnlockMethod, VaultInfo, MAX_SECRET_BYTES};
+use remotely_core::vault::{
+    SecretId, SecretKind, SecretMeta, SecretString, UnlockMethod, VaultInfo, VaultResetDone, VaultResetPreview,
+    MAX_SECRET_BYTES,
+};
 use remotely_core::vm_links::AmbiguousLink;
 use remotely_core::{AuditExport, Core, CoreError};
 use serde::Serialize;
@@ -672,6 +675,24 @@ pub async fn vault_set_windows_login(
 pub async fn vault_turn_off_windows_login(state: State<'_, AppState>) -> IpcResult<VaultInfo> {
     let core = &state.core;
     Ok(core.vault.turn_off_windows_login(&core.ctx()).await?)
+}
+
+/// SS-04: what resetting the vault would delete: counts only, locked or unlocked.
+#[tauri::command]
+pub async fn vault_reset_preview(state: State<'_, AppState>) -> IpcResult<VaultResetPreview> {
+    let core = &state.core;
+    Ok(core.vault.reset_preview(&core.ctx()).await?)
+}
+
+/// SS-04: for a forgotten vault password: every saved password and key is deleted, in every workspace, and the
+/// vault is set up again with `password`, unlocked. Needs no password, since it reveals nothing.
+#[tauri::command]
+pub async fn vault_reset(
+    state: State<'_, AppState>,
+    password: SecretString,
+    windows_login: bool,
+) -> IpcResult<VaultResetDone> {
+    Ok(state.core.reset_vault(password, windows_login).await?)
 }
 
 /// SS-04: the user typed or clicked in the window (the UI sends this at most every few seconds), so

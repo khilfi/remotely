@@ -732,7 +732,10 @@ crates/core/          remotely-core: all app logic
     vault/            SS-04 vault: crypto (AES-256-GCM, Argon2id), DPAPI (opt-in for new vaults; turn_off_windows_login
                       needs no password), LocalVault (idle lock from note_activity only, never from get; a password
                       change makes a new data key and reseals every item in one transaction; secure_delete and a WAL
-                      checkpoint after vault changes), VaultService; bindings.rs SS-04, AP-06 SecretBindings: where a
+                      checkpoint after vault changes; reset, for a forgotten password: every item of every workspace
+                      deleted and a new data key under a new password in one transaction, no password needed since it
+                      reveals nothing, audited in each workspace that lost items; Core::reset_vault then closes what a
+                      lock closes), VaultService; bindings.rs SS-04, AP-06 SecretBindings: where a
                       vault password may go without asking (a saved session at that host, port and jump host logs in
                       with it, gives it to sudo, or a session_secret_grants row from an earlier answer, migration
                       0016; one added since the unlock goes to its first place free; keys and key passphrases never

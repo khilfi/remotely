@@ -3244,6 +3244,10 @@ impl Vault for FakeVault {
         Ok(false)
     }
 
+    async fn reset(&self, _: &Context, _: SecretString, _: bool) -> Result<Vec<(crate::domain::WorkspaceId, u64)>> {
+        Err(CoreError::NotImplemented("FakeVault reset"))
+    }
+
     // FD-02: like the real vault, each secret belongs to the workspace it was put in, and only that workspace
     // lists, reads or changes it.
     async fn list(&self, ctx: &Context) -> Result<Vec<SecretMeta>> {

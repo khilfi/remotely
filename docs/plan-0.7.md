@@ -229,3 +229,20 @@ editor and `sessions.rs`, and F1 and F9 the Toolbox page; the later one merges m
 - Support bundles and exports in tests read from `TestSshServer` and write to the system temp folder, never the repo.
 - Hand checks use demo data only (a temp `REMOTELY_DATA_DIR`, `dev_ssh_server` with its Telnet and WinRM stand-ins),
   never the owner's hosts, as in 0.6.0. Screenshots stay out of the repo.
+
+## After 0.7.1: resetting the vault (SS-04)
+
+Agreed with the owner on 5 Nov 2026, after a vault set up to unlock with the Windows login left its vault password
+forgotten. That password can't be recovered, and Critical actions (AP-06) and sending a saved password to a new host
+need it.
+
+- **Reset, never replace.** A new vault password can't be set while the secrets stay: anyone at an unlocked Windows
+  session could then set the password Critical actions ask for. "Reset the vault…" (the Vault page's "⋯", its Unlocking
+  card, and the unlock form while locked) deletes every saved password and key, in every workspace (they share the
+  vault's key), and sets the vault up again with a new password and a new data key, in one transaction. It needs no
+  password, locked or unlocked, since it reveals nothing; typing "reset" confirms it.
+- Sessions, folders, container hosts and templates stay and lose their saved passwords and keys, as when each is
+  deleted (the foreign keys set NULL); SSH key records and secret grants go with them.
+- Audited `vault_changed` in the workspace shown and in each other workspace that lost secrets, without naming the
+  first. Refused by the read-only lock. Like a lock, it ends the 5-minute grace of a vault password just given and
+  closes kept connections, typed login passwords, the file server and an opened FD-07 file.
