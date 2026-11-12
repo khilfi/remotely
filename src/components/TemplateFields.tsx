@@ -5,7 +5,7 @@
 // form; `effectiveInput` gives what the core gets. UX-04: the basics first (name, image, size, hypervisor, network,
 // environment and the count), the rest under a folded Advanced.
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { ChevronRightIcon, FolderOpenIcon, XIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -41,6 +41,11 @@ import {
 } from "@/lib/api";
 import { HYPERVISOR_LABEL, networkKinds, networkOfKind, profileHypervisors, sizeSummary } from "@/lib/catalog";
 import { parsePackages } from "@/lib/deploy";
+import { installConfigsApi, type InstallConfig } from "@/lib/install-configs-api";
+import { fitsImage } from "@/lib/install-configs";
+
+/** The install config select's "None". */
+const NO_CONFIG = "none";
 
 const NONE = "none";
 
@@ -189,6 +194,14 @@ export function TemplateFields({
   const keyChoices = keys.filter((k) => k.public !== null || k.id === value.sshKeyId);
   const golden = image?.source.kind === "goldenVm";
   const cloudInit = profile?.family !== "windows" && image?.source.kind !== "iso";
+  // VM-28: the own install configs that fit the image (a starter is copied first).
+  const [configs, setConfigs] = useState<InstallConfig[]>([]);
+  useEffect(() => {
+    installConfigsApi.list().then(setConfigs, () => setConfigs([]));
+  }, []);
+  const configChoices = image
+    ? configs.filter((c) => fitsImage(c, { kind: image.source.kind, family: profile?.family }))
+    : [];
   const id = (name: string) => `${idPrefix}-${name}`;
 
   async function pickFolder() {
@@ -499,6 +512,38 @@ export function TemplateFields({
                   : "An ISO install has no OS yet, so nothing is set up on first boot."}
             </p>
           </fieldset>
+
+          <div className="grid gap-2">
+            <Label htmlFor={id("install-config")}>
+              <Term id="installConfig">Install config</Term>
+            </Label>
+            <Select
+              value={value.installConfigId ?? NO_CONFIG}
+              onValueChange={(v) => set({ installConfigId: v === NO_CONFIG ? null : v })}
+            >
+              <SelectTrigger id={id("install-config")}>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value={NO_CONFIG}>None</SelectItem>
+                {configChoices.map((c) => (
+                  <SelectItem key={c.id} value={c.id}>
+                    {c.name}
+                  </SelectItem>
+                ))}
+                {value.installConfigId && !configChoices.some((c) => c.id === value.installConfigId) && (
+                  <SelectItem value={value.installConfigId}>
+                    {configs.find((c) => c.id === value.installConfigId)?.name ?? "(deleted install config)"}
+                  </SelectItem>
+                )}
+              </SelectContent>
+            </Select>
+            <p className="text-xs text-muted-foreground">
+              {image?.source.kind === "iso"
+                ? "The answer file the ISO installs itself from, with each VM's own values."
+                : "cloud-init user data for each VM's first boot, instead of the settings above."}
+            </p>
+          </div>
 
           {golden && (
             <div className="grid gap-2">

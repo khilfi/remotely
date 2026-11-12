@@ -22,12 +22,13 @@ use uuid::Uuid;
 use super::{free_name, item, Counts, ItemAction, ItemChoice, ItemProblem, PreviewItem, RowPlan, CONFLICT_CHOICES};
 use crate::adapters::hypervisor::Hypervisor;
 use crate::catalog::images::file_problem;
+use crate::catalog::install::InstallConfigInput;
 use crate::catalog::sizes::{built_in, MAX_SIZE_NAME};
 use crate::catalog::templates::hypervisor_label;
 use crate::catalog::{Catalog, Image, ImageSource, ImportedImage, Size, SizeInput, TemplateInput};
 use crate::domain::Context;
 use crate::error::{CoreError, Result};
-use crate::store::{Store, TemplateRow};
+use crate::store::{InstallConfigRow, Store, TemplateRow};
 use crate::vault::SecretId;
 
 // ---- In the file ------------------------------------------------------------------------------------------------
@@ -44,6 +45,18 @@ pub(super) struct CatalogEntries {
     /// VM-08 stacks. Files from before 0.5.0 R6 have none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     stacks: Vec<super::stacks::StackEntry>,
+    /// VM-28 install configs: the file, its variables and which vault items it names (by id, never a secret).
+    /// Files from before 0.8.0 have none, and 0.7.x ignores the field.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    install_configs: Vec<InstallConfigEntry>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct InstallConfigEntry {
+    id: Uuid,
+    #[serde(flatten)]
+    spec: InstallConfigInput,
 }
 
 impl CatalogEntries {
@@ -53,6 +66,7 @@ impl CatalogEntries {
             images: self.images.len(),
             templates: self.templates.len(),
             stacks: self.stacks.len(),
+            install_configs: self.install_configs.len(),
         }
     }
 
@@ -103,13 +117,15 @@ pub struct CatalogCounts {
     pub templates: usize,
     /// VM-08.
     pub stacks: usize,
+    /// VM-28.
+    pub install_configs: usize,
 }
 
 impl CatalogCounts {
     pub(super) fn describe(&self) -> String {
         format!(
-            "{} sizes, {} images, {} launch templates, {} stacks",
-            self.sizes, self.images, self.templates, self.stacks
+            "{} sizes, {} images, {} launch templates, {} stacks, {} install configs",
+            self.sizes, self.images, self.templates, self.stacks, self.install_configs
         )
     }
 }
@@ -123,6 +139,8 @@ pub struct CatalogPreview {
     pub templates: Vec<PreviewItem>,
     /// VM-08.
     pub stacks: Vec<PreviewItem>,
+    /// VM-28.
+    pub install_configs: Vec<PreviewItem>,
 }
 
 /// What the user chose for the catalogue's items. Items not listed get their default.
@@ -138,6 +156,9 @@ pub struct CatalogChoices {
     /// VM-08.
     #[serde(default)]
     pub stacks: Vec<ItemChoice>,
+    /// VM-28.
+    #[serde(default)]
+    pub install_configs: Vec<ItemChoice>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
@@ -148,6 +169,8 @@ pub struct CatalogReport {
     pub templates: Counts,
     /// VM-08.
     pub stacks: Counts,
+    /// VM-28.
+    pub install_configs: Counts,
     /// Images imported whose file isn't on this laptop (or whose golden VM isn't in its VM list).
     pub images_missing_here: usize,
 }
@@ -162,6 +185,9 @@ impl CatalogReport {
         );
         if self.stacks != Counts::default() {
             text.push_str(&format!("; stacks {}", self.stacks.describe()));
+        }
+        if self.install_configs != Counts::default() {
+            text.push_str(&format!("; install configs {}", self.install_configs.describe()));
         }
         if self.images_missing_here > 0 {
             text.push_str(&format!(
@@ -210,11 +236,18 @@ pub(super) async fn export(store: &Store, ctx: &Context) -> Result<CatalogEntrie
         .into_iter()
         .map(|t| TemplateEntry { id: t.id, spec: t.spec })
         .collect();
+    let install_configs = store
+        .list_install_configs(ctx)
+        .await?
+        .into_iter()
+        .map(|c| InstallConfigEntry { id: c.id, spec: c.spec })
+        .collect();
     Ok(CatalogEntries {
         sizes,
         images,
         templates,
         stacks: super::stacks::export(store, ctx).await?,
+        install_configs,
     })
 }
 
@@ -228,6 +261,8 @@ pub(super) struct LocalCatalog {
     vm_keys: HashSet<String>,
     /// VM-08.
     stacks: Vec<crate::store::StackRow>,
+    /// VM-28.
+    install_configs: Vec<InstallConfigRow>,
 }
 
 impl LocalCatalog {
@@ -237,6 +272,7 @@ impl LocalCatalog {
             images: store.list_catalog_images(ctx).await?,
             templates: store.list_catalog_templates(ctx).await?,
             stacks: store.list_stacks(ctx).await?,
+            install_configs: store.list_install_configs(ctx).await?,
             vm_keys: store
                 .list_vms(ctx)
                 .await?
@@ -340,6 +376,61 @@ fn size_name(id: &str, file: &CatalogEntries, local: &LocalCatalog) -> Option<St
         .or_else(|| local.sizes.iter().find(|s| s.id == id).map(|s| s.name.clone()))
 }
 
+/// VM-28: two configs are the same when all but which vault items they picked (ids differ between laptops) is.
+fn same_config(a: &InstallConfigInput, b: &InstallConfigInput) -> bool {
+    let refs = |c: &InstallConfigInput| c.secrets.iter().map(|s| (s.name.clone(), s.kind)).collect::<Vec<_>>();
+    a.name == b.name
+        && a.kind == b.kind
+        && a.body == b.body
+        && a.variables == b.variables
+        && a.notes == b.notes
+        && refs(a) == refs(b)
+}
+
+fn plan_install_configs(file: &CatalogEntries, local: &LocalCatalog) -> Vec<RowPlan<Uuid>> {
+    file.install_configs
+        .iter()
+        .enumerate()
+        .map(|(index, e)| {
+            let here = local.install_configs.iter().find(|l| l.id == e.id).or_else(|| {
+                local
+                    .install_configs
+                    .iter()
+                    .find(|l| l.spec.name.eq_ignore_ascii_case(e.spec.name.trim()))
+            });
+            match here {
+                None => RowPlan::new(index),
+                Some(l) if same_config(&e.spec, &l.spec) => RowPlan::same(index, l.id, "Already here.".into()),
+                Some(l) => RowPlan::conflict(
+                    index,
+                    l.id,
+                    format!(
+                        "An install config named '{}' is here, with another file or settings.",
+                        l.spec.name
+                    ),
+                    CONFLICT_CHOICES.to_vec(),
+                ),
+            }
+        })
+        .collect()
+}
+
+/// The install config a template entry names, by name: in the file, else here by id.
+fn config_name(id: Option<Uuid>, file: &CatalogEntries, local: &LocalCatalog) -> Option<String> {
+    let id = id?;
+    file.install_configs
+        .iter()
+        .find(|c| c.id == id)
+        .map(|c| c.spec.name.clone())
+        .or_else(|| {
+            local
+                .install_configs
+                .iter()
+                .find(|c| c.id == id)
+                .map(|c| c.spec.name.clone())
+        })
+}
+
 fn plan_templates(file: &CatalogEntries, local: &LocalCatalog) -> Vec<RowPlan<Uuid>> {
     file.templates
         .iter()
@@ -355,11 +446,14 @@ fn plan_templates(file: &CatalogEntries, local: &LocalCatalog) -> Vec<RowPlan<Uu
             let names = |name: Option<String>| name.map(|n| n.to_lowercase());
             let same_refs = names(image_name(e.spec.image_id, file, local))
                 == names(image_name(l.spec.image_id, file, local))
-                && names(size_name(&e.spec.size_id, file, local)) == names(size_name(&l.spec.size_id, file, local));
+                && names(size_name(&e.spec.size_id, file, local)) == names(size_name(&l.spec.size_id, file, local))
+                && names(config_name(e.spec.install_config_id, file, local))
+                    == names(config_name(l.spec.install_config_id, file, local));
             let same_rest = TemplateInput {
                 image_id: l.spec.image_id,
                 size_id: l.spec.size_id.clone(),
                 ssh_key_id: l.spec.ssh_key_id,
+                install_config_id: l.spec.install_config_id,
                 ..e.spec.clone()
             } == l.spec;
             if same_refs && same_rest {
@@ -466,6 +560,26 @@ pub(super) async fn preview(file: &CatalogEntries, local: &LocalCatalog) -> Resu
                     "Its image or size isn't in the file or here, so it can't deploy until it gets another.".into(),
                 );
             }
+            if e.spec.install_config_id.is_some() && config_name(e.spec.install_config_id, file, local).is_none() {
+                notes.push(
+                    "Its install config isn't in the file or here, so it can't deploy until it gets another.".into(),
+                );
+            }
+            item(row, e.spec.name.clone(), detail, notes)
+        })
+        .collect();
+    let install_configs = plan_install_configs(file, local)
+        .into_iter()
+        .map(|row| {
+            let e = &file.install_configs[row.index];
+            let detail = format!("{}, {} lines", e.spec.kind.label(), e.spec.body.lines().count());
+            let mut notes = Vec::new();
+            if e.spec.secrets.iter().any(|s| s.secret_id.is_some()) {
+                notes.push(
+                    "Its passwords and keys come from the vault: those not in this export are picked again here."
+                        .into(),
+                );
+            }
             item(row, e.spec.name.clone(), detail, notes)
         })
         .collect();
@@ -481,6 +595,7 @@ pub(super) async fn preview(file: &CatalogEntries, local: &LocalCatalog) -> Resu
         images,
         templates,
         stacks,
+        install_configs,
     })
 }
 
@@ -490,6 +605,7 @@ pub(super) struct CatalogDecided {
     images: Vec<(RowPlan<Uuid>, ItemAction)>,
     templates: Vec<(RowPlan<Uuid>, ItemAction)>,
     stacks: Vec<(RowPlan<Uuid>, ItemAction)>,
+    install_configs: Vec<(RowPlan<Uuid>, ItemAction)>,
 }
 
 /// Checks the user's choice for every catalogue item before anything changes.
@@ -509,6 +625,9 @@ pub(super) fn decide(file: &CatalogEntries, local: &LocalCatalog, choices: &Cata
             &choices.stacks,
             |i| file.stacks[i].name().to_owned(),
         )?,
+        install_configs: with_actions(plan_install_configs(file, local), &choices.install_configs, |i| {
+            file.install_configs[i].spec.name.clone()
+        })?,
     })
 }
 
@@ -644,8 +763,46 @@ pub(super) async fn commit(
         }
     }
 
-    // Templates, pointing at what their image, size and key became here. VM-08: the file's id -> the template here,
-    // for the stacks.
+    // VM-28: install configs, each vault pick mapped to this vault's item (or unpicked). The file's id -> the one here.
+    let mut config_map: HashMap<Uuid, Uuid> = HashMap::new();
+    for (row, action) in decided.install_configs {
+        let e = &file.install_configs[row.index];
+        let mut spec = e.spec.clone();
+        for s in &mut spec.secrets {
+            s.secret_id = s.secret_id.and_then(|id| secrets.get(&id).copied());
+        }
+        let result = match action {
+            ItemAction::Skip => {
+                if let Some(here) = row.local {
+                    config_map.insert(e.id, here);
+                }
+                report.install_configs.count(action);
+                continue;
+            }
+            ItemAction::Replace => catalog.import_install_config(ctx, row.local, spec).await,
+            ItemAction::KeepBoth => {
+                let taken = catalog.install_config_names(ctx).await?;
+                spec.name = free_name(e.spec.name.trim(), &taken, crate::catalog::install::MAX_CONFIG_NAME);
+                catalog.import_install_config(ctx, None, spec).await
+            }
+            ItemAction::Import => catalog.import_install_config(ctx, None, spec).await,
+        };
+        match result {
+            Ok(saved) => {
+                if let Ok(id) = Uuid::parse_str(&saved.id) {
+                    config_map.insert(e.id, id);
+                }
+                report.install_configs.count(action);
+            }
+            Err(err) => problems.push(ItemProblem {
+                name: format!("install config '{}'", e.spec.name),
+                reason: err.to_string(),
+            }),
+        }
+    }
+
+    // Templates, pointing at what their image, size, key and install config became here. VM-08: the file's id -> the
+    // template here, for the stacks.
     let mut template_map: HashMap<Uuid, Uuid> = HashMap::new();
     for (row, action) in decided.templates {
         let e = &file.templates[row.index];
@@ -655,6 +812,7 @@ pub(super) async fn commit(
             spec.size_id.clone_from(here);
         }
         spec.ssh_key_id = spec.ssh_key_id.map(|k| secrets.get(&k).copied().unwrap_or(k));
+        spec.install_config_id = spec.install_config_id.map(|c| config_map.get(&c).copied().unwrap_or(c));
         let result = match action {
             ItemAction::Skip => {
                 if let Some(here) = row.local {

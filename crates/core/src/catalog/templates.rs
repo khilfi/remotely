@@ -258,6 +258,9 @@ pub struct TemplateInput {
     /// VM-21 (R2): how a golden VM image is cloned.
     #[serde(default)]
     pub clone_mode: CloneMode,
+    /// VM-28: the install config its deploys use (an own one: a starter is copied first). G6 delivers it.
+    #[serde(default)]
+    pub install_config_id: Option<Uuid>,
 }
 
 /// Why a template can't deploy now.
@@ -277,6 +280,103 @@ pub enum ProblemCode {
     PatternNeedsNumber,
     CountOutOfRange,
     NameTaken,
+    /// VM-28: its install config was deleted.
+    InstallConfigGone,
+    /// VM-28: an install config for another kind of image or OS.
+    InstallConfigMismatch,
+    /// VM-28: its install config has errors.
+    InstallConfigProblems,
+    /// VM-28: its install config's disk layout needs more than the size's boot disk.
+    InstallConfigDisk,
+}
+
+/// VM-28: a template's install config, as the catalogue found it.
+pub enum InstallRef<'a> {
+    None,
+    Gone,
+    Found(&'a super::install::InstallConfig),
+}
+
+/// VM-28: why `template`'s install config can't go with its image and size.
+pub fn install_problems(
+    template: &TemplateInput,
+    image: Option<&Image>,
+    size: Option<&Size>,
+    config: InstallRef,
+) -> Vec<Problem> {
+    use super::install::Severity;
+    use ProblemCode as C;
+    let config = match config {
+        InstallRef::None => return Vec::new(),
+        InstallRef::Gone if template.install_config_id.is_none() => return Vec::new(),
+        InstallRef::Gone => {
+            return vec![Problem::new(
+                C::InstallConfigGone,
+                "Its install config was deleted. Pick another, or none.",
+            )]
+        }
+        InstallRef::Found(config) => config,
+    };
+    let mut out = Vec::new();
+    let name = &config.spec.name;
+    let kind = config.spec.kind;
+    if let Some(image) = image {
+        let image_kind = image.source.kind();
+        let from_iso = image_kind == super::images::ImageKind::Iso;
+        if kind.installs_from_iso() && !from_iso {
+            out.push(Problem::new(
+                C::InstallConfigMismatch,
+                format!(
+                    "Its install config '{name}' is {}, which installs from an ISO, and image '{}' isn't an ISO.",
+                    kind.label(),
+                    image.name
+                ),
+            ));
+        } else if !kind.installs_from_iso() && from_iso {
+            out.push(Problem::new(
+                C::InstallConfigMismatch,
+                format!(
+                    "Its install config '{name}' is cloud-init user data, for a cloud image or a golden VM, and image '{}' is an ISO.",
+                    image.name
+                ),
+            ));
+        }
+        if let Some(profile) = profile(&image.os_profile) {
+            let windows = profile.family == super::profiles::GuestFamily::Windows;
+            if windows != kind.windows() {
+                out.push(Problem::new(
+                    C::InstallConfigMismatch,
+                    format!(
+                        "Its install config '{name}' is for {}, and image '{}' is {}.",
+                        if kind.windows() { "Windows" } else { "Linux" },
+                        image.name,
+                        profile.name
+                    ),
+                ));
+            }
+        }
+    }
+    if let Some(error) = config.problems.iter().find(|p| p.severity == Severity::Error) {
+        let at = error.line.map(|l| format!("line {l}: ")).unwrap_or_default();
+        out.push(Problem::new(
+            C::InstallConfigProblems,
+            format!("Its install config '{name}' can't deploy yet: {at}{}", error.message),
+        ));
+    }
+    if let (Some(need), Some(size)) = (config.disk_need_mb, size) {
+        let boot_gb = size.disks.first().map_or(0, |d| d.size_gb);
+        if need > u64::from(boot_gb) * 1024 {
+            out.push(Problem::new(
+                C::InstallConfigDisk,
+                format!(
+                    "Its install config '{name}' lays out at least {} GB, and the size {}'s boot disk is {boot_gb} GB.",
+                    need.div_ceil(1024),
+                    size.name
+                ),
+            ));
+        }
+    }
+    out
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -541,6 +641,7 @@ pub fn check_template(input: &TemplateInput) -> Result<TemplateInput> {
         guest_user,
         packages,
         clone_mode: input.clone_mode,
+        install_config_id: input.install_config_id,
     })
 }
 
@@ -1032,6 +1133,13 @@ pub(crate) fn template_changes(
     if before.clone_mode != after.clone_mode {
         out.push(format!("golden VMs: {}", after.clone_mode.label()));
     }
+    if before.install_config_id != after.install_config_id {
+        out.push(if after.install_config_id.is_some() {
+            "install config changed".to_owned()
+        } else {
+            "install config removed".to_owned()
+        });
+    }
     out
 }
 
@@ -1090,6 +1198,7 @@ mod tests {
             guest_user: Some("alice".into()),
             packages: vec!["nginx".into()],
             clone_mode: CloneMode::Full,
+            install_config_id: None,
         }
     }
 

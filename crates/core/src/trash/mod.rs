@@ -58,6 +58,8 @@ pub enum TrashKind {
     Image,
     Template,
     Stack,
+    /// VM-28: an install config.
+    InstallConfig,
 }
 
 impl TrashKind {
@@ -69,6 +71,7 @@ impl TrashKind {
             TrashKind::Image => "image",
             TrashKind::Template => "template",
             TrashKind::Stack => "stack",
+            TrashKind::InstallConfig => "install_config",
         }
     }
 
@@ -80,6 +83,7 @@ impl TrashKind {
             "image" => Some(TrashKind::Image),
             "template" => Some(TrashKind::Template),
             "stack" => Some(TrashKind::Stack),
+            "install_config" => Some(TrashKind::InstallConfig),
             _ => None,
         }
     }
@@ -93,6 +97,7 @@ impl TrashKind {
             TrashKind::Image => "image",
             TrashKind::Template => "launch template",
             TrashKind::Stack => "stack",
+            TrashKind::InstallConfig => "install config",
         }
     }
 
@@ -104,6 +109,7 @@ impl TrashKind {
             TrashKind::Image => "catalog_images",
             TrashKind::Template => "catalog_templates",
             TrashKind::Stack => "stacks",
+            TrashKind::InstallConfig => "install_configs",
         }
     }
 
@@ -116,6 +122,7 @@ impl TrashKind {
             TrashKind::Image => crate::catalog::images::MAX_IMAGE_NAME,
             TrashKind::Template => crate::catalog::templates::MAX_TEMPLATE_NAME,
             TrashKind::Stack => crate::stacks::spec::MAX_NAME,
+            TrashKind::InstallConfig => crate::catalog::install::MAX_CONFIG_NAME,
         }
     }
 
@@ -128,6 +135,7 @@ impl TrashKind {
             TrashKind::Image => Some(crate::catalog::images::MAX_IMAGES),
             TrashKind::Template => Some(crate::catalog::templates::MAX_TEMPLATES),
             TrashKind::Stack => Some(crate::stacks::spec::MAX_STACKS),
+            TrashKind::InstallConfig => Some(crate::catalog::install::MAX_CONFIGS),
         }
     }
 
@@ -736,7 +744,7 @@ impl Trash {
             }
             TrashKind::Template => notes.extend(self.template_notes(ctx, &snap.row).await?),
             TrashKind::Stack => notes.extend(self.stack_notes(ctx, &snap.row).await?),
-            TrashKind::Size | TrashKind::Image => {}
+            TrashKind::Size | TrashKind::Image | TrashKind::InstallConfig => {}
         }
 
         // Everything back, and out of the trash, at once.

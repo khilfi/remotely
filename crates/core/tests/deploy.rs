@@ -127,6 +127,7 @@ fn template(name: &str, image: &Image, hypervisor: Hypervisor, folder: &Path, ne
         guest_user: Some("alice".into()),
         packages: vec!["nginx".into()],
         clone_mode: CloneMode::Full,
+        install_config_id: None,
     }
 }
 

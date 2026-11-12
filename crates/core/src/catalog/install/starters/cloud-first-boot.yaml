@@ -1,0 +1,21 @@
+#cloud-config
+# A cloud image's first boot: its hostname, an admin user with sudo and your SSH key (no password), the packages, and
+# the root partition grown to the disk. Remotely's own first-boot setup (a launch template's guest user and packages),
+# as a config you can copy and change. A starter from Remotely.
+hostname: "{{hostname}}"
+preserve_hostname: false
+users:
+  - name: sysadmin
+    shell: /bin/bash
+    lock_passwd: true
+    sudo: "ALL=(ALL) NOPASSWD:ALL"
+    ssh_authorized_keys:
+      - "{{ssh_key.admin}}"
+ssh_pwauth: false
+package_update: true
+packages:
+  - curl
+growpart:
+  mode: auto
+  devices: ["/"]
+resize_rootfs: true

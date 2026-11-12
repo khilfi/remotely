@@ -1,0 +1,39 @@
+#cloud-config
+# Ubuntu Server 24.04 LTS with Docker: the minimal starter, plus Docker from Ubuntu's archive, with the admin user in
+# the docker group. A starter from Remotely: copy it to change it.
+autoinstall:
+  version: 1
+  source:
+    id: ubuntu-server-minimal
+  locale: en_US.UTF-8
+  keyboard:
+    layout: us
+  timezone: Etc/UTC
+  network:
+    version: 2
+    ethernets:
+      any:
+        match:
+          name: "e*"
+        dhcp4: true
+  storage:
+    layout:
+      name: lvm
+      sizing-policy: all
+  identity:
+    hostname: "{{hostname}}"
+    username: sysadmin
+    password: "{{password.admin}}"
+  ssh:
+    install-server: true
+    allow-pw: false
+    authorized-keys:
+      - "{{ssh_key.admin}}"
+  packages:
+    - docker.io
+    - docker-compose-v2
+  updates: security
+  late-commands:
+    - curtin in-target -- usermod -aG docker sysadmin
+    - curtin in-target -- systemctl enable docker
+  shutdown: reboot

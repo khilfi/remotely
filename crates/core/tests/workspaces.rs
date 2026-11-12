@@ -416,6 +416,45 @@ async fn the_catalogue_rules_groups_container_marks_and_notifications_are_per_wo
 }
 
 #[tokio::test]
+async fn install_configs_are_per_workspace() {
+    use remotely_core::catalog::install::starters;
+    let core = Setup::new(FakeVmware::default()).build().await;
+    let acme = core.ctx();
+    let mut spec = starters::spec(starters::find("starter.debian-12-minimal").unwrap());
+    spec.name = "Acme Debian".into();
+    let saved = core.catalog.add_install_config(&acme, spec.clone()).await.unwrap();
+    let id = Uuid::parse_str(&saved.id).unwrap();
+    let own =
+        |list: Vec<remotely_core::catalog::install::InstallConfig>| list.into_iter().filter(|c| !c.built_in).count();
+    assert_eq!(own(core.catalog.install_configs(&acme).await.unwrap()), 1);
+
+    let globex = create(&core, "Globex").await;
+    switch(&core, &globex).await;
+    let b = core.ctx();
+    let listed = core.catalog.install_configs(&b).await.unwrap();
+    assert_eq!(own(listed.clone()), 0, "only the starters");
+    assert_eq!(listed.len(), starters::STARTERS.len());
+    assert!(core.catalog.install_config(&b, &saved.id).await.is_err());
+    assert!(core.catalog.update_install_config(&b, id, spec.clone()).await.is_err());
+    assert!(core.catalog.delete_install_config(&b, id).await.is_err());
+    // The same name is free in another workspace.
+    core.catalog.add_install_config(&b, spec).await.unwrap();
+
+    let home = core
+        .workspaces
+        .list()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|w| !w.current)
+        .unwrap();
+    switch(&core, &home).await;
+    let back = core.catalog.install_config(&acme, &saved.id).await.unwrap();
+    assert_eq!(back.spec.name, "Acme Debian");
+    assert_eq!(own(core.catalog.install_configs(&acme).await.unwrap()), 1);
+}
+
+#[tokio::test]
 async fn notes_stars_recents_and_the_trash_are_per_workspace() {
     let core = Setup::new(FakeVmware::default()).build().await;
     let acme = core.ctx();
