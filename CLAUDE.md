@@ -279,7 +279,9 @@ crates/core/          remotely-core: all app logic
                       only their lines), protect/restore (placeholders as private-use tokens for the YAML reader);
                       hidden_break: a line break only Python reads (U+0085, U+2028, U+2029, a lone CR, VT, FF...) in a
                       file of any kind but unattend refuses saving and render, as the installer would see lines the
-                      checks don't; the service runs the checks on spawn_blocking;
+                      checks don't; every kind scans for secrets whatever other errors it has, in every YAML document,
+                      and YAML or XML that doesn't read refuses saving (it can't be checked for one); the service runs
+                      the checks on spawn_blocking;
                       vars.rs `{{hostname}}` `{{ip}}` `{{n}}` `{{template}}` `{{date}}`, `\{{` escapes, split (linear, at
                       most MAX_ERRORS, 50), check_value (one line, no white space but a plain space; text kinds refuse
                       quotes, `$`, `;`, `#`, braces...; YAML kinds a leading `-` `!` `*` `[` and the like; XML

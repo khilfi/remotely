@@ -59,12 +59,23 @@ fn all<'a>(root: &'a Element, local: &str) -> Vec<&'a Element> {
 
 pub fn check(text: &str) -> Vec<ConfigProblem> {
     let mut out = syntax(text);
-    if !out.is_empty() {
+    let root = match xml::parse(text) {
+        Ok(root) => root,
+        Err(err) => {
+            // Not well formed: it can't be checked for a password written into it, so it isn't saved (review of #88).
+            out.push(ConfigProblem::secret(
+                Some(err.line),
+                "Remotely can't read this file's XML to check it for passwords, so it can't be saved until it is well formed.",
+            ));
+            return out;
+        }
+    };
+    // Secrets first, whatever else is wrong.
+    let syntax_failed = !out.is_empty();
+    out.extend(secrets(&root));
+    if syntax_failed {
         return out;
     }
-    let Ok(root) = xml::parse(text) else {
-        return out;
-    };
     if root.attr("xmlns") != Some("urn:schemas-microsoft-com:unattend") {
         out.push(ConfigProblem::warning(
             Some(root.line),
@@ -98,10 +109,26 @@ pub fn check(text: &str) -> Vec<ConfigProblem> {
             }
         }
     }
-    // Secrets: every password's value is Remotely's, or empty.
-    for p in all(&root, "Password")
+    for k in all(&root, "ProductKey") {
+        let key = k.child("Key").map_or(k.trimmed(), Element::trimmed);
+        if !key.is_empty() {
+            out.push(ConfigProblem::warning(
+                Some(k.line),
+                "A product key is your licence's: it travels with the config in exports.",
+            ));
+        }
+    }
+    out.extend(asks(&root));
+    out.sort_by_key(|p| (p.line.unwrap_or(u32::MAX), p.severity == Severity::Warning));
+    out
+}
+
+/// Every password's value is Remotely's, or empty.
+fn secrets(root: &Element) -> Vec<ConfigProblem> {
+    let mut out = Vec::new();
+    for p in all(root, "Password")
         .into_iter()
-        .chain(all(&root, "AdministratorPassword"))
+        .chain(all(root, "AdministratorPassword"))
     {
         let (value, line) = match p.child("Value") {
             Some(v) => (v.trimmed().to_owned(), v.line),
@@ -129,17 +156,13 @@ pub fn check(text: &str) -> Vec<ConfigProblem> {
         };
         out.push(ConfigProblem::secret(Some(line), format!("<{}> holds {what}: a config never keeps one. Pick it from the vault in the form, or write {{{{password.<name>}}}}.", p.name)));
     }
-    for k in all(&root, "ProductKey") {
-        let key = k.child("Key").map_or(k.trimmed(), Element::trimmed);
-        if !key.is_empty() {
-            out.push(ConfigProblem::warning(
-                Some(k.line),
-                "A product key is your licence's: it travels with the config in exports.",
-            ));
-        }
-    }
-    // What Setup would stop to ask.
-    let setup = component(&root, "windowsPE", SETUP);
+    out
+}
+
+/// What Setup would stop to ask, an account to sign in with, and WinRM over HTTPS.
+fn asks(root: &Element) -> Vec<ConfigProblem> {
+    let mut out = Vec::new();
+    let setup = component(root, "windowsPE", SETUP);
     match setup {
         None => out.push(ConfigProblem::warning(
             None,
@@ -170,15 +193,15 @@ pub fn check(text: &str) -> Vec<ConfigProblem> {
             }
         }
     }
-    let admin = components(&root, SHELL).find_map(|c| c.at(&["UserAccounts", "AdministratorPassword"]));
-    let local = components(&root, SHELL).any(|c| c.at(&["UserAccounts", "LocalAccounts", "LocalAccount"]).is_some());
+    let admin = components(root, SHELL).find_map(|c| c.at(&["UserAccounts", "AdministratorPassword"]));
+    let local = components(root, SHELL).any(|c| c.at(&["UserAccounts", "LocalAccounts", "LocalAccount"]).is_some());
     if admin.is_none() && !local {
         out.push(ConfigProblem::error(
             None,
             "No account to sign in with: give the Administrator a password in the form.",
         ));
     }
-    if component(&root, "oobeSystem", SHELL)
+    if component(root, "oobeSystem", SHELL)
         .and_then(|c| c.child("OOBE"))
         .is_none()
     {
@@ -187,7 +210,7 @@ pub fn check(text: &str) -> Vec<ConfigProblem> {
             "Windows asks its first-start questions: hide them under oobeSystem's OOBE.",
         ));
     }
-    let commands: Vec<String> = all(&root, "CommandLine")
+    let commands: Vec<String> = all(root, "CommandLine")
         .iter()
         .map(|c| c.trimmed().to_ascii_lowercase())
         .collect();

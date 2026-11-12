@@ -383,6 +383,97 @@ fn every_way_of_writing_a_password_into_the_file_is_refused() {
 }
 
 #[test]
+fn a_syntax_error_elsewhere_never_lets_a_password_be_saved() {
+    // Re-review of #88: autoinstall and cloud-init returned before their secret lint on any syntax error.
+    let cases: Vec<(&str, InstallKind, String)> = vec![
+        (
+            "autoinstall without its header, a merge key",
+            InstallKind::Autoinstall,
+            "autoinstall:\n  version: 1\n  identity:\n    hostname: h\n    username: u\n    <<: {password: probe-pw}\n".into(),
+        ),
+        (
+            "autoinstall without its header, user-data's password",
+            InstallKind::Autoinstall,
+            "autoinstall:\n  version: 1\n  user-data:\n    password: probe-pw\n".into(),
+        ),
+        (
+            "autoinstall with its header, a merge key",
+            InstallKind::Autoinstall,
+            "#cloud-config\nautoinstall:\n  version: 1\n  identity:\n    hostname: h\n    username: u\n    <<: {password: probe-pw}\n".into(),
+        ),
+        (
+            "autoinstall with no section, identity's password",
+            InstallKind::Autoinstall,
+            "#cloud-config\nidentity:\n  hostname: h\n  username: u\n  password: probe-pw\n".into(),
+        ),
+        (
+            "autoinstall's second document",
+            InstallKind::Autoinstall,
+            "#cloud-config\nautoinstall:\n  version: 1\n---\nautoinstall:\n  identity:\n    password: probe-pw\n".into(),
+        ),
+        (
+            "the installer's own user data around the section",
+            InstallKind::Autoinstall,
+            "autoinstall:\n  version: 1\npassword: probe-pw\n".into(),
+        ),
+        (
+            "cloud-init in two documents",
+            InstallKind::CloudInit,
+            "#cloud-config\nusers:\n  - name: bob\n    plain_text_passwd: probe-pw\n---\nx: 1\n".into(),
+        ),
+        (
+            "cloud-init's second document",
+            InstallKind::CloudInit,
+            "#cloud-config\nx: 1\n---\nusers:\n  - name: bob\n    plain_text_passwd: probe-pw\n".into(),
+        ),
+        (
+            "cloud-init without its header",
+            InstallKind::CloudInit,
+            "users:\n  - name: bob\n    plain_text_passwd: probe-pw\n".into(),
+        ),
+        (
+            "kickstart with a bad line",
+            InstallKind::Kickstart,
+            "text\nlang \"unclosed\nrootpw --plaintext probe-pw\nreboot\n".into(),
+        ),
+        (
+            "preseed with a bad line",
+            InstallKind::Preseed,
+            "d-i\nd-i passwd/root-password password probe-pw\n".into(),
+        ),
+        (
+            "unattend with another root",
+            InstallKind::Unattend,
+            "<answers><AdministratorPassword><Value>probe-pw</Value></AdministratorPassword></answers>".into(),
+        ),
+    ];
+    for (what, kind, body) in cases {
+        let problems = check(&spec(kind, &body), &CheckFacts::default());
+        assert!(problems.iter().any(|p| p.blocks_saving), "{what}: {problems:?}");
+    }
+    // YAML or XML that doesn't read at all can't be checked, so it isn't saved either.
+    for (kind, body) in [
+        (
+            InstallKind::Autoinstall,
+            "#cloud-config\nautoinstall:\n  version: 1\n  identity: [\n    password: probe-pw\n",
+        ),
+        (
+            InstallKind::CloudInit,
+            "#cloud-config\nusers: [\n  - plain_text_passwd: probe-pw\n",
+        ),
+        (InstallKind::Unattend, "<unattend><Password>probe-pw</unattend>"),
+    ] {
+        let problems = check(&spec(kind, body), &CheckFacts::default());
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.blocks_saving && p.message.contains("can't read this file")),
+            "{kind:?}: {problems:?}"
+        );
+    }
+}
+
+#[test]
 fn hostile_files_check_quickly() {
     // MEDIUM: 240 KB of `{{` took 25 s and gave 120,000 problems.
     for (kind, body) in [

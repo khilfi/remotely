@@ -141,16 +141,26 @@ pub fn syntax(text: &str) -> Vec<ConfigProblem> {
 /// What cloud-init would make of the file: syntax, its keys and types, secrets written into it, and lock-outs.
 pub fn check(text: &str) -> Vec<ConfigProblem> {
     let mut out = syntax(text);
+    let parsed = match yaml::parse(text) {
+        Ok(parsed) => parsed,
+        Err(err) => {
+            out.push(unreadable_for_secrets(err.line));
+            return out;
+        }
+    };
+    // Secrets first, in every document, whatever else is wrong (review of #88: a syntax error skipped them).
+    out.extend(unread_shapes(&parsed));
+    for (i, doc) in parsed.docs.iter().enumerate() {
+        if doc.is_map() {
+            out.extend(user_data_checks(doc, "", i == 0));
+        }
+    }
     if out
         .iter()
-        .any(|p| p.severity == super::Severity::Error && p.line != Some(1))
+        .any(|p| p.severity == super::Severity::Error && !p.blocks_saving && p.line != Some(1))
     {
         return out;
     }
-    let Ok(parsed) = yaml::parse(text) else {
-        return out;
-    };
-    out.extend(unread_shapes(&parsed));
     for (line, key) in &parsed.duplicates {
         out.push(ConfigProblem::warning(
             Some(*line),
@@ -169,8 +179,15 @@ pub fn check(text: &str) -> Vec<ConfigProblem> {
         }
     }
     out.extend(types(root));
-    out.extend(user_data_checks(root, "", true));
     out
+}
+
+/// YAML that doesn't parse can't be checked for a password written into it, so it isn't saved (review of #88).
+pub(crate) fn unreadable_for_secrets(line: u32) -> ConfigProblem {
+    ConfigProblem::secret(
+        Some(line),
+        "Remotely can't read this file's YAML to check it for passwords, so it can't be saved until the YAML reads.",
+    )
 }
 
 fn types(root: &Node) -> Vec<ConfigProblem> {

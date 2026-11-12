@@ -304,13 +304,26 @@ pub fn syntax(text: &str) -> Vec<ConfigProblem> {
 /// Syntax, Ubuntu's schema, secrets in the file and lock-outs.
 pub fn check(text: &str) -> Vec<ConfigProblem> {
     let mut out = syntax(text);
-    if out.iter().any(|p| p.severity == Severity::Error) {
+    let parsed = match yaml::parse(text) {
+        Ok(parsed) => parsed,
+        Err(err) => {
+            out.push(super::cloud_init::unreadable_for_secrets(err.line));
+            return out;
+        }
+    };
+    // Secrets first, in every document, whatever else is wrong (review of #88: a syntax error skipped them): the
+    // autoinstall section, or the document itself when it has none, and the user data around it, which cloud-init
+    // applies to the installer's own system.
+    out.extend(super::cloud_init::unread_shapes(&parsed));
+    for doc in &parsed.docs {
+        out.extend(secrets(section(doc).map_or(doc, |(ai, _)| ai)));
+        if doc.is_map() && section(doc).is_some_and(|(_, path)| !path.is_empty()) {
+            out.extend(user_data_checks(doc, "", false));
+        }
+    }
+    if out.iter().any(|p| p.severity == Severity::Error && !p.blocks_saving) {
         return out;
     }
-    let Ok(parsed) = yaml::parse(text) else {
-        return out;
-    };
-    out.extend(super::cloud_init::unread_shapes(&parsed));
     for (line, key) in &parsed.duplicates {
         out.push(ConfigProblem::warning(
             Some(*line),
@@ -333,19 +346,10 @@ pub fn check(text: &str) -> Vec<ConfigProblem> {
     out
 }
 
-fn lint(ai: &Node) -> Vec<ConfigProblem> {
+/// Passwords and hashes written into an autoinstall section (or a document read as one): identity's, the disk's
+/// passphrase, and everything in its user-data.
+fn secrets(ai: &Node) -> Vec<ConfigProblem> {
     let mut out = Vec::new();
-    let interactive = cloud_init_texts(ai.get("interactive-sections"));
-    if !interactive.is_empty() {
-        out.push(ConfigProblem::warning(
-            ai.get("interactive-sections").map(|n| n.line),
-            format!(
-                "The installer stops to ask about {}: an unattended deploy would wait.",
-                interactive.join(", ")
-            ),
-        ));
-    }
-    // Secrets.
     if let Some(p) = ai.at(&["identity", "password"]) {
         let value = p.text().unwrap_or_default();
         if !value.is_empty() && !is_sample_secret(value) {
@@ -366,6 +370,24 @@ fn lint(ai: &Node) -> Vec<ConfigProblem> {
             "The disk's encryption passphrase would sit in the file in plain text: Remotely's configs can't hold one.",
         ));
     }
+    if let Some(ud) = ai.get("user-data").filter(|u| u.is_map()) {
+        out.extend(user_data_checks(ud, "user-data.", false));
+    }
+    out
+}
+
+fn lint(ai: &Node) -> Vec<ConfigProblem> {
+    let mut out = Vec::new();
+    let interactive = cloud_init_texts(ai.get("interactive-sections"));
+    if !interactive.is_empty() {
+        out.push(ConfigProblem::warning(
+            ai.get("interactive-sections").map(|n| n.line),
+            format!(
+                "The installer stops to ask about {}: an unattended deploy would wait.",
+                interactive.join(", ")
+            ),
+        ));
+    }
     for key in ["ubuntu-pro", "ubuntu-advantage"] {
         if let Some(t) = ai.at(&[key, "token"]) {
             out.push(ConfigProblem::warning(
@@ -375,9 +397,6 @@ fn lint(ai: &Node) -> Vec<ConfigProblem> {
         }
     }
     let user_data = ai.get("user-data").filter(|u| u.is_map());
-    if let Some(ud) = user_data {
-        out.extend(user_data_checks(ud, "user-data.", false));
-    }
     // Lock-outs.
     let identity = ai.get("identity");
     let ud_users = user_data
