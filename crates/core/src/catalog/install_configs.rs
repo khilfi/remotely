@@ -34,6 +34,13 @@ pub struct PreviewVm {
     pub values: BTreeMap<String, String>,
 }
 
+/// A check off the runtime's threads: a 256 KB file can take a while to read (review of #88).
+async fn blocking<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> Result<T> {
+    tokio::task::spawn_blocking(f)
+        .await
+        .map_err(|err| CoreError::InvalidInput(format!("the install config couldn't be checked: {err}")))
+}
+
 fn body_hash(body: &str) -> String {
     hex::encode(Sha256::digest(body.as_bytes()))
 }
@@ -132,13 +139,8 @@ impl Catalog {
     /// The workspace's own configs, by name, each checked.
     pub(crate) async fn own_install_configs(&self, ctx: &Context) -> Result<Vec<InstallConfig>> {
         let facts = self.check_facts(ctx, None).await?;
-        Ok(self
-            .store
-            .list_install_configs(ctx)
-            .await?
-            .into_iter()
-            .map(|row| Self::checked(row, &facts))
-            .collect())
+        let rows = self.store.list_install_configs(ctx).await?;
+        blocking(move || rows.into_iter().map(|row| Self::checked(row, &facts)).collect()).await
     }
 
     /// The starters, then the workspace's own by name.
@@ -159,7 +161,7 @@ impl Catalog {
         let uuid = Uuid::parse_str(id.trim()).map_err(|_| CoreError::UnknownTarget(format!("install config {id}")))?;
         let row = self.config_row(ctx, uuid).await?;
         let facts = self.check_facts(ctx, None).await?;
-        Ok(Self::checked(row, &facts))
+        blocking(move || Self::checked(row, &facts)).await
     }
 
     async fn config_row(&self, ctx: &Context, id: Uuid) -> Result<InstallConfigRow> {
@@ -183,7 +185,7 @@ impl Catalog {
         let facts = self.check_facts(ctx, size_id).await?;
         let body = input.body.replace("\r\n", "\n");
         let spec = InstallConfigInput { body, ..input.clone() };
-        Ok(install::check_all(&spec, &facts))
+        blocking(move || install::check_all(&spec, &facts)).await
     }
 
     /// One VM's file as the editor and the deploy dialog show it: every value written and every secret masked
@@ -221,7 +223,7 @@ impl Catalog {
             body: input.body.replace("\r\n", "\n"),
             ..input.clone()
         };
-        install::render::preview(&spec, &values, &public)
+        blocking(move || install::render::preview(&spec, &values, &public)).await?
     }
 
     pub async fn add_install_config(&self, ctx: &Context, input: InstallConfigInput) -> Result<InstallConfig> {
@@ -250,7 +252,11 @@ impl Catalog {
     ) -> Result<InstallConfig> {
         let spec = install::check_input(&input)?;
         let facts = self.check_facts(ctx, None).await?;
-        let secrets: Vec<String> = install::check(&spec, &facts)
+        let checked = {
+            let (spec, facts) = (spec.clone(), facts.clone());
+            blocking(move || install::check(&spec, &facts)).await?
+        };
+        let secrets: Vec<String> = checked
             .into_iter()
             .filter(|p| p.blocks_saving)
             .map(|p| match p.line {
@@ -302,7 +308,8 @@ impl Catalog {
                     .ok_or_else(|| CoreError::UnknownTarget(format!("install config {id}")))?;
                 let changed = changes(&before.spec, &spec);
                 if changed.is_empty() {
-                    return Ok(Self::checked(before.clone(), &facts));
+                    let (row, facts) = (before.clone(), facts.clone());
+                    return blocking(move || Self::checked(row, &facts)).await;
                 }
                 self.store.update_install_config(ctx, id, &spec).await?;
                 (id, changed.join("; "))
@@ -322,7 +329,7 @@ impl Catalog {
         self.audit(ctx, &format!("{verb} the install config '{}'", spec.name), &detail)
             .await?;
         let row = self.config_row(ctx, id).await?;
-        Ok(Self::checked(row, &facts))
+        blocking(move || Self::checked(row, &facts)).await
     }
 
     /// To the trash; launch templates that use it say so until they get another.

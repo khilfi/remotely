@@ -170,10 +170,10 @@ pub fn check(text: &str) -> Vec<ConfigProblem> {
         }
         seen.push(&e.question);
         let at = line_no(e.start);
-        if PLAIN_PASSWORDS.contains(&e.question.as_str()) && !e.value.is_empty() {
+        if PLAIN_PASSWORDS.contains(&e.question.to_ascii_lowercase().as_str()) && !e.value.is_empty() {
             out.push(ConfigProblem::secret(at, format!("{} holds a password in plain text: a config never keeps one. Use the -crypted question with {{{{password.<name>}}}}.", e.question)));
         }
-        if CRYPTED.contains(&e.question.as_str())
+        if CRYPTED.contains(&e.question.to_ascii_lowercase().as_str())
             && !e.value.is_empty()
             && !is_sample_secret(&e.value)
             && e.value != "!"

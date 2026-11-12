@@ -277,23 +277,33 @@ crates/core/          remotely-core: all app logic
                       to a vault id), check (placeholders, then the kind's syntax, schema and lint on a sample render:
                       SAMPLE_HASH, SAMPLE_ONE_TIME, SAMPLE_KEY), check_input, read_form/apply_form (only changed fields,
                       only their lines), protect/restore (placeholders as private-use tokens for the YAML reader);
-                      vars.rs `{{hostname}}` `{{ip}}` `{{n}}` `{{template}}` `{{date}}`, `\{{` escapes, check_value
-                      (one line; text kinds refuse quotes, `$`, `;`, `#`, braces...; XML escaped); form.rs InstallForm
+                      hidden_break: a line break only Python reads (U+0085, U+2028, U+2029, a lone CR, VT, FF...) in a
+                      file of any kind but unattend refuses saving and render, as the installer would see lines the
+                      checks don't; the service runs the checks on spawn_blocking;
+                      vars.rs `{{hostname}}` `{{ip}}` `{{n}}` `{{template}}` `{{date}}`, `\{{` escapes, split (linear, at
+                      most MAX_ERRORS, 50), check_value (one line, no white space but a plain space; text kinds refuse
+                      quotes, `$`, `;`, `#`, braces...; YAML kinds a leading `-` `!` `*` `[` and the like; XML
+                      escaped); form.rs InstallForm
                       (the common parts) and FieldState per kind; render.rs the pure per-VM render (Random: salts and
                       one-time passwords; SHA-512 crypt through sha-crypt, a fresh 12-byte salt each render; Windows: a
                       24-character one-time password returned in Rendered.one_time for G6 to replace over WinRM; the
                       rendered file a SecretString checked again as its kind; only the config's name and SHA-256 are
                       loggable) and preview (`$6$••••••••`); yaml.rs saphyr-parser events into a tree with lines,
-                      PyYAML's YAML 1.1 scalars, caps (50,000 nodes, 64 deep), an emitter, and `set` (one key changed in
+                      PyYAML's YAML 1.1 scalars, caps (50,000 nodes, 64 deep), `<<` merge keys and tags recorded
+                      (cloud_init::unread_shapes refuses both: PyYAML reads them, the tree doesn't), an emitter, and
+                      `set` (one key changed in
                       place, verified by parsing again); autoinstall.rs Ubuntu's schema as code (SCHEMA), lint (no user,
                       no SSH server, password logins off with no key, interactive sections, secrets), the form;
-                      cloud_init.rs `#cloud-config`, known modules, users (lock_passwd's default), secrets, the form;
+                      cloud_init.rs `#cloud-config`, known modules, users (lock_passwd's default), secrets (write_files'
+                      b64 content decoded, gzip refused), the form;
                       kickstart.rs pykickstart's words, COMMANDS and REMOVED, sections, autopart vs part, sources, rootpw
-                      and user passwords (--iscrypted), RHEL 9's root SSH rule, the form by lines; preseed.rs
+                      and user passwords (--iscrypted; a locked rootpw's too), option prefixes read as argparse does
+                      (full_option: `--pa` is `--password`), RHEL 9's root SSH rule, the form by lines; preseed.rs
                       `owner question type value` lines with continuations, plain and crypted passwords, what the
                       installer would ask; unattend.rs passes, components, passwords (PlainText), what Setup would ask,
                       WinRM over HTTPS, the form by element; xml.rs a strict XML reader (one root, matching tags, five
-                      entities, no DOCTYPE; 64 deep, 20,000 elements) with byte spans and set_text; starters.rs the
+                      entities, no DOCTYPE; 64 deep, 20,000 elements, 256 attributes) with byte spans and set_text;
+                      starters.rs the
                       read-only library (Ubuntu 24.04 minimal and with Docker, Rocky 9, Alma 9, Debian 12, Windows Server
                       2022 and 2025 with WinRM over HTTPS, a cloud image's first boot) from starters/*
     deploy/           VM-21, VM-22, VM-10 deploy. spec.rs DeploySpec: what is approved is what runs (Command::Deploy,
@@ -778,7 +788,8 @@ crates/core/          remotely-core: all app logic
                       zxcvbn-style score of at least 3 of 4: common passwords and words, repeats, sequences,
                       keyboard rows, years and dates; hints never quote it), passphrase.rs (Generate: six words from
                       a built-in list of 1327, the OS CSPRNG)
-    store/            install_configs.rs (VM-28 rows, migration 0035); jobs.rs: the journal stores
+    store/            install_configs.rs (VM-28 rows, migration 0035; install_configs_upgrade_tests.rs a database at
+                      0033 with trash rows of every kind, opened by 0035's trash rebuild); jobs.rs: the journal stores
                       Command::for_journal (scripts and lines redacted), command_type
                       (migration 0017) for the lists, which pick a page of ids on an index first (AP-03, BX-03);
                       purge_job_bodies and redact_old_commands; audit.rs redacts every entry's text before hashing it,

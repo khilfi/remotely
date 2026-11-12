@@ -180,6 +180,43 @@ const SOURCES: &[&str] = &[
     "bootc",
 ];
 
+/// Options without a value.
+const FLAG_OPTIONS: &[&str] = &[
+    "iscrypted",
+    "plaintext",
+    "lock",
+    "allow-ssh",
+    "sshkey",
+    "activate",
+    "noswap",
+    "utc",
+    "nochroot",
+    "grow",
+    "encrypted",
+    "all",
+    "initlabel",
+    "eject",
+    "noipv6",
+    "nodefroute",
+    "nontp",
+    "disable",
+    "enable",
+    "erroronfail",
+];
+
+/// An option as Anaconda reads it: pykickstart's argparse takes an unambiguous prefix of a known option (`--pa` is
+/// `--password`), so the checks read it whole too (review of #88). An unknown or ambiguous one stays as written.
+fn full_option(name: &str) -> String {
+    if name.len() < 2 || VALUE_OPTIONS.contains(&name) || FLAG_OPTIONS.contains(&name) {
+        return name.to_owned();
+    }
+    let mut matches = VALUE_OPTIONS.iter().chain(FLAG_OPTIONS).filter(|o| o.starts_with(name));
+    match (matches.next(), matches.next()) {
+        (Some(only), None) => (*only).to_owned(),
+        _ => name.to_owned(),
+    }
+}
+
 /// A line split into words as pykickstart does; an unclosed quote is an error.
 pub(crate) fn words(line: &str) -> Result<Vec<String>, String> {
     let mut out = Vec::new();
@@ -284,12 +321,14 @@ impl Args {
             let w = &words[i];
             if let Some(opt) = w.strip_prefix("--") {
                 match opt.split_once('=') {
-                    Some((name, value)) => out.options.push((name.to_owned(), Some(value.to_owned()))),
-                    None if VALUE_OPTIONS.contains(&opt) && words.get(i + 1).is_some_and(|n| !n.starts_with("--")) => {
-                        out.options.push((opt.to_owned(), words.get(i + 1).cloned()));
+                    Some((name, value)) => out.options.push((full_option(name), Some(value.to_owned()))),
+                    None if VALUE_OPTIONS.contains(&full_option(opt).as_str())
+                        && words.get(i + 1).is_some_and(|n| !n.starts_with("--")) =>
+                    {
+                        out.options.push((full_option(opt), words.get(i + 1).cloned()));
                         i += 1;
                     }
-                    None => out.options.push((opt.to_owned(), None)),
+                    None => out.options.push((full_option(opt), None)),
                 }
             } else {
                 out.positional.push(w.clone());
@@ -582,11 +621,10 @@ pub fn check(text: &str) -> Vec<ConfigProblem> {
         let at = line_no(c.at);
         let crypted = c.args.has("iscrypted");
         let (what, value) = match c.name.as_str() {
-            "rootpw" if !c.args.has("lock") => ("rootpw", c.args.positional.first().map(String::as_str)),
+            // Locked or not, a password written here is kept in the file (review of #88).
+            "rootpw" => ("rootpw", c.args.positional.first().map(String::as_str)),
             "user" => ("user's --password", c.args.get("password")),
-            "sshpw" if !c.args.has("sshkey") && !c.args.has("lock") => {
-                ("sshpw", c.args.positional.first().map(String::as_str))
-            }
+            "sshpw" if !c.args.has("sshkey") => ("sshpw", c.args.positional.first().map(String::as_str)),
             "bootloader" => ("bootloader's --password", c.args.get("password")),
             _ => continue,
         };

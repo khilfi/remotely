@@ -394,12 +394,20 @@ fn sample(kind: InstallKind, spec: &InstallConfigInput, p: &Placeholder) -> Stri
         Placeholder::BuiltIn("n") => "1".into(),
         Placeholder::BuiltIn("date") => "20260101".into(),
         Placeholder::BuiltIn(_) => "template".into(),
-        Placeholder::Own(name) => spec
-            .variables
-            .iter()
-            .find(|v| v.name == *name)
-            .and_then(|v| v.default.clone())
-            .unwrap_or_else(|| "value".into()),
+        Placeholder::Own(name) => {
+            let value = spec
+                .variables
+                .iter()
+                .find(|v| v.name == *name)
+                .and_then(|v| v.default.clone())
+                .unwrap_or_else(|| "value".into());
+            // As render writes it: escaped in XML (review of #88: `Example & Co` was a false error).
+            if kind == InstallKind::Unattend {
+                xml::escape(&value)
+            } else {
+                value
+            }
+        }
         Placeholder::Password(_) if kind.windows() => SAMPLE_ONE_TIME.into(),
         Placeholder::Password(_) => SAMPLE_HASH.into(),
         Placeholder::SshKey(_) => SAMPLE_KEY.into(),
@@ -430,8 +438,36 @@ pub(crate) fn looks_hashed(value: &str) -> bool {
 }
 
 /// Everything a check finds in `spec`'s file, in line order.
+/// Characters Python reads as line breaks (PyYAML for Subiquity and cloud-init: U+0085, U+2028, U+2029; `str.splitlines`
+/// also the rest) where Remotely's own readers see none, so a line hidden behind one would reach only the installer.
+const HIDDEN_BREAKS: [char; 9] = [
+    '\r', '\u{000b}', '\u{000c}', '\u{001c}', '\u{001d}', '\u{001e}', '\u{0085}', '\u{2028}', '\u{2029}',
+];
+
+/// A line break only Python sees, in a file of a kind Python reads (every kind but Windows' XML): refused, so the
+/// checks see the lines the installer will (review of #88).
+pub(crate) fn hidden_break(kind: InstallKind, text: &str) -> Option<ConfigProblem> {
+    if kind == InstallKind::Unattend {
+        return None;
+    }
+    let (at, c) = text.char_indices().find(|(_, c)| HIDDEN_BREAKS.contains(c))?;
+    let line = u32::try_from(text[..at].matches('\n').count() + 1).ok();
+    Some(ConfigProblem::secret(
+        line,
+        format!(
+            "The file holds U+{:04X}, which the installer reads as a line break and Remotely's checks don't: \
+             write a plain line break instead.",
+            u32::from(c)
+        ),
+    ))
+}
+
 pub fn check(spec: &InstallConfigInput, facts: &CheckFacts) -> Vec<ConfigProblem> {
     let mut problems = Vec::new();
+    if let Some(problem) = hidden_break(spec.kind, &spec.body) {
+        // Nothing else can be read as the installer would.
+        return vec![problem];
+    }
     let pieces = match vars::split(&spec.body) {
         Ok(pieces) => pieces,
         Err(errors) => {
@@ -585,9 +621,11 @@ pub(crate) fn protect(text: &str) -> Option<(String, Vec<String>)> {
     let mut rest = text;
     while let Some(open) = rest.find("{{") {
         let after = &rest[open + 2..];
-        let Some(close) = after.find("}}").filter(|c| !after[..*c].contains('\n')) else {
-            out.push_str(&rest[..open + 2]);
-            rest = after;
+        // Within its own line only; an unclosed `{{` leaves the rest of the line as it is (linear: review of #88).
+        let line_end = after.find('\n').unwrap_or(after.len());
+        let Some(close) = after[..line_end].find("}}") else {
+            out.push_str(&rest[..open + 2 + line_end]);
+            rest = &after[line_end..];
             continue;
         };
         out.push_str(&rest[..open]);
@@ -692,7 +730,8 @@ pub fn changed_fields(a: &InstallForm, b: &InstallForm) -> Vec<FormField> {
 /// One line each, no control characters; the values a form field takes.
 fn check_form(kind: InstallKind, form: &InstallForm) -> Result<()> {
     let one_line = |what: &str, v: &str| -> Result<()> {
-        if v.chars().any(|c| c.is_control() || untrusted::is_format_char(c)) || v.chars().count() > 2000 {
+        let bad = |c: char| c.is_control() || untrusted::is_format_char(c) || (c.is_whitespace() && c != ' ');
+        if v.chars().any(bad) || v.chars().count() > 2000 {
             return invalid(format!("{what} has to be one line of text."));
         }
         Ok(())
@@ -720,6 +759,9 @@ fn check_form(kind: InstallKind, form: &InstallForm) -> Result<()> {
         }
         if kind != InstallKind::Autoinstall && kind != InstallKind::CloudInit && c.contains('\n') {
             return invalid("Each command after the install is one line here.");
+        }
+        if c.contains(HIDDEN_BREAKS) || c.chars().any(|ch| ch.is_control() && ch != '\n' && ch != '\t') {
+            return invalid("A command after the install holds a line break the installer would read differently.");
         }
     }
     for u in &form.users {

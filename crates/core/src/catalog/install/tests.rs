@@ -222,3 +222,220 @@ fn kinds_round_trip_their_names() {
     );
     assert_eq!(ref_name("x", vars::PASSWORD_PREFIX), None);
 }
+
+// ---- Review of #88: the reviewer's probes, as regression tests ------------------------------------------------------
+
+fn render_vm() -> render::VmValues {
+    render::VmValues {
+        hostname: "web-1".into(),
+        ip: Some("192.0.2.21".into()),
+        n: 1,
+        template: "web".into(),
+        date: time::macros::date!(2026 - 11 - 12),
+        values: std::collections::BTreeMap::new(),
+    }
+}
+
+fn render_secrets() -> render::RenderSecrets {
+    let mut s = render::RenderSecrets::default();
+    s.passwords.insert(
+        "admin".into(),
+        crate::vault::SecretString::new(format!("Pw-{}", uuid::Uuid::new_v4().simple())),
+    );
+    s.ssh_keys.insert(
+        "admin".into(),
+        "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExample alice@example.com".into(),
+    );
+    s
+}
+
+fn with_var(kind: InstallKind, body: &str, var: &str, default: &str) -> InstallConfigInput {
+    InstallConfigInput {
+        name: "probe".into(),
+        kind,
+        body: body.into(),
+        variables: vec![VariableDef {
+            name: var.into(),
+            default: Some(default.into()),
+        }],
+        secrets: vec![
+            SecretRef {
+                name: "admin".into(),
+                kind: SecretRefKind::Password,
+                secret_id: None,
+            },
+            SecretRef {
+                name: "admin".into(),
+                kind: SecretRefKind::SshKey,
+                secret_id: None,
+            },
+        ],
+        notes: None,
+    }
+}
+
+#[test]
+fn a_unicode_line_separator_in_a_value_never_adds_lines_for_the_installer() {
+    // HIGH: PyYAML (Subiquity, cloud-init) and Python's splitlines read U+2028 as a line break; saphyr doesn't.
+    let ls = '\u{2028}';
+    let cases = [
+        (
+            InstallKind::CloudInit,
+            "#cloud-config\nhostname: \"{{hostname}}\"\nfqdn: {{v}}\n",
+            format!("example.com{ls}injected_key:{ls}- marker"),
+        ),
+        (
+            InstallKind::Autoinstall,
+            "#cloud-config\nautoinstall:\n  version: 1\n  locale: {{v}}\n  identity:\n    hostname: \"{{hostname}}\"\n    username: sysadmin\n    password: \"{{password.admin}}\"\n  ssh:\n    install-server: true\n    authorized-keys:\n      - \"{{ssh_key.admin}}\"\n",
+            format!("en_US.UTF-8{ls}  late-commands:{ls}  - marker"),
+        ),
+        (
+            InstallKind::Kickstart,
+            "text\nlang en_US.UTF-8\ntimezone {{v}} --utc\nrootpw --lock\nuser --name=sysadmin --iscrypted --password=\"{{password.admin}}\"\nreboot\n",
+            format!("Etc/UTC{ls}lang en_GB.UTF-8"),
+        ),
+    ];
+    for (kind, body, value) in cases {
+        // As a default, it is refused when saved.
+        let spec = with_var(kind, body, "v", &value);
+        assert!(check_input(&spec).is_err(), "{kind:?}: the default is refused");
+        // As a VM's own value, render refuses it.
+        let plain = with_var(kind, body, "v", "x");
+        let mut vm = render_vm();
+        vm.values.insert("v".into(), value.clone());
+        let err = render::render(&plain, &vm, &render_secrets(), &mut render::OsRandom).unwrap_err();
+        assert!(err.to_string().contains("line break"), "{kind:?}: {err}");
+    }
+    // Through the form, too.
+    let ubuntu = include_str!("starters/ubuntu-24.04-minimal.yaml");
+    let mut form = read_form(InstallKind::Autoinstall, ubuntu).form;
+    form.timezone = Some(format!("Etc/UTC{ls}late-commands: [reboot]"));
+    assert!(apply_form(InstallKind::Autoinstall, ubuntu, &form).is_err());
+    form.timezone = Some("Etc/UTC".into());
+    form.late_commands = vec![format!("echo a{ls}reboot")];
+    assert!(apply_form(InstallKind::Autoinstall, ubuntu, &form).is_err());
+}
+
+#[test]
+fn a_line_break_only_python_sees_in_the_file_refuses_saving() {
+    for sep in ['\u{2028}', '\u{2029}', '\u{0085}', '\u{000b}', '\u{000c}', '\r'] {
+        for kind in [
+            InstallKind::Autoinstall,
+            InstallKind::CloudInit,
+            InstallKind::Kickstart,
+            InstallKind::Preseed,
+        ] {
+            let body = format!("#cloud-config\nhostname: \"{{{{hostname}}}}\"\nruncmd:\n  - echo a{sep}  - reboot\n");
+            let problems = check(&spec(kind, &body), &CheckFacts::default());
+            assert_eq!(problems.len(), 1, "{kind:?} {sep:?}: {problems:?}");
+            assert!(
+                problems[0].blocks_saving && problems[0].line == Some(4),
+                "{kind:?} {sep:?}: {problems:?}"
+            );
+        }
+    }
+    // Windows' XML reads them as text.
+    let xml = "<unattend xmlns=\"urn:schemas-microsoft-com:unattend\"><a>x\u{2028}y</a></unattend>";
+    assert!(!check(&spec(InstallKind::Unattend, xml), &CheckFacts::default())
+        .iter()
+        .any(|p| p.blocks_saving));
+}
+
+#[test]
+fn every_way_of_writing_a_password_into_the_file_is_refused() {
+    // MEDIUM: merge keys and separators hid a password from the lint, and FD-07's import goes through the same gate.
+    let ci = |rest: &str| format!("#cloud-config\nhostname: \"{{{{hostname}}}}\"\n{rest}");
+    let ai = |rest: &str| format!("#cloud-config\nautoinstall:\n  version: 1\n{rest}");
+    let xml = |inner: &str| {
+        format!("<unattend xmlns=\"urn:schemas-microsoft-com:unattend\"><settings pass=\"oobeSystem\"><component name=\"Microsoft-Windows-Shell-Setup\" processorArchitecture=\"amd64\">{inner}</component></settings></unattend>")
+    };
+    let cases: Vec<(&str, InstallKind, String)> = vec![
+        ("cloud-init plain_text_passwd", InstallKind::CloudInit, ci("users:\n  - name: bob\n    plain_text_passwd: probe-pw\n")),
+        ("cloud-init flow", InstallKind::CloudInit, ci("users: [{name: bob, plain_text_passwd: probe-pw}]\n")),
+        ("cloud-init merge key", InstallKind::CloudInit, ci("users:\n  - name: bob\n    <<: {plain_text_passwd: probe-pw}\n")),
+        ("cloud-init U+2028", InstallKind::CloudInit, ci("users:\n  - name: bob\n    shell: /bin/bash\u{2028}    plain_text_passwd:\u{2028}      probe-pw\n")),
+        ("cloud-init tag", InstallKind::CloudInit, ci("write_files:\n  - path: /x\n    content: !!binary |\n      LS0tLS1CRUdJTg==\n")),
+        // The marker is put together at run time, so no private key's header sits in the repo.
+        ("cloud-init private key", InstallKind::CloudInit, ci(&format!("write_files:\n  - path: /x\n    content: \"-----BEGIN OPENSSH {}-----\"\n", "PRIVATE KEY"))),
+        ("cloud-init private key b64", InstallKind::CloudInit, ci("write_files:\n  - path: /x\n    encoding: b64\n    content: LS0tLS1CRUdJTiBPUEVOU1NIIFBSSVZBVEUgS0VZLS0tLS0=\n")),
+        ("cloud-init gzip", InstallKind::CloudInit, ci("write_files:\n  - path: /x\n    encoding: gz+b64\n    content: H4sIAAAAAAAAAwMAAAAAAAAAAAA=\n")),
+        ("autoinstall identity merge", InstallKind::Autoinstall, ai("  identity:\n    hostname: \"{{hostname}}\"\n    username: u\n    <<: {password: probe-pw}\n")),
+        ("kickstart rootpw plaintext", InstallKind::Kickstart, "text\nlang en_US.UTF-8\nrootpw --plaintext probe-pw\nreboot\n".into()),
+        ("kickstart rootpw locked plaintext", InstallKind::Kickstart, "text\nlang en_US.UTF-8\nrootpw --lock --plaintext probe-pw\nreboot\n".into()),
+        ("kickstart --pa abbreviation", InstallKind::Kickstart, "text\nlang en_US.UTF-8\nuser --name=bob --plaintext --pa=probe-pw\nreboot\n".into()),
+        ("kickstart --password and a space", InstallKind::Kickstart, "text\nlang en_US.UTF-8\nuser --name=bob --plaintext --password probe-pw\nreboot\n".into()),
+        ("preseed plain", InstallKind::Preseed, "d-i passwd/root-password password probe-pw\n".into()),
+        ("preseed letter case", InstallKind::Preseed, "d-i passwd/Root-Password password probe-pw\n".into()),
+        ("unattend administrator", InstallKind::Unattend, xml("<UserAccounts><AdministratorPassword><Value>probe-pw</Value><PlainText>true</PlainText></AdministratorPassword></UserAccounts>")),
+        ("unattend local account", InstallKind::Unattend, xml("<UserAccounts><LocalAccounts><LocalAccount><Password><Value>probe-pw</Value><PlainText>true</PlainText></Password><Name>bob</Name></LocalAccount></LocalAccounts></UserAccounts>")),
+        ("unattend auto logon", InstallKind::Unattend, xml("<AutoLogon><Password><Value>probe-pw</Value><PlainText>true</PlainText></Password><Enabled>true</Enabled><Username>Administrator</Username></AutoLogon>")),
+        ("unattend domain join", InstallKind::Unattend, "<unattend xmlns=\"urn:schemas-microsoft-com:unattend\"><settings pass=\"specialize\"><component name=\"Microsoft-Windows-UnattendedJoin\" processorArchitecture=\"amd64\"><Identification><Credentials><Domain>example.com</Domain><Password>probe-pw</Password><Username>joiner</Username></Credentials></Identification></component></settings></unattend>".into()),
+    ];
+    for (what, kind, body) in cases {
+        let problems = check(&spec(kind, &body), &CheckFacts::default());
+        assert!(problems.iter().any(|p| p.blocks_saving), "{what}: {problems:?}");
+    }
+    // A locked root without a password is fine; a tag-free, merge-free file is too.
+    let ks = "text\nlang en_US.UTF-8\ntimezone Etc/UTC\nrootpw --lock\nuser --name=bob --lock\nsshkey --username=bob \"ssh-ed25519 AAAA bob@example.com\"\nreboot\n";
+    assert!(!check(&spec(InstallKind::Kickstart, ks), &CheckFacts::default())
+        .iter()
+        .any(|p| p.blocks_saving));
+}
+
+#[test]
+fn hostile_files_check_quickly() {
+    // MEDIUM: 240 KB of `{{` took 25 s and gave 120,000 problems.
+    for (kind, body) in [
+        (
+            InstallKind::CloudInit,
+            format!("#cloud-config\na: {}\n", "{{".repeat(120_000)),
+        ),
+        (InstallKind::Kickstart, format!("lang {}\n", "{{".repeat(120_000))),
+        (
+            InstallKind::CloudInit,
+            format!("#cloud-config\n{}", "a: {{\n".repeat(40_000)),
+        ),
+    ] {
+        let started = std::time::Instant::now();
+        let problems = check(&spec(kind, &body), &CheckFacts::default());
+        let _ = read_form(kind, &body);
+        assert!(problems.len() <= vars::MAX_ERRORS, "{kind:?}: {}", problems.len());
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(3),
+            "{kind:?}: {:?}",
+            started.elapsed()
+        );
+    }
+}
+
+#[test]
+fn values_starting_with_yaml_syntax_are_refused_in_yaml_files() {
+    let body = "#cloud-config\nhostname: \"{{hostname}}\"\nfqdn: {{d}}\n";
+    for value in ["!probe x", "*alias", "[a, b]", "- item", "@x"] {
+        let mut vm = render_vm();
+        vm.values.insert("d".into(), value.into());
+        let spec = with_var(InstallKind::CloudInit, body, "d", "example.com");
+        assert!(
+            render::render(&spec, &vm, &render_secrets(), &mut render::OsRandom).is_err(),
+            "{value}"
+        );
+    }
+}
+
+#[test]
+fn an_unattend_default_with_an_ampersand_checks_as_render_writes_it() {
+    // LOW: the sample wrote `Example & Co` raw, which the strict XML reader refused.
+    let body = include_str!("starters/windows-server-2022.xml");
+    let mut s = starters::spec(starters::find("starter.windows-server-2022").unwrap());
+    s.body = body.replace("\r\n", "\n");
+    for v in &mut s.variables {
+        if v.name == "organization" {
+            v.default = Some("Example & Co <IT>".into());
+        }
+    }
+    let errors: Vec<ConfigProblem> = check(&s, &CheckFacts::default())
+        .into_iter()
+        .filter(|p| p.severity == Severity::Error)
+        .collect();
+    assert!(errors.is_empty(), "{errors:?}");
+}

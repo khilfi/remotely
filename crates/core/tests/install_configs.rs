@@ -238,6 +238,20 @@ async fn a_secret_in_the_file_is_never_saved_and_the_audit_names_only_the_files_
         .body
         .replace("\"{{password.admin}}\"", "\"$6$abcdefgh$ijklmnopqrstuvwxyz0123\"");
     assert!(core.catalog.add_install_config(ctx, hashed).await.is_err());
+    // Review of #88: behind a YAML merge key, or a line break only the installer sees (FD-07's import saves the same way).
+    let mut merged = spec.clone();
+    merged.body = merged.body.replace(
+        "    password: \"{{password.admin}}\"",
+        &format!("    <<: {{password: \"{literal}\"}}"),
+    );
+    assert!(core.catalog.add_install_config(ctx, merged).await.is_err());
+    let mut hidden = spec.clone();
+    hidden.body = hidden.body.replace(
+        "  updates: security",
+        "  updates: security\u{2028}  late-commands: [reboot]",
+    );
+    let err = core.catalog.add_install_config(ctx, hidden).await.unwrap_err();
+    assert!(err.to_string().contains("U+2028"), "{err}");
     // A pick that isn't a vault password here.
     let mut stray = spec.clone();
     stray.secrets[0].secret_id = Some(remotely_core::vault::SecretId(Uuid::new_v4()));

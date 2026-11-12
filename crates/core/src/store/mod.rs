@@ -14,6 +14,8 @@ mod favourites;
 mod forwards;
 mod host_specs;
 mod install_configs;
+#[cfg(test)]
+mod install_configs_upgrade_tests;
 mod inventory;
 mod jobs;
 mod known_hosts;

@@ -310,6 +310,7 @@ pub fn check(text: &str) -> Vec<ConfigProblem> {
     let Ok(parsed) = yaml::parse(text) else {
         return out;
     };
+    out.extend(super::cloud_init::unread_shapes(&parsed));
     for (line, key) in &parsed.duplicates {
         out.push(ConfigProblem::warning(
             Some(*line),

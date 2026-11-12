@@ -11,6 +11,8 @@
 const MAX_DEPTH: usize = 64;
 /// Elements in all.
 const MAX_ELEMENTS: usize = 20_000;
+/// Attributes on one element (review of #88: 20,000 took 3.8 s to check for twins).
+const MAX_ATTRIBUTES: usize = 256;
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Element {
@@ -284,6 +286,7 @@ pub fn parse(text: &str) -> Result<Element, XmlError> {
         }
         i = name_end;
         let mut attrs: Vec<(String, String)> = Vec::new();
+        let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
         let self_closing;
         loop {
             let rest = &tag[i..];
@@ -329,7 +332,10 @@ pub fn parse(text: &str) -> Result<Element, XmlError> {
             if raw.contains('<') {
                 return Err(reader.err(pos + i, format!("{attr_name}'s value can't hold <.")));
             }
-            if attrs.iter().any(|(k, _)| k == attr_name) {
+            if attrs.len() >= MAX_ATTRIBUTES {
+                return Err(reader.err(start, format!("<{name}> has more than {MAX_ATTRIBUTES} attributes.")));
+            }
+            if !seen.insert(attr_name) {
                 return Err(reader.err(pos + i, format!("<{name}> has {attr_name} twice.")));
             }
             let value = unescape(&reader, pos + value_at + 1, raw)?;
@@ -468,5 +474,20 @@ mod tests {
         assert!(parse(&deep).unwrap_err().message.contains("64 deep"));
         let wide = format!("<r>{}</r>", "<a/>".repeat(20_001));
         assert!(parse(&wide).unwrap_err().message.contains("20,000"));
+        // Review of #88: 20,000 attributes took 3.8 s to check for twins.
+        let mut many = String::from("<unattend ");
+        for i in 0..20_000 {
+            many.push_str(&format!("a{i}='1' "));
+        }
+        many.push_str("/>");
+        let started = std::time::Instant::now();
+        assert!(parse(&many).unwrap_err().message.contains("more than 256 attributes"));
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(1),
+            "{:?}",
+            started.elapsed()
+        );
+        let fine: String = (0..256).map(|i| format!(" a{i}='1'")).collect();
+        assert!(parse(&format!("<a{fine}/>")).is_ok());
     }
 }

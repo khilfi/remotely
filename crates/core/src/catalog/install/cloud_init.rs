@@ -150,6 +150,7 @@ pub fn check(text: &str) -> Vec<ConfigProblem> {
     let Ok(parsed) = yaml::parse(text) else {
         return out;
     };
+    out.extend(unread_shapes(&parsed));
     for (line, key) in &parsed.duplicates {
         out.push(ConfigProblem::warning(
             Some(*line),
@@ -230,6 +231,27 @@ fn private_key_in(text: &str) -> bool {
     text.contains("PRIVATE KEY-----")
 }
 
+/// YAML that PyYAML reads differently from this tree (review of #88): a `<<` merge key, which PyYAML folds into its
+/// mapping (so a password behind one escaped the lint), and tags (`!!binary`, `!!python/...`, `!x`), which name types
+/// the checks don't know. Both refuse saving.
+pub(crate) fn unread_shapes(parsed: &yaml::Parsed) -> Vec<ConfigProblem> {
+    let mut out = Vec::new();
+    if let Some(line) = parsed.merges.first() {
+        out.push(ConfigProblem::secret(
+            Some(*line),
+            "A << merge key folds keys in that Remotely's checks can't see: write the keys out.",
+        ));
+    }
+    if let Some(line) = parsed.tags.first() {
+        out.push(ConfigProblem::secret(
+            Some(*line),
+            "A YAML tag (!...) names a type Remotely's checks don't read: write the value plainly (for write_files, \
+             use encoding: b64).",
+        ));
+    }
+    out
+}
+
 /// Secrets written into user data, and lock-outs. `prefix` names where the user data sits (`user-data.` inside an
 /// autoinstall); `whole` is false there, where the installer's identity may be the user that signs in.
 pub(crate) fn user_data_checks(root: &Node, prefix: &str, whole: bool) -> Vec<ConfigProblem> {
@@ -280,7 +302,36 @@ pub(crate) fn user_data_checks(root: &Node, prefix: &str, whole: bool) -> Vec<Co
         }
     }
     for f in root.get("write_files").map(Node::items).unwrap_or_default() {
-        if f.get("content").and_then(Node::text).is_some_and(private_key_in) {
+        let content = f.get("content").and_then(Node::text).unwrap_or_default();
+        let encoding = f
+            .get("encoding")
+            .and_then(Node::text)
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        // Review of #88: base64 content is decoded before it is looked at; gzip content can't be checked, so refused.
+        let decoded = match encoding.as_str() {
+            "b64" | "base64" => {
+                use base64::Engine;
+                let compact: String = content.chars().filter(|c| !c.is_whitespace()).collect();
+                Some(
+                    base64::engine::general_purpose::STANDARD
+                        .decode(compact.as_bytes())
+                        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+                        .unwrap_or_default(),
+                )
+            }
+            "gz" | "gzip" | "gz+base64" | "gzip+base64" | "gz+b64" | "gzip+b64" => {
+                out.push(ConfigProblem::secret(
+                    Some(f.line),
+                    format!(
+                        "{prefix}write_files has gzip content, which Remotely can't check for a private key: write it plain or as b64."
+                    ),
+                ));
+                continue;
+            }
+            _ => None,
+        };
+        if private_key_in(content) || decoded.as_deref().is_some_and(private_key_in) {
             out.push(ConfigProblem::secret(
                 Some(f.line),
                 format!("{prefix}write_files writes a private key: a config never keeps one."),

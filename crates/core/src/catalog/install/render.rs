@@ -271,6 +271,9 @@ pub fn render(
         zeroize::Zeroize::zeroize(v);
     }
     // The rendered file must still read as its kind: a value can't have broken it.
+    if let Some(problem) = super::hidden_break(spec.kind, text.expose()) {
+        return invalid(format!("The file rendered for {}: {}", vm.hostname, problem.message));
+    }
     let errors: Vec<ConfigProblem> = kind_check(spec.kind, text.expose())
         .into_iter()
         .filter(|p| p.severity == Severity::Error && !p.blocks_saving)
@@ -525,6 +528,25 @@ mod tests {
             preview(&w, &vm(), &keys).unwrap(),
             "<a><Value>••••••••</Value><N>web-1</N></a>"
         );
+    }
+
+    #[test]
+    fn hashes_match_glibc_crypt() {
+        // Made with `openssl passwd -6 -salt remotelykatsalt0 "remotely test vector"` (a test phrase, not a password).
+        let reference = "$6$remotelykatsalt0$2urCTNZla5uHqrpQtQhSm2yWLKjVA.xjosjhZKXZ7d0V2tCU1YCRyZoYNFeAMH9nunrh0EVxh5oSNE//e55m3.";
+        assert!(ShaCrypt::SHA512
+            .verify_password(b"remotely test vector", reference)
+            .is_ok());
+        assert!(ShaCrypt::SHA512
+            .verify_password(b"remotely test vectors", reference)
+            .is_err());
+        // And what render writes: rounds=5000 is glibc's default, spelled out.
+        let ours = hash_password("remotely test vector", &mut Counter(1)).unwrap();
+        let salt = ours.split('$').nth(3).unwrap();
+        assert_eq!(salt.len(), 16);
+        assert!(ShaCrypt::SHA512
+            .verify_password(b"remotely test vector", ours.as_str())
+            .is_ok());
     }
 
     #[test]

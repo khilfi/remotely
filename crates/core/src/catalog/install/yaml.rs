@@ -265,6 +265,8 @@ struct Builder {
     nodes: usize,
     error: Option<YamlError>,
     duplicates: Vec<(u32, String)>,
+    merges: Vec<u32>,
+    tags: Vec<u32>,
 }
 
 fn count(node: &Node) -> usize {
@@ -304,7 +306,12 @@ impl Builder {
                 None => {
                     let line = node.line;
                     match node.value {
-                        Value::Str(text, _) => *key = Some(text),
+                        Value::Str(text, style) => {
+                            if style == Style::Plain && text == "<<" {
+                                self.merges.push(line);
+                            }
+                            *key = Some(text);
+                        }
                         Value::Null => *key = Some(String::new()),
                         _ => self.fail(
                             line,
@@ -330,7 +337,10 @@ impl<'input> SpannedEventReceiver<'input> for Builder {
         }
         let line = u32::try_from(span.start.line()).unwrap_or(u32::MAX);
         match ev {
-            Event::Scalar(text, style, anchor, _tag) => {
+            Event::Scalar(text, style, anchor, tag) => {
+                if tag.is_some() {
+                    self.tags.push(line);
+                }
                 let style = match style {
                     ScalarStyle::Plain => Style::Plain,
                     ScalarStyle::SingleQuoted | ScalarStyle::DoubleQuoted => Style::Quoted,
@@ -343,7 +353,10 @@ impl<'input> SpannedEventReceiver<'input> for Builder {
                 };
                 self.add(Node { line, value }, anchor);
             }
-            Event::SequenceStart(anchor, _) => {
+            Event::SequenceStart(anchor, tag) => {
+                if tag.is_some() {
+                    self.tags.push(line);
+                }
                 if self.stack.len() >= MAX_DEPTH {
                     self.fail(line, "The file nests lists and mappings more than 64 deep.");
                     return;
@@ -354,7 +367,10 @@ impl<'input> SpannedEventReceiver<'input> for Builder {
                     items: Vec::new(),
                 });
             }
-            Event::MappingStart(anchor, _) => {
+            Event::MappingStart(anchor, tag) => {
+                if tag.is_some() {
+                    self.tags.push(line);
+                }
                 if self.stack.len() >= MAX_DEPTH {
                     self.fail(line, "The file nests lists and mappings more than 64 deep.");
                     return;
@@ -399,6 +415,10 @@ impl<'input> SpannedEventReceiver<'input> for Builder {
 pub struct Parsed {
     pub docs: Vec<Node>,
     pub duplicates: Vec<(u32, String)>,
+    /// Lines of `<<` merge keys, which PyYAML resolves and this tree doesn't.
+    pub merges: Vec<u32>,
+    /// Lines of tagged values (`!!binary`, `!!python/...`, `!x`).
+    pub tags: Vec<u32>,
 }
 
 /// Every document of `text`, or the first reason it isn't YAML (with its line).
@@ -418,6 +438,8 @@ pub fn parse(text: &str) -> Result<Parsed, YamlError> {
     Ok(Parsed {
         docs: builder.docs,
         duplicates: builder.duplicates,
+        merges: builder.merges,
+        tags: builder.tags,
     })
 }
 
