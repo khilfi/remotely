@@ -777,9 +777,14 @@ impl JobRunner {
         *locks::write(&self.converter) = Some(converter);
     }
 
-    /// VM-31: what copies an attached disk into its VM's folder.
-    pub fn set_vm_converter(&self, converter: Arc<crate::convert::Converter>) {
-        self.vm_editor.set_converter(converter);
+    /// VM-31: what copies an attached disk into its VM's folder, and the inventory whose unassigned VMs' disks an
+    /// attach refuses too.
+    pub fn set_attach_tools(
+        &self,
+        converter: Arc<crate::convert::Converter>,
+        inventory: Arc<crate::inventory::Inventory>,
+    ) {
+        self.vm_editor.set_attach_tools(converter, inventory);
     }
 
     /// FD-04: what writes support bundles.

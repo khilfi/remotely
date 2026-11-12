@@ -58,9 +58,11 @@ use crate::convert::inspect::ImageInfo;
 use crate::convert::Converter;
 use crate::domain::{Context, PowerState, Target, TargetRef};
 use crate::error::{CoreError, Result};
+use crate::inventory::Inventory;
 use crate::linked_clones::{LinkedClones, VboxMedia};
 use crate::locks;
-use crate::store::{Store, VmRecord};
+use crate::store::Store;
+use crate::untrusted;
 
 /// VM-24: `.vmx` files added by hand (Add existing VM), which inventory refreshes list like the library's.
 pub const ADDED_VMS_KEY: &str = "vmware.addedVms";
@@ -145,6 +147,14 @@ enum Action {
         copy: Option<DiskCopy>,
         calls: Vec<Vec<String>>,
     },
+}
+
+/// VM-31: a VM Remotely knows on this PC, for "does another VM use this disk".
+struct KnownVm {
+    key: String,
+    hypervisor: Hypervisor,
+    config_path: Option<String>,
+    name: String,
 }
 
 /// VM-31: an attached disk's copy into the VM's folder, through CV-01's conversion runner.
@@ -293,8 +303,14 @@ fn check_growth(hardware: &VmHardware, slot: &str, size_mb: u64) -> Result<Strin
 }
 
 /// VM-31: why the hypervisor can't run the disk where it is: a format it doesn't run (Workstation: VMDK only;
-/// VirtualBox: VDI, VMDK, VHD), a stream-optimized VMDK (read only by copying it), or a disk with a parent.
-fn in_place_refusal(info: &ImageInfo, hypervisor: Hypervisor) -> Result<()> {
+/// VirtualBox: VDI, VMDK, VHD), a stream-optimized VMDK (read only by copying it), a disk with a parent, or on
+/// VirtualBox a disk outside the VM's folder (`inside` false), which its deletes would take with them.
+fn in_place_refusal(info: &ImageInfo, hypervisor: Hypervisor, inside: bool) -> Result<()> {
+    if hypervisor == Hypervisor::VirtualBox && !inside {
+        return Err(refused(
+            "VirtualBox deletes a VM's disks when the VM is deleted or a disk is removed, so Remotely doesn't use a disk outside the VM's folder where it is: copy it into the VM's folder instead.",
+        ));
+    }
     let runs = match hypervisor {
         Hypervisor::Vmware => info.format == DiskFormat::Vmdk,
         Hypervisor::VirtualBox => matches!(info.format, DiskFormat::Vdi | DiskFormat::Vmdk | DiskFormat::Vhd),
@@ -323,28 +339,127 @@ fn in_place_refusal(info: &ImageInfo, hypervisor: Hypervisor) -> Result<()> {
     Ok(())
 }
 
-/// VM-31: the preview's words for a disk used where it is.
-fn used_where_it_is(inside: bool) -> String {
-    if inside {
-        "used where it is, in the VM's folder".to_owned()
-    } else {
-        "used where it is, outside the VM's folder: the VM writes to that file, and deleting the VM keeps it".to_owned()
+/// VM-31: the preview's words for a disk used where it is, as each hypervisor's deletes treat it: Workstation's
+/// `deleteVM` deletes the disks in the VM's folder and keeps those outside it (and Remove disk refuses those);
+/// VirtualBox's `unregistervm --delete` and Remove disk delete any disk, so a disk outside its folder is never used
+/// in place there ([`in_place_refusal`]).
+fn used_where_it_is(inside: bool, hypervisor: Hypervisor) -> String {
+    match (inside, hypervisor) {
+        (true, Hypervisor::Vmware) => {
+            "used where it is, in the VM's folder: deleting the VM deletes it with the VM's own disks".to_owned()
+        }
+        (true, Hypervisor::VirtualBox) => {
+            "used where it is, in the VM's folder: deleting the VM or removing the disk deletes it".to_owned()
+        }
+        (false, _) => {
+            "used where it is, outside the VM's folder: the VM writes to that file, and deleting the VM keeps it"
+                .to_owned()
+        }
     }
 }
 
-/// VM-31: a copy the VM didn't take: the file, and a preallocated VMDK's `-flat.vmdk` extent.
-async fn delete_copy(copy: &DiskCopy) {
-    let mut files = vec![copy.target.clone()];
-    if let (Some(stem), Some(folder)) = (copy.target.file_stem(), copy.target.parent()) {
-        files.push(folder.join(format!("{}-flat.vmdk", stem.to_string_lossy())));
+/// VM-31, review of PR #86: the files a copy at `target` makes: the disk, and a preallocated VMDK's `-flat.vmdk`
+/// extent. Each must be free before the copy starts, so a failed copy deletes only what the job made.
+fn copy_files(target: &Path) -> Vec<PathBuf> {
+    let mut files = vec![target.to_path_buf()];
+    if let (Some(stem), Some(folder)) = (target.file_stem(), target.parent()) {
+        if target.extension().is_some_and(|e| e.eq_ignore_ascii_case("vmdk")) {
+            files.push(folder.join(format!("{}-flat.vmdk", stem.to_string_lossy())));
+        }
     }
-    for file in files {
+    files
+}
+
+/// VM-31: a copy the VM didn't take: the files the job made ([`copy_files`], which were free before it copied).
+async fn delete_copy(copy: &DiskCopy) {
+    for file in copy_files(&copy.target) {
         match tokio::fs::remove_file(&file).await {
             Ok(()) => {}
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
             Err(err) => tracing::warn!(error = %err, "could not delete an attached disk's copy the VM didn't take"),
         }
     }
+}
+
+/// VM-31, review of PR #86: the name a path's file is known by, for "is this the same disk": the file's final
+/// path when it is there (`..`, junctions, symbolic links, 8.3 names and `subst` drives resolved, as
+/// GetFinalPathNameByHandleW gives it), else the path with `.` and `..` worked out; lower case either way. A path
+/// on a share or a device path is never opened (A3).
+async fn identity(path: &Path) -> String {
+    if untrusted::path_refusal(path).is_none() {
+        if let Ok(found) = tokio::fs::canonicalize(path).await {
+            let text = found.display().to_string();
+            let text = match text.strip_prefix(r"\\?\UNC\") {
+                Some(rest) => format!(r"\\{rest}"),
+                None => text.strip_prefix(r"\\?\").map(str::to_owned).unwrap_or(text),
+            };
+            return path_key(Path::new(&text));
+        }
+    }
+    let mut parts: Vec<std::path::Component> = Vec::new();
+    for part in path.components() {
+        match part {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                if matches!(parts.last(), Some(std::path::Component::Normal(_))) {
+                    parts.pop();
+                }
+            }
+            other => parts.push(other),
+        }
+    }
+    path_key(&parts.iter().collect::<PathBuf>())
+}
+
+/// VM-31: whether `file` sits right in `folder` (the VM's own), by their final paths.
+async fn in_folder(file: &Path, folder: &Path) -> bool {
+    match file.parent() {
+        Some(parent) => identity(parent).await == identity(folder).await,
+        None => false,
+    }
+}
+
+/// Whether the file named `file` is inside the folder named `folder` (both [`identity`]s).
+fn is_inside(file: &str, folder: &str) -> bool {
+    file.starts_with(&format!("{}\\", folder.trim_end_matches('\\')))
+}
+
+/// VM-31, review of PR #86: the attached file as it was when the command was made (each of its files' size and
+/// time), so a file swapped between the approval and the job is refused.
+fn stamp_matches(seen: &[ops::FileStamp], now: &[ops::FileStamp]) -> bool {
+    seen.len() == now.len()
+        && seen.iter().all(|s| {
+            now.iter().any(|n| {
+                path_key(Path::new(&n.path)) == path_key(Path::new(&s.path))
+                    && n.bytes == s.bytes
+                    && n.modified_ms == s.modified_ms
+            })
+        })
+}
+
+/// VM-31: the stamps of a disk's files now ([`crate::convert::inspect::disk_files`]); files that aren't there or
+/// that Remotely doesn't open (A3) are left out.
+pub async fn disk_stamps(path: &Path) -> Vec<ops::FileStamp> {
+    let mut out = Vec::new();
+    for file in crate::convert::inspect::disk_files(path).await {
+        if untrusted::path_refusal(&file).is_some() {
+            continue;
+        }
+        let Ok(meta) = tokio::fs::metadata(&file).await else {
+            continue;
+        };
+        let modified_ms = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX));
+        out.push(ops::FileStamp {
+            path: file.display().to_string(),
+            bytes: meta.len(),
+            modified_ms,
+        });
+    }
+    out
 }
 
 /// The job's id in a backup's name (`ab12cd34`).
@@ -363,6 +478,8 @@ pub struct VmEditor {
     /// VM-31: CV-01's conversion runner, which copies an attached disk into the VM's folder (and says which tools
     /// it takes); set once the core has made it.
     converter: Arc<RwLock<Option<Arc<Converter>>>>,
+    /// VM-31: the inventory, whose unassigned VMs (no workspace has them) count as known VMs too.
+    inventory: Arc<RwLock<Option<Arc<Inventory>>>>,
 }
 
 impl VmEditor {
@@ -372,12 +489,15 @@ impl VmEditor {
             hypervisors,
             store,
             converter: Arc::default(),
+            inventory: Arc::default(),
         }
     }
 
-    /// VM-31: the conversion runner attached disks are copied with.
-    pub fn set_converter(&self, converter: Arc<Converter>) {
+    /// VM-31: the conversion runner attached disks are copied with, and the inventory whose unassigned VMs an
+    /// attached disk mustn't belong to.
+    pub fn set_attach_tools(&self, converter: Arc<Converter>, inventory: Arc<Inventory>) {
         *locks::write(&self.converter) = Some(converter);
+        *locks::write(&self.inventory) = Some(inventory);
     }
 
     fn converter(&self) -> Result<Arc<Converter>> {
@@ -524,12 +644,12 @@ impl VmEditor {
 
     async fn plan(&self, ctx: &Context, key: &str, command: &Command, state: &VmState) -> Result<Plan> {
         if let Command::VmDisk {
-            op: VmDiskOp::Attach { path, copy, bus },
+            op: VmDiskOp::Attach { path, copy, bus, seen },
             ..
         } = command
         {
             return self
-                .attach(ctx, key, Path::new(path), *copy, bus.as_deref(), state)
+                .attach(ctx, key, Path::new(path), *copy, bus.as_deref(), seen.as_deref(), state)
                 .await;
         }
         match (command, Hypervisor::of_key(key)) {
@@ -932,6 +1052,15 @@ impl VmEditor {
             VmDiskOp::Remove { slot } => {
                 require_no_snapshots(state, "removed")?;
                 let path = virtualbox::disk_on(&info, slot)?;
+                // As on Workstation (review of PR #86): a disk outside the VM's folder may be another's or the user's
+                // own file, so `closemedium --delete` never runs on it.
+                let folder = info.config_file.as_deref().and_then(Path::parent);
+                if !folder.is_some_and(|f| path.parent().map(path_key) == Some(path_key(f))) {
+                    return Err(refused(format!(
+                        "{} is outside the VM's folder, where another VM may use it, so Remotely doesn't delete it.",
+                        path.display()
+                    )));
+                }
                 let size = vbox
                     .hardware(uuid)
                     .await
@@ -958,6 +1087,7 @@ impl VmEditor {
 
     /// VM-31: the plan that attaches the disk at `source` to the VM `key`: copied into its folder (`copy`), or used
     /// where it is, on `bus` (or the boot disk's controller).
+    #[allow(clippy::too_many_arguments)]
     async fn attach(
         &self,
         ctx: &Context,
@@ -965,6 +1095,7 @@ impl VmEditor {
         source: &Path,
         copy: bool,
         bus: Option<&str>,
+        seen: Option<&[ops::FileStamp]>,
         state: &VmState,
     ) -> Result<Plan> {
         let hypervisor = Hypervisor::of_key(key);
@@ -972,6 +1103,15 @@ impl VmEditor {
         if hypervisor == Hypervisor::Vmware {
             let file = self.vmx(Path::new(key)).await?;
             self.require_unlocked(Path::new(key), &file).await?;
+        }
+        // What was approved is what is attached: the file as it was when the command was made.
+        if let Some(seen) = seen {
+            if !stamp_matches(seen, &disk_stamps(source).await) {
+                return Err(refused(format!(
+                    "{} changed since you chose it (its size, its time or its files): attach it again to see it as it is now.",
+                    source.display()
+                )));
+            }
         }
         let info = self.attach_source(ctx, key, source).await?;
         let what = format!(
@@ -1009,72 +1149,140 @@ impl VmEditor {
         Ok(info)
     }
 
-    /// VM-31: a disk goes on one VM only. Refused when a VM Remotely knows (in any workspace) names it, this one
-    /// included, or when it is inside another VM's folder, where that VM or its snapshots may use it.
+    /// VM-31: a disk goes on one VM only. Every file the source is made of (itself, a descriptor's extents, its
+    /// parents) is compared by its final path ([`identity`]) with every file each VM Remotely knows is made of (its
+    /// disks with their extents and snapshot chains, a VirtualBox VM's whole media list): VMs of every workspace and
+    /// the unassigned ones. Refused when one is the same file (this VM's too), when one is inside another VM's folder,
+    /// or when a VM's settings can't be read, since then Remotely can't tell.
     async fn require_disk_free(&self, ctx: &Context, key: &str, source: &Path) -> Result<()> {
-        let wanted = path_key(source);
+        let mut wanted: Vec<(String, PathBuf)> = Vec::new();
+        for file in crate::convert::inspect::disk_files(source).await {
+            wanted.push((identity(&file).await, file));
+        }
         let this = path_key(Path::new(key));
-        for vm in self.store.list_vms_all_workspaces(ctx.user_id).await? {
-            let own = path_key(Path::new(&vm.vmx_path)) == this;
-            let (folder, disks) = self.disk_files_of(&vm).await;
-            if disks.iter().any(|d| path_key(d) == wanted) {
-                return Err(refused(if own {
-                    format!("The VM has {} already.", source.display())
-                } else {
-                    format!(
-                        "The VM '{}' uses {} already, and a disk two VMs write to is lost: shut that VM down and remove the disk from it first, or attach a copy of your own.",
-                        vm.display_name,
-                        source.display()
-                    )
-                }));
+        for vm in self.known_vms(ctx).await? {
+            let own = path_key(Path::new(&vm.key)) == this;
+            let (folder, files) = self.disk_files_of(&vm).await.map_err(|why| {
+                refused(format!(
+                    "Remotely couldn't read the VM '{}' ({why}), so it can't tell whether that VM uses this disk. Fix or remove that VM first.",
+                    vm.name
+                ))
+            })?;
+            let mut theirs = Vec::with_capacity(files.len());
+            for file in &files {
+                theirs.push(identity(file).await);
             }
-            let inside = folder.as_deref().is_some_and(|f| {
-                let folder = path_key(f);
-                wanted.starts_with(&format!("{}\\", folder.trim_end_matches('\\')))
-            });
-            if inside && !own {
-                return Err(refused(format!(
-                    "{} is in the folder of the VM '{}', where that VM or its snapshots may use it: Remotely doesn't take a disk from another VM's folder. Move it out of there first.",
-                    source.display(),
-                    vm.display_name
-                )));
+            let folder = match &folder {
+                Some(folder) => Some(identity(folder).await),
+                None => None,
+            };
+            for (id, file) in &wanted {
+                let named = |what: &str| {
+                    if file == source {
+                        source.display().to_string()
+                    } else {
+                        format!("{} ({what} {})", source.display(), file.display())
+                    }
+                };
+                if theirs.contains(id) {
+                    return Err(refused(if own {
+                        format!("The VM has {} already.", named("its file"))
+                    } else {
+                        format!(
+                            "The VM '{}' uses {} already, and a disk two VMs write to is lost: shut that VM down and remove the disk from it first, or attach a copy of your own.",
+                            vm.name,
+                            named("its file")
+                        )
+                    }));
+                }
+                if !own && folder.as_deref().is_some_and(|f| is_inside(id, f)) {
+                    return Err(refused(format!(
+                        "{} is in the folder of the VM '{}', where that VM or its snapshots may use it: Remotely doesn't take a disk from another VM's folder. Move it out of there first.",
+                        named("its file"),
+                        vm.name
+                    )));
+                }
             }
         }
         Ok(())
     }
 
-    /// A known VM's folder and the disk files it names (none when its files can't be read).
-    async fn disk_files_of(&self, vm: &VmRecord) -> (Option<PathBuf>, Vec<PathBuf>) {
-        match vm.hypervisor {
+    /// Every VM Remotely knows on this PC: each workspace's, and the unassigned ones the last refresh found.
+    async fn known_vms(&self, ctx: &Context) -> Result<Vec<KnownVm>> {
+        let mut out: Vec<KnownVm> = self
+            .store
+            .list_vms_all_workspaces(ctx.user_id)
+            .await?
+            .into_iter()
+            .map(|vm| KnownVm {
+                key: vm.vmx_path,
+                hypervisor: vm.hypervisor,
+                config_path: vm.config_path,
+                name: vm.display_name,
+            })
+            .collect();
+        let inventory = locks::read(&self.inventory).clone();
+        if let Some(inventory) = inventory {
+            for vm in inventory.unassigned() {
+                if !out
+                    .iter()
+                    .any(|k| path_key(Path::new(&k.key)) == path_key(Path::new(&vm.vmx_path)))
+                {
+                    out.push(KnownVm {
+                        key: vm.vmx_path,
+                        hypervisor: vm.hypervisor,
+                        config_path: vm.config_path,
+                        name: vm.display_name,
+                    });
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// A known VM's folder and every file its disks are made of; why not when its settings can't be read.
+    async fn disk_files_of(&self, vm: &KnownVm) -> std::result::Result<(Option<PathBuf>, Vec<PathBuf>), String> {
+        let mut disks: Vec<PathBuf> = Vec::new();
+        let folder = match vm.hypervisor {
             Hypervisor::Vmware => {
-                let vmx = Path::new(&vm.vmx_path);
+                let vmx = Path::new(&vm.key);
                 let folder = vmx.parent().map(Path::to_path_buf);
-                let disks = match self.vmx(vmx).await {
-                    Ok(file) => {
-                        let base = folder.clone().unwrap_or_default();
-                        file.pairs()
-                            .filter(|(k, v)| k.ends_with(".filename") && v.to_ascii_lowercase().ends_with(".vmdk"))
-                            .map(|(_, v)| vmware::resolve(&base, v))
-                            .collect()
-                    }
-                    Err(_) => Vec::new(),
-                };
-                (folder, disks)
+                let file = self.vmx(vmx).await.map_err(|err| err.to_string())?;
+                let base = folder.clone().unwrap_or_default();
+                disks.extend(
+                    file.pairs()
+                        .filter(|(k, v)| k.ends_with(".filename") && v.to_ascii_lowercase().ends_with(".vmdk"))
+                        .map(|(_, v)| vmware::resolve(&base, v)),
+                );
+                folder
             }
             Hypervisor::VirtualBox => {
-                let info = self.hypervisors.virtualbox().vm_info(&vm.vmx_path).await.ok();
-                let folder = vm
+                let vbox = self.hypervisors.virtualbox();
+                let info = vbox.vm_info(&vm.key).await.map_err(|err| err.to_string())?;
+                let cfg = vm
                     .config_path
                     .as_deref()
                     .map(PathBuf::from)
-                    .or_else(|| info.as_ref().and_then(|i| i.config_file.clone()))
-                    .and_then(|cfg| cfg.parent().map(Path::to_path_buf));
-                let disks = info
-                    .map(|i| i.disks.into_iter().map(|d| d.path).collect())
-                    .unwrap_or_default();
-                (folder, disks)
+                    .or_else(|| info.config_file.clone());
+                let folder = cfg.as_deref().and_then(Path::parent).map(Path::to_path_buf);
+                disks.extend(info.disks.iter().map(|d| d.path.clone()));
+                // The base disks under its snapshots' differencing images, from its media list (a .vbox that can't be
+                // read leaves them to the folder check: VirtualBox keeps them in the VM's folder).
+                if let (Some(folder), Some(extras)) = (&folder, vbox.settings_extras(&info).await) {
+                    disks.extend(extras.hard_disks.iter().map(|l| vmware::resolve(folder, l)));
+                }
+                folder
+            }
+        };
+        let mut files: Vec<PathBuf> = Vec::new();
+        for disk in disks {
+            for file in crate::convert::inspect::disk_files(&disk).await {
+                if !files.contains(&file) {
+                    files.push(file);
+                }
             }
         }
+        Ok((folder, files))
     }
 
     /// VM-31: how the copy is made, in words ("vmware-vdiskmanager (VMDK to VMDK, growable...)"), or why it can't be
@@ -1102,17 +1310,20 @@ impl VmEditor {
         Ok(crate::convert::plan::describe(&steps))
     }
 
-    /// A file name in `folder` that neither the VM nor the folder has: `<stem>-<n>.<ext>` from `first`.
+    /// A file name in `folder` that neither the VM nor the folder has: `<stem>-<n>.<ext>` from `first`, with every
+    /// file its copy makes free too (a preallocated VMDK's `-flat.vmdk`, [`copy_files`]).
     async fn free_name(&self, folder: &Path, stem: &str, ext: &str, first: u32, named: &[String]) -> Result<PathBuf> {
-        for n in first..1000 {
+        'names: for n in first..1000 {
             let candidate = folder.join(format!("{stem}-{n}.{ext}"));
-            let lower = path_key(&candidate);
-            let taken = named.contains(&lower)
-                || self.hypervisors.vmware().file_exists(&candidate).await
-                || tokio::fs::try_exists(&candidate).await.unwrap_or(true);
-            if !taken {
-                return Ok(candidate);
+            for file in copy_files(&candidate) {
+                let taken = named.contains(&path_key(&file))
+                    || self.hypervisors.vmware().file_exists(&file).await
+                    || tokio::fs::try_exists(&file).await.unwrap_or(true);
+                if taken {
+                    continue 'names;
+                }
             }
+            return Ok(candidate);
         }
         Err(refused("No free name for the disk's copy in the VM's folder."))
     }
@@ -1164,9 +1375,9 @@ impl VmEditor {
                 line,
             )
         } else {
-            in_place_refusal(&info, Hypervisor::Vmware)?;
             // Named by its own name when it is in the VM's folder, else by its whole path.
-            let inside = source.parent().map(path_key) == Some(path_key(&folder));
+            let inside = in_folder(source, &folder).await;
+            in_place_refusal(&info, Hypervisor::Vmware, inside)?;
             let name = if inside {
                 source
                     .file_name()
@@ -1175,7 +1386,7 @@ impl VmEditor {
             } else {
                 source.display().to_string()
             };
-            (None, name, used_where_it_is(inside))
+            (None, name, used_where_it_is(inside, Hypervisor::Vmware))
         };
         let mut disk = vmware::plan_new_disk(&file, &stem, bus, &|_| false)?;
         disk.file_name = file_name;
@@ -1236,9 +1447,13 @@ impl VmEditor {
                 line,
             )
         } else {
-            in_place_refusal(&info, Hypervisor::VirtualBox)?;
-            let inside = source.parent().map(path_key) == Some(path_key(&folder));
-            (None, source.to_path_buf(), used_where_it_is(inside))
+            let inside = in_folder(source, &folder).await;
+            in_place_refusal(&info, Hypervisor::VirtualBox, inside)?;
+            (
+                None,
+                source.to_path_buf(),
+                used_where_it_is(inside, Hypervisor::VirtualBox),
+            )
         };
         let (calls, slot) = virtualbox::attach_existing_calls(uuid, &vm, &path, bus)?;
         Ok(Plan::one(
@@ -1259,6 +1474,15 @@ impl VmEditor {
                 info.describe(),
                 copy.info.describe()
             )));
+        }
+        // Every file the copy makes must be free now, so a failure deletes only what this job made.
+        for file in copy_files(&copy.target) {
+            if tokio::fs::try_exists(&file).await.unwrap_or(true) {
+                return Err(refused(format!(
+                    "{} is there now, and Remotely never replaces a file: attach the disk again for another name.",
+                    file.display()
+                )));
+            }
         }
         let folder = copy.target.parent().unwrap_or(Path::new("."));
         let work = folder.join(format!(".remotely-attach-{}", Uuid::new_v4().simple()));

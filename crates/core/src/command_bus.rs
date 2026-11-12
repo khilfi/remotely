@@ -1438,9 +1438,13 @@ impl CommandBus {
         let _ = self.bindings.set(bindings);
     }
 
-    /// VM-31: the conversion runner, for the approval preview of an attached disk's copy.
-    pub fn set_vm_converter(&self, converter: Arc<crate::convert::Converter>) {
-        self.impact.set_vm_converter(converter);
+    /// VM-31: the conversion runner and the inventory, for the approval preview of an attached disk.
+    pub fn set_attach_tools(
+        &self,
+        converter: Arc<crate::convert::Converter>,
+        inventory: Arc<crate::inventory::Inventory>,
+    ) {
+        self.impact.set_attach_tools(converter, inventory);
     }
 
     fn bindings(&self) -> SecretBindings {

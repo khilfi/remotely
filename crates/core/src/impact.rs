@@ -159,9 +159,14 @@ impl ImpactPreviewer {
         self.editor.preview(ctx, command, targets).await
     }
 
-    /// VM-31: the conversion runner, which says how an attached disk would be copied.
-    pub fn set_vm_converter(&self, converter: std::sync::Arc<crate::convert::Converter>) {
-        self.editor.set_converter(converter);
+    /// VM-31: the conversion runner, which says how an attached disk would be copied, and the inventory, whose
+    /// unassigned VMs' disks an attach refuses too.
+    pub fn set_attach_tools(
+        &self,
+        converter: std::sync::Arc<crate::convert::Converter>,
+        inventory: std::sync::Arc<crate::inventory::Inventory>,
+    ) {
+        self.editor.set_attach_tools(converter, inventory);
     }
 
     /// VM-08: for a stack command, the instance, its steps in order and each step's VMs (a deploy's with R2's

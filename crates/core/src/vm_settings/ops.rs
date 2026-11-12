@@ -217,7 +217,21 @@ pub enum VmDiskOp {
         copy: bool,
         #[serde(default)]
         bus: Option<String>,
+        /// The disk's files when the command was made (the shell's dialog): the job refuses a file that changed
+        /// since, so what was approved is what is attached.
+        #[serde(default)]
+        seen: Option<Vec<FileStamp>>,
     },
+}
+
+/// VM-31: one file of an attached disk as it was: its size and its last write.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileStamp {
+    pub path: String,
+    pub bytes: u64,
+    /// Milliseconds since 1970.
+    pub modified_ms: i64,
 }
 
 fn thin_by_default() -> bool {
@@ -944,6 +958,7 @@ mod tests {
             path: path.into(),
             copy,
             bus: None,
+            seen: None,
         };
         assert!(validate_disk(&vm(WEB), &attach(r"C:\Exports\web01_Data_Disk.vmdk", true)).is_ok());
         assert!(validate_disk(&vm(VBOX), &attach(r"C:\Exports\data.qcow2", true)).is_ok());
@@ -968,6 +983,7 @@ mod tests {
             path: r"C:\Exports\data.vmdk".into(),
             copy: true,
             bus: Some("pci0".into()),
+            seen: None,
         };
         assert!(validate_disk(&vm(WEB), &on_bus).is_err());
         assert_eq!(

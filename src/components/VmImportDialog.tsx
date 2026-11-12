@@ -61,6 +61,7 @@ import {
   describedText,
   importDiskRows,
   importDisksBytes,
+  importControllerAuto,
   importFirmwareAuto,
   importKindText,
   importReasons,
@@ -114,7 +115,8 @@ export function VmImportDialog({ initialPath, onSubmitted, onClose }: Props) {
   const [packages, setPackages] = useState("");
   // CV-04: the data disks after the boot disk, in order, and the disks' controller.
   const [dataDisks, setDataDisks] = useState<ImportDiskView[]>([]);
-  const [controller, setController] = useState<DiskController>("sata");
+  // "auto": what the boot disk says it was made for (a VMware disk keeps its SCSI or IDE; others go on SATA).
+  const [controller, setController] = useState<DiskController | "auto">("auto");
   const [check, setCheck] = useState<{ key: string; check: DeployCheck } | null>(null);
   const [checkError, setCheckError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -245,7 +247,7 @@ export function VmImportDialog({ initialPath, onSubmitted, onClose }: Props) {
               ? { guestUser: guestUser.trim() || null, sshKeyId: keyId, packages: parsePackages(packages) }
               : null,
           dataDisks: analysis.kind === "disk" ? dataDisks.flatMap((d) => (d.path ? [d.path] : [])) : [],
-          controller: analysis.kind === "appliance" ? null : controller,
+          controller: analysis.kind === "appliance" || controller === "auto" ? null : controller,
         }
       : null;
   const requestKey = JSON.stringify(request);
@@ -382,6 +384,8 @@ export function VmImportDialog({ initialPath, onSubmitted, onClose }: Props) {
                       <span className="text-xs text-muted-foreground">
                         {analysis.disks.length + dataDisks.length} disks,{" "}
                         {sizeText(importDisksBytes(analysis, dataDisks))} in all; they attach in this order
+                        {analysis.dataDiskOffers.length > 0 &&
+                          ". The data disks beside it are added: leave out any you don't want"}
                       </span>
                     )}
                   </div>
@@ -461,12 +465,13 @@ export function VmImportDialog({ initialPath, onSubmitted, onClose }: Props) {
                 {analysis.kind !== "appliance" && (
                   <div className="grid gap-2">
                     <Label htmlFor="import-controller">Disk controller</Label>
-                    <Select value={controller} onValueChange={(v) => setController(v as DiskController)}>
+                    <Select value={controller} onValueChange={(v) => setController(v as DiskController | "auto")}>
                       <SelectTrigger id="import-controller" className="w-full">
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
-                        <SelectItem value="sata">SATA (boots most disks from other hypervisors)</SelectItem>
+                        <SelectItem value="auto">{importControllerAuto(analysis)}</SelectItem>
+                        <SelectItem value="sata">SATA</SelectItem>
                         <SelectItem value="scsi">SCSI</SelectItem>
                         <SelectItem value="nvme">NVMe</SelectItem>
                         <SelectItem value="ide">IDE</SelectItem>

@@ -297,7 +297,11 @@ crates/core/          remotely-core: all app logic
                       Workstation) through Converter::convert_into, which also makes R1's qcow2 cloud images deploy;
                       CV-04 (0.8.0) a cloud server's disks as one VM: ImportRequest.data_disks after a disk image's
                       boot disk, attached in order and each copied or converted as it needs, every disk in the preview
-                      and the capacity plan; foreign disks on SATA unless ImportRequest.controller says otherwise;
+                      and the capacity plan; the controller is ImportRequest.controller, else the boot disk's
+                      (convert::import::controller_hint: a VMDK VMware's tools made, by `ddb.longContentID` or
+                      `ddb.uuid`, keeps its `ddb.adapterType`'s IDE, BusLogic or SCSI; every other disk goes on SATA),
+                      refused past IDE's slots (Workstation 4; VirtualBox 2, 1 with the seed's DVD) and for NVMe with
+                      BIOS;
                       the firmware the request's, else the description's, else the boot disk's partition table's
                       (convert/boot.rs), else the profile's; an import's first boot (FirstBootSpec.imported) is a
                       NoCloud seed on both hypervisors (Workstation: a CD/DVD of its own after the SATA disks,
@@ -473,10 +477,18 @@ crates/core/          remotely-core: all app logic
                       dialog, vm_pick_disk): CV-03's Inspect reads it, then it is copied into the VM's folder through
                       the Converter (VmEditor::set_converter: vdiskmanager `-r` for a VMDK on Workstation, VBoxManage
                       or qemu-img for the rest; a format the hypervisor doesn't run becomes VMDK or VDI) or named where
-                      it is (VMDK on Workstation; VDI, VMDK or VHD on VirtualBox; never stream-optimized or with a
-                      parent); refused for a disk any known VM names (this one too), one inside another VM's folder,
-                      one with Workstation's `.lck`, and VM-23's refusals; the preview names the file, its size and
-                      where it goes; a copy the VM didn't take is deleted
+                      it is (VMDK on Workstation; VDI, VMDK or VHD on VirtualBox only in the VM's own folder, since its
+                      deletes take every attached disk; never stream-optimized or with a parent); refused when any file
+                      the disk is made of (inspect::disk_files: itself, its extents, its parents) is, by its final
+                      path (`identity`: canonicalized, so `..`, junctions, 8.3 names and `subst` resolve; A3 paths only
+                      by text), a file a known VM's disks are made of (every workspace's VMs and the unassigned ones,
+                      VmEditor::set_attach_tools; a VirtualBox VM's whole media list; this VM too) or inside another
+                      VM's folder, when a VM's settings can't be read, for one with Workstation's `.lck`, and with
+                      VM-23's refusals; the command carries the files' sizes and times (VmDiskOp::Attach.seen, from
+                      the shell's dialog) and the job refuses a file that changed since; the preview names the file,
+                      its size and where it goes, and what Delete VM and Remove disk would do to it; a copy's files
+                      (with a flat VMDK's `-flat` extent) must be free before it starts, and only those go when it
+                      fails. VirtualBox's Remove disk keeps a disk outside the VM's folder, as Workstation's does
     host_networks/    VM-11 (Core.networks): mod.rs the report (vmnets with a NAT vmnet's forwards, VirtualBox's
                       host-only interfaces, NAT networks and rules, each VM's NAT adapter rules, the VMs on each from
                       QL-21's fresh adapter read, host_details::networks), networks_only (the networks alone: one vmrun

@@ -51,6 +51,10 @@ export interface ImageInfo {
   partitionTable: string | null;
   /** CV-04: how it boots, from its partition table (UEFI with an EFI system partition, else BIOS); null: can't tell. */
   firmwareHint: "bios" | "efi" | null;
+  /** CV-04: a VMDK descriptor's `ddb.adapterType`. */
+  adapterType: string | null;
+  /** CV-04: VMware's own tools made it (its descriptor says so). */
+  madeByVmware: boolean;
   /** Why it can't be converted as it is. */
   problems: string[];
   notes: string[];
@@ -193,6 +197,8 @@ export interface ImportAnalysis {
   dataDiskOffers: ImportDiskView[];
   /** CV-04: how the boot disk boots, from its partition table; null: can't tell. */
   firmwareHint: "bios" | "efi" | null;
+  /** CV-04: the controller the boot disk's guest boots from, as its file tells; null for an appliance. */
+  controllerHint: { controller: DiskController; scsiAdapter: string | null; why: string } | null;
 }
 
 export interface ImportRequest {
@@ -216,7 +222,7 @@ export interface ImportRequest {
   cloudInit: { guestUser: string | null; sshKeyId: string | null; packages: string[] } | null;
   /** CV-04: data disks after a disk image's boot disk, in the order they attach. */
   dataDisks: string[];
-  /** CV-04: the disks' controller; null: SATA for foreign disks. */
+  /** CV-04: the disks' controller; null: what the disk says (`ImportAnalysis.controllerHint`). */
   controller: DiskController | null;
 }
 

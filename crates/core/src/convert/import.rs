@@ -77,6 +77,51 @@ pub struct ImportAnalysis {
     /// CV-04: how the boot disk boots, from its partition table (CV-03's Inspect): UEFI with an EFI system
     /// partition, else BIOS; `None` when it can't be told.
     pub firmware_hint: Option<crate::catalog::profiles::Firmware>,
+    /// CV-04: the controller the boot disk's guest boots from, as far as its file tells; `None` for an appliance.
+    pub controller_hint: Option<ControllerHint>,
+}
+
+/// CV-04: the controller a foreign disk goes on unless the user picks another.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ControllerHint {
+    pub controller: crate::catalog::sizes::DiskController,
+    /// A SCSI disk's adapter when its descriptor names one the OS profile's wouldn't match (`buslogic`).
+    pub scsi_adapter: Option<String>,
+    /// Why, in words, for the dialog and the preview.
+    pub why: String,
+}
+
+/// CV-04, review of PR #86: a disk VMware's tools made (its descriptor has `ddb.longContentID` or `ddb.uuid`)
+/// keeps the controller its guest booted from: IDE, BusLogic, else SCSI (the OS profile's model, which suits the
+/// guest). Every other disk (qemu-img's VMDKs, qcow2, raw, VHD, VHDX, VDI) was built for another hypervisor, whose
+/// guests boot from virtio or IDE: SATA, whose driver every Linux and Windows has.
+pub fn controller_hint(info: &ImageInfo) -> ControllerHint {
+    use crate::catalog::sizes::DiskController;
+    if info.format == DiskFormat::Vmdk && info.made_by_vmware {
+        return match info.adapter_type.as_deref() {
+            Some("ide") => ControllerHint {
+                controller: DiskController::Ide,
+                scsi_adapter: None,
+                why: "made by VMware for IDE, as its descriptor says".into(),
+            },
+            Some("buslogic") => ControllerHint {
+                controller: DiskController::Scsi,
+                scsi_adapter: Some("buslogic".into()),
+                why: "made by VMware for a BusLogic SCSI controller, as its descriptor says".into(),
+            },
+            _ => ControllerHint {
+                controller: DiskController::Scsi,
+                scsi_adapter: None,
+                why: "made by VMware for SCSI, as its descriptor says".into(),
+            },
+        };
+    }
+    ControllerHint {
+        controller: DiskController::Sata,
+        scsi_adapter: None,
+        why: "built for another hypervisor (KVM, Hyper-V or a cloud), whose guests have SATA's driver".into(),
+    }
 }
 
 impl ImportAnalysis {
@@ -269,6 +314,7 @@ pub async fn analyze(path: &Path, tools: &ToolPaths) -> Result<ImportAnalysis> {
         cloud_export: false,
         data_disk_offers: Vec::new(),
         firmware_hint: None,
+        controller_hint: None,
     };
     let read_text = |p: &Path| {
         let p = p.to_path_buf();
@@ -414,11 +460,11 @@ pub async fn analyze(path: &Path, tools: &ToolPaths) -> Result<ImportAnalysis> {
             }
         }
     }
-    out.firmware_hint = out
-        .disks
-        .first()
-        .and_then(|d| d.info.as_ref())
-        .and_then(|info| info.firmware_hint);
+    let boot = out.disks.first().and_then(|d| d.info.as_ref());
+    out.firmware_hint = boot.and_then(|info| info.firmware_hint);
+    if out.kind != ImportKind::Appliance {
+        out.controller_hint = boot.map(controller_hint);
+    }
     if let Some(name) = out.described.name.as_deref().filter(|n| !n.trim().is_empty()) {
         out.suggested_name = vm_name(name);
     }

@@ -134,6 +134,15 @@ export function moved<T>(list: T[], index: number, delta: number): T[] {
   return out;
 }
 
+const CONTROLLER_LABEL: Record<string, string> = { scsi: "SCSI", sata: "SATA", nvme: "NVMe", ide: "IDE" };
+
+/** CV-04: the controller list's "as the disk says" choice: what the boot disk was made for, and why. */
+export function importControllerAuto(analysis: ImportAnalysis): string {
+  const hint = analysis.controllerHint;
+  if (!hint) return "The OS profile's";
+  return `${CONTROLLER_LABEL[hint.controller] ?? hint.controller}: ${hint.why}`;
+}
+
 /** CV-04: the firmware dialog's "as found" choice: the description's, else the boot disk's partition table's. */
 export function importFirmwareAuto(analysis: ImportAnalysis): string {
   if (analysis.described.efi !== null) return `As the source says (${analysis.described.efi ? "UEFI" : "BIOS"})`;

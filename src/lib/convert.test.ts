@@ -8,6 +8,7 @@ import {
   exportReason,
   importDiskRows,
   importDisksBytes,
+  importControllerAuto,
   importFirmwareAuto,
   importKindText,
   importReasons,
@@ -33,6 +34,8 @@ const info: ImageInfo = {
   encrypted: false,
   partitionTable: null,
   firmwareHint: null,
+  adapterType: null,
+  madeByVmware: false,
   problems: [],
   notes: [],
 };
@@ -176,6 +179,7 @@ test("Import says where it can go and what the file is", () => {
     cloudExport: false,
     dataDiskOffers: [],
     firmwareHint: null,
+    controllerHint: null,
   };
   assert.deepEqual(importReasons(analysis), { vmware: null, virtualbox: "qcow2 to VDI, dynamic needs qemu-img" });
   assert.deepEqual(importReasons({ ...analysis, problems: ["Disk 1 is missing."] }), {
@@ -188,6 +192,14 @@ test("Import says where it can go and what the file is", () => {
   const bare = { ...analysis, described: { ...analysis.described, efi: null } };
   assert.equal(importFirmwareAuto({ ...bare, firmwareHint: "bios" }), "As its partition table says (BIOS)");
   assert.match(importFirmwareAuto(bare), /couldn't be read/);
+  assert.equal(importControllerAuto(analysis), "The OS profile's");
+  assert.equal(
+    importControllerAuto({
+      ...analysis,
+      controllerHint: { controller: "scsi", scsiAdapter: null, why: "made by VMware for SCSI, as its descriptor says" },
+    }),
+    "SCSI: made by VMware for SCSI, as its descriptor says",
+  );
 });
 
 test("a cloud server's disks list in order with their sizes, the data disks movable", () => {
@@ -223,6 +235,7 @@ test("a cloud server's disks list in order with their sizes, the data disks mova
     cloudExport: true,
     dataDiskOffers: [disk("web01_Data_Disk.vmdk", 100)],
     firmwareHint: "efi",
+    controllerHint: { controller: "sata", scsiAdapter: null, why: "built for another hypervisor" },
   };
   const data = [disk("web01_Data_Disk.vmdk", 100), disk("logs.vmdk", 20)];
   const rows = importDiskRows(analysis, data);

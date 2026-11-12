@@ -116,7 +116,7 @@ pub fn read_table(sectors: &[u8]) -> Option<PartitionTable> {
         };
         for i in 0..count {
             let at = start.checked_add(i.checked_mul(size)?)?;
-            let Some(kind) = sectors.get(at..at + 16) else {
+            let Some(kind) = sectors.get(at..at.checked_add(16)?) else {
                 break;
             };
             if kind.iter().all(|b| *b == 0) {
@@ -193,6 +193,11 @@ enum Chunk {
     At(u64, u64),
     /// Compressed: `len` bytes at this offset, zlib (`true`, a VMDK grain) or raw deflate (a qcow2 cluster).
     Deflated { offset: u64, len: u64, zlib: bool },
+}
+
+/// `base * unit + index * width`, the offset of a table's entry; `None` when a hostile header makes it overflow.
+fn entry_at(base: u64, unit: u64, index: u64, width: u64) -> Option<u64> {
+    base.checked_mul(unit)?.checked_add(index.checked_mul(width)?)
 }
 
 /// How many chunks of `chunk` bytes hold the first [`BOOT_BYTES`]; `None` for a size no format has.
@@ -293,27 +298,28 @@ async fn sparse_vmdk(mut image: Image) -> Option<Vec<u8>> {
     let gtes = u64::from(header.gtes_per_gt);
     let mut chunks = Vec::new();
     for index in 0..chunks_needed(grain)? {
-        let gd_entry = image.exact(gd * 512 + (index / gtes) * 4, 4).await?;
+        let gd_entry = image.exact(entry_at(gd, 512, index / gtes, 4)?, 4).await?;
         let gt = u64::from(le_u32(&gd_entry, 0)?);
         if gt == 0 {
             chunks.push(Chunk::Zero);
             continue;
         }
-        let gte = image.exact(gt * 512 + (index % gtes) * 4, 4).await?;
+        let gte = image.exact(entry_at(gt, 512, index % gtes, 4)?, 4).await?;
         let sector = u64::from(le_u32(&gte, 0)?);
+        let at = sector.checked_mul(512)?;
         // 0: never written; 1: a zero grain (version 2 and on).
         chunks.push(if sector <= 1 {
             Chunk::Zero
         } else if compressed {
             // A grain marker: its LBA (8 bytes) and the compressed size (4), then the data.
-            let marker = image.exact(sector * 512, 12).await?;
+            let marker = image.exact(at, 12).await?;
             Chunk::Deflated {
-                offset: sector * 512 + 12,
+                offset: at.checked_add(12)?,
                 len: u64::from(le_u32(&marker, 8)?),
                 zlib: true,
             }
         } else {
-            Chunk::At(sector * 512, grain)
+            Chunk::At(at, grain)
         });
     }
     fill(&mut image, grain, chunks).await
@@ -445,14 +451,14 @@ async fn qcow2(path: &Path) -> Option<Vec<u8>> {
             chunks.push(Chunk::Zero);
             continue;
         }
-        let l1 = be_u64(&image.exact(l1_offset + l1_index * 8, 8).await?, 0)?;
+        let l1 = be_u64(&image.exact(entry_at(l1_offset, 1, l1_index, 8)?, 8).await?, 0)?;
         let l2_offset = l1 & OFFSET_MASK;
         if l2_offset == 0 {
             chunks.push(Chunk::Zero);
             continue;
         }
         let l2_index = index & ((1 << l2_bits) - 1);
-        let l2 = be_u64(&image.exact(l2_offset + l2_index * 8, 8).await?, 0)?;
+        let l2 = be_u64(&image.exact(entry_at(l2_offset, 1, l2_index, 8)?, 8).await?, 0)?;
         let host = l2 & OFFSET_MASK;
         chunks.push(if l2 & (1 << 62) != 0 {
             // Compressed: the host offset in the low x bits, then the count of 512-byte sectors less one.
@@ -501,14 +507,14 @@ async fn vhd(path: &Path) -> Option<Vec<u8>> {
             let mut chunks = Vec::new();
             for index in 0..chunks_needed(block)? {
                 let entry = if index < entries {
-                    be_u32(&image.exact(table + index * 4, 4).await?, 0)?
+                    be_u32(&image.exact(entry_at(table, 1, index, 4)?, 4).await?, 0)?
                 } else {
                     u32::MAX
                 };
                 chunks.push(if entry == u32::MAX {
                     Chunk::Zero
                 } else {
-                    Chunk::At(u64::from(entry) * 512 + bitmap, block)
+                    Chunk::At(entry_at(bitmap, 1, u64::from(entry), 512)?, block)
                 });
             }
             fill(&mut image, block, chunks).await
@@ -536,7 +542,7 @@ async fn vdi(path: &Path) -> Option<Vec<u8>> {
     let mut chunks = Vec::new();
     for index in 0..chunks_needed(block)? {
         let entry = if index < count {
-            le_u32(&image.exact(blocks_at + index * 4, 4).await?, 0)?
+            le_u32(&image.exact(entry_at(blocks_at, 1, index, 4)?, 4).await?, 0)?
         } else {
             u32::MAX
         };
@@ -544,7 +550,11 @@ async fn vdi(path: &Path) -> Option<Vec<u8>> {
         chunks.push(if entry >= 0xffff_fffe {
             Chunk::Zero
         } else {
-            Chunk::At(data_at + u64::from(entry) * (block + extra) + extra, block)
+            let stride = block.checked_add(extra)?;
+            Chunk::At(
+                entry_at(extra, 1, u64::from(entry), stride)?.checked_add(data_at)?,
+                block,
+            )
         });
     }
     fill(&mut image, block, chunks).await
@@ -661,6 +671,35 @@ mod tests {
         assert_eq!(partition_table(&empty, DiskFormat::Vmdk).await, None);
         let vhdx = dir.write("disk.vhdx", &img::vhdx(64 * MB, false, false));
         assert_eq!(first_sectors(&vhdx, DiskFormat::Vhdx).await, None);
+    }
+
+    /// Review of PR #86, P7: offsets from a hostile header overflow in debug builds (and wrap to wrong reads in
+    /// release ones). They must read as "can't tell", never panic.
+    #[tokio::test]
+    async fn hostile_offsets_read_as_cant_tell() {
+        let dir = TempFolder::new("boot-hostile");
+        let mut sparse = img::vmdk_sparse("h.vmdk", 8 * MB, false);
+        sparse[44..48].copy_from_slice(&512u32.to_le_bytes());
+        sparse[56..64].copy_from_slice(&(u64::MAX / 256).to_le_bytes());
+        let path = dir.write("h.vmdk", &sparse);
+        assert_eq!(first_sectors(&path, DiskFormat::Vmdk).await, None);
+        let info = crate::convert::inspect::inspect(&path)
+            .await
+            .expect("Inspect still answers");
+        assert_eq!(info.firmware_hint, None);
+        // A VDI whose block map points past what a u64 holds.
+        let mut vdi = img::vdi_with(&img::boot_sectors(img::Table::GptEsp), 64 * MB);
+        vdi[0x178..0x17c].copy_from_slice(&u32::MAX.to_le_bytes());
+        vdi[0x17c..0x180].copy_from_slice(&u32::MAX.to_le_bytes());
+        let map_at = u32::from_le_bytes(vdi[0x154..0x158].try_into().unwrap()) as usize;
+        vdi[map_at..map_at + 4].copy_from_slice(&0xffff_fff0u32.to_le_bytes());
+        let path = dir.write("h.vdi", &vdi);
+        assert_eq!(first_sectors(&path, DiskFormat::Vdi).await, None);
+        // A qcow2 whose L1 table sits at the end of the address space.
+        let mut qcow = img::qcow2_with(&img::boot_sectors(img::Table::GptEsp), 64 * MB, false);
+        qcow[40..48].copy_from_slice(&(u64::MAX - 3).to_be_bytes());
+        let path = dir.write("h.qcow2", &qcow);
+        assert_eq!(first_sectors(&path, DiskFormat::Qcow2).await, None);
     }
 
     #[test]

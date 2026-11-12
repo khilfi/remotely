@@ -46,10 +46,76 @@ pub struct ImageInfo {
     /// CV-04: how the disk boots, from its partition table: UEFI with an EFI system partition, else BIOS. `None`
     /// when it can't be told (a VHDX, a disk with a parent, no partition table).
     pub firmware_hint: Option<Firmware>,
+    /// CV-04: a VMDK descriptor's `ddb.adapterType` (`ide`, `buslogic`, `lsilogic`, `legacyESX`).
+    pub adapter_type: Option<String>,
+    /// CV-04: a VMDK VMware's own tools made: its descriptor has `ddb.longContentID` or `ddb.uuid`, which
+    /// qemu-img doesn't write. Its guest booted from the controller `adapter_type` names.
+    pub made_by_vmware: bool,
     /// Why it can't be converted as it is.
     pub problems: Vec<String>,
     /// What else to know.
     pub notes: Vec<String>,
+}
+
+/// CV-04: a VMDK descriptor's `ddb.adapterType`, and whether VMware's own tools wrote it.
+pub fn descriptor_ddb(text: &str) -> (Option<String>, bool) {
+    let mut adapter = None;
+    let mut vmware = false;
+    for line in text.lines() {
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+        let key = key.trim();
+        let value = value.trim().trim_matches('"').trim();
+        if key.eq_ignore_ascii_case("ddb.adapterType") && !value.is_empty() {
+            adapter = Some(value.to_ascii_lowercase());
+        }
+        if (key.eq_ignore_ascii_case("ddb.longContentID") || key.eq_ignore_ascii_case("ddb.uuid")) && !value.is_empty()
+        {
+            vmware = true;
+        }
+    }
+    (adapter, vmware)
+}
+
+/// The longest chain of parents followed, and the most extents read per descriptor.
+const MAX_FAMILY: usize = 64;
+
+/// VM-31: every file a disk is made of: the file itself, a VMDK descriptor's extents, and its parents' files down
+/// to the base disk (a Workstation snapshot's delta names its parent). A file on a share or a device path is listed
+/// but never opened (A3); what can't be read ends the walk there.
+pub async fn disk_files(path: &Path) -> Vec<std::path::PathBuf> {
+    let mut out: Vec<std::path::PathBuf> = Vec::new();
+    let mut current = path.to_path_buf();
+    for _ in 0..MAX_FAMILY {
+        if out.contains(&current) {
+            break;
+        }
+        out.push(current.clone());
+        if untrusted::path_refusal(&current).is_some() {
+            break;
+        }
+        let Ok((head, _)) = head_of(&current).await else {
+            break;
+        };
+        let DiskHeader::Vmdk(descriptor) = vm_hardware::parse_header(&head) else {
+            break;
+        };
+        let folder = current.parent().unwrap_or(Path::new("")).to_path_buf();
+        for (_, name) in descriptor.extents.iter().take(MAX_FAMILY) {
+            if let Some(name) = name {
+                let extent = crate::vm_settings::vmware::resolve(&folder, name);
+                if !out.contains(&extent) {
+                    out.push(extent);
+                }
+            }
+        }
+        let Some(parent) = descriptor.parent else {
+            break;
+        };
+        current = crate::vm_settings::vmware::resolve(&folder, &parent);
+    }
+    out
 }
 
 impl ImageInfo {
@@ -296,6 +362,8 @@ pub async fn inspect(path: &Path) -> Result<ImageInfo> {
         encrypted: false,
         partition_table: None,
         firmware_hint: None,
+        adapter_type: None,
+        made_by_vmware: false,
         problems: Vec::new(),
         notes: Vec::new(),
     };
@@ -352,6 +420,22 @@ pub async fn inspect(path: &Path) -> Result<ImageInfo> {
             if head.starts_with(b"KDMV") && info.subformat.is_none() {
                 info.subformat = Some("monolithicSparse".into());
             }
+            // CV-04: the descriptor's own words on its controller and maker (a sparse file's embedded one).
+            let text: &[u8] = if head.starts_with(b"KDMV") {
+                let at = le_u64(&head, 28)
+                    .and_then(|s| usize::try_from(s).ok())
+                    .and_then(|s| s.checked_mul(512));
+                let len = le_u64(&head, 36)
+                    .and_then(|s| usize::try_from(s).ok())
+                    .and_then(|s| s.checked_mul(512));
+                match (at, len) {
+                    (Some(at), Some(len)) if at < head.len() => &head[at..head.len().min(at.saturating_add(len))],
+                    _ => &[],
+                }
+            } else {
+                &head
+            };
+            (info.adapter_type, info.made_by_vmware) = descriptor_ddb(&String::from_utf8_lossy(text));
         }
         DiskHeader::Vdi {
             capacity_bytes,

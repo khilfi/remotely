@@ -113,6 +113,37 @@ fn coded(code: ProblemCode, message: impl Into<String>) -> Problem {
     }
 }
 
+/// CV-04, review of PR #86: what the disks' controller can't take. Workstation's IDE has four slots (`ide0:0` to
+/// `ide1:1`); VirtualBox's IDE as the deploy lays it out (each disk a port of its own, the DVD drive after them) has
+/// two ports, the seed's DVD taking one. A VM boots from NVMe only with UEFI.
+fn controller_problem(hv: Hypervisor, size: &SizeSpec, firmware: Firmware, seed: bool) -> Option<Problem> {
+    let on = |c: DiskController| size.disks.iter().filter(|d| d.controller == c).count();
+    let ide = on(DiskController::Ide);
+    let ide_slots = match hv {
+        Hypervisor::Vmware => 4,
+        Hypervisor::VirtualBox => {
+            if seed {
+                1
+            } else {
+                2
+            }
+        }
+    };
+    if ide > ide_slots {
+        return Some(problem(format!(
+            "IDE takes {ide_slots} disk{} here and the import has {ide}: pick SATA, or leave data disks out.",
+            if ide_slots == 1 { "" } else { "s" }
+        )));
+    }
+    let boots_from_nvme = size.disks.first().is_some_and(|d| d.controller == DiskController::Nvme);
+    if boots_from_nvme && firmware == Firmware::Bios {
+        return Some(problem(
+            "A VM boots from NVMe only with UEFI: pick UEFI, or another disk controller.",
+        ));
+    }
+    None
+}
+
 /// `bytes` as whole GB, at least 1.
 fn gb(bytes: u64) -> u32 {
     u32::try_from(bytes.div_ceil(GIB).max(1)).unwrap_or(u32::MAX)
@@ -196,12 +227,21 @@ impl Deploys {
         };
         // CV-04: a foreign disk boots on SATA unless asked otherwise; an appliance keeps its import tool's.
         let foreign = analysis.kind != ImportKind::Appliance;
-        let controller = match request.controller {
-            Some(chosen) => chosen,
-            None if foreign => DiskController::Sata,
-            None => os.controller(hv),
+        // The user's pick, else what the disk says (review of PR #86: a VMware-made disk keeps its SCSI or IDE;
+        // a disk built for another hypervisor goes on SATA), else the profile's.
+        let hint = analysis.controller_hint.as_ref().filter(|_| foreign);
+        let controller = match (request.controller, hint) {
+            (Some(chosen), _) => chosen,
+            (None, Some(hint)) => hint.controller,
+            (None, None) => os.controller(hv),
         };
-        let controller_model = templates::controller_model(hv, controller, &os).to_owned();
+        let controller_model = match (request.controller, hint.and_then(|h| h.scsi_adapter.as_deref())) {
+            (None, Some("buslogic")) if controller == DiskController::Scsi => match hv {
+                Hypervisor::Vmware => "buslogic".to_owned(),
+                Hypervisor::VirtualBox => "BusLogic".to_owned(),
+            },
+            _ => templates::controller_model(hv, controller, &os).to_owned(),
+        };
         let disk = |size_gb: u32| DiskPlan {
             size_gb,
             provisioning,
@@ -357,6 +397,9 @@ impl Deploys {
             Some(false) => Firmware::Bios,
             None => analysis.firmware_hint.unwrap_or(os.firmware),
         });
+        if let Some(problem) = controller_problem(hv, &size, firmware, first_boot.is_some()) {
+            return Ok(Err(vec![problem]));
+        }
         let file_name = Path::new(&request.source)
             .file_name()
             .map_or_else(|| request.source.clone(), |n| n.to_string_lossy().into_owned());
@@ -422,6 +465,11 @@ impl Deploys {
             let tools = self.tool_paths().unwrap_or_default();
             if let (Some(size), Some(profile)) = (&spec.size, &spec.profile) {
                 let controller = size.disks.first().map_or("SATA", |d| d.controller.label());
+                let controller = match (&request.controller, &analysis.controller_hint) {
+                    (Some(_), _) => format!("{controller} (as you chose)"),
+                    (None, Some(hint)) => format!("{controller} (it was {})", hint.why),
+                    (None, None) => controller.to_owned(),
+                };
                 let how = match (request.firmware, analysis.described.efi, analysis.firmware_hint) {
                     (Some(_), _, _) => "as you chose".to_owned(),
                     (None, Some(_), _) => "as its description says".to_owned(),
@@ -480,13 +528,17 @@ impl Deploys {
             }
             if let Some(first_boot) = &spec.first_boot {
                 notes.push(format!(
-                    "Its first boot reads a cloud-init seed: hostname {}, {} with sudo{}, and DHCP on whichever network card it has; never a password. It is ejected once the guest has booted. A disk without cloud-init ignores it and boots as it was.",
+                    "Its first boot gets a cloud-init seed: hostname {}, {} with sudo{}, and DHCP on whichever network card it has; never a password. It takes effect if the disk's cloud-init reads NoCloud seeds (most do); a disk without cloud-init boots as it was. {}",
                     spec.vms.first().map_or("", |vm| vm.hostname.as_str()),
                     first_boot.user.as_deref().unwrap_or("its default user"),
                     if first_boot.public_key.is_some() {
                         " and your SSH key"
                     } else {
                         ", but no SSH key: pick one, or sign in as before"
+                    },
+                    match spec.hypervisor {
+                        Hypervisor::VirtualBox => "The seed is ejected once the guest has booted.",
+                        Hypervisor::Vmware => "Its drive is disconnected once the guest has booted, and stays in the VM's settings until you eject it while the VM is off.",
                     }
                 ));
             }

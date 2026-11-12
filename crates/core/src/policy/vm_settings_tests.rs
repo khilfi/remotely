@@ -76,6 +76,7 @@ fn attach(copy: bool) -> VmDiskOp {
         path: r"C:\Exports\web01_Data_Disk.vmdk".into(),
         copy,
         bus: None,
+        seen: None,
     }
 }
 

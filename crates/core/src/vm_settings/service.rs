@@ -135,12 +135,16 @@ impl VmSettings {
                 refusal.describe()
             )));
         }
+        let path = crate::adapters::vmware::with_backslashes(path);
+        // What is approved is what is attached: the job refuses the file if it changed since.
+        let seen = super::disk_stamps(&path).await;
         let command = Command::VmDisk {
             targets: vec![vm_ref(key)],
             op: VmDiskOp::Attach {
-                path: crate::adapters::vmware::with_backslashes(path).display().to_string(),
+                path: path.display().to_string(),
                 copy,
                 bus,
+                seen: Some(seen),
             },
         };
         self.bus.submit(&self.current.get(), command).await
