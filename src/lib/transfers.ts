@@ -43,8 +43,9 @@ export function mergeTransfer(list: TransferInfo[], changed: TransferInfo): Tran
   return next;
 }
 
+/** Not finished yet: waiting, running, or (SS-14) paused. */
 export function isActive(t: Pick<TransferInfo, "state">) {
-  return t.state === "queued" || t.state === "running";
+  return t.state === "queued" || t.state === "running" || t.state === "paused";
 }
 
 export type SortKey = "name" | "size" | "modified";

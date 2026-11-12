@@ -54,6 +54,8 @@ pub(super) struct SftpServer {
     home: String,
     handles: HashMap<String, Open>,
     next: u64,
+    /// SS-14: started under sudo: writes anywhere, opens anything, gives any owner; what it makes is root's.
+    as_root: bool,
 }
 
 impl SftpServer {
@@ -70,6 +72,21 @@ impl SftpServer {
             home,
             handles: HashMap::new(),
             next: 1,
+            as_root: user == "root",
+        }
+    }
+
+    /// SS-14: root browsing's server, started by sudo from the login's exec channel (its folder is the login's home).
+    pub(super) fn new_root(state: Arc<State>, root: PathBuf) -> Self {
+        let mut server = Self::new(state, root, "alice");
+        server.as_root = true;
+        server
+    }
+
+    /// SS-14: what a new file or folder made now belongs to.
+    fn made(&self, path: &str, mode: u32) {
+        if self.as_root {
+            locks::lock(&self.state.sftp_meta).insert(path.to_owned(), (mode, 0, 0));
         }
     }
 
@@ -85,6 +102,9 @@ impl SftpServer {
     }
 
     fn protected(&self, path: &str) -> bool {
+        if self.as_root {
+            return false;
+        }
         let path = self.path(path);
         let folder = match path.rsplit_once('/') {
             Some(("", _)) | None => "/".to_owned(),
@@ -98,6 +118,9 @@ impl SftpServer {
 
     /// QL-09: `path` is an unreadable folder or in one; `inside` only counts what is in one.
     fn unreadable(&self, path: &str, inside: bool) -> bool {
+        if self.as_root {
+            return false;
+        }
         let path = self.path(path);
         locks::lock(&self.state.sftp_unreadable)
             .iter()
@@ -126,7 +149,7 @@ impl SftpServer {
             now.gid.unwrap_or(LOGIN_ID),
         );
         if let (Some(new_uid), Some(new_gid)) = (set.uid, set.gid) {
-            if (new_uid, new_gid) != (uid, gid) && (new_uid, new_gid) != (LOGIN_ID, LOGIN_ID) {
+            if !self.as_root && (new_uid, new_gid) != (uid, gid) && (new_uid, new_gid) != (LOGIN_ID, LOGIN_ID) {
                 self.state.note(format!("sftp chown refused {path}"));
                 return Err(StatusCode::PermissionDenied);
             }
@@ -134,6 +157,24 @@ impl SftpServer {
         }
         if let Some(permissions) = set.permissions {
             mode = permissions & 0o7777;
+        }
+        // SS-14: a modification time set is the real file's (a folder's is left as it is).
+        if let Some(mtime) = set.mtime {
+            if meta.is_file() {
+                let at = UNIX_EPOCH + std::time::Duration::from_secs(u64::from(mtime));
+                let file = std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(local(&self.root, path))
+                    .map_err(|e| io_status(&e))?;
+                file.set_modified(at).map_err(|e| io_status(&e))?;
+            }
+            self.state.note(format!("sftp set time {path}"));
+        }
+        if set.permissions.is_some() || set.uid.is_some() {
+            self.state.note(format!(
+                "sftp setstat {path} {mode:o} {uid}:{gid}{}",
+                if self.as_root { " as root" } else { "" }
+            ));
         }
         locks::lock(&self.state.sftp_meta).insert(path.to_owned(), (mode, uid, gid));
         Ok(())
@@ -197,10 +238,6 @@ fn io_status(err: &std::io::Error) -> StatusCode {
         std::io::ErrorKind::PermissionDenied => StatusCode::PermissionDenied,
         _ => StatusCode::Failure,
     }
-}
-
-fn attrs(meta: &std::fs::Metadata) -> FileAttributes {
-    attrs_with(meta, None)
 }
 
 /// `set`: the mode, uid and gid kept for the path, if any.
@@ -269,6 +306,10 @@ impl russh_sftp::server::Handler for SftpServer {
 
     async fn fsetstat(&mut self, id: u32, handle: String, attrs: FileAttributes) -> Result<Status, Self::Error> {
         let path = self.open_path(&handle)?;
+        // SS-14: a size cuts the file there (a resumed upload's partial file).
+        if let (Some(size), Some(Open::File { file, .. })) = (attrs.size, self.handles.get_mut(&handle)) {
+            file.set_len(size).map_err(|e| io_status(&e))?;
+        }
         self.apply(&path, &attrs)?;
         Ok(ok(id))
     }
@@ -307,7 +348,7 @@ impl russh_sftp::server::Handler for SftpServer {
         let meta = std::fs::symlink_metadata(self.local(&path)).map_err(|e| io_status(&e))?;
         Ok(Attrs {
             id,
-            attrs: attrs(&meta),
+            attrs: self.attrs_of(&self.path(&path), &meta),
         })
     }
 
@@ -321,10 +362,18 @@ impl russh_sftp::server::Handler for SftpServer {
             return Ok(Handle { id, handle });
         }
         let mut entries = Vec::new();
+        let folder = self.path(&path);
         for entry in std::fs::read_dir(self.local(&path)).map_err(|e| io_status(&e))? {
             let entry = entry.map_err(|e| io_status(&e))?;
             let meta = entry.metadata().map_err(|e| io_status(&e))?;
-            entries.push(File::new(entry.file_name().to_string_lossy(), attrs(&meta)));
+            let name = entry.file_name().to_string_lossy().into_owned();
+            // SS-14: with the modes and owners SFTP set.
+            let host_path = if folder == "/" {
+                format!("/{name}")
+            } else {
+                format!("{folder}/{name}")
+            };
+            entries.push(File::new(name, self.attrs_of(&host_path, &meta)));
         }
         let handle = self.handle(Open::Folder { entries: Some(entries) });
         Ok(Handle { id, handle })
@@ -366,9 +415,17 @@ impl russh_sftp::server::Handler for SftpServer {
             return Err(StatusCode::PermissionDenied);
         }
         let options: std::fs::OpenOptions = pflags.into();
-        let file = options.open(local(&self.root, &path)).map_err(|e| io_status(&e))?;
-        self.state
-            .note(format!("sftp open {path}{}", if writes { " for writing" } else { "" }));
+        let at = local(&self.root, &path);
+        let new = pflags.contains(OpenFlags::CREATE) && !at.exists();
+        let file = options.open(&at).map_err(|e| io_status(&e))?;
+        if new {
+            self.made(&path, 0o644);
+        }
+        self.state.note(format!(
+            "sftp open {path}{}{}",
+            if writes { " for writing" } else { "" },
+            if self.as_root { " as root" } else { "" }
+        ));
         let handle = self.handle(Open::File { file, path });
         Ok(Handle { id, handle })
     }
@@ -418,6 +475,47 @@ impl russh_sftp::server::Handler for SftpServer {
         std::fs::remove_file(local(&self.root, &path)).map_err(|e| io_status(&e))?;
         locks::lock(&self.state.sftp_meta).remove(&path);
         self.state.note(format!("sftp remove {path}"));
+        Ok(ok(id))
+    }
+
+    /// SS-14: a new folder; "failure" when something is there, as OpenSSH answers.
+    async fn mkdir(&mut self, id: u32, path: String, _attrs: FileAttributes) -> Result<Status, Self::Error> {
+        let path = self.path(&path);
+        if self.protected(&path) {
+            return Err(StatusCode::PermissionDenied);
+        }
+        let at = local(&self.root, &path);
+        if at.exists() {
+            return Err(StatusCode::Failure);
+        }
+        std::fs::create_dir(&at).map_err(|e| io_status(&e))?;
+        self.made(&path, 0o755);
+        self.state.note(format!(
+            "sftp mkdir {path}{}",
+            if self.as_root { " as root" } else { "" }
+        ));
+        Ok(ok(id))
+    }
+
+    /// SS-14: deletes an empty folder; "failure" for one that holds something, as OpenSSH answers.
+    async fn rmdir(&mut self, id: u32, path: String) -> Result<Status, Self::Error> {
+        let path = self.path(&path);
+        if self.protected(&path) {
+            return Err(StatusCode::PermissionDenied);
+        }
+        let at = local(&self.root, &path);
+        if !at.is_dir() {
+            return Err(StatusCode::NoSuchFile);
+        }
+        if std::fs::read_dir(&at).map_err(|e| io_status(&e))?.next().is_some() {
+            return Err(StatusCode::Failure);
+        }
+        std::fs::remove_dir(&at).map_err(|e| io_status(&e))?;
+        locks::lock(&self.state.sftp_meta).remove(&path);
+        self.state.note(format!(
+            "sftp rmdir {path}{}",
+            if self.as_root { " as root" } else { "" }
+        ));
         Ok(ok(id))
     }
 }

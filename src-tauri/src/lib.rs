@@ -792,6 +792,13 @@ fn commands() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         files::files_cancel,
         files::files_retry,
         files::files_open_folder,
+        files::files_change,
+        files::files_root_start,
+        files::files_root_stop,
+        files::files_root_status,
+        files::files_pause,
+        files::files_resume,
+        files::files_pick_upload_folder,
         // FD-04 support bundles.
         support_bundle::bundle_presets,
         support_bundle::bundle_limits,

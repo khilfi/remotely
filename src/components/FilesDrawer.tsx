@@ -1,7 +1,7 @@
 // SS-08: the "Files here" drawer of the Terminal page. It follows the current terminal's shell folder (bash and zsh
 // report it through Remotely's prompt hook), or starts in the home folder for other shells, where folders are opened
-// by hand: double-click a folder, the breadcrumb, Up, Home, Back, or a path typed in. Files can be ticked and
-// downloaded to Downloads or a folder picked in a dialog, and uploaded into the folder shown. SFTP runs on the
+// by hand: double-click a folder, the breadcrumb, Up, Home, Back, or a path typed in. Files and folders can be ticked
+// and downloaded to Downloads or a folder picked in a dialog, and uploaded into the folder shown. SFTP runs on the
 // terminal's own connection; uploads go through the approval flow. The transfers panel sits at the bottom. QL-08:
 // disabled buttons say why.
 //
@@ -11,27 +11,69 @@
 // (su, sudo -i), says so and that transfers still run as the login user. User names carry data-mask="user" (FD-03).
 // P6: transfers come from the transfers store, not from the page: the drawer re-renders when an upload into its
 // terminal finished (to list the folder again), and only the transfers panel follows each transfer's progress.
+//
+// SS-14: each row's "⋯" renames, moves, copies, deletes and sets permissions or the owner; ticked rows get the same in
+// the selection bar; the header's "⋯" makes a folder or an empty file, uploads a folder, and browses as root (the
+// host's sftp-server under sudo: the header says "as root", and every change asks one tier more). Each change goes
+// through the command bus, which asks at its tier; the folder lists again once its job ends. The full two-pane Files
+// page is 0.8.0's G3.
 
-import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
+import { Fragment, useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 import {
   ArrowLeftIcon,
   ArrowUpIcon,
   CircleAlertIcon,
+  CopyIcon,
   CrosshairIcon,
+  DownloadIcon,
   FileIcon,
+  FilePlusIcon,
   FolderIcon,
+  FolderInputIcon,
   FolderOpenIcon,
+  FolderPlusIcon,
+  FolderUpIcon,
   HouseIcon,
+  KeyRoundIcon,
   LinkIcon,
+  MoreHorizontalIcon,
+  PencilIcon,
   RefreshCwIcon,
+  ShieldIcon,
+  ShieldOffIcon,
+  Trash2Icon,
   UploadIcon,
   UserIcon,
+  UserRoundCogIcon,
 } from "lucide-react";
+import { toast } from "sonner";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import { FileChangeDialog, type FileAsk } from "@/components/FileChangeDialog";
+import { HelpTip } from "@/components/HelpTip";
+import { RowMenu } from "@/components/RowMenu";
+import { SelectionBar } from "@/components/SelectionBar";
 import { SortableHead } from "@/components/SortableHead";
 import { usePresentation } from "@/components/Presentation";
 import { Tip } from "@/components/Tip";
@@ -41,14 +83,20 @@ import { useUploadsDone } from "@/hooks/use-transfers";
 import {
   api,
   errorMessage,
+  type FileChange,
   type FolderListing,
   type FolderTracking,
+  type RemoteEntry,
   type ShellUsers,
+  type SubmitOutcome,
   type TransferInfo,
 } from "@/lib/api";
-import { downloadReason, uploadReason } from "@/lib/disabled-reasons";
+import { downloadReason, fileChangeReason, uploadReason } from "@/lib/disabled-reasons";
+import { changeLabel } from "@/lib/file-ops";
 import { plural } from "@/lib/format";
 import { readOnlyLocked } from "@/lib/presentation-state";
+import { isReauthCancelled } from "@/lib/reauth";
+import { withVaultPassword } from "@/lib/reauth-prompt";
 import { crumbs, formatSize, joinPath, sortEntries, userNote, type SortKey } from "@/lib/transfers";
 import type { PaneSnapshot } from "@/lib/terminal-session";
 import { cn } from "@/lib/utils";
@@ -61,9 +109,12 @@ interface Props {
   name: string;
   /** SS-10: terminals MultiExec types into; uploads still go to this one only. */
   multiExecTerminals: number;
-  onUpload: (folder: string) => void;
-  onDownload: (paths: string[], to: "downloads" | "choose") => void;
+  /** SS-14: `asRoot` through root browsing; `folder`: pick a folder to upload with what is in it. */
+  onUpload: (folder: string, asRoot: boolean, pick: "files" | "folder") => void;
+  onDownload: (paths: string[], to: "downloads" | "choose", asRoot: boolean) => void;
   onRetry: (transfer: TransferInfo) => void;
+  /** SS-14: a file change went to the bus: queued, or the approval dialog; `onJob` once its job runs. */
+  onSubmitted: (outcome: SubmitOutcome, onJob: (jobId: string) => void) => void;
 }
 
 /** A folder opened by hand: a path (absolute, `~`, or relative to `from`, the folder shown when it was typed). */
@@ -98,9 +149,21 @@ function Who({ children }: { children: string }) {
   );
 }
 
-/** QL-09: "Transfers as alice", and what is known about the shell's own user. */
-function TransfersAs({ user }: { user: ShellUsers | undefined }) {
+/** QL-09: "Transfers as alice", and what is known about the shell's own user. SS-14: or "as root". */
+function TransfersAs({ user, asRoot }: { user: ShellUsers | undefined; asRoot: boolean }) {
   const login = user?.username;
+  if (asRoot) {
+    return (
+      <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
+        <ShieldIcon className="size-3.5 shrink-0 text-tier-high" aria-hidden />
+        <span>
+          Transfers and changes here run as <span className="font-medium text-tier-high">root</span> (sudo), one
+          approval tier higher.
+        </span>
+        <HelpTip topic="filesRoot" />
+      </p>
+    );
+  }
   if (!login) return null;
   const note = userNote(user);
   let more: ReactNode = null;
@@ -144,31 +207,51 @@ function TransfersAs({ user }: { user: ShellUsers | undefined }) {
     <div className="grid gap-1 text-xs text-muted-foreground">
       <p
         className="flex items-center gap-1.5"
-        title="Uploads and downloads run over SFTP as the SSH login user, never with sudo."
+        title="Uploads, downloads and changes run over SFTP as the SSH login user, unless you browse as root."
       >
         <UserIcon className="size-3.5 shrink-0" aria-hidden />
         <span>
           Transfers as <Who>{login}</Who>
         </span>
+        <HelpTip topic="filesChanges" />
       </p>
       {more && <p className="rounded-md bg-muted/60 px-2 py-1 text-foreground/90">{more}</p>}
     </div>
   );
 }
 
-export function FilesDrawer({ terminalId, snapshot, name, multiExecTerminals, onUpload, onDownload, onRetry }: Props) {
+/** A rename or move that would replace a file: asked before it goes again with `replace`. */
+interface ReplaceAsk {
+  change: Extract<FileChange, { kind: "rename" } | { kind: "move" }>;
+  /** The core's words: what is there. */
+  message: string;
+}
+
+export function FilesDrawer({
+  terminalId,
+  snapshot,
+  name,
+  multiExecTerminals,
+  onUpload,
+  onDownload,
+  onRetry,
+  onSubmitted,
+}: Props) {
   // Grows when an upload into this terminal finished, so the listing shows the new file.
   const refresh = useUploadsDone(terminalId);
-  // FD-03: uploads say why they are off while the read-only lock applies.
+  // FD-03: uploads and changes say why they are off while the read-only lock applies.
   const presentation = usePresentation();
   const connected = terminalId !== null && snapshot.status.state === "connected";
   const shellFolder = snapshot.folder?.path ?? null;
   /** A folder opened by hand, per terminal; none: the shell's folder (or home). */
   const [browsing, setBrowsing] = useState<Browse | null>(null);
   const browse = browsing && browsing.terminal === terminalId ? browsing : null;
+  /** SS-14: root browsing, per terminal. */
+  const [rootFor, setRootFor] = useState<string | null>(null);
+  const asRoot = terminalId !== null && rootFor === terminalId;
   const [tick, setTick] = useState(0);
   const keyOf = (b: Browse | null) =>
-    `${terminalId ?? ""}|${b ? `${b.path}|${b.from ?? ""}` : `shell:${shellFolder ?? ""}`}|${tick}|${refresh}|${connected}`;
+    `${terminalId ?? ""}|${b ? `${b.path}|${b.from ?? ""}` : `shell:${shellFolder ?? ""}`}|${tick}|${refresh}|${connected}|${asRoot}`;
   const want = keyOf(browse);
   const [loaded, setLoaded] = useState<{ key: string; listing: FolderListing | null; error: string | null } | null>(
     null,
@@ -178,25 +261,43 @@ export function FilesDrawer({ terminalId, snapshot, name, multiExecTerminals, on
   const [sort, setSort] = useState<{ key: SortKey; dir: 1 | -1 }>({ key: "name", dir: 1 });
   const [picked, setPicked] = useState<{ path: string; names: string[] }>({ path: "", names: [] });
   const [typed, setTyped] = useState<{ for: string; text: string } | null>(null);
+  const [ask, setAsk] = useState<FileAsk | null>(null);
+  const [replaceAsk, setReplaceAsk] = useState<ReplaceAsk | null>(null);
+  /** SS-14: jobs of changes made here; the folder lists again when one ends. */
+  const watched = useRef(new Set<string>());
+
+  useEffect(() => {
+    const unlisten = api.onJobEvent((event) => {
+      if (event.event === "finished" && watched.current.delete(event.jobId)) setTick((n) => n + 1);
+    });
+    return () => void unlisten.then((stop) => stop());
+  }, []);
 
   useEffect(() => {
     if (!terminalId || !connected || have.current === want) return;
     let gone = false;
-    api.filesList(terminalId, browse?.path ?? null, browse?.from ?? null).then(
+    api.filesList(terminalId, browse?.path ?? null, browse?.from ?? null, asRoot).then(
       (listing) => {
         if (gone) return;
         have.current = want;
         setLoaded({ key: want, listing, error: null });
       },
       (err) => {
+        if (gone) return;
+        // SS-14: root browsing ended (a reconnect, the vault locked): back to the login user.
+        if (asRoot && errorMessage(err).includes("not browsing as root")) {
+          setRootFor(null);
+          toast.info("Root browsing ended; the folder shows what the login user can open");
+          return;
+        }
         // The terminal can't reach its files at all: the last folder stays, so the drawer still goes somewhere.
-        if (!gone) setLoaded((prev) => ({ key: want, listing: prev?.listing ?? null, error: errorMessage(err) }));
+        setLoaded((prev) => ({ key: want, listing: prev?.listing ?? null, error: errorMessage(err) }));
       },
     );
     return () => {
       gone = true;
     };
-  }, [want, terminalId, connected, browse]);
+  }, [want, terminalId, connected, browse, asRoot]);
 
   const fresh = loaded?.key === want;
   // While the next folder loads, the last one stays (dimmed).
@@ -209,6 +310,7 @@ export function FilesDrawer({ terminalId, snapshot, name, multiExecTerminals, on
   const pickedEntries = entries.filter((e) => names.includes(e.name));
   const shownPath = listing?.path ?? "";
   const pathText = typed && typed.for === shownPath ? typed.text : shownPath;
+  const readOnly = readOnlyLocked(presentation);
 
   function open(path: string, from: string | null = null) {
     setBrowsing({ terminal: terminalId, path, from });
@@ -223,7 +325,7 @@ export function FilesDrawer({ terminalId, snapshot, name, multiExecTerminals, on
   async function back() {
     if (!terminalId || !listing) return;
     try {
-      const result = await api.filesBack(terminalId, listing.path);
+      const result = await api.filesBack(terminalId, listing.path, asRoot);
       const next: Browse = { terminal: terminalId, path: result.path, from: null };
       const key = keyOf(next);
       have.current = key;
@@ -243,6 +345,10 @@ export function FilesDrawer({ terminalId, snapshot, name, multiExecTerminals, on
     setPicked({ path: listing.path, names: [...now] });
   }
 
+  function clearPicked() {
+    setPicked({ path: "", names: [] });
+  }
+
   function sortBy(key: SortKey) {
     setSort((s) => ({ key, dir: s.key === key ? (s.dir === 1 ? -1 : 1) : 1 }));
   }
@@ -254,24 +360,198 @@ export function FilesDrawer({ terminalId, snapshot, name, multiExecTerminals, on
     if (text) open(text, listing?.path ?? null);
   }
 
+  /** SS-14: sends a change to the bus; the folder lists again once its job ends. Throws for the dialog to show. */
+  async function change(next: FileChange) {
+    if (!terminalId) return;
+    try {
+      const outcome = await api.filesChange(terminalId, next, asRoot);
+      setAsk(null);
+      clearPicked();
+      onSubmitted(outcome, (jobId) => watched.current.add(jobId));
+      if (outcome.status === "queued") {
+        toast.success(changeLabel(next));
+        // A quick job may end before its id is watched: list the folder again a moment later anyway.
+        window.setTimeout(() => setTick((n) => n + 1), 1500);
+      }
+    } catch (err) {
+      const code = err && typeof err === "object" && "code" in err ? String(err.code) : "";
+      if (code === "path_taken" && (next.kind === "rename" || next.kind === "move")) {
+        setAsk(null);
+        setReplaceAsk({ change: next, message: errorMessage(err) });
+        return;
+      }
+      throw err;
+    }
+  }
+
+  /** A change from a menu (no dialog of its own): its error is a toast. */
+  function run(next: FileChange) {
+    change(next).catch((err) => toast.error(errorMessage(err)));
+  }
+
+  async function startRoot(retry = false) {
+    if (!terminalId) return;
+    try {
+      const started = await withVaultPassword((vaultPassword) =>
+        api.filesRootStart(terminalId, { vaultPassword, retry }),
+      );
+      setRootFor(terminalId);
+      clearPicked();
+      toast.success(started.withPassword ? "Browsing as root" : "Browsing as root (sudo asked for no password)");
+    } catch (err) {
+      if (isReauthCancelled(err)) return;
+      const code = err && typeof err === "object" && "code" in err ? String(err.code) : "";
+      if (code === "login_parked") {
+        toast.error(errorMessage(err), { action: { label: "Try again", onClick: () => void startRoot(true) } });
+      } else {
+        toast.error(`Can't browse as root: ${errorMessage(err)}`);
+      }
+    }
+  }
+
+  async function stopRoot() {
+    if (!terminalId) return;
+    setRootFor(null);
+    clearPicked();
+    try {
+      await api.filesRootStop(terminalId);
+    } catch (err) {
+      toast.error(errorMessage(err));
+    }
+  }
+
   const followingShell = snapshot.folder?.tracking === "following";
   const note = trackingNote(snapshot.folder?.tracking, browse === null);
-  const files = pickedEntries.filter((e) => e.kind === "file");
   const download = downloadReason({ connected, picked: pickedEntries });
   const upload =
-    uploadReason({ open: terminalId !== null, connected, readOnly: readOnlyLocked(presentation) }) ??
+    uploadReason({ open: terminalId !== null, connected, readOnly }) ??
     (!listing ? "Open a folder first" : failed ? "This folder couldn't be opened" : null);
-  const allFiles = entries.filter((e) => e.kind === "file");
-  const login = snapshot.folder?.user?.username ?? null;
+  const changes = fileChangeReason({ connected, readOnly, folderOpen: listing !== null && !failed });
+  const paths = (list: RemoteEntry[]) => (listing ? list.map((e) => joinPath(listing.path, e.name)) : []);
+  const here = listing?.path ?? "/";
+
+  /** The actions on one row, or on the ticked rows (the selection bar's). */
+  function actions(
+    list: RemoteEntry[],
+    item: (key: string, label: string, icon: ReactNode, onSelect: () => void, danger?: boolean) => ReactNode,
+  ) {
+    const p = paths(list);
+    const one = list.length === 1 ? list[0] : null;
+    return [
+      one?.kind === "folder" &&
+        item("open", "Open", <FolderOpenIcon />, () => listing && open(joinPath(listing.path, one.name))),
+      list.every((e) => e.kind !== "other") &&
+        item("download", "Download", <DownloadIcon />, () => onDownload(p, "downloads", asRoot)),
+      list.every((e) => e.kind !== "other") &&
+        item("downloadTo", "Download to…", <FolderInputIcon />, () => onDownload(p, "choose", asRoot)),
+      one && item("rename", "Rename…", <PencilIcon />, () => setAsk({ kind: "rename", path: p[0] })),
+      item("move", "Move to…", <FolderUpIcon />, () => setAsk({ kind: "move", paths: p, folder: here })),
+      item("copy", "Copy to…", <CopyIcon />, () => setAsk({ kind: "copy", paths: p, folder: here })),
+      item("mode", "Permissions…", <KeyRoundIcon />, () => setAsk({ kind: "mode", paths: p, mode: one?.mode ?? null })),
+      item("owner", "Owner…", <UserRoundCogIcon />, () =>
+        setAsk({ kind: "owner", paths: p, uid: one?.uid ?? null, gid: one?.gid ?? null }),
+      ),
+      item(
+        "delete",
+        list.length === 1 ? "Delete" : `Delete ${list.length}`,
+        <Trash2Icon />,
+        () => run({ kind: "delete", paths: p }),
+        true,
+      ),
+    ];
+  }
+
+  const menuItem = (key: string, label: string, icon: ReactNode, onSelect: () => void, danger = false) => {
+    const changing = !["open", "download", "downloadTo"].includes(key);
+    return (
+      <Fragment key={key}>
+        {key === "delete" && <DropdownMenuSeparator />}
+        <DropdownMenuItem
+          variant={danger ? "destructive" : "default"}
+          disabled={changing && changes !== null}
+          onSelect={onSelect}
+        >
+          {icon}
+          {label}
+        </DropdownMenuItem>
+      </Fragment>
+    );
+  };
+
+  /** The selection bar's buttons: its main actions; the rest are in its "⋯". */
+  const barButton = (key: string, label: string, icon: ReactNode, onSelect: () => void) => {
+    const changing = !["open", "download", "downloadTo"].includes(key);
+    const why = changing ? changes : download;
+    if (!["download", "move", "copy", "delete"].includes(key)) return null;
+    return (
+      <WhyDisabled key={key} reason={why}>
+        <Button variant="ghost" size="sm" disabled={why !== null} onClick={onSelect}>
+          {icon}
+          {label}
+        </Button>
+      </WhyDisabled>
+    );
+  };
 
   return (
     <div className="@container flex h-full min-h-0 flex-col gap-2 rounded-lg border p-2">
       <div className="flex items-center gap-1.5">
         <FolderOpenIcon className="size-4 shrink-0 text-muted-foreground" aria-hidden />
         <h2 className="shrink-0 text-sm font-medium whitespace-nowrap">Files here</h2>
+        {asRoot && (
+          <Badge variant="outline" className="shrink-0 border-tier-high/50 font-normal text-tier-high">
+            as root
+          </Badge>
+        )}
         <span className="truncate text-xs text-muted-foreground" title={name}>
           {name}
         </span>
+        {connected && (
+          <DropdownMenu>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <DropdownMenuTrigger asChild>
+                  <Button variant="ghost" size="icon-sm" className="ml-auto" aria-label="More file actions">
+                    <MoreHorizontalIcon />
+                  </Button>
+                </DropdownMenuTrigger>
+              </TooltipTrigger>
+              <TooltipContent>More file actions</TooltipContent>
+            </Tooltip>
+            <DropdownMenuContent align="end" className="min-w-52">
+              <DropdownMenuItem
+                disabled={changes !== null}
+                onSelect={() => setAsk({ kind: "newFolder", folder: here })}
+              >
+                <FolderPlusIcon />
+                New folder…
+              </DropdownMenuItem>
+              <DropdownMenuItem disabled={changes !== null} onSelect={() => setAsk({ kind: "newFile", folder: here })}>
+                <FilePlusIcon />
+                New empty file…
+              </DropdownMenuItem>
+              <DropdownMenuItem
+                disabled={upload !== null}
+                onSelect={() => listing && onUpload(listing.path, asRoot, "folder")}
+              >
+                <FolderUpIcon />
+                Upload a folder here…
+              </DropdownMenuItem>
+              <DropdownMenuSeparator />
+              {asRoot ? (
+                <DropdownMenuItem onSelect={() => void stopRoot()}>
+                  <ShieldOffIcon />
+                  Stop browsing as root
+                </DropdownMenuItem>
+              ) : (
+                <DropdownMenuItem disabled={readOnly} onSelect={() => void startRoot()}>
+                  <ShieldIcon />
+                  Browse as root…
+                </DropdownMenuItem>
+              )}
+            </DropdownMenuContent>
+          </DropdownMenu>
+        )}
       </div>
 
       {!terminalId ? (
@@ -280,7 +560,7 @@ export function FilesDrawer({ terminalId, snapshot, name, multiExecTerminals, on
         <p className="text-sm text-muted-foreground">This terminal is not connected, so its files can't be reached.</p>
       ) : (
         <>
-          <TransfersAs user={snapshot.folder?.user} />
+          <TransfersAs user={snapshot.folder?.user} asRoot={asRoot} />
           {note && <p className="text-xs text-muted-foreground">{note}</p>}
           {multiExecTerminals > 1 && (
             <p className="rounded-md bg-muted/60 px-2 py-1 text-xs">
@@ -346,6 +626,16 @@ export function FilesDrawer({ terminalId, snapshot, name, multiExecTerminals, on
             </nav>
           )}
           {error && <p className="text-xs text-destructive">{error}</p>}
+          {pickedEntries.length > 0 && (
+            <SelectionBar count={pickedEntries.length} onClear={clearPicked} className="flex-none">
+              {actions(pickedEntries, barButton)}
+              <RowMenu label={plural(pickedEntries.length, "selected item")}>
+                {actions(pickedEntries, (key, label, icon, onSelect) =>
+                  ["downloadTo", "mode", "owner"].includes(key) ? menuItem(key, label, icon, onSelect) : null,
+                )}
+              </RowMenu>
+            </SelectionBar>
+          )}
           {failed ? (
             <div
               role="alert"
@@ -359,10 +649,10 @@ export function FilesDrawer({ terminalId, snapshot, name, multiExecTerminals, on
                 <span className="break-words">{failed.message}</span>
               </p>
               <p className="text-muted-foreground">
-                {failed.code === "permission_denied" && login && (
+                {failed.code === "permission_denied" && snapshot.folder?.user?.username && !asRoot && (
                   <>
-                    Transfers run as <Who>{login}</Who>, the SSH login user, never with sudo, even when the shell has
-                    switched user.{" "}
+                    Transfers run as <Who>{snapshot.folder.user.username}</Who>, the SSH login user, unless you browse
+                    as root (the "⋯" above).{" "}
                   </>
                 )}
                 Go Back, Up or Home, pick a folder above, or type another one.
@@ -381,11 +671,11 @@ export function FilesDrawer({ terminalId, snapshot, name, multiExecTerminals, on
                   <TableRow>
                     <TableHead className="w-7">
                       <Checkbox
-                        aria-label="Tick every file"
-                        checked={allFiles.length > 0 && allFiles.every((e) => names.includes(e.name))}
-                        disabled={allFiles.length === 0}
+                        aria-label="Tick everything"
+                        checked={entries.length > 0 && entries.every((e) => names.includes(e.name))}
+                        disabled={entries.length === 0}
                         onCheckedChange={(on) =>
-                          listing && setPicked({ path: listing.path, names: on ? allFiles.map((e) => e.name) : [] })
+                          listing && setPicked({ path: listing.path, names: on ? entries.map((e) => e.name) : [] })
                         }
                       />
                     </TableHead>
@@ -409,12 +699,15 @@ export function FilesDrawer({ terminalId, snapshot, name, multiExecTerminals, on
                       onSort={() => sortBy("modified")}
                       className="hidden @sm:table-cell"
                     />
+                    <TableHead className="w-8">
+                      <span className="sr-only">Actions</span>
+                    </TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
                   {listing && entries.length === 0 && (
                     <TableRow>
-                      <TableCell colSpan={4} className="text-center text-xs text-muted-foreground">
+                      <TableCell colSpan={5} className="text-center text-xs text-muted-foreground">
                         This folder is empty.
                       </TableCell>
                     </TableRow>
@@ -426,9 +719,9 @@ export function FilesDrawer({ terminalId, snapshot, name, multiExecTerminals, on
                       onDoubleClick={() => {
                         if (!listing) return;
                         if (e.kind === "folder") open(joinPath(listing.path, e.name));
-                        else if (e.kind === "file") onDownload([joinPath(listing.path, e.name)], "downloads");
+                        else if (e.kind === "file") onDownload([joinPath(listing.path, e.name)], "downloads", asRoot);
                       }}
-                      className="cursor-default text-xs"
+                      className="group cursor-default text-xs"
                       title={
                         e.kind === "folder"
                           ? "Double-click to open"
@@ -468,6 +761,11 @@ export function FilesDrawer({ terminalId, snapshot, name, multiExecTerminals, on
                             })
                           : ""}
                       </TableCell>
+                      <TableCell className="py-0.5">
+                        <RowMenu label={e.name} className="opacity-0 group-hover:opacity-100 focus-visible:opacity-100">
+                          {actions([e], menuItem)}
+                        </RowMenu>
+                      </TableCell>
                     </TableRow>
                   ))}
                 </TableBody>
@@ -475,44 +773,16 @@ export function FilesDrawer({ terminalId, snapshot, name, multiExecTerminals, on
             </div>
           )}
           <div className="flex flex-wrap items-center gap-1.5">
-            <WhyDisabled reason={download}>
-              <Button
-                size="xs"
-                disabled={download !== null}
-                onClick={() =>
-                  listing &&
-                  onDownload(
-                    files.map((e) => joinPath(listing.path, e.name)),
-                    "downloads",
-                  )
-                }
-              >
-                Download{files.length > 1 ? ` ${files.length}` : ""}
-              </Button>
-            </WhyDisabled>
-            <WhyDisabled reason={download}>
-              <Button
-                size="xs"
-                variant="outline"
-                disabled={download !== null}
-                onClick={() =>
-                  listing &&
-                  onDownload(
-                    files.map((e) => joinPath(listing.path, e.name)),
-                    "choose",
-                  )
-                }
-              >
-                Download to…
-              </Button>
-            </WhyDisabled>
+            {listing?.more && (
+              <p className="text-xs text-muted-foreground">More is in this folder than is listed here.</p>
+            )}
             <WhyDisabled reason={upload}>
               <Button
                 size="xs"
                 variant="outline"
                 className="ml-auto"
                 disabled={upload !== null}
-                onClick={() => listing && onUpload(listing.path)}
+                onClick={() => listing && onUpload(listing.path, asRoot, "files")}
               >
                 <UploadIcon />
                 Upload here…
@@ -527,6 +797,31 @@ export function FilesDrawer({ terminalId, snapshot, name, multiExecTerminals, on
       <div className="flex max-h-[35%] min-h-0 shrink-0 flex-col overflow-hidden">
         <TransfersList onRetry={onRetry} />
       </div>
+      {ask && <FileChangeDialog ask={ask} asRoot={asRoot} onSubmit={change} onClose={() => setAsk(null)} />}
+      {replaceAsk && (
+        <AlertDialog open onOpenChange={(open) => !open && setReplaceAsk(null)}>
+          <AlertDialogContent>
+            <AlertDialogHeader>
+              <AlertDialogTitle>Replace what is there?</AlertDialogTitle>
+              <AlertDialogDescription>
+                {replaceAsk.message}. Replacing loses what is there, so it asks for your approval next.
+              </AlertDialogDescription>
+            </AlertDialogHeader>
+            <AlertDialogFooter>
+              <AlertDialogCancel>Cancel</AlertDialogCancel>
+              <AlertDialogAction
+                onClick={() => {
+                  const again = { ...replaceAsk.change, replace: true };
+                  setReplaceAsk(null);
+                  run(again);
+                }}
+              >
+                Replace…
+              </AlertDialogAction>
+            </AlertDialogFooter>
+          </AlertDialogContent>
+        </AlertDialog>
+      )}
     </div>
   );
 }

@@ -8,6 +8,7 @@ import {
   connectedReason,
   diffReason,
   downloadReason,
+  fileChangeReason,
   multiExecIdleReason,
   multiExecReason,
   READ_ONLY_REASON,
@@ -105,13 +106,20 @@ test("SS-08: uploads need a connected terminal", () => {
   assert.equal(uploadReason({ open: true, connected: true }), null);
 });
 
-test("SS-08: downloads take files, not folders", () => {
+test("SS-08, SS-14: downloads take files and folders, not devices", () => {
   const file = { kind: "file" as const };
   assert.match(downloadReason({ connected: false, picked: [file] }) ?? "", /not connected/);
   assert.match(downloadReason({ connected: true, picked: [] }) ?? "", /Tick the files/);
-  assert.match(downloadReason({ connected: true, picked: [file, { kind: "folder" }] }) ?? "", /Folders aren't/);
-  assert.match(downloadReason({ connected: true, picked: [{ kind: "other" }] }) ?? "", /regular files/);
+  assert.equal(downloadReason({ connected: true, picked: [file, { kind: "folder" }] }), null);
+  assert.match(downloadReason({ connected: true, picked: [{ kind: "other" }] }) ?? "", /files and folders/);
   assert.equal(downloadReason({ connected: true, picked: [file, file] }), null);
+});
+
+test("SS-14: file changes need a connected terminal, an open folder and no read-only lock", () => {
+  assert.equal(fileChangeReason({ connected: true, folderOpen: true }), null);
+  assert.equal(fileChangeReason({ connected: true, folderOpen: true, readOnly: true }), READ_ONLY_REASON);
+  assert.match(fileChangeReason({ connected: false, folderOpen: true }) ?? "", /not connected/);
+  assert.match(fileChangeReason({ connected: true, folderOpen: false }) ?? "", /couldn't be opened/);
 });
 
 test("FD-03: with the read-only lock on, changing actions say so first", () => {

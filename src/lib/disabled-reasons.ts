@@ -106,11 +106,18 @@ export function uploadReason(input: { open: boolean; connected: boolean; readOnl
   return null;
 }
 
-/** SS-08: the drawer's Download buttons, for the picked entries. */
+/** SS-08: the drawer's Download buttons, for the picked entries (SS-14: folders come with what is in them). */
 export function downloadReason(input: { connected: boolean; picked: { kind: "file" | "folder" | "other" }[] }) {
   if (!input.connected) return "This terminal is not connected, so its files can't be reached";
   if (input.picked.length === 0) return "Tick the files to download first";
-  if (input.picked.some((e) => e.kind === "folder")) return "Folders aren't downloaded: open the folder and pick files";
-  if (input.picked.some((e) => e.kind === "other")) return "Only regular files can be downloaded";
+  if (input.picked.some((e) => e.kind === "other")) return "Only files and folders can be downloaded";
+  return null;
+}
+
+/** SS-14: the drawer's file changes (rename, move, copy, delete, permissions, new folder). */
+export function fileChangeReason(input: { connected: boolean; readOnly?: boolean; folderOpen: boolean }) {
+  if (input.readOnly) return READ_ONLY_REASON;
+  if (!input.connected) return "This terminal is not connected, so its files can't be changed";
+  if (!input.folderOpen) return "This folder couldn't be opened";
   return null;
 }

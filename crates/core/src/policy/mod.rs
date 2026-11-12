@@ -20,6 +20,8 @@ mod convert_tests;
 #[cfg(test)]
 mod deploy_tests;
 #[cfg(test)]
+mod file_ops_tests;
+#[cfg(test)]
 mod file_server_tests;
 #[cfg(test)]
 mod host_networks_tests;
@@ -50,6 +52,7 @@ use crate::error::{CoreError, Result};
 use crate::host_networks::HostNetworkOp;
 use crate::presentation::Change;
 use crate::stacks::StackOp;
+use crate::terminal::file_ops::FileOp;
 use crate::vm_settings::{VmConfigEdit, VmDeviceOp, VmDiskOp, VmLifecycleOp};
 
 pub use commands::{default_dangerous_patterns, default_read_only_commands, DangerousPattern};
@@ -119,6 +122,21 @@ pub enum ActionKind {
     FileUpload,
     /// Upload files that replace files on the host (SS-08). Never below Medium: replacing asks.
     FileReplace,
+    // SS-14 (docs/plan-0.8.md, "Approval tiers"): changes to a host's files. As root, one tier higher.
+    /// Make a folder or an empty file on a host.
+    FileNew,
+    /// Rename or move files and folders on a host, replacing nothing.
+    FileMove,
+    /// Rename or move files over files on a host. Never below Medium: replacing asks.
+    FileMoveReplace,
+    /// Copy files and folders within a host (`cp -a`, also rated by the shell rules).
+    FileCopy,
+    /// Change files' permissions or owner on a host.
+    FilePermissions,
+    /// Delete files, links or empty folders on a host. Never below Medium: deleting asks.
+    FileDelete,
+    /// Delete folders with everything in them on a host. Never below Medium.
+    FileDeleteFolder,
     /// Open a local or SOCKS tunnel only this PC can use (SS-07).
     TunnelLocal,
     /// Open a remote tunnel: the host listens, and connections to it reach a host this PC reaches
@@ -204,7 +222,7 @@ pub enum ActionKind {
 
 impl ActionKind {
     /// Every action, in the order Settings lists them (AP-01).
-    pub const ALL: [ActionKind; 58] = [
+    pub const ALL: [ActionKind; 65] = [
         ActionKind::VmStart,
         ActionKind::VmUnpause,
         ActionKind::VmPause,
@@ -243,6 +261,13 @@ impl ActionKind {
         ActionKind::SshKeyRemove,
         ActionKind::FileUpload,
         ActionKind::FileReplace,
+        ActionKind::FileNew,
+        ActionKind::FileMove,
+        ActionKind::FileMoveReplace,
+        ActionKind::FileCopy,
+        ActionKind::FilePermissions,
+        ActionKind::FileDelete,
+        ActionKind::FileDeleteFolder,
         ActionKind::TunnelLocal,
         ActionKind::TunnelRemote,
         ActionKind::TunnelShared,
@@ -289,6 +314,13 @@ impl ActionKind {
             ActionKind::SshKeyRemove => "Remove an SSH key from hosts",
             ActionKind::FileUpload => "Upload files",
             ActionKind::FileReplace => "Upload files that replace files on the host",
+            ActionKind::FileNew => "Make a folder or an empty file on a host",
+            ActionKind::FileMove => "Rename or move files on a host",
+            ActionKind::FileMoveReplace => "Rename or move files over files on a host",
+            ActionKind::FileCopy => "Copy files within a host",
+            ActionKind::FilePermissions => "Change files' permissions or owner on a host",
+            ActionKind::FileDelete => "Delete files or empty folders on a host",
+            ActionKind::FileDeleteFolder => "Delete folders with what is in them on a host",
             ActionKind::TunnelLocal => "Open a tunnel for this PC only",
             ActionKind::TunnelRemote => "Open a remote tunnel (the host listens)",
             ActionKind::TunnelShared => "Open a tunnel other computers can use",
@@ -408,8 +440,10 @@ pub struct PolicyRules {
     pub powershell: PowerShellRules,
 }
 
-/// SS-08: replacing a file on a host always asks at least for a confirm.
+/// SS-08: replacing a file on a host always asks at least for a confirm (SS-14: a rename or move over one too).
 pub const MIN_REPLACE_TIER: Tier = Tier::Medium;
+/// SS-14: deleting files on a host always asks at least for a confirm.
+pub const MIN_DELETE_TIER: Tier = Tier::Medium;
 /// SS-07: a tunnel other computers can use always asks at least for a confirm, which says so.
 pub const MIN_SHARED_TUNNEL_TIER: Tier = Tier::Medium;
 
@@ -587,12 +621,21 @@ impl PolicyRules {
             let Some(rule) = self.tiers.get(&kind) else {
                 return invalid(kind.label(), "no tier set for this action".into());
             };
-            if kind == ActionKind::FileReplace && rule.single < MIN_REPLACE_TIER {
+            if matches!(kind, ActionKind::FileReplace | ActionKind::FileMoveReplace) && rule.single < MIN_REPLACE_TIER {
                 return invalid(
                     kind.label(),
                     format!(
                         "replacing a file always asks first, so this can't be lower than {}",
                         MIN_REPLACE_TIER.as_str()
+                    ),
+                );
+            }
+            if matches!(kind, ActionKind::FileDelete | ActionKind::FileDeleteFolder) && rule.single < MIN_DELETE_TIER {
+                return invalid(
+                    kind.label(),
+                    format!(
+                        "deleting files on a host always asks first, so this can't be lower than {}",
+                        MIN_DELETE_TIER.as_str()
                     ),
                 );
             }
@@ -990,6 +1033,16 @@ impl Default for PolicyRules {
             // SS-08: a new file in a folder the user can write to anyway; replacing one asks first.
             (FileUpload, TierRule::same(Low)),
             (FileReplace, TierRule::same(Medium)),
+            // SS-14 (docs/plan-0.8.md, "Approval tiers"): what adds or renames without losing anything is Low, as an
+            // upload; what replaces, changes who may read or write, copies or deletes asks once; deleting a folder
+            // with what is in it is the full approval. As root, one tier higher.
+            (FileNew, TierRule::same(Low)),
+            (FileMove, TierRule::same(Low)),
+            (FileMoveReplace, TierRule::same(Medium)),
+            (FileCopy, TierRule::same(Medium)),
+            (FilePermissions, TierRule::same(Medium)),
+            (FileDelete, TierRule::same(Medium)),
+            (FileDeleteFolder, TierRule::same(High)),
             // SS-07: a tunnel only this PC can use reaches what the terminal reaches anyway (the PRD:
             // Medium on a Prod host, which the Prod rule gives). A remote one opens a port on the host
             // into this PC's network; a shared one lets other computers in without logging in.
@@ -1360,6 +1413,8 @@ impl PolicyEngine {
             // SS-08: replacing a file loses what was there; adding one does not.
             Command::FileUpload { files, .. } if files.iter().any(|f| f.replace) => ActionKind::FileReplace,
             Command::FileUpload { .. } => ActionKind::FileUpload,
+            // SS-14: what is lost decides.
+            Command::FileOp { spec, .. } => file_op_kind(&spec.op),
             // SS-07: who can use the tunnel decides, then which way it goes.
             Command::OpenTunnel { forward, .. } if !forward.spec.loopback_only() => ActionKind::TunnelShared,
             Command::OpenTunnel { forward, .. } if forward.spec.kind == ForwardKind::Remote => ActionKind::TunnelRemote,
@@ -1784,6 +1839,41 @@ impl PolicyEngine {
             }
         }
 
+        // SS-14: a copy within a host runs `cp -a` on it, so the shell rules rate it too (on one host: the bulk tier
+        // for commands is about many hosts), and the higher of the two counts.
+        if let Command::FileOp { spec, .. } = command {
+            if let Some(script) = spec.copy_script() {
+                let rated = self.classify_script(&script);
+                let floor = self.rules.tier_for(rated, 1);
+                let line = format!(
+                    "`cp -a` is rated by the shell rules as {} ({})",
+                    exec_word(rated),
+                    floor.as_str()
+                );
+                if floor > tier {
+                    reasons.push(format!("{line}: {} -> {}", tier.as_str(), floor.as_str()));
+                    tier = floor;
+                } else {
+                    reasons.push(line);
+                }
+                let hits = self.dangerous_matches(&script);
+                if !hits.is_empty() {
+                    reasons.push(format!("flagged dangerous: {}", hits.join(", ")));
+                }
+            }
+        }
+
+        // SS-14: as root (root browsing), one tier higher, whatever the target's label; Prod adds its own.
+        if command.as_root() {
+            let bumped = tier.bump();
+            if bumped == tier {
+                reasons.push("as root (sudo)".into());
+            } else {
+                reasons.push(format!("as root (sudo): {} -> {}", tier.as_str(), bumped.as_str()));
+            }
+            tier = bumped;
+        }
+
         if self.rules.prod_bump && active.iter().any(|t| t.environment == Environment::Prod) {
             let bumped = tier.bump();
             if bumped != tier {
@@ -1836,6 +1926,19 @@ impl PolicyEngine {
                 steps
             }
         }
+    }
+}
+
+/// SS-14: the action a file change is.
+pub fn file_op_kind(op: &FileOp) -> ActionKind {
+    match op {
+        FileOp::NewFolder { .. } | FileOp::NewFile { .. } => ActionKind::FileNew,
+        FileOp::Rename { replace: true, .. } | FileOp::Move { replace: true, .. } => ActionKind::FileMoveReplace,
+        FileOp::Rename { .. } | FileOp::Move { .. } => ActionKind::FileMove,
+        FileOp::Copy { .. } => ActionKind::FileCopy,
+        FileOp::Mode { .. } | FileOp::Owner { .. } => ActionKind::FilePermissions,
+        FileOp::Delete { recursive: true, .. } => ActionKind::FileDeleteFolder,
+        FileOp::Delete { .. } => ActionKind::FileDelete,
     }
 }
 
@@ -1908,6 +2011,8 @@ pub fn safety_snapshot_applies(command: &Command) -> bool {
         | Command::RemoveSshKey { .. }
         | Command::TerminalLine { .. }
         | Command::FileUpload { .. }
+        // SS-14: files on a host, never a VM's own state.
+        | Command::FileOp { .. }
         | Command::OpenTunnel { .. }
         | Command::Container { .. }
         // VM-11: a forward is the network's (or a NAT adapter's) setting; a snapshot of the guest wouldn't undo it.

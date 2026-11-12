@@ -551,6 +551,7 @@ impl Core {
             Arc::clone(&links),
         );
         terminals.set_bindings(bindings.clone());
+        terminals.set_login_guard(login_guard.clone());
         // F4: one WinRM client for PowerShell consoles, Windows guest metrics and facts, and Windows service checks. It
         // checks an HTTPS certificate against Windows' trust store through the network tools (a fake in tests).
         let winrm: Arc<dyn adapters::winrm::WinrmAdapter> =

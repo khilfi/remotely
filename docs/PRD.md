@@ -76,6 +76,7 @@ The session manager matches PuTTY and MobaXterm on the basics in the MVP, then a
 | SS-11 | Timestamped session logs and terminal recording with replay | v2 |
 | SS-12 | RDP (launches mstsc with saved settings), VNC, Telnet, serial/COM and WinRM sessions | v3 |
 | SS-13 | External vaults: KeePass, Bitwarden, HashiCorp Vault | v3 |
+| SS-14 | A file manager for hosts: rename, move, copy, delete, new folders and files, permissions and owners as commands on the bus; browsing as root (sudo); a transfer queue with pause and resume, folders and what to do with files already there (0.8.0, `docs/plan-0.8.md`) | v2 |
 
 ## Bulk execution
 
@@ -236,6 +237,18 @@ Health checks (0.7.0, MO-08, `docs/plan-0.7.md` "Approval tiers"). Checks run fr
 | --- | --- |
 | A health check's run (ping, TCP port, HTTP(S), certificate, DNS, or a systemd unit's state over SSH), and "Run now" | Not a command: no tier, not audited (reads), allowed by the read-only lock; each result kept in the checks' history |
 | Adding, editing, pausing, resuming or deleting a health check | No tier; audited (`check_changed`), refused by the read-only lock |
+
+Files on hosts (0.8.0, SS-14, `docs/plan-0.8.md` "Approval tiers"). Every change to a host's files is a command on the bus: one job per action, a step per path, each audited with its path. They run over the terminal's own SFTP channel as the login user, or as root through root browsing (the host's sftp-server under sudo, with BX-07's password; a refused one is parked by the login guard). A Prod-labelled terminal moves each up one tier, and as root moves it up one more:
+
+| Action | Tier |
+| --- | --- |
+| List a folder, download files or folders (audited reads, each file marked as from the internet) | Reads: no tier |
+| Upload a new file or a folder, make a folder or an empty file, rename or move without replacing anything | Low |
+| Replace a file (an upload, or a rename or move over one), change permissions or the owner, copy within the host (`cp -a`, also rated by the shell rules: a dangerous match raises it) | Medium; replacing never below Medium |
+| Delete a file, a link or an empty folder | Medium; never below Medium |
+| Delete a folder with what is in it (never `/` or a top-level folder) | High; never below Medium |
+| Any of these as root (sudo) | One tier higher |
+| Start or stop root browsing | No tier; audited (`files_root_started`, `files_root_stopped`, `files_root_refused`); a vault password new to the host asks for the vault password (AP-06) |
 
 | ID | Requirement | Phase |
 | --- | --- | --- |

@@ -10,8 +10,15 @@
 use std::path::PathBuf;
 
 use remotely_core::adapters::remote::RemoteEntry;
-use remotely_core::terminal::files::{Existing, FolderListing, Retried, StagedFiles, TransferInfo, UploadStart};
+use remotely_core::command_bus::SubmitOutcome;
+use remotely_core::terminal::file_ops::FileChange;
+use remotely_core::terminal::files::{
+    DownloadDest, DownloadOptions, DownloadStart, Existing, FolderListing, Retried, StagedFiles, TransferInfo,
+    UploadStart,
+};
 use remotely_core::terminal::folder::FolderInfo;
+use remotely_core::terminal::root_files::{RootBrowsing, RootRequest};
+use remotely_core::vault::{SecretId, SecretString};
 use remotely_core::CoreError;
 use serde::{Deserialize, Serialize};
 use tauri::{Emitter, Manager, State, WebviewWindow, Window};
@@ -38,18 +45,109 @@ pub async fn files_list(
     id: Uuid,
     path: Option<String>,
     from: Option<String>,
+    as_root: Option<bool>,
 ) -> IpcResult<FolderListing> {
     Ok(state
         .core
         .terminals
-        .open_folder(id, path.as_deref(), from.as_deref())
+        .open_folder_as(id, path.as_deref(), from.as_deref(), as_root.unwrap_or(false))
         .await?)
 }
 
 /// QL-09: the drawer's Back from the folder it shows.
 #[tauri::command]
-pub async fn files_back(state: State<'_, AppState>, id: Uuid, from: String) -> IpcResult<FolderListing> {
-    Ok(state.core.terminals.folder_back(id, &from).await?)
+pub async fn files_back(
+    state: State<'_, AppState>,
+    id: Uuid,
+    from: String,
+    as_root: Option<bool>,
+) -> IpcResult<FolderListing> {
+    Ok(state
+        .core
+        .terminals
+        .folder_back_as(id, &from, as_root.unwrap_or(false))
+        .await?)
+}
+
+/// SS-14: a change to files on the terminal's host (rename, move, copy, delete, new folder or file, permissions,
+/// owner), through the command bus: queued (Low) or waiting for the approval dialog. The core checks every path.
+#[tauri::command]
+pub async fn files_change(
+    state: State<'_, AppState>,
+    id: Uuid,
+    change: FileChange,
+    as_root: bool,
+) -> IpcResult<SubmitOutcome> {
+    Ok(state.core.files.change(id, change, as_root).await?)
+}
+
+/// SS-14: starts browsing the terminal's host as root (its sftp-server under sudo). `reauth_required` when a vault
+/// password would go to sudo somewhere it doesn't go yet; `login_parked` after sudo refused it, until `retry`.
+#[tauri::command]
+pub async fn files_root_start(
+    state: State<'_, AppState>,
+    id: Uuid,
+    sudo_password_id: Option<SecretId>,
+    vault_password: Option<SecretString>,
+    retry: Option<bool>,
+) -> IpcResult<RootBrowsing> {
+    let core = &state.core;
+    let request = RootRequest {
+        sudo_password_id,
+        vault_password,
+        retry: retry.unwrap_or(false),
+    };
+    Ok(core.terminals.browse_as_root(&core.ctx(), id, request).await?)
+}
+
+/// SS-14: ends root browsing on the terminal; false when it wasn't on.
+#[tauri::command]
+pub async fn files_root_stop(state: State<'_, AppState>, id: Uuid) -> IpcResult<bool> {
+    let core = &state.core;
+    Ok(core.terminals.stop_root(&core.ctx(), id).await?)
+}
+
+/// SS-14: whether the terminal browses as root now.
+#[tauri::command]
+pub fn files_root_status(state: State<'_, AppState>, id: Uuid) -> Option<RootBrowsing> {
+    state.core.terminals.root_browsing(id)
+}
+
+/// SS-14: pauses a transfer (it stops after its current chunk); false when there was none to pause.
+#[tauri::command]
+pub fn files_pause(state: State<'_, AppState>, transfer_id: Uuid) -> bool {
+    state.core.terminals.pause_transfer(transfer_id)
+}
+
+/// SS-14: a paused transfer goes on from where it stopped.
+#[tauri::command]
+pub fn files_resume(state: State<'_, AppState>, transfer_id: Uuid) -> bool {
+    state.core.terminals.resume_transfer(transfer_id)
+}
+
+/// SS-14: asks for a folder to upload with what is in it (a dialog opened here) and stages it. `None` when the user
+/// closed the dialog.
+#[tauri::command]
+pub async fn files_pick_upload_folder(
+    window: WebviewWindow,
+    state: State<'_, AppState>,
+) -> IpcResult<Option<StagedFiles>> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    window
+        .dialog()
+        .file()
+        .set_parent(&window)
+        .set_title("Upload a folder to the terminal's folder")
+        .pick_folder(move |path| {
+            let _ = tx.send(path);
+        });
+    let Some(path) = rx.await.ok().flatten() else {
+        return Ok(None);
+    };
+    let path = path
+        .into_path()
+        .map_err(|err| CoreError::InvalidInput(format!("can't read that folder: {err}")))?;
+    Ok(Some(state.core.files.stage(vec![path])?))
 }
 
 #[derive(Serialize)]
@@ -102,8 +200,13 @@ pub async fn files_upload(
     staged_id: Uuid,
     folder: String,
     existing: Existing,
+    as_root: Option<bool>,
 ) -> IpcResult<UploadStart> {
-    Ok(state.core.files.upload(id, staged_id, &folder, existing).await?)
+    Ok(state
+        .core
+        .files
+        .upload_as(id, staged_id, &folder, existing, as_root.unwrap_or(false))
+        .await?)
 }
 
 /// SS-08: staged files that will not be uploaded (dropped beside the terminals, or the question closed).
@@ -121,8 +224,12 @@ pub enum DownloadTo {
     Choose,
 }
 
-/// SS-08: downloads files from the terminal's host (paths absolute, or from the shell's folder).
-/// `None` when the user closed the folder dialog.
+/// SS-08: downloads files (SS-14: and folders with what is in them) from the terminal's host (paths absolute, or from
+/// the shell's folder). `None` when the user closed the folder dialog. SS-14: `existing` says what to do with a file
+/// that is there on this PC (by default a number is added); as root when `as_root`; `choice` answers a conflict
+/// question, into the folder it was about.
+// Tauri passes each argument by name, as the UI sends them.
+#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 pub async fn files_download(
     window: WebviewWindow,
@@ -130,7 +237,24 @@ pub async fn files_download(
     id: Uuid,
     paths: Vec<String>,
     to: DownloadTo,
-) -> IpcResult<Option<Vec<TransferInfo>>> {
+    existing: Option<Existing>,
+    as_root: Option<bool>,
+    choice: Option<Uuid>,
+) -> IpcResult<Option<DownloadStart>> {
+    let options = DownloadOptions {
+        existing: existing.unwrap_or(Existing::KeepBoth),
+        as_root: as_root.unwrap_or(false),
+    };
+    // SS-14: the answer to a conflict question goes to the folder it was about, which the core kept.
+    if let Some(choice) = choice {
+        return Ok(Some(
+            state
+                .core
+                .files
+                .download(id, &paths, DownloadDest::Chosen(choice), options)
+                .await?,
+        ));
+    }
     let downloads = window
         .path()
         .download_dir()
@@ -155,8 +279,13 @@ pub async fn files_download(
                 .map_err(|err| CoreError::InvalidInput(format!("can't save there: {err}")))?
         }
     };
-    let core = &state.core;
-    Ok(Some(core.terminals.download(&core.ctx(), id, &paths, &dest).await?))
+    Ok(Some(
+        state
+            .core
+            .files
+            .download(id, &paths, DownloadDest::Folder(dest), options)
+            .await?,
+    ))
 }
 
 /// SS-08: every transfer the panel shows, newest last.

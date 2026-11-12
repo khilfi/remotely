@@ -150,12 +150,24 @@ pub enum TargetRef {
     },
     /// CV-03: a disk image a conversion writes on this PC, by its full path (it is new: nothing is there yet).
     DiskImage { path: String },
+    /// SS-14: one path of a file operation on an open terminal's host ([`crate::terminal::file_ops`]): one job step
+    /// each. `step` is the path's place in the operation's spec, which holds the path itself, so the audit log's
+    /// targets name the path only in the target's name, redacted like other free text. The bus fills in `session_id`
+    /// as for [`TargetRef::Terminal`].
+    RemotePath {
+        terminal_id: Uuid,
+        #[serde(default)]
+        session_id: Option<Uuid>,
+        step: usize,
+    },
 }
 
 /// VM-21: [`TargetRef::NewVm`]'s key prefix.
 pub const NEW_VM_KEY: &str = "new-vm";
 /// CV-03: [`TargetRef::DiskImage`]'s key prefix.
 pub const DISK_IMAGE_KEY: &str = "disk-image";
+/// SS-14: [`TargetRef::RemotePath`]'s key prefix.
+pub const REMOTE_PATH_KEY: &str = "remote-path";
 
 /// CT-01, CT-02: where containers run.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -255,6 +267,7 @@ impl TargetRef {
             TargetRef::Network { .. } => "network",
             TargetRef::NewVm { .. } => "new_vm",
             TargetRef::DiskImage { .. } => "disk_image",
+            TargetRef::RemotePath { .. } => "remote_path",
         }
     }
 
@@ -275,7 +288,20 @@ impl TargetRef {
             TargetRef::NewVm { hypervisor, name, .. } => format!("{NEW_VM_KEY}/{}/{name}", hypervisor.as_str()),
             // CV-03: `disk-image/C:\Images\rocky.vmdk`.
             TargetRef::DiskImage { path } => format!("{DISK_IMAGE_KEY}/{path}"),
+            // SS-14: `remote-path/<terminal>/<step>`; the path itself is in the operation.
+            TargetRef::RemotePath { terminal_id, step, .. } => format!("{REMOTE_PATH_KEY}/{terminal_id}/{step}"),
         }
+    }
+
+    /// SS-14: a file operation's path target from its [`TargetRef::key`].
+    pub fn remote_path_from_key(key: &str) -> Option<TargetRef> {
+        let rest = key.strip_prefix(REMOTE_PATH_KEY)?.strip_prefix('/')?;
+        let (terminal, step) = rest.split_once('/')?;
+        Some(TargetRef::RemotePath {
+            terminal_id: Uuid::parse_str(terminal).ok()?,
+            session_id: None,
+            step: step.parse().ok()?,
+        })
     }
 
     /// CV-03: a disk image target from its [`TargetRef::key`].

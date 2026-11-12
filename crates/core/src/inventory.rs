@@ -927,6 +927,27 @@ impl TargetDirectory for StoreDirectory {
                 environment: *environment,
                 protected: false,
             }),
+            // SS-14: a file change's path has its terminal's labels (the bus names it by its path).
+            TargetRef::RemotePath { terminal_id, step, .. } => {
+                let Some(terminals) = &self.terminals else {
+                    return Err(CoreError::UnknownTarget(target.key()));
+                };
+                let on = terminals.target(ctx, *terminal_id).await?;
+                let session_id = match &on.target {
+                    TargetRef::Terminal { session_id, .. } => *session_id,
+                    _ => None,
+                };
+                Ok(Target {
+                    target: TargetRef::RemotePath {
+                        terminal_id: *terminal_id,
+                        session_id,
+                        step: *step,
+                    },
+                    name: format!("{}: path {}", on.name, step + 1),
+                    environment: on.environment,
+                    protected: on.protected,
+                })
+            }
             // CV-03: a new file on this PC: named by its file name; no label, never protected.
             TargetRef::DiskImage { path } => Ok(Target {
                 target: target.clone(),

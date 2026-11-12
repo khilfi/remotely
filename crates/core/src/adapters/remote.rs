@@ -23,6 +23,7 @@
 
 pub mod forward;
 mod sftp;
+pub(crate) mod sftp_root;
 mod socks;
 
 use std::net::IpAddr;
@@ -480,6 +481,22 @@ pub struct RemoteEntry {
     pub modified: Option<u64>,
     /// The permission bits, e.g. 0o644.
     pub mode: Option<u32>,
+    /// SS-14: the owner's and group's numbers, as the host says.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub uid: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gid: Option<u32>,
+}
+
+/// SS-14: what [`RemoteFiles::set_attrs`] changes; `None` leaves it as it is.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SetAttrs {
+    /// The permission bits (`chmod`), at most 0o7777.
+    pub mode: Option<u32>,
+    /// The owner and group together (SFTP sets both at once).
+    pub owner: Option<(u32, u32)>,
+    /// The modification time, seconds since 1970 (the access time gets the same).
+    pub modified: Option<u64>,
 }
 
 /// SS-08: files on the host, on an SFTP channel of a terminal's connection. Paths are the host's:
@@ -503,8 +520,75 @@ pub trait RemoteFiles: Send + Sync {
     /// takes the old file's place only once all of it arrived ([`RemoteWrite::finish`]), keeping its
     /// permissions and owner; until then the old file stays as it was. [`Written`] says how it went.
     async fn write(&self, path: &str, replace: bool) -> Result<Box<dyn RemoteWrite>>;
-    /// Deletes a file (a transfer's own leftover).
+    /// Deletes a file (a transfer's own leftover), or a link (never what it points to).
     async fn remove(&self, path: &str) -> Result<()>;
+
+    /// SS-14: what is at `path` itself: a link is a link ([`RemoteEntry::link`], its kind
+    /// [`EntryKind::Other`]), never followed. `None` when nothing is.
+    async fn lstat(&self, path: &str) -> Result<Option<RemoteEntry>> {
+        self.stat(path).await
+    }
+    /// SS-14: a new, empty folder; fails when something is at `path`.
+    async fn make_folder(&self, _path: &str) -> Result<()> {
+        Err(CoreError::NotImplemented("making folders on this connection"))
+    }
+    /// SS-14: deletes an empty folder ([`CoreError::RemoteFolderNotEmpty`] when it isn't).
+    async fn remove_folder(&self, _path: &str) -> Result<()> {
+        Err(CoreError::NotImplemented("deleting folders on this connection"))
+    }
+    /// SS-14: `from` takes the name `to`. Without `replace` it fails when something is at `to`; with it, a file
+    /// there is replaced in one step (OpenSSH's posix-rename), and a host that can't do that refuses.
+    async fn rename(&self, _from: &str, _to: &str, _replace: bool) -> Result<()> {
+        Err(CoreError::NotImplemented("renaming on this connection"))
+    }
+    /// SS-14: sets a file's or folder's permissions, owner or modification time.
+    async fn set_attrs(&self, _path: &str, _attrs: SetAttrs) -> Result<()> {
+        Err(CoreError::NotImplemented("changing permissions on this connection"))
+    }
+    /// SS-14: a file read from `offset` on: a paused download going on where it stopped.
+    async fn read_from(&self, path: &str, offset: u64) -> Result<Box<dyn RemoteRead>> {
+        if offset == 0 {
+            return self.read(path).await;
+        }
+        Err(CoreError::NotImplemented("resuming a download on this connection"))
+    }
+    /// SS-14: files as root on this same connection: `server` (the host's sftp-server, from
+    /// [`SFTP_SERVER_PROBE`]) started under sudo on an exec channel, with `password` on its stdin when sudo asks.
+    /// [`CoreError::SudoPasswordRefused`] when sudo did not take it.
+    async fn open_as_root(&self, _server: &str, _password: Option<&SecretString>) -> Result<RootOpened> {
+        Err(CoreError::NotImplemented("browsing as root on this connection"))
+    }
+    /// SS-14: these files are root's (an SFTP server started with sudo).
+    fn as_root(&self) -> bool {
+        false
+    }
+}
+
+/// SS-14: root browsing's files, from [`RemoteFiles::open_as_root`].
+pub struct RootOpened {
+    pub files: Arc<dyn RemoteFiles>,
+    /// sudo asked for the password and took it (false: it asked for none, so none went to the host).
+    pub took_password: bool,
+}
+
+/// SS-14: finds the host's SFTP server program, to start it under sudo for root browsing. A read, as the login user:
+/// the first of the distributions' usual places that is there (Debian and Ubuntu, RHEL and Fedora, Arch, Alpine,
+/// SUSE), else `sftp-server` on the PATH. Prints one absolute path, or nothing.
+pub const SFTP_SERVER_PROBE: &str = "for p in /usr/lib/openssh/sftp-server /usr/libexec/openssh/sftp-server \
+/usr/lib/ssh/sftp-server /usr/libexec/sftp-server /usr/lib/sftp-server /usr/libexec/ssh/sftp-server; do \
+if [ -x \"$p\" ]; then printf '%s\\n' \"$p\"; exit 0; fi; done; command -v sftp-server";
+
+/// SS-14: the server [`SFTP_SERVER_PROBE`] found: an absolute path of plain characters, so it can go on a command
+/// line as it is.
+pub fn parse_sftp_server(stdout: &str) -> Option<String> {
+    let path = stdout.lines().map(str::trim).find(|l| !l.is_empty())?;
+    let plain = path.starts_with('/')
+        && path.len() <= 256
+        && !path.contains("/../")
+        && path
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '-' | '_' | '+'));
+    plain.then(|| path.to_owned())
 }
 
 /// A9: a folder listing stops after this many entries, and [`RemoteListing::more`] says so. Folders
@@ -538,6 +622,15 @@ pub trait RemoteWrite: Send {
     /// replacement's temporary file too, so the old file stays as it was. Says what is left on the
     /// host, for the transfers panel.
     async fn abort(self: Box<Self>) -> String;
+    /// SS-14: the transfer pauses: the host's file handle closes, and what was written so far stays (the new file,
+    /// or a replacement's temporary file), for [`RemoteWrite::resume`].
+    async fn pause(&mut self) -> Result<()> {
+        Err(CoreError::NotImplemented("pausing an upload on this connection"))
+    }
+    /// SS-14: goes on after a pause, writing from `offset` (what was written before the pause).
+    async fn resume(&mut self, _offset: u64) -> Result<()> {
+        Err(CoreError::NotImplemented("resuming an upload on this connection"))
+    }
 }
 
 /// H8: how an upload's file landed on the host.
@@ -1973,10 +2066,24 @@ impl ExecSession for ShellCommands {
         })
     }
 
-    async fn run_sudo(&self, _: &str, _: &SecretString, _: usize) -> Result<ExecResult> {
-        Err(CoreError::InvalidInput(
-            "a terminal's connection runs no sudo commands for Remotely".into(),
-        ))
+    /// SS-14: only a copy made as root (root browsing's `cp -a`, approved on the bus one tier higher) runs under sudo
+    /// here, with the password root browsing gave sudo (BX-07's, which passed rule 7's checks then). Scrubbed from the
+    /// output like any sudo password.
+    async fn run_sudo(&self, script: &str, password: &SecretString, max_output: usize) -> Result<ExecResult> {
+        if self.handle.is_closed() {
+            return Err(CoreError::Ssh("the terminal's connection is closed".into()));
+        }
+        let started = std::time::Instant::now();
+        let secrets = [password.clone()];
+        let (exit_code, signal, output) =
+            run_command(&self.handle, &self.shared, script, Some(password), &secrets, max_output).await?;
+        Ok(ExecResult {
+            exit_code,
+            signal,
+            output,
+            duration_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            peer_ip: None,
+        })
     }
 
     fn is_closed(&self) -> bool {

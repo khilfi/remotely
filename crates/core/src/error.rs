@@ -286,6 +286,14 @@ pub enum CoreError {
     #[error("{path} doesn't exist on the host")]
     RemoteNotFound { path: String },
 
+    /// SS-14: a file operation that was not asked to replace anything found something at its new path.
+    #[error("{path} already exists on the host, so nothing was replaced")]
+    RemotePathTaken { path: String },
+
+    /// SS-14: a folder to delete on its own still holds something (it changed since it was looked at).
+    #[error("{path} is not empty on the host, so it was not deleted. Delete it again to delete what is in it too")]
+    RemoteFolderNotEmpty { path: String },
+
     /// SS-08: SFTP failed: the host has no SFTP server, the channel closed, or the host reported an
     /// error. Never holds a secret or file content.
     #[error("{0}")]
@@ -534,6 +542,8 @@ impl CoreError {
             CoreError::RemotePermissionDenied { .. } => "permission_denied",
             CoreError::RemoteFileExists { .. } => "file_exists",
             CoreError::RemoteNotFound { .. } => "not_found",
+            CoreError::RemotePathTaken { .. } => "path_taken",
+            CoreError::RemoteFolderNotEmpty { .. } => "folder_not_empty",
             CoreError::Sftp(_) => "sftp",
             CoreError::ReadOnlyLock { .. } => "read_only_lock",
             CoreError::NotImplemented(_) => "not_implemented",

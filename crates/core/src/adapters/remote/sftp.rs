@@ -14,6 +14,10 @@
 //! made in the folder, or the old owner can't be given to it) is the file written over in place, as
 //! before, and the result says why ([`Written::InPlace`]). Extended attributes, ACLs and other hard
 //! links of the old file are not carried over by a rename.
+//!
+//! SS-14: renames, moves, folders, deletes, permissions, owners and times ([`RemoteFiles`]'s file operations), reads
+//! from an offset and uploads that pause and resume. Root browsing is the same code on another channel: the host's
+//! sftp-server started under sudo on an exec channel ([`super::sftp_root`]), so everything runs as root.
 
 use std::sync::{Arc, Mutex};
 
@@ -25,19 +29,33 @@ use russh_sftp::client::fs::{File, Metadata};
 use russh_sftp::client::{Config as SftpConfig, RawSftpSession, SftpSession};
 use russh_sftp::extensions::HardlinkExtension;
 use russh_sftp::protocol::{FileAttributes, FileType, OpenFlags, Packet, StatusCode};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
 use super::{
-    disconnect_reason, EntryKind, Handler, RemoteEntry, RemoteFiles, RemoteListing, RemoteRead, RemoteWrite, Shared,
-    Written, MAX_LISTING,
+    disconnect_reason, sftp_root, EntryKind, Handler, RemoteEntry, RemoteFiles, RemoteListing, RemoteRead, RemoteWrite,
+    RootOpened, SetAttrs, Shared, Written, MAX_LISTING,
 };
 use crate::error::{CoreError, Result};
+use crate::vault::SecretString;
 
 /// Each SFTP request may take this long before it counts as failed (a slow disk on the host).
 const REQUEST_TIMEOUT_SECS: u64 = 60;
 
 /// What a refused upload says to do instead.
-const WRITE_ADVICE: &str = " Remotely transfers files as the logged-in user and never uses sudo: upload to a folder you can write to (your home folder, /tmp), then move the file with sudo in the terminal.";
+const WRITE_ADVICE: &str = " Remotely transfers files as the logged-in user unless the folder is browsed as root: upload to a folder you can write to (your home folder, /tmp), or browse as root.";
+
+/// SS-14: what a refused file operation says to do instead.
+const CHANGE_ADVICE: &str = " Files change as the logged-in user unless the folder is browsed as root.";
+
+/// SS-14: the operations whose refusal gets [`CHANGE_ADVICE`].
+const WRITES: [&str; 6] = [
+    "rename",
+    "delete",
+    "make the folder",
+    "change the permissions of",
+    "change the owner of",
+    "set the time of",
+];
 
 /// H8: OpenSSH's rename that replaces a file that is there; a plain SFTP rename refuses to.
 const POSIX_RENAME: &str = "posix-rename@openssh.com";
@@ -58,10 +76,26 @@ pub(super) struct SftpFiles {
 struct Inner {
     handle: Arc<client::Handle<Handler>>,
     shared: Arc<Mutex<Shared>>,
-    /// The logged-in user, for messages.
+    /// The logged-in user, for messages; `root` for root browsing.
     user: String,
+    /// How a new SFTP channel starts.
+    opener: Opener,
+    /// SS-14: sudo took the password on a root channel (false: it asked for none).
+    took_password: std::sync::atomic::AtomicBool,
     session: tokio::sync::Mutex<Option<Arc<SftpSession>>>,
     raw: tokio::sync::Mutex<Option<Arc<Raw>>>,
+}
+
+/// SS-14: how this connection's SFTP channels start.
+enum Opener {
+    /// The `sftp` subsystem, as the login user.
+    Subsystem,
+    /// The host's sftp-server under sudo on an exec channel, with sudo's password (kept in memory for the channels
+    /// opened again after one broke; zeroized when the files are dropped).
+    Root {
+        server: String,
+        password: Option<SecretString>,
+    },
 }
 
 /// The second SFTP session, at the protocol level.
@@ -80,15 +114,30 @@ fn config() -> SftpConfig {
 
 impl SftpFiles {
     pub(super) fn new(handle: Arc<client::Handle<Handler>>, shared: Arc<Mutex<Shared>>, user: String) -> Self {
+        Self::with_opener(handle, shared, user, Opener::Subsystem)
+    }
+
+    fn with_opener(
+        handle: Arc<client::Handle<Handler>>,
+        shared: Arc<Mutex<Shared>>,
+        user: String,
+        opener: Opener,
+    ) -> Self {
         Self {
             inner: Arc::new(Inner {
                 handle,
                 shared,
                 user,
+                opener,
+                took_password: std::sync::atomic::AtomicBool::new(false),
                 session: tokio::sync::Mutex::new(None),
                 raw: tokio::sync::Mutex::new(None),
             }),
         }
+    }
+
+    fn is_root(&self) -> bool {
+        matches!(self.inner.opener, Opener::Root { .. })
     }
 
     async fn lost(&self) -> CoreError {
@@ -100,6 +149,15 @@ impl SftpFiles {
     async fn open_stream(&self) -> Result<russh::ChannelStream<client::Msg>> {
         if self.inner.handle.is_closed() {
             return Err(self.lost().await);
+        }
+        if let Opener::Root { server, password } = &self.inner.opener {
+            let (stream, took) = sftp_root::open_stream(&self.inner.handle, server, password.as_ref()).await?;
+            if took {
+                self.inner
+                    .took_password
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+            return Ok(stream);
         }
         let mut channel = self
             .inner
@@ -189,7 +247,15 @@ impl SftpFiles {
                     user: self.inner.user.clone(),
                     what,
                     path: path.to_owned(),
-                    advice: if what == "write to" { WRITE_ADVICE } else { "" },
+                    advice: if self.is_root() {
+                        ""
+                    } else if what == "write to" {
+                        WRITE_ADVICE
+                    } else if WRITES.contains(&what) {
+                        CHANGE_ADVICE
+                    } else {
+                        ""
+                    },
                 },
                 StatusCode::NoSuchFile => CoreError::RemoteNotFound { path: path.to_owned() },
                 code => {
@@ -407,7 +473,38 @@ fn to_entry(name: String, meta: Option<&Metadata>, link: bool) -> RemoteEntry {
         size: meta.map_or(0, Metadata::len),
         modified: meta.and_then(|m| m.mtime).map(u64::from),
         mode: meta.and_then(|m| m.permissions).map(|p| p & 0o7777),
+        uid: meta.and_then(|m| m.uid),
+        gid: meta.and_then(|m| m.gid),
     }
+}
+
+/// SS-14: what a path is itself, a link not followed.
+fn to_lstat_entry(name: String, meta: &Metadata) -> RemoteEntry {
+    if meta.file_type() == FileType::Symlink {
+        let mut entry = to_entry(name, None, true);
+        entry.mode = meta.permissions.map(|p| p & 0o7777);
+        entry.uid = meta.uid;
+        entry.gid = meta.gid;
+        entry.modified = meta.mtime.map(u64::from);
+        return entry;
+    }
+    to_entry(name, Some(meta), false)
+}
+
+/// SS-14: SFTP's attributes for a [`SetAttrs`]: the times go together, as the protocol sets them.
+fn attributes(set: SetAttrs) -> FileAttributes {
+    let mut attrs = FileAttributes::empty();
+    attrs.permissions = set.mode.map(|m| m & 0o7777);
+    if let Some((uid, gid)) = set.owner {
+        attrs.uid = Some(uid);
+        attrs.gid = Some(gid);
+    }
+    if let Some(at) = set.modified {
+        let at = u32::try_from(at).unwrap_or(u32::MAX);
+        attrs.atime = Some(at);
+        attrs.mtime = Some(at);
+    }
+    attrs
 }
 
 /// The last part of a path, for an entry's name.
@@ -536,6 +633,132 @@ impl RemoteFiles for SftpFiles {
             Ok(()) => Ok(()),
             Err(err) => Err(self.error(err, "delete", path).await),
         }
+    }
+
+    async fn lstat(&self, path: &str) -> Result<Option<RemoteEntry>> {
+        let session = self.sftp().await?;
+        match session.symlink_metadata(path).await {
+            Ok(meta) => Ok(Some(to_lstat_entry(file_name(path), &meta))),
+            Err(SftpError::Status(status)) if status.status_code == StatusCode::NoSuchFile => Ok(None),
+            Err(err) => Err(self.error(err, "look at", path).await),
+        }
+    }
+
+    async fn make_folder(&self, path: &str) -> Result<()> {
+        let session = self.sftp().await?;
+        match session.create_dir(path).await {
+            Ok(()) => Ok(()),
+            Err(err) => {
+                // OpenSSH answers a plain "failure" when something is there already.
+                let refused = matches!(&err, SftpError::Status(s) if s.status_code == StatusCode::Failure);
+                if refused && session.symlink_metadata(path).await.is_ok() {
+                    return Err(CoreError::RemotePathTaken { path: path.to_owned() });
+                }
+                Err(self.error(err, "make the folder", path).await)
+            }
+        }
+    }
+
+    async fn remove_folder(&self, path: &str) -> Result<()> {
+        let session = self.sftp().await?;
+        match session.remove_dir(path).await {
+            Ok(()) => Ok(()),
+            Err(err) => {
+                // rmdir of a folder that holds something is a plain "failure" too.
+                let refused = matches!(&err, SftpError::Status(s) if s.status_code == StatusCode::Failure);
+                if refused {
+                    if let Ok(listing) = self.list(path).await {
+                        if !listing.entries.is_empty() || listing.more {
+                            return Err(CoreError::RemoteFolderNotEmpty { path: path.to_owned() });
+                        }
+                    }
+                }
+                Err(self.error(err, "delete", path).await)
+            }
+        }
+    }
+
+    async fn rename(&self, from: &str, to: &str, replace: bool) -> Result<()> {
+        if replace {
+            let raw = self.raw().await?;
+            if !raw.posix_rename {
+                return Err(CoreError::Sftp(format!(
+                    "the host can't replace {to} in one step (its SFTP server has no posix-rename), so nothing was \
+                     changed. Delete {to} first, or rename into a free name"
+                )));
+            }
+            return match self.posix_rename(&raw, from, to).await {
+                Ok(()) => Ok(()),
+                Err(err) => Err(self.error(err, "rename", from).await),
+            };
+        }
+        let session = self.sftp().await?;
+        match session.rename(from, to).await {
+            Ok(()) => Ok(()),
+            Err(err) => {
+                // A plain SFTP rename refuses a name that is taken, with a plain "failure".
+                let refused = matches!(&err, SftpError::Status(s) if s.status_code == StatusCode::Failure);
+                if refused && session.symlink_metadata(to).await.is_ok() {
+                    return Err(CoreError::RemotePathTaken { path: to.to_owned() });
+                }
+                Err(self.error(err, "rename", from).await)
+            }
+        }
+    }
+
+    async fn set_attrs(&self, path: &str, attrs: SetAttrs) -> Result<()> {
+        let session = self.sftp().await?;
+        let what = if attrs.owner.is_some() {
+            "change the owner of"
+        } else if attrs.mode.is_some() {
+            "change the permissions of"
+        } else {
+            "set the time of"
+        };
+        match session.set_metadata(path, attributes(attrs)).await {
+            Ok(()) => Ok(()),
+            Err(err) => Err(self.error(err, what, path).await),
+        }
+    }
+
+    async fn read_from(&self, path: &str, offset: u64) -> Result<Box<dyn RemoteRead>> {
+        let session = self.sftp().await?;
+        let mut file = match session.open(path).await {
+            Ok(file) => file,
+            Err(err) => return Err(self.error(err, "read", path).await),
+        };
+        if offset > 0 {
+            file.seek(std::io::SeekFrom::Start(offset))
+                .await
+                .map_err(|err| CoreError::Sftp(format!("could not go on reading {path} on the host: {err}")))?;
+        }
+        Ok(Box::new(SftpRead {
+            file,
+            path: path.to_owned(),
+        }))
+    }
+
+    async fn open_as_root(&self, server: &str, password: Option<&SecretString>) -> Result<RootOpened> {
+        let root = SftpFiles::with_opener(
+            Arc::clone(&self.inner.handle),
+            Arc::clone(&self.inner.shared),
+            "root".to_owned(),
+            Opener::Root {
+                server: server.to_owned(),
+                password: password.cloned(),
+            },
+        );
+        // Started now, so a refused password or a missing server is known before the drawer says "as root".
+        root.raw().await?;
+        let took_password = root.inner.took_password.load(std::sync::atomic::Ordering::SeqCst);
+        Ok(RootOpened {
+            files: Arc::new(root),
+            took_password,
+        })
+    }
+
+    fn as_root(&self) -> bool {
+        self.is_root()
     }
 }
 
@@ -704,6 +927,47 @@ impl RemoteWrite for SftpWrite {
                 self.path
             ),
         }
+    }
+
+    async fn pause(&mut self) -> Result<()> {
+        // Every write confirmed, then the handle closed; the file stays as far as it got.
+        if let Some(mut file) = self.file.take() {
+            file.shutdown()
+                .await
+                .map_err(|err| CoreError::Sftp(format!("pausing {} on the host failed: {err}", self.path)))?;
+        }
+        Ok(())
+    }
+
+    async fn resume(&mut self, offset: u64) -> Result<()> {
+        if self.file.is_some() {
+            return Ok(());
+        }
+        let session = self.files.sftp().await?;
+        let mut file = match session.open_with_flags(&self.path, OpenFlags::WRITE).await {
+            Ok(file) => file,
+            Err(err) => return Err(self.files.error(err, "write to", &self.path).await),
+        };
+        let size = file.metadata().await.map(|m| m.len()).unwrap_or(0);
+        if size < offset {
+            return Err(CoreError::Sftp(format!(
+                "{} on the host is shorter than what was uploaded before the pause (someone changed it), so the upload \
+                 can't go on. Retry it",
+                self.path
+            )));
+        }
+        if size > offset {
+            let mut cut = FileAttributes::empty();
+            cut.size = Some(offset);
+            if let Err(err) = file.set_metadata(cut).await {
+                return Err(self.files.error(err, "write to", &self.path).await);
+            }
+        }
+        file.seek(std::io::SeekFrom::Start(offset))
+            .await
+            .map_err(|err| CoreError::Sftp(format!("could not go on writing {} on the host: {err}", self.path)))?;
+        self.file = Some(file);
+        Ok(())
     }
 }
 

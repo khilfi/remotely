@@ -474,14 +474,15 @@ async fn downloads_are_audited_and_never_overwrite_a_file_here() {
     assert!(detail.contains(&saved.display().to_string()), "{detail}");
     assert!(detail.contains(&format!("{} bytes", body.len())), "{detail}");
 
-    // A folder is not downloaded, and a missing file says so.
-    let err = t
+    // SS-14: a folder comes down with what is in it (nothing, here: just the folder), and a missing file says so.
+    let queued = t
         .core
         .terminals
         .download(&t.core.ctx(), terminal, &["/srv".into()], &dest)
         .await
-        .unwrap_err();
-    assert!(err.to_string().contains("is a folder"), "{err}");
+        .unwrap();
+    assert!(queued.is_empty());
+    assert!(dest.join("srv").is_dir());
     let err = t
         .core
         .terminals
@@ -570,11 +571,14 @@ async fn the_drawer_lists_the_home_folder_when_the_shell_does_not_report_one() {
 }
 
 #[tokio::test]
-async fn folders_and_two_files_of_one_name_are_not_staged() {
+async fn two_files_of_one_name_are_not_staged_and_a_folder_comes_with_what_is_in_it() {
     let (t, _) = fake(FakeFiles::default(), Environment::Lab).await;
+    // SS-14: a folder is staged with its files.
     let folder = temp_folder("stage");
-    let err = t.core.files.stage(vec![folder.clone()]).unwrap_err();
-    assert!(err.to_string().contains("is a folder"), "{err}");
+    std::fs::write(folder.join("inside.txt"), b"in").unwrap();
+    let staged = t.core.files.stage(vec![folder.clone()]).unwrap();
+    assert_eq!((staged.count, staged.files.len()), (1, 1));
+    assert!(staged.files[0].folder);
     let a = local_file("same.txt", b"a");
     let b = local_file("same.txt", b"b");
     let err = t.core.files.stage(vec![a, b]).unwrap_err();
@@ -851,7 +855,7 @@ async fn sftp_runs_on_the_terminals_own_connection() {
         .unwrap();
     let message = failed.message.unwrap();
     assert!(message.contains("alice can't write to /etc/motd"), "{message}");
-    assert!(message.contains("never uses sudo"), "{message}");
+    assert!(message.contains("or browse as root"), "{message}");
 
     assert_eq!(server.connections(), 1, "no second login for SFTP");
     let log = server.log();

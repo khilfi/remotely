@@ -59,6 +59,7 @@
 pub mod activity;
 pub mod alerts;
 pub mod console;
+pub mod file_ops;
 pub mod files;
 pub mod folder;
 pub mod log;
@@ -66,6 +67,7 @@ pub mod multiexec;
 pub mod output;
 pub mod quick;
 pub mod record;
+pub mod root_files;
 pub mod rules;
 pub mod shell_user;
 pub mod tunnels;
@@ -670,6 +672,8 @@ pub trait TerminalActions: Send + Sync {
     async fn send(&self, terminal_id: Uuid, keys: &[u8]) -> Result<()>;
     /// Uploads the files of a [`crate::command_bus::Command::FileUpload`], each audited as it lands.
     async fn upload(&self, run: UploadRun<'_>, cancel: &CancellationToken) -> Result<UploadReport>;
+    /// SS-14: one step (path) of a [`crate::command_bus::Command::FileOp`], audited when done. Returns its note.
+    async fn file_op(&self, run: file_ops::FileOpRun<'_>, cancel: &CancellationToken) -> Result<String>;
     /// Opens the forward of a [`crate::command_bus::Command::OpenTunnel`]. Returns where it listens.
     async fn open_tunnel(&self, run: TunnelRun<'_>) -> Result<String>;
 }
@@ -728,6 +732,10 @@ struct Control {
     dirty: AtomicBool,
     /// SS-08: the live connection's files (SFTP), while connected.
     files: Mutex<Option<Arc<dyn RemoteFiles>>>,
+    /// SS-14: root browsing on the live connection, while it lasts.
+    root: Mutex<Option<root_files::RootFiles>>,
+    /// SS-14: transfers at a time on this terminal's connection ([`files::TRANSFERS_PER_HOST`]).
+    slots: Arc<tokio::sync::Semaphore>,
     /// SS-08: the shell's folder.
     folder: Mutex<FolderInfo>,
     /// SS-08: the login's home folder on this connection, once asked.
@@ -838,6 +846,8 @@ struct Inner {
     specs: OnceLock<SpecsCollector>,
     /// SS-04, AP-06: where vault passwords may be typed and quick connections may send them.
     bindings: OnceLock<SecretBindings>,
+    /// SS-14: parks a sudo password root browsing had refused.
+    guard: OnceLock<crate::login_guard::LoginGuard>,
     /// R9: bumped when Windows resumes or the network changes; panes waiting to reconnect watch it.
     wake: tokio::sync::watch::Sender<(u64, WakeReason)>,
     /// R9: the panes that a wake would make try again now.
@@ -928,6 +938,7 @@ impl Terminals {
                 bus: OnceLock::new(),
                 specs: OnceLock::new(),
                 bindings: OnceLock::new(),
+                guard: OnceLock::new(),
                 wake: tokio::sync::watch::channel((0, WakeReason::NetworkChanged)).0,
                 waiting: Mutex::default(),
                 rules: OnceLock::new(),
@@ -960,14 +971,21 @@ impl Terminals {
         let _ = self.inner.bindings.set(bindings);
     }
 
+    /// SS-14: the guard that parks a sudo password root browsing had refused.
+    pub fn set_login_guard(&self, guard: crate::login_guard::LoginGuard) {
+        let _ = self.inner.guard.set(guard);
+    }
+
     /// SS-04: the vault locked. Passwords typed for logins (in a terminal or the quick-connect form, for
     /// the session or a jump host) are forgotten, so a reconnect asks again; open shells stay open, and
-    /// what was logged in with stays known only to scrub it from saved output and logs.
+    /// what was logged in with stays known only to scrub it from saved output and logs. SS-14: root browsing,
+    /// which holds sudo's password, ends.
     pub fn forget_logins(&self) {
         let open: Vec<Arc<Control>> = locks::lock(&self.inner.open).values().cloned().collect();
         for control in open {
             locks::lock(&control.remembered).take();
             locks::lock(&control.jump_passwords).clear();
+            root_files::end(&control);
         }
     }
 
@@ -1332,6 +1350,8 @@ impl Terminals {
             screen: Mutex::default(),
             dirty: AtomicBool::new(false),
             files: Mutex::default(),
+            root: Mutex::default(),
+            slots: Arc::new(tokio::sync::Semaphore::new(files::TRANSFERS_PER_HOST)),
             folder: Mutex::default(),
             home: Mutex::default(),
             opened: Mutex::default(),
@@ -2038,6 +2058,10 @@ impl TerminalActions for Terminals {
 
     async fn upload(&self, run: UploadRun<'_>, cancel: &CancellationToken) -> Result<UploadReport> {
         self.run_upload(run, cancel).await
+    }
+
+    async fn file_op(&self, run: file_ops::FileOpRun<'_>, cancel: &CancellationToken) -> Result<String> {
+        self.run_file_op(run, cancel).await
     }
 
     async fn open_tunnel(&self, run: TunnelRun<'_>) -> Result<String> {
@@ -3238,6 +3262,8 @@ impl Pane {
         self.send_alerts(due).await;
         *locks::lock(&self.control.screen) = PaneScreen::default();
         locks::lock(&self.control.files).take();
+        // SS-14: root browsing rode this connection.
+        root_files::end(&self.control);
         locks::lock(&self.control.forwards).take();
         locks::lock(&self.control.commands).take();
         // SS-07: open tunnels close with the connection and wait for the next one; closing the

@@ -51,7 +51,9 @@ export type TargetRef =
   /** VM-21, VM-10: a VM a deploy makes, by the name and label it will have. */
   | { kind: "newVm"; hypervisor: Hypervisor; name: string; environment: Environment }
   /** CV-03: the new image a conversion writes on this PC, by its full path. */
-  | { kind: "diskImage"; path: string };
+  | { kind: "diskImage"; path: string }
+  /** SS-14: one path of a file change on an open terminal's host, by its step (the target's name holds the path). */
+  | { kind: "remotePath"; terminalId: string; sessionId?: string | null; step: number };
 
 export interface Target {
   target: TargetRef;
@@ -289,7 +291,17 @@ export type Command =
    */
   | { type: "terminalLine"; targets: TargetRef[]; line: string; unreliable: boolean; keys: string }
   /** SS-08: an upload. Never submitted by the UI: `filesUpload` builds it in Rust from picked or dropped files. */
-  | { type: "fileUpload"; targets: TargetRef[]; folder: string; files: UploadFile[] }
+  | {
+      type: "fileUpload";
+      targets: TargetRef[];
+      folder: string;
+      files: UploadFile[];
+      folders?: string[];
+      keepTimes?: boolean;
+      asRoot?: boolean;
+    }
+  /** SS-14: a change to a host's files. Never submitted by the UI: `filesChange` builds it in Rust. */
+  | { type: "fileOp"; targets: TargetRef[]; spec: unknown }
   /** SS-07: a saved port forward opened on a terminal. Never submitted by the UI: `terminalTunnelStart` builds it. */
   | { type: "openTunnel"; targets: TargetRef[]; forward: PortForward }
   /** CT-01, CT-02: every target a container target whose object fits the op. */
@@ -480,7 +492,30 @@ export interface UploadFile {
 /** SS-08: an upload as the approval dialog shows it. */
 export interface UploadDetails {
   folder: string;
+  /** The first 500 files, the ones that replace a file listed first. */
   files: { name: string; size: number; replace: boolean }[];
+  /** SS-14: files beyond those, and how many of them replace a file. */
+  more?: number;
+  moreReplacing?: number;
+  /** SS-14: folders it makes (an uploaded folder's). */
+  folders?: number;
+  asRoot?: boolean;
+}
+
+/** SS-14: a file change as the approval dialog shows it, besides its paths (the targets). */
+export interface FileOpDetails {
+  kind: "newFolder" | "newFile" | "rename" | "move" | "copy" | "delete" | "mode" | "owner";
+  /** Where they go (a move or a copy), or the new name (a rename). */
+  into: string | null;
+  /** "0644". */
+  mode: string | null;
+  /** "1000:33". */
+  owner: string | null;
+  replace: boolean;
+  recursive: boolean;
+  asRoot: boolean;
+  /** A copy's `cp -a` lines. */
+  script: string | null;
 }
 
 /** AP-02: a VM target as it is now, read without a guest login. */
@@ -612,6 +647,8 @@ export interface ApprovalRequest {
   standing?: StandingDetails | null;
   /** FD-04: a support bundle's files and where the zip goes. */
   bundle?: BundleDetails | null;
+  /** SS-14: a file change: where they go, the new mode or owner, whether it replaces, recurses or runs as root. */
+  fileOp?: FileOpDetails | null;
 }
 
 /** VM-14, VM-27: a schedule as its approval dialog shows it (the approval holds for each of its runs). */
@@ -958,6 +995,13 @@ export type ActionKind =
   | "sshKeyRemove"
   | "fileUpload"
   | "fileReplace"
+  | "fileNew"
+  | "fileMove"
+  | "fileMoveReplace"
+  | "fileCopy"
+  | "filePermissions"
+  | "fileDelete"
+  | "fileDeleteFolder"
   | "tunnelLocal"
   | "tunnelRemote"
   | "tunnelShared"
@@ -1588,6 +1632,9 @@ export interface RemoteEntry {
   modified: number | null;
   /** Permission bits, e.g. 0o644. */
   mode: number | null;
+  /** SS-14: the owner's and group's numbers, as the host says. */
+  uid?: number;
+  gid?: number;
 }
 
 export interface FolderListing {
@@ -1599,16 +1646,51 @@ export interface FolderListing {
   error: { code: string; message: string } | null;
   /** QL-09: where Back goes. */
   back: string | null;
+  /** A9: the folder holds more than is listed. */
+  more?: boolean;
+  /** SS-14: listed as root (root browsing). */
+  asRoot?: boolean;
+  /** SS-14: root browsing is on for the terminal. */
+  rootAvailable?: boolean;
 }
 
 export interface StagedFiles {
   id: string;
-  files: { name: string; size: number }[];
+  /** What was picked: files, and SS-14 folders with how many files are in them. */
+  files: { name: string; size: number; folder?: boolean; files?: number }[];
   total: number;
+  /** SS-14: files in all, a folder's counted one by one. */
+  count?: number;
+  /** SS-14: links and junctions inside the folders, left out. */
+  leftOut?: number;
 }
 
-/** SS-08: what to do with files already in the folder. */
-export type Existing = "ask" | "replace" | "skip";
+/** SS-08, SS-14: what to do with files already there. */
+export type Existing = "ask" | "replace" | "replaceIfNewer" | "skip" | "keepBoth";
+
+/** SS-14: how starting a download went. */
+export type DownloadStart =
+  | { status: "conflicts"; existing: string[]; dest: string; choice: string | null }
+  | { status: "queued"; transfers: TransferInfo[]; skipped: number };
+
+/** SS-14: what the Files drawer asks to change. Paths are the host's, absolute; the core checks each. */
+export type FileChange =
+  | { kind: "newFolder"; folder: string; name: string }
+  | { kind: "newFile"; folder: string; name: string }
+  | { kind: "rename"; path: string; name: string; replace?: boolean }
+  | { kind: "move"; paths: string[]; into: string; replace?: boolean }
+  | { kind: "copy"; paths: string[]; into: string }
+  | { kind: "delete"; paths: string[] }
+  | { kind: "mode"; paths: string[]; mode: number }
+  | { kind: "owner"; paths: string[]; uid: number | null; gid: number | null };
+
+/** SS-14: root browsing on a terminal. */
+export interface RootBrowsing {
+  /** The host's sftp-server under sudo. */
+  server: string;
+  /** sudo took a password (false: it asked for none). */
+  withPassword: boolean;
+}
 
 export type UploadStart =
   | { status: "conflicts"; existing: string[]; folder: string }
@@ -1616,7 +1698,7 @@ export type UploadStart =
   /** Every file was there already and skipped. */
   | { status: "nothing" };
 
-export type TransferState = "queued" | "running" | "done" | "failed" | "cancelled";
+export type TransferState = "queued" | "running" | "paused" | "done" | "failed" | "cancelled";
 
 export interface TransferInfo {
   id: string;
@@ -1634,6 +1716,8 @@ export interface TransferInfo {
   message: string | null;
   sha256: string | null;
   replace: boolean;
+  /** SS-14: through root browsing. */
+  asRoot?: boolean;
 }
 
 export type Retried = { kind: "upload"; start: UploadStart } | { kind: "download"; transfers: TransferInfo[] };
@@ -4042,22 +4126,53 @@ export const api = {
    * SS-08: a folder on the terminal's host; without a path, the shell's folder (or home). QL-09: a relative path goes on
    * from `from` (the folder the drawer shows); a folder that can't be opened comes back with its `error`.
    */
-  filesList: (id: string, path: string | null, from: string | null = null) =>
-    invoke<FolderListing>("files_list", { id, path, from }),
+  filesList: (id: string, path: string | null, from: string | null = null, asRoot = false) =>
+    invoke<FolderListing>("files_list", { id, path, from, asRoot }),
   /** QL-09: the drawer's Back from the folder it shows. */
-  filesBack: (id: string, from: string) => invoke<FolderListing>("files_back", { id, from }),
+  filesBack: (id: string, from: string, asRoot = false) => invoke<FolderListing>("files_back", { id, from, asRoot }),
+  /** SS-14: a change to the host's files, through the command bus (queued, or the approval dialog). */
+  filesChange: (id: string, change: FileChange, asRoot: boolean) =>
+    invoke<SubmitOutcome>("files_change", { id, change, asRoot }),
+  /** SS-14: browse the host as root (its sftp-server under sudo). `reauth_required`, `login_parked` say why not. */
+  filesRootStart: (
+    id: string,
+    opts: { sudoPasswordId?: string | null; vaultPassword?: string; retry?: boolean } = {},
+  ) =>
+    invoke<RootBrowsing>("files_root_start", {
+      id,
+      sudoPasswordId: opts.sudoPasswordId ?? null,
+      vaultPassword: opts.vaultPassword ?? null,
+      retry: opts.retry ?? false,
+    }),
+  filesRootStop: (id: string) => invoke<boolean>("files_root_stop", { id }),
+  filesRootStatus: (id: string) => invoke<RootBrowsing | null>("files_root_status", { id }),
+  /** SS-14: pause and resume a transfer (it goes on from where it stopped). */
+  filesPause: (transferId: string) => invoke<boolean>("files_pause", { transferId }),
+  filesResume: (transferId: string) => invoke<boolean>("files_resume", { transferId }),
+  /** SS-14: a folder dialog; the folder waits (staged, with what is in it) for `filesUpload`. null: cancelled. */
+  filesPickUploadFolder: () => invoke<StagedFiles | null>("files_pick_upload_folder"),
   /** SS-08: what a name right-clicked in the output is, from the shell's folder. null: nothing there. */
   filesLookUp: (id: string, path: string) =>
     invoke<{ path: string; entry: RemoteEntry } | null>("files_look_up", { id, path }),
   /** SS-08: a file dialog opened by the shell; the files wait (staged) for `filesUpload`. null: cancelled. */
   filesPickUpload: () => invoke<StagedFiles | null>("files_pick_upload"),
   /** SS-08: uploads staged files through the command bus (Low; Prod and replacing ask). */
-  filesUpload: (id: string, stagedId: string, folder: string, existing: Existing) =>
-    invoke<UploadStart>("files_upload", { id, stagedId, folder, existing }),
+  filesUpload: (id: string, stagedId: string, folder: string, existing: Existing, asRoot = false) =>
+    invoke<UploadStart>("files_upload", { id, stagedId, folder, existing, asRoot }),
   filesUnstage: (stagedId: string) => invoke<void>("files_unstage", { stagedId }),
-  /** SS-08: to Downloads, or a folder the shell asks for. Audited per file. null: the dialog was closed. */
-  filesDownload: (id: string, paths: string[], to: "downloads" | "choose") =>
-    invoke<TransferInfo[] | null>("files_download", { id, paths, to }),
+  /**
+   * SS-08: to Downloads, or a folder the shell asks for. Audited per file. null: the dialog was closed. SS-14: folders
+   * come with what is in them; `existing` says what to do with a file that is there on this PC (a number by default).
+   */
+  filesDownload: (
+    id: string,
+    paths: string[],
+    to: "downloads" | "choose",
+    existing: Existing = "keepBoth",
+    asRoot = false,
+    /** The answer to a conflict question: the folder it was about, kept by the core. */
+    choice: string | null = null,
+  ) => invoke<DownloadStart | null>("files_download", { id, paths, to, existing, asRoot, choice }),
   filesTransfers: () => invoke<TransferInfo[]>("files_transfers"),
   filesCancel: (transferId: string) => invoke<boolean>("files_cancel", { transferId }),
   filesRetry: (transferId: string) => invoke<Retried>("files_retry", { transferId }),

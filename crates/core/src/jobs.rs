@@ -1867,7 +1867,17 @@ impl JobRunner {
                 self.terminals.send(*terminal_id, keys.as_bytes()).await?;
                 Ok(TargetOutcome::done())
             }
-            (Command::FileUpload { folder, files, .. }, TargetRef::Terminal { terminal_id, .. }) => {
+            (
+                Command::FileUpload {
+                    folder,
+                    files,
+                    folders,
+                    keep_times,
+                    as_root,
+                    ..
+                },
+                TargetRef::Terminal { terminal_id, .. },
+            ) => {
                 if token.is_cancelled() {
                     return Err(CoreError::Cancelled);
                 }
@@ -1879,6 +1889,9 @@ impl JobRunner {
                     terminal_id: *terminal_id,
                     folder,
                     files,
+                    folders,
+                    keep_times: *keep_times,
+                    as_root: *as_root,
                 };
                 let report = self.terminals.upload(run, token).await?;
                 Ok(TargetOutcome {
@@ -1888,6 +1901,22 @@ impl JobRunner {
                     failure: report.failure(),
                     note: Some(report.summary(folder)),
                     peer_ip: None,
+                })
+            }
+            // SS-14: one path of a file change, through its terminal.
+            (Command::FileOp { spec: change, .. }, TargetRef::RemotePath { step, .. }) => {
+                let run = crate::terminal::file_ops::FileOpRun {
+                    ctx: spec.ctx,
+                    job_id,
+                    tier: spec.decision.tier,
+                    target,
+                    spec: change,
+                    step: *step,
+                };
+                let note = self.terminals.file_op(run, token).await?;
+                Ok(TargetOutcome {
+                    note: Some(note),
+                    ..TargetOutcome::done()
                 })
             }
             (Command::OpenTunnel { forward, .. }, TargetRef::Terminal { terminal_id, .. }) => {
@@ -2772,7 +2801,9 @@ impl JobRunner {
             Command::TerminalLine { targets, .. } => targets.len(),
             // SS-08: one terminal, its files one after another. SS-07: one tunnel on one terminal. VM-11: one forward.
             // FD-09: one packet.
+            // SS-14: a file change's paths one after another, in their order (a folder before what goes into it).
             Command::FileUpload { .. }
+            | Command::FileOp { .. }
             | Command::OpenTunnel { .. }
             | Command::HostNetwork { .. }
             | Command::WakeOnLan { .. }
@@ -2924,6 +2955,7 @@ fn safety_verb(command: &Command) -> &'static str {
         | Command::RemoveSshKey { .. }
         | Command::TerminalLine { .. } => "command",
         Command::FileUpload { .. } => "upload",
+        Command::FileOp { .. } => "file change",
         Command::OpenTunnel { .. } => "tunnel",
         Command::Container { .. } => "container",
         Command::AppUpdate { .. } => "update",
