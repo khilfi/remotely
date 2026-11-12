@@ -21,6 +21,17 @@ ignore = [
   # rsa (Marvin attack: RSA decryption timing). Remotely only signs with RSA (SSH user keys, SS-09)
   # and never decrypts with it, and no rsa release fixes it yet. Revisit when one does.
   { id = "RUSTSEC-2023-0071", reason = "rsa timing side channel affects decryption; Remotely only signs" },
+  # libsqlite3-sys (SQLite CVE-2026-119375: a crafted database and `-wal` pair with different page sizes
+  # returns uninitialized page-cache memory). Remotely opens only its own database, remotely.db in this
+  # user's app data folder, which only this user (and administrators) can write, and which the quick file
+  # server never writes into. Whoever could plant a `-wal` there can already read the app's memory. The fix
+  # is in libsqlite3-sys 0.39, but sqlx-sqlite 0.9.0 takes only < 0.38. Revisit when sqlx allows 0.39.
+  { id = "RUSTSEC-2026-0459", reason = "SQLite WAL page-size bug needs a crafted file; Remotely opens only its own database" },
+  # russh (the agent server signs with confirm-constrained keys without asking `Agent::confirm`). Remotely
+  # is an agent client only: the Windows OpenSSH agent or Pageant holds the keys and signs, not russh. It
+  # never forwards an agent. russh's agent server runs only in the `fakes` test agent, with no constrained
+  # keys. The fix is in russh 0.65, a breaking release: drop this entry when Remotely moves to it.
+  { id = "RUSTSEC-2026-0495", reason = "russh agent server bug; Remotely only uses the agent client, the server is test-only" },
 ]
 
 [bans]
