@@ -6,8 +6,11 @@
 //!   paths; what the window sends is checked, never resolved.
 //! * Root browsing starts the host's sftp-server under sudo on an exec channel of the terminal's connection; changes
 //!   made through it are one tier higher; a refused password parks it.
-//! * The transfer queue: four at a time per host, pause and resume from the same offset, what to do with a file that
-//!   is there, times kept both ways, folders up and down with what is in them.
+//! * The transfer queue: four at a time per host, pause and resume (an upload from the same offset once the host's
+//!   file is checked to be what was sent, a download again from the start), what to do with a file that is there,
+//!   times kept both ways, folders up and down with what is in them (never Git's data).
+//! * What another user on the host could do meanwhile: a paused upload's file written again, a paused download's file
+//!   rewritten in place, a vault lock while a root upload waits, a sudo park the Containers page set.
 //!
 //! No real host is contacted; test data uses alice and files made at run time in the system temp folder.
 
@@ -28,6 +31,7 @@ use remotely_core::fakes::ssh_server::{SudoMode, TestSshServer, DEFAULT_SFTP_SER
 use remotely_core::fakes::FakeVmware;
 use remotely_core::jobs::JobStatus;
 use remotely_core::known_hosts::HostKey;
+use remotely_core::login_guard::{self, ParkReason, ParkScope, Parked};
 use remotely_core::policy::{ActionKind, ApprovalStep, Tier};
 use remotely_core::sessions::{SessionAuth, SessionInput};
 use remotely_core::terminal::file_ops::FileChange;
@@ -37,7 +41,7 @@ use remotely_core::terminal::files::{
 use remotely_core::terminal::folder::FolderTracking;
 use remotely_core::terminal::root_files::RootRequest;
 use remotely_core::terminal::{TerminalHandle, TerminalTuning};
-use remotely_core::vault::{SecretKind, SecretString};
+use remotely_core::vault::{SecretId, SecretKind, SecretString};
 use remotely_core::Core;
 use sha2::{Digest, Sha256};
 use tokio::time::timeout;
@@ -73,6 +77,12 @@ fn tuning() -> TerminalTuning {
 
 /// A terminal to the test server, logged in with a password from the vault; the terminal's id.
 async fn pane(server: &TestSshServer, password: &str, environment: Environment) -> (Core, Uuid) {
+    let (core, id, _, _) = pane_ids(server, password, environment).await;
+    (core, id)
+}
+
+/// [`pane`], with the session's id and its login password's vault item too.
+async fn pane_ids(server: &TestSshServer, password: &str, environment: Environment) -> (Core, Uuid, Uuid, SecretId) {
     let core = Setup::new(FakeVmware::default())
         .with_real_vault()
         .with_ssh()
@@ -128,7 +138,7 @@ async fn pane(server: &TestSshServer, password: &str, environment: Environment) 
     let handle = core.terminals.open(&core.ctx(), session, SIZE).await.unwrap();
     let id = handle.id;
     drain(&core, handle).await;
-    (core, id)
+    (core, id, session, login)
 }
 
 /// Waits until the terminal is connected and knows how it follows its folder; keeps draining it after.
@@ -388,6 +398,20 @@ async fn file_changes_run_on_the_host_a_step_per_path_at_their_tiers_and_are_aud
         "a step named by its path"
     );
     assert!(!server.sftp_path("/home/alice/old").exists());
+    // Review H2, M9: GNU rm on the host, which never follows a link swapped in, its path passed as octal escapes
+    // through /bin/sh, so no login shell reads anything in it.
+    let log = server.log();
+    assert!(
+        log.iter().any(|l| l.starts_with("exec /bin/sh -c 'p0=$(printf ")
+            && l.contains("exec rm -rf --one-file-system -- \"$p0\"")),
+        "{log:#?}"
+    );
+    assert!(log.iter().any(|l| l == "rm -rf /home/alice/old as alice"), "{log:#?}");
+    assert!(
+        log.iter()
+            .any(|l| l.starts_with("exec /bin/sh -c 'p0=$(printf ") && l.contains("exec cp -a -- ")),
+        "{log:#?}"
+    );
 
     // Audited with the paths, each step on its own.
     let audit = core.store.recent_audit(&core.ctx(), 300).await.unwrap();
@@ -403,7 +427,7 @@ async fn file_changes_run_on_the_host_a_step_per_path_at_their_tiers_and_are_aud
         "Copied /home/alice/www/new to /home/alice/new on 'web01'",
         "Set the permissions of /home/alice/new/c.html to 0600 on 'web01'",
         "Deleted the empty folder /home/alice/empty on 'web01'",
-        "Deleted the folder /home/alice/old with 2 files and 1 folder in it on 'web01'",
+        "Deleted the folder /home/alice/old with everything in it on 'web01'",
     ] {
         assert!(changed.contains(&wanted), "{wanted}: {changed:#?}");
     }
@@ -612,6 +636,12 @@ async fn root_browsing_runs_sftp_under_sudo_and_every_change_through_it_asks_one
     assert_eq!((status, tier), (JobStatus::Succeeded, Tier::High));
     let (_, uid, gid) = server.sftp_meta("/etc/remotely").unwrap();
     assert_eq!((uid, gid), (33, 33));
+    // Set on the path itself, never through a link: OpenSSH's lsetstat, which the host offers.
+    assert!(
+        server.log().iter().any(|l| l == "sftp lsetstat /etc/remotely"),
+        "{:?}",
+        server.log()
+    );
 
     // A copy as root runs cp -a under sudo.
     let (status, tier, _) = change(
@@ -882,7 +912,7 @@ async fn four_transfers_run_at_a_time_per_host() {
 }
 
 #[tokio::test]
-async fn a_paused_download_goes_on_from_where_it_stopped() {
+async fn a_paused_download_comes_down_again_once_it_goes_on() {
     let pw = password();
     let body = content(3 * 1024 * 1024);
     let server = TestSshServer::start()
@@ -928,7 +958,7 @@ async fn a_paused_download_goes_on_from_where_it_stopped() {
         .iter()
         .filter(|l| *l == "sftp open /home/alice/big.bin")
         .count();
-    assert_eq!(opened, 2, "read again from its offset after the pause");
+    assert_eq!(opened, 2, "read again, from the start, after the pause");
 }
 
 #[tokio::test]
@@ -1080,7 +1110,7 @@ async fn a_download_asks_replaces_skips_or_keeps_both_and_keeps_the_mark_of_the_
         panic!("asks first")
     };
     assert_eq!(existing, ["report.txt"]);
-    let DownloadStart::Queued { transfers, skipped } = down(Existing::Skip).await else {
+    let DownloadStart::Queued { transfers, skipped, .. } = down(Existing::Skip).await else {
         panic!()
     };
     assert!(transfers.is_empty() && skipped == 1);
@@ -1204,4 +1234,339 @@ async fn folders_go_up_and_come_down_with_what_is_in_them() {
     assert_eq!(std::fs::read(dest.join("site/css/main.css")).unwrap(), b"p{}");
     assert_eq!(std::fs::read(dest.join("site/index.html")).unwrap(), b"<p>hi</p>");
     assert!(dest.join("site/empty").is_dir(), "an empty folder comes down too");
+}
+
+// ---- What others on the host do meanwhile ----------------------------------------------------------------------
+
+/// The transfer `id`, as the panel shows it.
+fn transfer(core: &Core, id: Uuid) -> TransferInfo {
+    core.terminals.transfers().into_iter().find(|x| x.id == id).unwrap()
+}
+
+/// Waits until the job's transfer has sent something, pauses it, and waits until it shows as paused; its id.
+async fn pause_job_transfer(core: &Core, job_id: Uuid) -> Uuid {
+    let find = |core: &Core| {
+        core.terminals
+            .transfers()
+            .into_iter()
+            .find(|x| x.job_id == Some(job_id))
+    };
+    timeout(WAIT, async {
+        while find(core).is_none_or(|x| x.done == 0) {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    let id = find(core).unwrap().id;
+    assert!(core.terminals.pause_transfer(id));
+    timeout(WAIT, async {
+        while transfer(core, id).state != TransferState::Paused {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    id
+}
+
+/// Writes `content` over a file of the test server's folder and puts its modification time back, as someone on the
+/// host could: the same size and time as before, other bytes.
+fn rewrite_in_place(path: &Path, content: &[u8]) {
+    let before = std::fs::metadata(path).unwrap().modified().unwrap();
+    std::fs::write(path, content).unwrap();
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(path)
+        .unwrap()
+        .set_modified(before)
+        .unwrap();
+}
+
+#[tokio::test]
+async fn a_paused_upload_whose_file_was_written_again_on_the_host_starts_again() {
+    let pw = password();
+    let body = content(3 * 1024 * 1024);
+    let server = TestSshServer::start()
+        .await
+        .with_password("alice", &pw)
+        .with_sftp_delay(Duration::from_millis(20));
+    let (core, t) = pane(&server, &pw, Environment::Lab).await;
+    let local = temp_folder("swap-up").join("big.bin");
+    std::fs::write(&local, &body).unwrap();
+    let staged = core.files.stage(vec![local]).unwrap();
+    let start = core
+        .files
+        .upload(t, staged.id, "/home/alice", Existing::Ask)
+        .await
+        .unwrap();
+    let UploadStart::Submitted {
+        outcome: SubmitOutcome::Queued { job_id, .. },
+    } = start
+    else {
+        panic!("a new file is Low: {start:?}")
+    };
+    let id = pause_job_transfer(&core, job_id).await;
+    // While paused, the part on the host is written again: as many bytes, the same time, other content.
+    let host = server.sftp_path("/home/alice/big.bin");
+    let size = std::fs::metadata(&host).unwrap().len() as usize;
+    assert!(size > 0 && size < body.len());
+    rewrite_in_place(&host, &vec![0xAA; size]);
+    assert!(core.terminals.resume_transfer(id));
+    assert_eq!(
+        timeout(WAIT, core.jobs.wait(job_id)).await.unwrap().unwrap(),
+        JobStatus::Succeeded
+    );
+    assert_eq!(
+        server.sftp_file("/home/alice/big.bin").unwrap(),
+        body,
+        "what is on the host is what was sent, all of it"
+    );
+    let audit = core.store.recent_audit(&core.ctx(), 100).await.unwrap();
+    let uploaded = audit.iter().find(|e| e.event == "file_uploaded").unwrap();
+    let detail = uploaded.detail.as_deref().unwrap();
+    assert!(
+        detail.contains(&format!("{} bytes sent, SHA-256 {}", body.len(), sha(&body))),
+        "{detail}"
+    );
+}
+
+#[tokio::test]
+async fn a_paused_download_of_a_file_rewritten_in_place_comes_down_as_it_is_now() {
+    let pw = password();
+    let old = content(3 * 1024 * 1024);
+    let new: Vec<u8> = old.iter().map(|b| b ^ 0x5A).collect();
+    let server = TestSshServer::start()
+        .await
+        .with_password("alice", &pw)
+        .with_sftp_file("/home/alice/big.bin", &old)
+        .with_sftp_delay(Duration::from_millis(20));
+    let (core, t) = pane(&server, &pw, Environment::Lab).await;
+    let dest = temp_folder("rewrite-down");
+    let queued = core
+        .terminals
+        .download(&core.ctx(), t, &strings(&["/home/alice/big.bin"]), &dest)
+        .await
+        .unwrap();
+    let id = queued[0].id;
+    timeout(WAIT, async {
+        while transfer(&core, id).done == 0 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(core.terminals.pause_transfer(id));
+    timeout(WAIT, async {
+        while transfer(&core, id).state != TransferState::Paused {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap();
+    // The same size and time: nothing SFTP says tells the two apart.
+    rewrite_in_place(&server.sftp_path("/home/alice/big.bin"), &new);
+    assert!(core.terminals.resume_transfer(id));
+    let done = wait_done(&core, &[id]).await;
+    assert_eq!(done[0].state, TransferState::Done, "{:?}", done[0].message);
+    let saved = std::fs::read(dest.join("big.bin")).unwrap();
+    assert!(saved == new, "the new file whole, never part of each");
+    assert_eq!(done[0].sha256.as_deref(), Some(sha(&new).as_str()));
+    let audit = core.store.recent_audit(&core.ctx(), 100).await.unwrap();
+    let downloaded = audit.iter().find(|e| e.event == "file_downloaded").unwrap();
+    assert!(downloaded.detail.as_deref().unwrap().contains(&sha(&new)));
+}
+
+#[tokio::test]
+async fn a_vault_lock_ends_root_browsing_and_its_paused_upload_writes_nothing_more() {
+    let pw = password();
+    let body = content(3 * 1024 * 1024);
+    let server = TestSshServer::start()
+        .await
+        .with_password("alice", &pw)
+        .with_sudo(SudoMode::Password(pw.clone()))
+        .with_sftp_file("/etc/nginx/nginx.conf", b"worker_processes 1;")
+        .with_sftp_delay(Duration::from_millis(20));
+    let (core, t) = pane(&server, &pw, Environment::Lab).await;
+    core.terminals
+        .browse_as_root(&core.ctx(), t, RootRequest::default())
+        .await
+        .unwrap();
+    let local = temp_folder("root-lock").join("site.conf");
+    std::fs::write(&local, &body).unwrap();
+    let staged = core.files.stage(vec![local]).unwrap();
+    let UploadStart::Submitted { outcome } = core
+        .files
+        .upload_as(t, staged.id, "/etc/nginx", Existing::Ask, true)
+        .await
+        .unwrap()
+    else {
+        panic!("submitted")
+    };
+    let SubmitOutcome::NeedsApproval { request } = outcome else {
+        panic!("as root, an upload asks")
+    };
+    let job_id = approve(&core, &request).await;
+    let id = pause_job_transfer(&core, job_id).await;
+    let starts = |log: &[String]| log.iter().filter(|l| *l == "sftp start as root").count();
+    let started = starts(&server.log());
+
+    core.terminals.forget_logins();
+    assert!(core.terminals.root_browsing(t).is_none());
+    // Going on is no longer possible: it was cancelled with root browsing.
+    core.terminals.resume_transfer(id);
+    timeout(WAIT, core.jobs.wait(job_id)).await.unwrap().unwrap();
+    let ended = transfer(&core, id);
+    assert_eq!(ended.state, TransferState::Cancelled, "{:?}", ended.message);
+    assert!(
+        server.sftp_file("/etc/nginx/site.conf").is_none(),
+        "the part it made is deleted, nothing more is written"
+    );
+    assert_eq!(starts(&server.log()), started, "no root channel opened again");
+    // Its end is audited with why.
+    timeout(WAIT, async {
+        loop {
+            let audit = core.store.recent_audit(&core.ctx(), 100).await.unwrap();
+            if audit
+                .iter()
+                .any(|e| e.event == "files_root_stopped" && e.detail.as_deref() == Some("the vault locked"))
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("files_root_stopped, the vault locked");
+}
+
+#[tokio::test]
+async fn git_data_never_comes_down_and_a_git_folder_picked_is_refused() {
+    let pw = password();
+    let server = TestSshServer::start()
+        .await
+        .with_password("alice", &pw)
+        .with_sftp_file("/home/alice/proj/src/main.rs", b"fn main() {}")
+        .with_sftp_file("/home/alice/proj/.git/config", b"[core]\n\tfsmonitor = calc.exe\n")
+        .with_sftp_file("/home/alice/proj/.git/hooks/post-checkout", b"#!/bin/sh\n")
+        .with_sftp_file("/home/alice/proj/sub/.git", b"gitdir: /home/alice/elsewhere\n");
+    let (core, t) = pane(&server, &pw, Environment::Lab).await;
+    let dest = temp_folder("git-down");
+    let started = core
+        .terminals
+        .download_with(
+            &core.ctx(),
+            t,
+            &strings(&["/home/alice/proj"]),
+            &dest,
+            DownloadOptions::default(),
+        )
+        .await
+        .unwrap();
+    let DownloadStart::Queued {
+        transfers, left_out, ..
+    } = started
+    else {
+        panic!("{started:?}")
+    };
+    assert_eq!(left_out, 2, "the .git folder and the .git file, counted");
+    let ids: Vec<Uuid> = transfers.iter().map(|x| x.id).collect();
+    let done = wait_done(&core, &ids).await;
+    assert!(done.iter().all(|d| d.state == TransferState::Done));
+    assert!(dest.join("proj").join("src").join("main.rs").is_file());
+    assert!(!dest.join("proj").join(".git").exists());
+    assert!(!dest.join("proj").join("sub").join(".git").exists());
+
+    let err = core
+        .terminals
+        .download_with(
+            &core.ctx(),
+            t,
+            &strings(&["/home/alice/proj/.git"]),
+            &dest,
+            DownloadOptions::default(),
+        )
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("Git's own data"), "{err}");
+}
+
+#[tokio::test]
+async fn keep_both_never_takes_a_name_another_file_of_the_upload_has() {
+    let pw = password();
+    let server = TestSshServer::start()
+        .await
+        .with_password("alice", &pw)
+        .with_sftp_file("/home/alice/a.txt", b"there");
+    let (core, t) = pane(&server, &pw, Environment::Lab).await;
+    let folder = temp_folder("keep-both");
+    std::fs::write(folder.join("a.txt"), b"new").unwrap();
+    std::fs::write(folder.join("a (1).txt"), b"other").unwrap();
+    let staged = core
+        .files
+        .stage(vec![folder.join("a.txt"), folder.join("a (1).txt")])
+        .unwrap();
+    let start = core
+        .files
+        .upload(t, staged.id, "/home/alice", Existing::KeepBoth)
+        .await
+        .unwrap();
+    let UploadStart::Submitted { outcome } = start else {
+        panic!("{start:?}")
+    };
+    assert_eq!(run(&core, outcome).await.0, JobStatus::Succeeded);
+    assert_eq!(server.sftp_file("/home/alice/a.txt").unwrap(), b"there");
+    assert_eq!(server.sftp_file("/home/alice/a (1).txt").unwrap(), b"other");
+    assert_eq!(server.sftp_file("/home/alice/a (2).txt").unwrap(), b"new");
+}
+
+#[tokio::test]
+async fn a_sudo_park_is_one_per_password_shared_with_the_containers_page() {
+    let pw = password();
+    let server = TestSshServer::start()
+        .await
+        .with_password("alice", &pw)
+        .with_sudo(SudoMode::Password("another password".into()));
+    let (core, t, session, login) = pane_ids(&server, &pw, Environment::Lab).await;
+    let ctx = core.ctx();
+    let spec = core.store.session_spec(&ctx, session).await.unwrap().unwrap();
+    let key = login_guard::sudo_key(&spec);
+    let refused = |log: &[String]| log.iter().filter(|l| *l == "sudo refused").count();
+    let parked = || Parked {
+        reason: ParkReason::SudoRefused,
+        message: "sudo refused".into(),
+    };
+
+    // The Containers page parked this session's sudo with its login password: root browsing doesn't try it either.
+    let login_scope = ParkScope::Sudo { secret: Some(login) };
+    core.login_guard.park(session, login_scope, &key, parked());
+    let err = core
+        .terminals
+        .browse_as_root(&ctx, t, RootRequest::default())
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), "login_parked", "{err}");
+    assert_eq!(refused(&server.log()), 0, "nothing tried on the host");
+
+    // Another sudo password, parked for the Containers page, and the session's logins: a retry here lifts neither.
+    let other = core
+        .vault
+        .add(&ctx, SecretKind::Password, "other sudo", SecretString::new("x"))
+        .await
+        .unwrap()
+        .id;
+    let other_scope = ParkScope::Sudo { secret: Some(other) };
+    core.login_guard.park(session, other_scope, &key, parked());
+    let login_key = login_guard::login_key(&spec);
+    core.login_guard.park(session, ParkScope::Login, &login_key, parked());
+    let retry = RootRequest {
+        retry: true,
+        ..RootRequest::default()
+    };
+    let err = core.terminals.browse_as_root(&ctx, t, retry).await.unwrap_err();
+    assert_eq!(err.code(), "login_parked", "refused again, and parked again: {err}");
+    assert_eq!(refused(&server.log()), 1, "one try");
+    assert!(core.login_guard.parked(session, login_scope, &key).is_some());
+    assert!(core.login_guard.parked(session, other_scope, &key).is_some());
+    assert!(core.login_guard.parked(session, ParkScope::Login, &login_key).is_some());
 }

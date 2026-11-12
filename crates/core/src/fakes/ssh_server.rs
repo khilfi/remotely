@@ -658,14 +658,14 @@ pub const DEFAULT_SFTP_SERVER: &str = "/usr/lib/openssh/sftp-server";
 
 /// SS-14: root browsing's exec command ([`crate::adapters::remote::sftp_root`]): its prompt marker and the server
 /// it starts. Anything else is no request for root SFTP.
-fn root_sftp_request(command: &str) -> Option<(String, String)> {
+fn root_sftp_request(command: &str) -> Option<(String, String, String)> {
     let rest = command.strip_prefix("sudo -S -p '")?;
     let (marker, rest) = rest.split_once('\'')?;
-    if !rest.contains(crate::adapters::remote::sftp_root::READY) {
-        return None;
-    }
+    let ready = format!("{} ", crate::adapters::remote::sftp_root::READY);
+    let (_, after) = rest.split_once(&ready)?;
+    let nonce = after.split_whitespace().next()?;
     let server = rest.rsplit_once(" sh '")?.1.strip_suffix('\'')?;
-    Some((marker.to_owned(), server.to_owned()))
+    Some((marker.to_owned(), server.to_owned(), nonce.to_owned()))
 }
 
 /// SS-14: the toy sudo in front of a root SFTP server on an exec channel: the prompt on stderr, a line of stdin per
@@ -677,6 +677,8 @@ struct RootSftp {
     id: ChannelId,
     marker: String,
     server: String,
+    /// The ready line's nonce, as the command gave it.
+    nonce: String,
     root: PathBuf,
 }
 
@@ -737,8 +739,12 @@ impl RootSftp {
                 self.say("Sorry, try again.\n").await;
             }
         }
-        self.say(&format!("{}\n", crate::adapters::remote::sftp_root::READY))
-            .await;
+        self.say(&format!(
+            "{}-{}\n",
+            crate::adapters::remote::sftp_root::READY,
+            self.nonce
+        ))
+        .await;
         let known = locks::lock(&self.state.sftp_server).clone();
         if known.as_deref() != Some(self.server.as_str()) {
             self.say(&format!("sh: 1: exec: {}: not found\n", self.server)).await;
@@ -1250,7 +1256,7 @@ impl server::Handler for ServerHandler {
         let command = String::from_utf8_lossy(data).into_owned();
         self.state.note(format!("exec {command}"));
         // SS-14: root browsing's sftp-server under sudo talks SFTP on this channel once sudo let it through.
-        if let Some((marker, server)) = root_sftp_request(&command) {
+        if let Some((marker, server, nonce)) = root_sftp_request(&command) {
             let stream = self.unclaimed.remove(&channel);
             let root = locks::lock(&self.state.sftp_root).clone();
             if let (Some(stream), Some(root)) = (stream, root) {
@@ -1262,6 +1268,7 @@ impl server::Handler for ServerHandler {
                     id: channel,
                     marker,
                     server,
+                    nonce,
                     root,
                 };
                 tokio::spawn(request.run(stream));
@@ -1548,6 +1555,8 @@ enum Part {
     Output(String),
     /// `$?`: the last command's exit status.
     Status,
+    /// SS-14: `$NAME`: a variable set by an assignment (empty when unset).
+    Var(String),
 }
 
 /// A word or an operator of a toy shell command line.
@@ -1591,6 +1600,19 @@ impl WordBuilder {
             self.started = false;
         }
     }
+}
+
+/// SS-14: a variable's name after `$`.
+fn read_name(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> String {
+    let mut name = String::new();
+    while let Some(&c) = chars.peek() {
+        if !(c.is_ascii_alphanumeric() || c == '_') {
+            break;
+        }
+        name.push(c);
+        chars.next();
+    }
+    name
 }
 
 /// The script inside `$(...)`, after the `$(` was read: up to the matching `)`.
@@ -1649,6 +1671,9 @@ fn tokenize(script: &str) -> Vec<Token> {
                             let inner = read_substitution(&mut chars);
                             word.part(Part::Output(inner));
                         }
+                        '$' if chars.peek().is_some_and(|n| n.is_ascii_alphabetic() || *n == '_') => {
+                            word.part(Part::Var(read_name(&mut chars)));
+                        }
                         _ => word.push(q),
                     }
                 }
@@ -1666,6 +1691,9 @@ fn tokenize(script: &str) -> Vec<Token> {
             '$' if chars.peek() == Some(&'?') => {
                 chars.next();
                 word.part(Part::Status);
+            }
+            '$' if chars.peek().is_some_and(|n| n.is_ascii_alphabetic() || *n == '_') => {
+                word.part(Part::Var(read_name(&mut chars)));
             }
             '#' if !word.started => {
                 while chars.peek().is_some_and(|&n| n != '\n') {
@@ -1759,6 +1787,8 @@ struct ToyShell<'a> {
     umask: u32,
     /// `$?`.
     last_status: u32,
+    /// SS-14: variables set by `NAME=value` on its own.
+    vars: HashMap<String, String>,
 }
 
 impl<'a> ToyShell<'a> {
@@ -1773,6 +1803,7 @@ impl<'a> ToyShell<'a> {
             exited: false,
             umask: 0o022,
             last_status: 0,
+            vars: HashMap::new(),
         }
     }
 
@@ -1869,6 +1900,7 @@ impl<'a> ToyShell<'a> {
                 Part::Text(text) => word.push_str(text),
                 Part::Home => word.push_str(&self.home()),
                 Part::Status => word.push_str(&self.last_status.to_string()),
+                Part::Var(name) => word.push_str(self.vars.get(name).map_or("", String::as_str)),
                 Part::Output(script) => {
                     let saved = std::mem::take(&mut self.stdout);
                     let exited = self.exited;
@@ -2006,10 +2038,22 @@ impl<'a> ToyShell<'a> {
                 .next()
                 .is_some_and(|n| !n.is_empty() && n.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'))
         {
-            return if words.len() > 1 { self.builtin(&words[1..]) } else { 0 };
+            if words.len() > 1 {
+                return self.builtin(&words[1..]);
+            }
+            // SS-14: `NAME=value` on its own sets a variable.
+            if let Some((name, value)) = first.split_once('=') {
+                self.vars.insert(name.to_owned(), value.to_owned());
+            }
+            return 0;
         }
         let args = &words[1..];
-        match words[0].as_str() {
+        // SS-14: Remotely runs its own scripts with `/bin/sh` by its path, whatever the login shell is.
+        let name = match words[0].as_str() {
+            "/bin/sh" | "/usr/bin/sh" => "sh",
+            name => name,
+        };
+        match name {
             "echo" => {
                 self.print(&format!("{}\n", args.join(" ")));
                 0
@@ -2122,6 +2166,12 @@ impl<'a> ToyShell<'a> {
                 self.stdin.clear();
                 0
             }
+            // SS-14: `exec cp ...`: the command, then the shell ends.
+            "exec" if !args.is_empty() => {
+                let status = self.command(args);
+                self.exited = true;
+                status
+            }
             "sh" if args.first().is_some_and(|a| a == "-c") => {
                 let script = args.get(1).cloned().unwrap_or_default();
                 let status = self.run(&script);
@@ -2194,6 +2244,45 @@ impl<'a> ToyShell<'a> {
                         self.err(&format!("chmod: cannot access '{p}': No such file or directory\n"));
                         status = 1;
                     }
+                }
+                status
+            }
+            // SS-14: `rm -rf --one-file-system -- PATH`: a recursive delete in the SFTP folder, never following a link
+            // (as GNU rm); like the SFTP server, only root deletes in a protected folder.
+            "rm" if args
+                .iter()
+                .any(|a| a.starts_with('-') && !a.starts_with("--") && a.contains('r')) =>
+            {
+                let Some(root) = locks::lock(&self.state.sftp_root).clone() else {
+                    self.err("rm: no files here\n");
+                    return 1;
+                };
+                let mut status = 0;
+                for p in args.iter().filter(|a| !a.starts_with('-')) {
+                    let path = self.path(p);
+                    let folder = parent_of(&path);
+                    let protected = folder == "/"
+                        || locks::lock(&self.state.sftp_protected)
+                            .iter()
+                            .any(|f| folder == *f || folder.starts_with(&format!("{f}/")));
+                    if protected && self.user != "root" {
+                        self.err(&format!("rm: cannot remove '{p}': Permission denied\n"));
+                        status = 1;
+                        continue;
+                    }
+                    let local = sftp::local(&root, &path);
+                    let removed = match std::fs::symlink_metadata(&local) {
+                        Ok(meta) if meta.is_dir() => std::fs::remove_dir_all(&local),
+                        Ok(_) => std::fs::remove_file(&local),
+                        Err(err) => Err(err),
+                    };
+                    if let Err(err) = removed {
+                        self.err(&format!("rm: cannot remove '{p}': {err}\n"));
+                        status = 1;
+                        continue;
+                    }
+                    locks::lock(&self.state.sftp_meta).retain(|k, _| k != &path && !k.starts_with(&format!("{path}/")));
+                    self.state.note(format!("rm -rf {path} as {}", self.user));
                 }
                 status
             }
@@ -2383,32 +2472,46 @@ impl<'a> ToyShell<'a> {
                 let Some((format, rest)) = args.split_first() else {
                     return 0;
                 };
-                // Like POSIX printf, the format is used again while arguments are left.
+                // Like POSIX printf, the format is used again while arguments are left. SS-14: `\NNN` is a byte in
+                // octal, so a path sent as octal escapes comes out byte for byte.
                 let mut rest = rest.iter();
                 loop {
                     let mut used = false;
-                    let mut out = String::new();
-                    let mut chars = format.chars();
+                    let mut out: Vec<u8> = Vec::new();
+                    let mut chars = format.chars().peekable();
                     while let Some(c) = chars.next() {
                         match c {
                             '\\' => match chars.next() {
-                                Some('n') => out.push('\n'),
-                                Some('t') => out.push('\t'),
-                                Some(other) => out.push(other),
-                                None => out.push('\\'),
+                                Some('n') => out.push(b'\n'),
+                                Some('t') => out.push(b'\t'),
+                                Some(d @ '0'..='7') => {
+                                    let mut value = d.to_digit(8).unwrap_or(0);
+                                    for _ in 0..2 {
+                                        match chars.peek().and_then(|n| n.to_digit(8)) {
+                                            Some(n) => {
+                                                value = value * 8 + n;
+                                                chars.next();
+                                            }
+                                            None => break,
+                                        }
+                                    }
+                                    out.push(u8::try_from(value).unwrap_or(b'?'));
+                                }
+                                Some(other) => out.extend_from_slice(other.to_string().as_bytes()),
+                                None => out.push(b'\\'),
                             },
                             '%' => match chars.next() {
                                 Some('s') => {
                                     used = true;
-                                    out.push_str(rest.next().map_or("", String::as_str));
+                                    out.extend_from_slice(rest.next().map_or("", String::as_str).as_bytes());
                                 }
-                                Some(other) => out.push(other),
-                                None => out.push('%'),
+                                Some(other) => out.extend_from_slice(other.to_string().as_bytes()),
+                                None => out.push(b'%'),
                             },
-                            c => out.push(c),
+                            c => out.extend_from_slice(c.to_string().as_bytes()),
                         }
                     }
-                    self.print(&out);
+                    self.stdout.extend_from_slice(&out);
                     if !used || rest.len() == 0 {
                         break;
                     }

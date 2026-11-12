@@ -1840,9 +1840,12 @@ impl PolicyEngine {
         }
 
         // SS-14: a copy within a host runs `cp -a` on it, so the shell rules rate it too (on one host: the bulk tier
-        // for commands is about many hosts), and the higher of the two counts.
+        // for commands is about many hosts), and the higher of the two counts. A recursive delete's `rm -rf` is
+        // Remotely's own fixed line on paths it checked (never `/` or a top-level folder), rated by its own tier: the
+        // default dangerous pattern for `rm -rf` would make every folder delete Critical.
         if let Command::FileOp { spec, .. } = command {
-            if let Some(script) = spec.copy_script() {
+            let copy = matches!(spec.op, FileOp::Copy { .. });
+            if let Some(script) = spec.shell_script().filter(|_| copy) {
                 let rated = self.classify_script(&script);
                 let floor = self.rules.tier_for(rated, 1);
                 let line = format!(

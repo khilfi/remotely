@@ -735,7 +735,7 @@ fn open_upload_folder(spec: &UploadSpec, limits: UploadLimits, protected: &[Path
 
 /// A folder's final path (`canonicalize`: 8.3 short names made long, links followed), also when it isn't there yet:
 /// the nearest folder above it that is there is resolved, and the rest joined on.
-fn final_place(folder: &std::path::Path) -> Option<PathBuf> {
+pub(crate) fn final_place(folder: &std::path::Path) -> Option<PathBuf> {
     let absolute = std::path::absolute(folder).ok()?;
     let mut missing = Vec::new();
     let mut current = absolute.as_path();

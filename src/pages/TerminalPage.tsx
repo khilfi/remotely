@@ -1442,13 +1442,18 @@ export function TerminalPage({
         });
         return;
       }
-      queuedDownloads(start.transfers, start.skipped);
+      queuedDownloads(start.transfers, start.skipped, start.leftOut);
     } catch (err) {
       toast.error(`Download failed: ${errorMessage(err)}`);
     }
   }
 
-  function queuedDownloads(queued: TransferInfo[], skipped: number) {
+  function queuedDownloads(queued: TransferInfo[], skipped: number, leftOut = 0) {
+    if (leftOut > 0) {
+      toast.info(
+        `${plural(leftOut, "item")} left out: Git's data, links to folders and what isn't a file stay on the host.`,
+      );
+    }
     if (queued.length === 0) {
       toast.info(skipped > 0 ? "Every file is here already, so nothing was downloaded." : "Nothing to download.");
       return;
@@ -2094,7 +2099,7 @@ export function TerminalPage({
             if (!id) throw new Error("The terminal has closed.");
             const start = await api.filesDownload(id, paths, to, answer, asRoot, choice);
             setConflict(null);
-            if (start?.status === "queued") queuedDownloads(start.transfers, start.skipped);
+            if (start?.status === "queued") queuedDownloads(start.transfers, start.skipped, start.leftOut);
           }}
           onCancel={() => setConflict(null)}
         />

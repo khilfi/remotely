@@ -1671,7 +1671,8 @@ export type Existing = "ask" | "replace" | "replaceIfNewer" | "skip" | "keepBoth
 /** SS-14: how starting a download went. */
 export type DownloadStart =
   | { status: "conflicts"; existing: string[]; dest: string; choice: string | null }
-  | { status: "queued"; transfers: TransferInfo[]; skipped: number };
+  /** `leftOut`: what a folder held that doesn't come down (Git's data, links to folders, devices). */
+  | { status: "queued"; transfers: TransferInfo[]; skipped: number; leftOut: number };
 
 /** SS-14: what the Files drawer asks to change. Paths are the host's, absolute; the core checks each. */
 export type FileChange =

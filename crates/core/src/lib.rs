@@ -495,9 +495,10 @@ impl Core {
             JobLimits::default(),
         )
         .await?;
-        // FD-09: the database's folder (the vault, logs and WebView2's profile beside it) is never served.
+        // FD-09: the database's folder (the vault, logs and WebView2's profile beside it) is never served; SS-14: and
+        // no download lands in it.
         if let Some(folder) = data_folder.filter(|f| !f.as_os_str().is_empty()) {
-            core.file_server.runner().protect(&folder);
+            core.protect_folder(&folder);
         }
         Ok(core)
     }
@@ -1031,6 +1032,13 @@ impl Core {
             }
         }
         jobs.len()
+    }
+
+    /// FD-09, SS-14: Remotely's own data (its database's folder, the logs): the file server never serves it or writes
+    /// into it, and no download lands in it.
+    pub fn protect_folder(&self, folder: &std::path::Path) {
+        self.file_server.runner().protect(folder);
+        self.terminals.protect_folder(folder);
     }
 
     /// Before the app exits, also when an update's installer is about to end it (FD-14, QL-15): every terminal

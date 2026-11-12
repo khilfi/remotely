@@ -274,6 +274,7 @@ impl russh_sftp::server::Handler for SftpServer {
         if !self.state.sftp_no_posix_rename.load(Ordering::SeqCst) {
             version.extensions.insert("posix-rename@openssh.com".into(), "1".into());
         }
+        version.extensions.insert("lsetstat@openssh.com".into(), "1".into());
         Ok(version)
     }
 
@@ -331,6 +332,21 @@ impl russh_sftp::server::Handler for SftpServer {
     }
 
     async fn extended(&mut self, id: u32, request: String, data: Vec<u8>) -> Result<Packet, Self::Error> {
+        // SS-14: OpenSSH's setstat on the path itself, never through a link (a link's mode can't be set).
+        if request == "lsetstat@openssh.com" {
+            let (asked_path, attrs) = path_and_attrs(&data).ok_or(StatusCode::BadMessage)?;
+            let path = self.path(&asked_path);
+            if self.protected(&path) {
+                return Err(StatusCode::PermissionDenied);
+            }
+            let meta = std::fs::symlink_metadata(local(&self.root, &path)).map_err(|e| io_status(&e))?;
+            if meta.file_type().is_symlink() {
+                return Err(StatusCode::OpUnsupported);
+            }
+            self.apply(&path, &attrs)?;
+            self.state.note(format!("sftp lsetstat {path}"));
+            return Ok(Packet::Status(ok(id)));
+        }
         if request != "posix-rename@openssh.com" || self.state.sftp_no_posix_rename.load(Ordering::SeqCst) {
             return Err(StatusCode::OpUnsupported);
         }
@@ -518,6 +534,37 @@ impl russh_sftp::server::Handler for SftpServer {
         ));
         Ok(ok(id))
     }
+}
+
+/// SS-14: `lsetstat@openssh.com`'s request: an SSH string, then SFTP v3 attributes (flags, then size, uid and gid,
+/// permissions, atime and mtime, each when its flag is set).
+fn path_and_attrs(data: &[u8]) -> Option<(String, FileAttributes)> {
+    let u32_at = |at: usize| -> Option<u32> { Some(u32::from_be_bytes(data.get(at..at + 4)?.try_into().ok()?)) };
+    let len = u32_at(0)? as usize;
+    let path = String::from_utf8(data.get(4..4 + len)?.to_vec()).ok()?;
+    let mut at = 4 + len;
+    let flags = u32_at(at)?;
+    at += 4;
+    let mut attrs = FileAttributes::empty();
+    if flags & 0x1 != 0 {
+        let size = u64::from_be_bytes(data.get(at..at + 8)?.try_into().ok()?);
+        attrs.size = Some(size);
+        at += 8;
+    }
+    if flags & 0x2 != 0 {
+        attrs.uid = Some(u32_at(at)?);
+        attrs.gid = Some(u32_at(at + 4)?);
+        at += 8;
+    }
+    if flags & 0x4 != 0 {
+        attrs.permissions = Some(u32_at(at)?);
+        at += 4;
+    }
+    if flags & 0x8 != 0 {
+        attrs.atime = Some(u32_at(at)?);
+        attrs.mtime = Some(u32_at(at + 4)?);
+    }
+    Some((path, attrs))
 }
 
 /// Two SSH strings (a 32-bit length, then the bytes), as an extension's request holds them.

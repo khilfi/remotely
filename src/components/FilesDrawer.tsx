@@ -14,9 +14,10 @@
 //
 // SS-14: each row's "⋯" renames, moves, copies, deletes and sets permissions or the owner; ticked rows get the same in
 // the selection bar; the header's "⋯" makes a folder or an empty file, uploads a folder, and browses as root (the
-// host's sftp-server under sudo: the header says "as root", and every change asks one tier more). Each change goes
-// through the command bus, which asks at its tier; the folder lists again once its job ends. The full two-pane Files
-// page is 0.8.0's G3.
+// host's sftp-server under sudo: the header says "as root", and every change asks one tier more; a session that saves
+// no password for sudo picks one from the vault). Permissions and owners are never offered on a link (the core refuses
+// them too). Each change goes through the command bus, which asks at its tier; the folder lists again once its job
+// ends. The full two-pane Files page is 0.8.0's G3.
 
 import { Fragment, useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 import {
@@ -75,6 +76,7 @@ import { HelpTip } from "@/components/HelpTip";
 import { RowMenu } from "@/components/RowMenu";
 import { SelectionBar } from "@/components/SelectionBar";
 import { SortableHead } from "@/components/SortableHead";
+import { SudoPasswordDialog } from "@/components/SudoPasswordDialog";
 import { usePresentation } from "@/components/Presentation";
 import { Tip } from "@/components/Tip";
 import { TransfersList } from "@/components/TransfersList";
@@ -263,6 +265,8 @@ export function FilesDrawer({
   const [typed, setTyped] = useState<{ for: string; text: string } | null>(null);
   const [ask, setAsk] = useState<FileAsk | null>(null);
   const [replaceAsk, setReplaceAsk] = useState<ReplaceAsk | null>(null);
+  /** SS-14: sudo asked for a password the session doesn't save. */
+  const [askSudo, setAskSudo] = useState(false);
   /** SS-14: jobs of changes made here; the folder lists again when one ends. */
   const watched = useRef(new Set<string>());
 
@@ -389,11 +393,11 @@ export function FilesDrawer({
     change(next).catch((err) => toast.error(errorMessage(err)));
   }
 
-  async function startRoot(retry = false) {
+  async function startRoot(retry = false, sudoPasswordId: string | null = null) {
     if (!terminalId) return;
     try {
       const started = await withVaultPassword((vaultPassword) =>
-        api.filesRootStart(terminalId, { vaultPassword, retry }),
+        api.filesRootStart(terminalId, { vaultPassword, retry, sudoPasswordId }),
       );
       setRootFor(terminalId);
       clearPicked();
@@ -402,7 +406,11 @@ export function FilesDrawer({
       if (isReauthCancelled(err)) return;
       const code = err && typeof err === "object" && "code" in err ? String(err.code) : "";
       if (code === "login_parked") {
-        toast.error(errorMessage(err), { action: { label: "Try again", onClick: () => void startRoot(true) } });
+        toast.error(errorMessage(err), {
+          action: { label: "Try again", onClick: () => void startRoot(true, sudoPasswordId) },
+        });
+      } else if (code === "no_sudo_password") {
+        setAskSudo(true);
       } else {
         toast.error(`Can't browse as root: ${errorMessage(err)}`);
       }
@@ -447,10 +455,15 @@ export function FilesDrawer({
       one && item("rename", "Rename…", <PencilIcon />, () => setAsk({ kind: "rename", path: p[0] })),
       item("move", "Move to…", <FolderUpIcon />, () => setAsk({ kind: "move", paths: p, folder: here })),
       item("copy", "Copy to…", <CopyIcon />, () => setAsk({ kind: "copy", paths: p, folder: here })),
-      item("mode", "Permissions…", <KeyRoundIcon />, () => setAsk({ kind: "mode", paths: p, mode: one?.mode ?? null })),
-      item("owner", "Owner…", <UserRoundCogIcon />, () =>
-        setAsk({ kind: "owner", paths: p, uid: one?.uid ?? null, gid: one?.gid ?? null }),
-      ),
+      // Never through a link: the file it points to is changed where it is.
+      list.every((e) => !e.link) &&
+        item("mode", "Permissions…", <KeyRoundIcon />, () =>
+          setAsk({ kind: "mode", paths: p, mode: one?.mode ?? null }),
+        ),
+      list.every((e) => !e.link) &&
+        item("owner", "Owner…", <UserRoundCogIcon />, () =>
+          setAsk({ kind: "owner", paths: p, uid: one?.uid ?? null, gid: one?.gid ?? null }),
+        ),
       item(
         "delete",
         list.length === 1 ? "Delete" : `Delete ${list.length}`,
@@ -798,6 +811,16 @@ export function FilesDrawer({
         <TransfersList onRetry={onRetry} />
       </div>
       {ask && <FileChangeDialog ask={ask} asRoot={asRoot} onSubmit={change} onClose={() => setAsk(null)} />}
+      {askSudo && (
+        <SudoPasswordDialog
+          terminal={name}
+          onCancel={() => setAskSudo(false)}
+          onPick={(id) => {
+            setAskSudo(false);
+            void startRoot(false, id);
+          }}
+        />
+      )}
       {replaceAsk && (
         <AlertDialog open onOpenChange={(open) => !open && setReplaceAsk(null)}>
           <AlertDialogContent>

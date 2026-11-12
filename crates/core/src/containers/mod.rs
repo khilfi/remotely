@@ -735,9 +735,16 @@ impl Containers {
             ContainerHost::Session { session_id } => {
                 let mark = self.mark(ctx, session_id, kind).await?;
                 let spec = self.spec(ctx, session_id).await?;
-                // sudo refused the saved password before: not again until something changes.
-                let sudo_key = format!("{} # {:?}", login_guard::login_key(&spec), mark.sudo);
-                if let Some(parked) = self.inner.guard.parked(session_id, ParkScope::Sudo, &sudo_key) {
+                // sudo refused the saved password before: not again until something changes. SS-14: the park is the
+                // password's, shared with root browsing, which gives sudo the same passwords.
+                let secret = match (mark.sudo, &spec.auth) {
+                    (SudoMode::Password { password_id: Some(id) }, _) => Some(id),
+                    (SudoMode::Password { password_id: None }, AuthMethod::Password(Some(login))) => Some(*login),
+                    _ => None,
+                };
+                let scope = ParkScope::Sudo { secret };
+                let sudo_key = login_guard::sudo_key(&spec);
+                if let Some(parked) = self.inner.guard.parked(session_id, scope, &sudo_key) {
                     return Err(parked.error());
                 }
                 let connection = self.connection(ctx, &spec).await?;
@@ -748,6 +755,7 @@ impl Containers {
                         inner: engine,
                         guard: self.inner.guard.clone(),
                         session_id,
+                        scope,
                         key: sudo_key,
                         host: spec.name.clone(),
                     }),
@@ -1018,6 +1026,8 @@ struct SudoWatch {
     inner: Arc<dyn ContainerEngine>,
     guard: LoginGuard,
     session_id: Uuid,
+    /// SS-14: the sudo password's own park slot.
+    scope: ParkScope,
     key: String,
     host: String,
 }
@@ -1033,8 +1043,7 @@ impl SudoWatch {
                         self.host
                     )),
                 };
-                self.guard
-                    .park(self.session_id, ParkScope::Sudo, &self.key, parked.clone());
+                self.guard.park(self.session_id, self.scope, &self.key, parked.clone());
                 Err(parked.error())
             }
             other => other,

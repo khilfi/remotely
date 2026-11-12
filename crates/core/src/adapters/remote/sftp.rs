@@ -33,7 +33,7 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
 use super::{
     disconnect_reason, sftp_root, EntryKind, Handler, RemoteEntry, RemoteFiles, RemoteListing, RemoteRead, RemoteWrite,
-    RootOpened, SetAttrs, Shared, Written, MAX_LISTING,
+    Resumed, RootOpened, SetAttrs, Shared, Written, MAX_LISTING,
 };
 use crate::error::{CoreError, Result};
 use crate::vault::SecretString;
@@ -91,10 +91,12 @@ enum Opener {
     /// The `sftp` subsystem, as the login user.
     Subsystem,
     /// The host's sftp-server under sudo on an exec channel, with sudo's password (kept in memory for the channels
-    /// opened again after one broke; zeroized when the files are dropped).
+    /// opened again after one broke, until [`RemoteFiles::revoke`]; zeroized when dropped).
     Root {
         server: String,
-        password: Option<SecretString>,
+        password: Mutex<Option<SecretString>>,
+        /// Root browsing ended: no channel opens again, and nothing goes through these files.
+        revoked: std::sync::atomic::AtomicBool,
     },
 }
 
@@ -103,6 +105,18 @@ struct Raw {
     session: RawSftpSession,
     /// The server announced `posix-rename@openssh.com`.
     posix_rename: bool,
+    /// SS-14: the server announced `lsetstat@openssh.com`: attributes set on a path itself, never through a link.
+    lsetstat: bool,
+}
+
+/// SS-14: OpenSSH's setstat that never follows a link.
+const LSETSTAT: &str = "lsetstat@openssh.com";
+
+/// SS-14: `lsetstat@openssh.com`'s request: the path, then the attributes, as SETSTAT's.
+#[derive(serde::Serialize)]
+struct LsetstatRequest {
+    path: String,
+    attrs: FileAttributes,
 }
 
 fn config() -> SftpConfig {
@@ -140,6 +154,18 @@ impl SftpFiles {
         matches!(self.inner.opener, Opener::Root { .. })
     }
 
+    /// SS-14: root browsing ended for these files.
+    fn revoked(&self) -> bool {
+        match &self.inner.opener {
+            Opener::Root { revoked, .. } => revoked.load(std::sync::atomic::Ordering::SeqCst),
+            Opener::Subsystem => false,
+        }
+    }
+
+    fn ended() -> CoreError {
+        CoreError::InvalidInput("Root browsing ended, so nothing more is done as root. Browse as root again.".into())
+    }
+
     async fn lost(&self) -> CoreError {
         let reason = disconnect_reason(&self.inner.shared).await;
         CoreError::Ssh(format!("the connection was lost: {reason}"))
@@ -150,8 +176,21 @@ impl SftpFiles {
         if self.inner.handle.is_closed() {
             return Err(self.lost().await);
         }
-        if let Opener::Root { server, password } = &self.inner.opener {
-            let (stream, took) = sftp_root::open_stream(&self.inner.handle, server, password.as_ref()).await?;
+        if let Opener::Root { server, password, .. } = &self.inner.opener {
+            if self.revoked() {
+                return Err(Self::ended());
+            }
+            let password = crate::locks::lock(password).clone();
+            let opened = sftp_root::open_stream(&self.inner.handle, server, password.as_ref()).await;
+            let (stream, took) = match opened {
+                Ok(opened) => opened,
+                // A channel opened again (after one broke) and sudo refused: never tried again with this password.
+                Err(CoreError::SudoPasswordRefused) => {
+                    self.revoke();
+                    return Err(CoreError::SudoPasswordRefused);
+                }
+                Err(err) => return Err(err),
+            };
             if took {
                 self.inner
                     .took_password
@@ -186,6 +225,9 @@ impl SftpFiles {
 
     /// The SFTP session, opened on a new channel when there is none yet.
     async fn sftp(&self) -> Result<Arc<SftpSession>> {
+        if self.revoked() {
+            return Err(Self::ended());
+        }
         let mut slot = self.inner.session.lock().await;
         if let Some(session) = slot.as_ref() {
             return Ok(Arc::clone(session));
@@ -201,6 +243,9 @@ impl SftpFiles {
 
     /// The protocol-level session, opened on a channel of its own when there is none yet.
     async fn raw(&self) -> Result<Arc<Raw>> {
+        if self.revoked() {
+            return Err(Self::ended());
+        }
         let mut slot = self.inner.raw.lock().await;
         if let Some(raw) = slot.as_ref() {
             return Ok(Arc::clone(raw));
@@ -212,7 +257,12 @@ impl SftpFiles {
             .await
             .map_err(|err| CoreError::Sftp(format!("SFTP did not start on the host: {err}")))?;
         let posix_rename = version.extensions.get(POSIX_RENAME).is_some_and(|v| v == "1");
-        let raw = Arc::new(Raw { session, posix_rename });
+        let lsetstat = version.extensions.get(LSETSTAT).is_some_and(|v| v == "1");
+        let raw = Arc::new(Raw {
+            session,
+            posix_rename,
+            lsetstat,
+        });
         *slot = Some(Arc::clone(&raw));
         Ok(raw)
     }
@@ -277,10 +327,17 @@ impl SftpFiles {
 
     /// H8: an upload over the file at `path`, through a temporary file where it can keep the old
     /// file as it was ([`Plan::Swap`]), else in place ([`Plan::InPlace`]).
-    async fn replace(&self, path: &str) -> Result<Box<dyn RemoteWrite>> {
+    async fn replace(&self, path: &str) -> Result<SftpWrite> {
         let session = self.sftp().await?;
-        // Through a link, the file it points to is replaced, so the link stays a link.
+        // Through a link, the file it points to is replaced, so the link stays a link. SS-14: never as root, where a
+        // link another user made could point anywhere.
         let target = match session.symlink_metadata(path).await {
+            Ok(meta) if meta.file_type() == FileType::Symlink && self.is_root() => {
+                return Err(CoreError::InvalidInput(format!(
+                    "{path} is a link, and as root Remotely doesn't write through links: upload to the file it points \
+                     to instead."
+                )))
+            }
             Ok(meta) if meta.file_type() == FileType::Symlink => match session.canonicalize(path).await {
                 Ok(real) if real != path && real.starts_with('/') => real,
                 _ => {
@@ -332,7 +389,7 @@ impl SftpFiles {
                 return self.in_place(&session, path, why).await;
             }
         }
-        Ok(Box::new(SftpWrite::new(
+        Ok(SftpWrite::new(
             self.clone(),
             file,
             temp,
@@ -340,19 +397,14 @@ impl SftpFiles {
                 target,
                 mode: old.permissions.map(|p| p & 0o7777),
             },
-        )))
+        ))
     }
 
     /// A new file at `path`; fails when one is there.
-    async fn create(&self, session: &SftpSession, path: &str) -> Result<Box<dyn RemoteWrite>> {
+    async fn create(&self, session: &SftpSession, path: &str) -> Result<SftpWrite> {
         let flags = OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::EXCLUDE;
         match session.open_with_flags(path, flags).await {
-            Ok(file) => Ok(Box::new(SftpWrite::new(
-                self.clone(),
-                file,
-                path.to_owned(),
-                Plan::Create,
-            ))),
+            Ok(file) => Ok(SftpWrite::new(self.clone(), file, path.to_owned(), Plan::Create)),
             Err(err) => {
                 // OpenSSH answers a plain "failure" when an exclusive create finds a file there.
                 let refused = matches!(&err, SftpError::Status(s) if s.status_code == StatusCode::Failure);
@@ -366,15 +418,15 @@ impl SftpFiles {
 
     /// The file at `path` written over where it is: emptied, then filled, keeping its owner and
     /// permissions.
-    async fn in_place(&self, session: &SftpSession, path: &str, why: String) -> Result<Box<dyn RemoteWrite>> {
+    async fn in_place(&self, session: &SftpSession, path: &str, why: String) -> Result<SftpWrite> {
         let flags = OpenFlags::WRITE | OpenFlags::CREATE | OpenFlags::TRUNCATE;
         match session.open_with_flags(path, flags).await {
-            Ok(file) => Ok(Box::new(SftpWrite::new(
+            Ok(file) => Ok(SftpWrite::new(
                 self.clone(),
                 file,
                 path.to_owned(),
                 Plan::InPlace { why },
-            ))),
+            )),
             Err(err) => Err(self.error(err, "write to", path).await),
         }
     }
@@ -621,10 +673,10 @@ impl RemoteFiles for SftpFiles {
 
     async fn write(&self, path: &str, replace: bool) -> Result<Box<dyn RemoteWrite>> {
         if replace {
-            return self.replace(path).await;
+            return Ok(Box::new(self.replace(path).await?));
         }
         let session = self.sftp().await?;
-        self.create(&session, path).await
+        Ok(Box::new(self.create(&session, path).await?))
     }
 
     async fn remove(&self, path: &str) -> Result<()> {
@@ -706,8 +758,10 @@ impl RemoteFiles for SftpFiles {
         }
     }
 
+    /// SS-14: never through a link: OpenSSH's `lsetstat@openssh.com` sets the path's own attributes (a link's mode
+    /// can't be set at all); a server without it gets SETSTAT, which follows links, only after `lstat` says the path is
+    /// no link.
     async fn set_attrs(&self, path: &str, attrs: SetAttrs) -> Result<()> {
-        let session = self.sftp().await?;
         let what = if attrs.owner.is_some() {
             "change the owner of"
         } else if attrs.mode.is_some() {
@@ -715,6 +769,28 @@ impl RemoteFiles for SftpFiles {
         } else {
             "set the time of"
         };
+        let raw = self.raw().await?;
+        if raw.lsetstat {
+            let request = LsetstatRequest {
+                path: path.to_owned(),
+                attrs: attributes(attrs),
+            };
+            let data = russh_sftp::ser::to_bytes(&request)
+                .map_err(|err| CoreError::Sftp(format!("could not {what} {path}: {err}")))?
+                .to_vec();
+            return match raw.session.extended(LSETSTAT, data).await {
+                Ok(Packet::Status(status)) if status.status_code == StatusCode::Ok => Ok(()),
+                Ok(Packet::Status(status)) => Err(self.error(SftpError::Status(status), what, path).await),
+                Ok(_) => Err(CoreError::Sftp(format!(
+                    "could not {what} {path}: the host's answer made no sense"
+                ))),
+                Err(err) => Err(self.error(err, what, path).await),
+            };
+        }
+        if self.lstat(path).await?.is_some_and(|entry| entry.link) {
+            return Err(link_refused(path));
+        }
+        let session = self.sftp().await?;
         match session.set_metadata(path, attributes(attrs)).await {
             Ok(()) => Ok(()),
             Err(err) => Err(self.error(err, what, path).await),
@@ -745,7 +821,8 @@ impl RemoteFiles for SftpFiles {
             "root".to_owned(),
             Opener::Root {
                 server: server.to_owned(),
-                password: password.cloned(),
+                password: Mutex::new(password.cloned()),
+                revoked: std::sync::atomic::AtomicBool::new(false),
             },
         );
         // Started now, so a refused password or a missing server is known before the drawer says "as root".
@@ -760,6 +837,32 @@ impl RemoteFiles for SftpFiles {
     fn as_root(&self) -> bool {
         self.is_root()
     }
+
+    fn revoke(&self) {
+        let Opener::Root { password, revoked, .. } = &self.inner.opener else {
+            return;
+        };
+        revoked.store(true, std::sync::atomic::Ordering::SeqCst);
+        crate::locks::lock(password).take();
+        // The root channels close; a transfer still holding a file of them is cancelled by the terminal.
+        let files = self.clone();
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                let session = files.inner.session.lock().await.take();
+                if let Some(session) = session {
+                    let _ = session.close().await;
+                }
+                files.inner.raw.lock().await.take();
+            });
+        }
+    }
+}
+
+/// SS-14: what a change through a link says.
+fn link_refused(path: &str) -> CoreError {
+    CoreError::InvalidInput(format!(
+        "{path} is a link, so nothing was changed: change the file it points to instead."
+    ))
 }
 
 struct SftpRead {
@@ -795,7 +898,14 @@ struct SftpWrite {
     plan: Plan,
     /// Finished or aborted; until then, dropping it deletes what it made.
     settled: bool,
+    /// SS-14: bytes written so far, which the host's file must hold when it is finished.
+    written: u64,
+    /// SS-14: the file's size and time when it paused, which it must still have to go on.
+    paused: Option<(u64, Option<u32>)>,
 }
+
+/// SS-14: how many bytes a resume reads back at a time to check them.
+const READ_BACK: usize = 256 * 1024;
 
 impl SftpWrite {
     fn new(files: SftpFiles, file: File, path: String, plan: Plan) -> Self {
@@ -805,7 +915,78 @@ impl SftpWrite {
             path,
             plan,
             settled: false,
+            written: 0,
+            paused: None,
         }
+    }
+
+    /// SS-14: the paused file, opened again, if it is still what was written: a regular file of `offset` bytes with
+    /// its time at the pause (never a link), whose bytes hash to `sent`. `None` when anything differs.
+    async fn reopen_checked(&self, offset: u64, sent: &str) -> Result<Option<File>> {
+        let Some((size, mtime)) = self.paused else {
+            return Ok(None);
+        };
+        let Some(entry) = self.files.lstat(&self.path).await? else {
+            return Ok(None);
+        };
+        if entry.link || entry.kind != EntryKind::File || entry.size != offset || size != offset {
+            return Ok(None);
+        }
+        if mtime.is_none() || entry.modified != mtime.map(u64::from) {
+            return Ok(None);
+        }
+        let session = self.files.sftp().await?;
+        let Ok(mut file) = session
+            .open_with_flags(&self.path, OpenFlags::READ | OpenFlags::WRITE)
+            .await
+        else {
+            return Ok(None);
+        };
+        // What the host holds is read back and hashed: it must be the bytes sent.
+        let mut hasher = <sha2::Sha256 as sha2::Digest>::new();
+        let mut buf = vec![0u8; READ_BACK];
+        let mut read = 0u64;
+        loop {
+            let n = file
+                .read(&mut buf)
+                .await
+                .map_err(|err| CoreError::Sftp(format!("reading {} back on the host failed: {err}", self.path)))?;
+            if n == 0 {
+                break;
+            }
+            read += n as u64;
+            if read > offset {
+                return Ok(None);
+            }
+            sha2::Digest::update(&mut hasher, &buf[..n]);
+        }
+        if read != offset || hex::encode(sha2::Digest::finalize(hasher)) != sent {
+            return Ok(None);
+        }
+        file.seek(std::io::SeekFrom::Start(offset))
+            .await
+            .map_err(|err| CoreError::Sftp(format!("could not go on writing {} on the host: {err}", self.path)))?;
+        Ok(Some(file))
+    }
+
+    /// SS-14: starts again from 0: what this write made is deleted (a link put in its place is deleted as a link, never
+    /// followed) and a new file made exclusively, as at the start.
+    async fn restart(&mut self) -> Result<()> {
+        let session = self.files.sftp().await?;
+        match session.remove_file(&self.path).await {
+            Ok(()) => {}
+            Err(SftpError::Status(status)) if status.status_code == StatusCode::NoSuchFile => {}
+            Err(err) => return Err(self.files.error(err, "delete", &self.path).await),
+        }
+        let fresh = match &self.plan {
+            Plan::Create => self.files.create(&session, &self.path).await?,
+            Plan::Swap { target, .. } => self.files.replace(target).await?,
+            Plan::InPlace { .. } => self.files.replace(&self.path).await?,
+        };
+        // The old one made nothing that is still there.
+        self.settled = true;
+        *self = fresh;
+        Ok(())
     }
 
     /// Deletes what this write made (a new file, or the temporary one); `Err` says why it stayed.
@@ -873,12 +1054,28 @@ impl RemoteWrite for SftpWrite {
         };
         file.write_all(data)
             .await
-            .map_err(|err| CoreError::Sftp(format!("writing {} on the host failed: {err}", self.path)))
+            .map_err(|err| CoreError::Sftp(format!("writing {} on the host failed: {err}", self.path)))?;
+        self.written += data.len() as u64;
+        Ok(())
     }
 
     async fn finish(mut self: Box<Self>) -> Result<Written> {
         let closed = match self.file.take() {
-            Some(mut file) => file.shutdown().await,
+            Some(mut file) => match file.flush().await {
+                // SS-14: the host's file holds what was sent, no more and no less.
+                Ok(()) => match file.metadata().await {
+                    Ok(meta) if meta.len() != self.written => {
+                        let _ = file.shutdown().await;
+                        Err(std::io::Error::other(format!(
+                            "the host's file holds {} bytes, not the {} sent (someone else wrote to it)",
+                            meta.len(),
+                            self.written
+                        )))
+                    }
+                    _ => file.shutdown().await,
+                },
+                Err(err) => Err(err),
+            },
             None => Ok(()),
         };
         let result = match closed {
@@ -930,44 +1127,34 @@ impl RemoteWrite for SftpWrite {
     }
 
     async fn pause(&mut self) -> Result<()> {
-        // Every write confirmed, then the handle closed; the file stays as far as it got.
+        // Every write confirmed, the file's size and time noted, then the handle closed; the file stays as far as it
+        // got.
         if let Some(mut file) = self.file.take() {
-            file.shutdown()
-                .await
-                .map_err(|err| CoreError::Sftp(format!("pausing {} on the host failed: {err}", self.path)))?;
+            let pausing =
+                |err: std::io::Error| CoreError::Sftp(format!("pausing {} on the host failed: {err}", self.path));
+            file.flush().await.map_err(pausing)?;
+            self.paused = file.metadata().await.ok().map(|meta| (meta.len(), meta.mtime));
+            file.shutdown().await.map_err(pausing)?;
         }
         Ok(())
     }
 
-    async fn resume(&mut self, offset: u64) -> Result<()> {
+    async fn resume(&mut self, offset: u64, sent_sha256: &str) -> Result<Resumed> {
         if self.file.is_some() {
-            return Ok(());
+            return Ok(Resumed::GoesOn);
         }
-        let session = self.files.sftp().await?;
-        let mut file = match session.open_with_flags(&self.path, OpenFlags::WRITE).await {
-            Ok(file) => file,
-            Err(err) => return Err(self.files.error(err, "write to", &self.path).await),
-        };
-        let size = file.metadata().await.map(|m| m.len()).unwrap_or(0);
-        if size < offset {
-            return Err(CoreError::Sftp(format!(
-                "{} on the host is shorter than what was uploaded before the pause (someone changed it), so the upload \
-                 can't go on. Retry it",
-                self.path
-            )));
-        }
-        if size > offset {
-            let mut cut = FileAttributes::empty();
-            cut.size = Some(offset);
-            if let Err(err) = file.set_metadata(cut).await {
-                return Err(self.files.error(err, "write to", &self.path).await);
+        match self.reopen_checked(offset, sent_sha256).await? {
+            Some(file) => {
+                self.file = Some(file);
+                self.written = offset;
+                self.paused = None;
+                Ok(Resumed::GoesOn)
+            }
+            None => {
+                self.restart().await?;
+                Ok(Resumed::FromStart)
             }
         }
-        file.seek(std::io::SeekFrom::Start(offset))
-            .await
-            .map_err(|err| CoreError::Sftp(format!("could not go on writing {} on the host: {err}", self.path)))?;
-        self.file = Some(file);
-        Ok(())
     }
 }
 

@@ -696,6 +696,8 @@ enum Source {
 }
 
 struct Control {
+    /// The terminal's id (SS-14: its transfers and parks are found by it).
+    id: Uuid,
     /// FD-02: the workspace the terminal was opened in. Switching workspaces closes it; until then nothing of
     /// another workspace may use it.
     workspace: crate::domain::WorkspaceId,
@@ -865,6 +867,8 @@ struct Inner {
     /// F4: the WinRM client (PowerShell consoles), and its time limits.
     winrm: std::sync::RwLock<Arc<dyn WinrmAdapter>>,
     winrm_tuning: Mutex<WinrmTuning>,
+    /// SS-14: folders no download lands in (Remotely's data and logs), as final paths.
+    protected: Mutex<Vec<std::path::PathBuf>>,
 }
 
 /// SS-12: the longest a serial pane waits for the port's last connection to let go of it (a write held up by flow
@@ -943,6 +947,7 @@ impl Terminals {
                 waiting: Mutex::default(),
                 rules: OnceLock::new(),
                 alert_timing: Mutex::new(AlertTiming::default()),
+                protected: Mutex::new(Vec::new()),
                 launcher: std::sync::RwLock::new(launcher),
                 serial: std::sync::RwLock::new(serial),
                 serial_held: Mutex::default(),
@@ -971,6 +976,22 @@ impl Terminals {
         let _ = self.inner.bindings.set(bindings);
     }
 
+    /// SS-14: no download lands in `folder` or anything in it (Remotely's own data: a download that replaces a file
+    /// could replace the database or the vault). See [`crate::Core::protect_folder`].
+    pub fn protect_folder(&self, folder: &std::path::Path) {
+        let Some(real) = crate::toolbox::file_server::final_place(folder) else {
+            return;
+        };
+        let mut protected = locks::lock(&self.inner.protected);
+        if !protected.contains(&real) {
+            protected.push(real);
+        }
+    }
+
+    pub(super) fn protected_folders(&self) -> Vec<std::path::PathBuf> {
+        locks::lock(&self.inner.protected).clone()
+    }
+
     /// SS-14: the guard that parks a sudo password root browsing had refused.
     pub fn set_login_guard(&self, guard: crate::login_guard::LoginGuard) {
         let _ = self.inner.guard.set(guard);
@@ -985,7 +1006,7 @@ impl Terminals {
         for control in open {
             locks::lock(&control.remembered).take();
             locks::lock(&control.jump_passwords).clear();
-            root_files::end(&control);
+            self.end_root(&control, root_files::RootEnd::VaultLocked);
         }
     }
 
@@ -1332,6 +1353,7 @@ impl Terminals {
         let (events_tx, events_rx) = mpsc::channel(64);
         let id = Uuid::new_v4();
         let control = Arc::new(Control {
+            id,
             workspace: ctx.workspace_id,
             input: input_tx,
             cancel: CancellationToken::new(),
@@ -3263,7 +3285,10 @@ impl Pane {
         *locks::lock(&self.control.screen) = PaneScreen::default();
         locks::lock(&self.control.files).take();
         // SS-14: root browsing rode this connection.
-        root_files::end(&self.control);
+        Terminals {
+            inner: Arc::clone(&self.inner),
+        }
+        .end_root(&self.control, root_files::RootEnd::ConnectionEnded);
         locks::lock(&self.control.forwards).take();
         locks::lock(&self.control.commands).take();
         // SS-07: open tunnels close with the connection and wait for the next one; closing the

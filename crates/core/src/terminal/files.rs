@@ -9,7 +9,9 @@
 //!   saved and its SHA-256, never its content. The folder is picked in a dialog the shell opens, or is
 //!   Downloads. SS-14: a file of the same name there is kept and the new one gets a number, unless the user
 //!   chose to replace it (always, or only when the host's is newer) or to skip it ([`Existing`]); a folder comes
-//!   down with what is in it.
+//!   down with what is in it, except Git's own data (`.git`, so no download makes a Git working tree whose hooks a
+//!   Git-aware tool would run), links to folders and what isn't a file, each counted as left out; at most
+//!   [`MAX_UPLOAD_FILES`] files and folders in all (A9). Nothing lands in Remotely's own data folder.
 //! * Uploads are changes: [`FileTransfers::upload`] submits a [`Command::FileUpload`] to the command
 //!   bus (Low; Prod raises it; replacing a file is at least Medium; as root one higher), and the job runner carries
 //!   it out here ([`TerminalActions::upload`]). Each uploaded file is audited with its name, size,
@@ -21,8 +23,10 @@
 //!   again; a replaced file stays as it was (H8).
 //! * SS-14, the transfer queue: at most [`TRANSFERS_PER_HOST`] transfers run at a time on a terminal's connection,
 //!   uploads and downloads together; the rest wait. A transfer pauses between two chunks (its slot goes to the next
-//!   one) and goes on from the same offset when resumed: a download reads the host's file from there (after checking
-//!   it didn't change), an upload writes from there into what it wrote before (the new file, or H8's temporary file).
+//!   one). An upload goes on from the same offset when resumed, into what it wrote before (the new file, or H8's
+//!   temporary file), once the host's file is checked to be exactly what was sent ([`RemoteWrite::resume`]), else from
+//!   the start. A download comes down again from the start: SFTP's whole-second times can't tell a file rewritten in
+//!   place, so its result is never part of each. The audit's SHA-256 is of the bytes sent or saved.
 //!   Modification times are kept both ways; a replaced file on the host keeps its permissions and owner (H8).
 //! * Every transfer is in [`Transfers`] while it runs and for a while after: progress, speed, cancel,
 //!   pause, resume and retry for the transfers panel ([`TransferInfo`], sent on [`Terminals::subscribe_transfers`]).
@@ -34,14 +38,14 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio::sync::{broadcast, watch, OwnedSemaphorePermit, Semaphore};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use super::folder::FolderInfo;
 use super::{audit, quoted_name, Control, Terminals};
-use crate::adapters::remote::{EntryKind, RemoteEntry, RemoteFiles, RemoteWrite, SetAttrs, Written};
+use crate::adapters::remote::{EntryKind, RemoteEntry, RemoteFiles, RemoteWrite, Resumed, SetAttrs, Written};
 use crate::command_bus::{
     human_size, Command, CommandBus, SubmitOutcome, UploadFile, MAX_FOLDER_DEPTH, MAX_UPLOAD_FILES,
 };
@@ -274,6 +278,30 @@ impl Transfers {
             }
             _ => false,
         }
+    }
+
+    /// SS-14: root browsing on `terminal` ended: every transfer as root of it that has not finished is cancelled
+    /// (a paused one too), so nothing more is written or read as root. The ids of those cancelled.
+    pub(super) fn cancel_root(&self, terminal: Uuid) -> Vec<Uuid> {
+        let list = locks::lock(&self.list);
+        let mut cancelled = Vec::new();
+        for entry in list.iter() {
+            if entry.info.terminal_id == terminal && entry.info.as_root && !entry.info.state.finished() {
+                entry.cancel.cancel();
+                cancelled.push(entry.info.id);
+            }
+        }
+        cancelled
+    }
+
+    /// Whether every one of `ids` has ended (or is gone from the list).
+    pub(super) fn all_finished(&self, ids: &[Uuid]) -> bool {
+        let list = locks::lock(&self.list);
+        ids.iter().all(|id| {
+            list.iter()
+                .find(|e| e.info.id == *id)
+                .is_none_or(|e| e.info.state.finished())
+        })
     }
 
     /// SS-14: asks a transfer that has not finished to pause (`on`) or go on. False when there is none to.
@@ -616,10 +644,12 @@ pub enum DownloadStart {
         dest: String,
         choice: Option<Uuid>,
     },
-    /// Queued; `skipped` files were there already and left alone.
+    /// Queued; `skipped` files were there already and left alone; `left_out`: what a folder held that doesn't come
+    /// down (Git's data, links to folders, devices and the like).
     Queued {
         transfers: Vec<TransferInfo>,
         skipped: usize,
+        left_out: usize,
     },
 }
 
@@ -644,12 +674,36 @@ struct DownloadItem {
     replace: bool,
 }
 
+/// SS-14: a name Git takes as its own data on this PC (`.git`, as Windows would save it: `.GIT`, `.git.`). A
+/// folder or file of that name makes the folder around it a Git working tree, whose hooks and `core.fsmonitor` a
+/// Git-aware tool runs when it opens the folder, so none comes down.
+fn is_git_name(name: &str) -> bool {
+    local_name(name).eq_ignore_ascii_case(".git")
+}
+
+/// SS-14: `path` is in one of `protected` (final paths), its parts compared as Windows compares them, without case.
+fn lands_in(path: &Path, protected: &[PathBuf]) -> bool {
+    let parts = |p: &Path| -> Vec<String> {
+        p.components()
+            .map(|c| c.as_os_str().to_string_lossy().to_lowercase())
+            .collect()
+    };
+    let at = parts(path);
+    protected.iter().any(|folder| {
+        let folder = parts(folder);
+        at.len() >= folder.len() && at[..folder.len()] == folder[..]
+    })
+}
+
 /// SS-14: a host folder's files, for a download of the folder: links to folders are left out (they may lead back up),
-/// links to files come down as the files they point to. Folders first in the list, parents first.
+/// links to files come down as the files they point to; Git's data ([`is_git_name`]) and what is neither a file nor
+/// a folder are left out too, each counted in `left_out`. At most [`MAX_UPLOAD_FILES`] files and folders (A9: an
+/// endless tree of empty folders is refused as well). Folders first in the list, parents first.
 async fn walk_remote(
     files: &Arc<dyn RemoteFiles>,
     root: &str,
     top: &str,
+    left_out: &mut usize,
 ) -> Result<(Vec<String>, Vec<(String, String, RemoteEntry)>)> {
     let mut folders = vec![top.to_owned()];
     let mut found = Vec::new();
@@ -663,10 +717,14 @@ async fn walk_remote(
             )));
         }
         for entry in listing.entries {
+            if is_git_name(&entry.name) {
+                *left_out += 1;
+                continue;
+            }
             let path = join(&folder, &entry.name);
             let shown_path = format!("{shown}/{}", entry.name);
             match entry.kind {
-                EntryKind::Folder if entry.link => {}
+                EntryKind::Folder if entry.link => *left_out += 1,
                 EntryKind::Folder => {
                     if depth >= MAX_FOLDER_DEPTH {
                         return Err(CoreError::InvalidInput(format!(
@@ -677,11 +735,11 @@ async fn walk_remote(
                     queue.push_back((path, shown_path, depth + 1));
                 }
                 EntryKind::File => found.push((path, shown_path, entry)),
-                EntryKind::Other => {}
+                EntryKind::Other => *left_out += 1,
             }
-            if found.len() > MAX_UPLOAD_FILES {
+            if found.len() + folders.len() > MAX_UPLOAD_FILES {
                 return Err(CoreError::InvalidInput(format!(
-                    "{root} holds more than {MAX_UPLOAD_FILES} files, so it can't come down in one go."
+                    "{root} holds more than {MAX_UPLOAD_FILES} files and folders, so it can't come down in one go."
                 )));
             }
         }
@@ -897,6 +955,16 @@ impl Terminals {
         if !dest.is_dir() {
             return Err(CoreError::InvalidInput(format!("{} is not a folder.", dest.display())));
         }
+        // Remotely's own data (the database, the vault, the logs): a download that replaced a file there would replace
+        // the app's own.
+        let protected = self.protected_folders();
+        let dest_real = crate::toolbox::file_server::final_place(dest).unwrap_or_else(|| dest.to_owned());
+        if lands_in(&dest_real, &protected) {
+            return Err(CoreError::InvalidInput(format!(
+                "{} is Remotely's own data folder, so nothing is downloaded into it. Choose another folder.",
+                dest.display()
+            )));
+        }
         if paths.is_empty() {
             return Err(CoreError::InvalidInput("Choose a file to download.".into()));
         }
@@ -913,17 +981,24 @@ impl Terminals {
         // What comes down: each file, and each folder's files with their folders (made on this PC first).
         let mut folders: Vec<String> = Vec::new();
         let mut found: Vec<(String, String, RemoteEntry)> = Vec::new();
+        let mut left_out = 0;
         for path in paths {
             let full = resolve(&base, &home, path);
             let entry = files
                 .stat(&full)
                 .await?
                 .ok_or_else(|| CoreError::RemoteNotFound { path: full.clone() })?;
+            if is_git_name(&entry.name) {
+                return Err(CoreError::InvalidInput(format!(
+                    "{full} is Git's own data, so it isn't downloaded: on this PC it would make the folder a Git \
+                     working tree, whose hooks Git-aware tools run."
+                )));
+            }
             match entry.kind {
                 EntryKind::File => found.push((full, entry.name.clone(), entry)),
                 EntryKind::Folder => {
                     let top = local_name(&entry.name);
-                    let (subfolders, inside) = walk_remote(&files, &full, &top).await?;
+                    let (subfolders, inside) = walk_remote(&files, &full, &top, &mut left_out).await?;
                     folders.extend(subfolders);
                     found.extend(inside);
                 }
@@ -933,9 +1008,9 @@ impl Terminals {
                     )))
                 }
             }
-            if found.len() > MAX_UPLOAD_FILES {
+            if found.len() + folders.len() > MAX_UPLOAD_FILES {
                 return Err(CoreError::InvalidInput(format!(
-                    "One download takes at most {MAX_UPLOAD_FILES} files."
+                    "One download takes at most {MAX_UPLOAD_FILES} files and folders."
                 )));
             }
         }
@@ -947,6 +1022,16 @@ impl Terminals {
             let mut parts: Vec<String> = shown.split('/').map(local_name).collect();
             let name = parts.pop().unwrap_or_else(|| "download".into());
             let folder = parts.iter().fold(dest.to_owned(), |at, part| at.join(part));
+            let lands = parts
+                .iter()
+                .fold(dest_real.clone(), |at, part| at.join(part))
+                .join(&name);
+            if lands_in(&lands, &protected) {
+                return Err(CoreError::InvalidInput(format!(
+                    "{} would land in Remotely's own data folder, so nothing is downloaded. Choose another folder.",
+                    folder.join(&name).display()
+                )));
+            }
             let there = std::fs::symlink_metadata(folder.join(&name)).ok();
             let mut replace = false;
             if let Some(there) = there {
@@ -1043,6 +1128,7 @@ impl Terminals {
         Ok(DownloadStart::Queued {
             transfers: queued,
             skipped,
+            left_out,
         })
     }
 
@@ -1064,15 +1150,18 @@ impl Terminals {
             result = self.copy_down(control, &info, landing, &mut pause, &mut slot) => result.map_err(Some),
         };
         match result {
-            Ok((local, sha, note)) => {
+            Ok((local, sha, saved, note)) => {
                 let shown = local.display().to_string();
-                transfers.change(transfer, |i| i.local_path = Some(shown.clone()));
+                transfers.change(transfer, |i| {
+                    i.local_path = Some(shown.clone());
+                    i.size = saved;
+                });
                 let root = if info.as_root { ", as root" } else { "" };
                 let action = format!("Downloaded '{}' from {}{root}", info.name, quoted_name(control));
                 let replaced = if info.replace { ", replacing the file there" } else { "" };
                 let detail = format!(
-                    "{}, {} bytes, SHA-256 {sha}; saved to {shown}{replaced}",
-                    info.remote_path, info.size
+                    "{}, {saved} bytes, SHA-256 {sha}; saved to {shown}{replaced}",
+                    info.remote_path
                 );
                 if let Err(err) = audit(
                     &self.inner.store,
@@ -1125,10 +1214,10 @@ impl Terminals {
     }
 
     /// Copies one host file to a new file in `dest` (or over the one there, when it replaces it), keeps its time, then
-    /// marks it as from the internet (A8); returns where it went, its SHA-256 and a note when the mark could not be
-    /// written. A file left half written (or not yet marked) is deleted; one it would replace stays as it was until
-    /// the last byte arrived. SS-14: a pause stops between two chunks, and the host's file is read again from the
-    /// same offset once it goes on, if it didn't change meanwhile.
+    /// marks it as from the internet (A8); returns where it went, the SHA-256 and size of the bytes saved, and a note
+    /// when the mark could not be written. A file left half written (or not yet marked) is deleted; one it would
+    /// replace stays as it was until the last byte arrived. SS-14: a pause stops between two chunks; once it goes on,
+    /// the host's file comes down again from the start (see the module's notes).
     async fn copy_down(
         &self,
         control: &Arc<Control>,
@@ -1136,13 +1225,13 @@ impl Terminals {
         landing: &Landing,
         pause: &mut watch::Receiver<bool>,
         slot: &mut Option<OwnedSemaphorePermit>,
-    ) -> Result<(PathBuf, String, Option<String>)> {
-        let (dest, name, modified) = (landing.dest.as_path(), landing.name.as_str(), landing.modified);
+    ) -> Result<(PathBuf, String, u64, Option<String>)> {
+        let (dest, name) = (landing.dest.as_path(), landing.name.as_str());
+        let mut modified = landing.modified;
         let slots = Arc::clone(&control.slots);
         *slot = Some(self.take_slot(&slots, info.id, pause).await?);
         let (_, files) = self.files_for(info.terminal_id, info.as_root)?;
-        let first = files.stat(&info.remote_path).await?;
-        let mut reader = Some(files.read_from(&info.remote_path, 0).await?);
+        let mut reader = Some(files.read(&info.remote_path).await?);
         // A replacement is written beside the file it replaces, then takes its place.
         let (path, final_path, mut file) = if info.replace {
             let final_path = dest.join(name);
@@ -1167,18 +1256,29 @@ impl Terminals {
                 drop(slot.take());
                 *slot = Some(self.take_slot(&slots, info.id, pause).await?);
                 let (_, files) = self.files_for(info.terminal_id, info.as_root)?;
-                let now = files.stat(&info.remote_path).await?;
-                let same = |a: &Option<RemoteEntry>, b: &Option<RemoteEntry>| match (a, b) {
-                    (Some(a), Some(b)) => a.size == b.size && a.modified == b.modified,
-                    _ => false,
-                };
-                if !same(&first, &now) {
-                    return Err(CoreError::Sftp(format!(
-                        "{} changed on the host while the download was paused, so it can't go on. Download it again",
+                // SFTP's times are whole seconds, or missing, so a file rewritten in place at the same size and time
+                // looks the same, and checking its bytes means reading them again anyway. So it comes down again
+                // from the start: all of it as the host has it now, never part of each.
+                let now = files
+                    .stat(&info.remote_path)
+                    .await?
+                    .ok_or_else(|| CoreError::RemoteNotFound {
+                        path: info.remote_path.clone(),
+                    })?;
+                if now.kind != EntryKind::File {
+                    return Err(CoreError::InvalidInput(format!(
+                        "{} is no longer a file on the host, so it can't come down.",
                         info.remote_path
                     )));
                 }
-                reader = Some(files.read_from(&info.remote_path, done).await?);
+                modified = now.modified;
+                self.inner.transfers.change(info.id, |i| i.size = now.size);
+                file.set_len(0).await?;
+                file.seek(std::io::SeekFrom::Start(0)).await?;
+                hasher = Sha256::new();
+                done = 0;
+                self.inner.transfers.progress(info.id, 0);
+                reader = Some(files.read(&info.remote_path).await?);
             }
             let Some(open) = reader.as_mut() else {
                 break;
@@ -1212,7 +1312,7 @@ impl Terminals {
             tokio::fs::rename(&path, &final_path).await?;
         }
         cleanup.0 = None;
-        Ok((final_path, hex::encode(hasher.finalize()), note))
+        Ok((final_path, hex::encode(hasher.finalize()), done, note))
     }
 
     /// SS-08: the job runner's half of [`Command::FileUpload`]: SS-14: its folders made first, then its files over the
@@ -1345,7 +1445,8 @@ impl Terminals {
                     job.folder,
                     quoted_name(&job.control)
                 );
-                let detail = format!("{size} bytes, SHA-256 {sha}; to {}{replaced}", info.remote_path);
+                // What was sent; finishing checked the host's file holds as many bytes.
+                let detail = format!("{size} bytes sent, SHA-256 {sha}; to {}{replaced}", info.remote_path);
                 job.audit("file_uploaded", &action, &detail, &self.inner.store).await?;
                 transfers.change(info.id, |i| i.size = size);
                 // H8: a kept backup or a write in place is worth a line in the panel; SS-14: so is a time not kept.
@@ -1465,7 +1566,7 @@ impl Terminals {
 
     /// The local file's bytes into the writer, with progress. Returns how many and their SHA-256. SS-14: a pause stops
     /// between two chunks: the host's file closes, the slot goes to the next transfer, and the writer goes on from
-    /// the same offset once it resumes.
+    /// the same offset once it resumes if the host's file is still exactly what was sent, else from the start.
     async fn pump(
         &self,
         local: &mut tokio::fs::File,
@@ -1483,7 +1584,16 @@ impl Terminals {
                 writer.pause().await?;
                 drop(permit.take());
                 *permit = Some(self.take_slot(slots, info.id, pause).await?);
-                writer.resume(done).await?;
+                let sent = hex::encode(hasher.clone().finalize());
+                match writer.resume(done, &sent).await? {
+                    Resumed::GoesOn => {}
+                    Resumed::FromStart => {
+                        local.seek(std::io::SeekFrom::Start(0)).await?;
+                        hasher = Sha256::new();
+                        done = 0;
+                        self.inner.transfers.progress(info.id, 0);
+                    }
+                }
             }
             let n = local.read(&mut buf).await?;
             if n == 0 {
@@ -2122,8 +2232,8 @@ async fn plan_upload(
         folders,
         conflicts: Vec::new(),
     };
-    // Names this upload gives in each folder, so two kept-both files never take the same number.
-    let mut given: HashSet<String> = HashSet::new();
+    // Names this upload gives in each folder, so a kept-both file never takes a number another file of it has or gets.
+    let mut given: HashSet<String> = items.iter().map(|item| join(folder, &item.name)).collect();
     for item in items {
         let (sub, name) = match item.name.rsplit_once('/') {
             Some((sub, name)) => (Some(sub), name),

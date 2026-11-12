@@ -124,7 +124,11 @@ export function changeLabel(change: FileChange): string {
 /** The choices for files that are there already, as the conflict dialog offers them. */
 export const EXISTING_CHOICES: { value: Exclude<Existing, "ask">; label: string; hint: string }[] = [
   { value: "replace", label: "Replace them", hint: "What is there now is lost" },
-  { value: "replaceIfNewer", label: "Replace them if newer", hint: "By modification time; the rest stay" },
+  {
+    value: "replaceIfNewer",
+    label: "Replace them if newer",
+    hint: "By modification time, as each clock says; the rest stay",
+  },
   { value: "keepBoth", label: "Keep both", hint: "The new ones get a number: name (1).ext" },
   { value: "skip", label: "Skip them", hint: "Only the others go" },
 ];

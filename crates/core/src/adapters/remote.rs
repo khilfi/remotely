@@ -562,6 +562,19 @@ pub trait RemoteFiles: Send + Sync {
     fn as_root(&self) -> bool {
         false
     }
+    /// SS-14: root browsing ended (stopped, the vault locked, the connection went): sudo's password is forgotten, the
+    /// root SFTP channels close, and nothing through these files (a paused upload's writer included) works again.
+    fn revoke(&self) {}
+}
+
+/// SS-14: how a paused upload went on ([`RemoteWrite::resume`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Resumed {
+    /// From the offset: what was written before the pause is on the host as it was sent.
+    GoesOn,
+    /// The host's file changed while paused (another size or time, other bytes, a link): what was made was deleted,
+    /// a new file made in its place, and the upload starts again from 0.
+    FromStart,
 }
 
 /// SS-14: root browsing's files, from [`RemoteFiles::open_as_root`].
@@ -571,12 +584,14 @@ pub struct RootOpened {
     pub took_password: bool,
 }
 
-/// SS-14: finds the host's SFTP server program, to start it under sudo for root browsing. A read, as the login user:
-/// the first of the distributions' usual places that is there (Debian and Ubuntu, RHEL and Fedora, Arch, Alpine,
-/// SUSE), else `sftp-server` on the PATH. Prints one absolute path, or nothing.
-pub const SFTP_SERVER_PROBE: &str = "for p in /usr/lib/openssh/sftp-server /usr/libexec/openssh/sftp-server \
+/// SS-14: finds the host's SFTP server program, to start it under sudo for root browsing. A read, as the login user,
+/// run by `/bin/sh` (not the login shell, whose rc files and PATH the result would otherwise depend on): the first of
+/// the distributions' fixed places that is there (Debian and Ubuntu, RHEL and Fedora, Arch, Alpine, SUSE). Never the
+/// PATH, which the login user controls and what is found runs as root. Prints one absolute path, or nothing.
+pub const SFTP_SERVER_PROBE: &str =
+    "/bin/sh -c 'for p in /usr/lib/openssh/sftp-server /usr/libexec/openssh/sftp-server \
 /usr/lib/ssh/sftp-server /usr/libexec/sftp-server /usr/lib/sftp-server /usr/libexec/ssh/sftp-server; do \
-if [ -x \"$p\" ]; then printf '%s\\n' \"$p\"; exit 0; fi; done; command -v sftp-server";
+if [ -x \"$p\" ]; then printf \"%s\\n\" \"$p\"; exit 0; fi; done; exit 1'";
 
 /// SS-14: the server [`SFTP_SERVER_PROBE`] found: an absolute path of plain characters, so it can go on a command
 /// line as it is.
@@ -627,8 +642,10 @@ pub trait RemoteWrite: Send {
     async fn pause(&mut self) -> Result<()> {
         Err(CoreError::NotImplemented("pausing an upload on this connection"))
     }
-    /// SS-14: goes on after a pause, writing from `offset` (what was written before the pause).
-    async fn resume(&mut self, _offset: u64) -> Result<()> {
+    /// SS-14: goes on after a pause, writing from `offset` (what was written before the pause), once the host's file is
+    /// checked to be what was written: a regular file, not a link, of `offset` bytes and the time it had at the pause,
+    /// whose bytes read back hash to `sent_sha256`. Otherwise it starts again from 0 ([`Resumed::FromStart`]).
+    async fn resume(&mut self, _offset: u64, _sent_sha256: &str) -> Result<Resumed> {
         Err(CoreError::NotImplemented("resuming an upload on this connection"))
     }
 }
@@ -2171,6 +2188,41 @@ pub(crate) fn sh_quote(text: &str) -> String {
     format!("'{}'", text.replace('\'', r"'\''"))
 }
 
+/// SS-14: `text` as `printf` octal escapes: only `A-Z a-z 0-9 / . _ -` stay as they are, every other byte is `\NNN`.
+/// Nothing in it is special to any login shell an exec string passes through (POSIX shells, fish, csh): no quote, no
+/// `\\` or `\'`, no `$`, `!` or white space.
+pub(crate) fn printf_escaped(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for byte in text.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'.' | b'_' | b'-') {
+            out.push(char::from(byte));
+        } else {
+            out.push_str(&format!("\\{byte:03o}"));
+        }
+    }
+    out
+}
+
+/// SS-14: a `/bin/sh` script running `program` (fixed words) with `paths` as its last arguments, each passed byte for
+/// byte whatever it holds: the script gets them from `printf` of their octal escapes ([`printf_escaped`]), so neither
+/// the login shell nor sh ever parses a path. A path can't end in a line break (`$(...)` would drop it); Remotely's
+/// paths hold none.
+pub(crate) fn paths_script(program: &str, paths: &[&str]) -> String {
+    let mut script = String::new();
+    let mut args = Vec::new();
+    for (i, path) in paths.iter().enumerate() {
+        script.push_str(&format!("p{i}=$(printf '{}'); ", printf_escaped(path)));
+        args.push(format!("\"$p{i}\""));
+    }
+    script.push_str(&format!("exec {program} -- {}", args.join(" ")));
+    script
+}
+
+/// SS-14: a script run by `/bin/sh`, as one exec string for whatever the login shell is.
+pub(crate) fn via_sh(script: &str) -> String {
+    format!("/bin/sh -c {}", sh_quote(script))
+}
+
 /// BX-07: the script under sudo. `sudo -S` reads the password from stdin, and `-p` makes its prompt
 /// a random marker: a second prompt means sudo asked again because the password was refused, and the
 /// markers are removed from the output. The script runs in `sh -c` with its stdin on /dev/null, so
@@ -2388,6 +2440,30 @@ mod tests {
         assert_eq!(sh_quote("plain"), "'plain'");
         assert_eq!(sh_quote("it's"), r"'it'\''s'");
         assert_eq!(sh_quote(""), "''");
+    }
+
+    #[test]
+    fn paths_reach_sh_as_octal_escapes_that_no_login_shell_reads() {
+        assert_eq!(printf_escaped("/srv/www/a-b_c.1"), "/srv/www/a-b_c.1");
+        assert_eq!(
+            printf_escaped("/srv/x; touch /tmp/p; #"),
+            r"/srv/x\073\040touch\040/tmp/p\073\040\043"
+        );
+        assert_eq!(printf_escaped("a\\"), r"a\134", "a backslash is a byte too");
+        assert_eq!(printf_escaped("it's %s $HOME!"), r"it\047s\040\045s\040\044HOME\041");
+        assert_eq!(printf_escaped("é"), r"\303\251", "UTF-8 byte by byte");
+        let script = paths_script("cp -a", &["/srv/a b", "/backup/a b"]);
+        assert_eq!(
+            script,
+            r#"p0=$(printf '/srv/a\040b'); p1=$(printf '/backup/a\040b'); exec cp -a -- "$p0" "$p1""#
+        );
+        let command = via_sh(&script);
+        // What the login shell parses: no `\\`, no `\'` inside quotes, no `!` (fish and csh read those).
+        let inner = &command["/bin/sh -c ".len()..];
+        assert!(!inner.contains(r"\\") && !inner.contains('!'), "{command}");
+        for quoted in inner.split(r"'\''") {
+            assert!(!quoted.trim_end_matches('\'').ends_with('\\'), "{command}");
+        }
     }
 
     #[test]

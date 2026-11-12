@@ -16,8 +16,11 @@
 //!   ([`FileOpSpec::validate`]), and looks at what is there right before it changes it.
 //! * **How.** Over the terminal's own SFTP channel (as the login user), or with `as_root` over its root SFTP server
 //!   ([`super::root_files`]). A copy is `cp -a` on an exec channel of the same connection (with sudo as root),
-//!   rated by the shell rules as well as by its own tier. A recursive delete walks the folder over SFTP and never
-//!   follows a link: a link is deleted as a link.
+//!   rated by the shell rules as well as by its own tier. A recursive delete is GNU `rm -rf --one-file-system` there,
+//!   which walks the folder by file descriptors, so a link swapped in while it runs is deleted as a link, never
+//!   followed. Both get their paths byte for byte as octal escapes through `/bin/sh` ([`host_command`]), so the
+//!   login shell (fish, csh) reads nothing in them. Permissions and owners are set on the path itself, never through a
+//!   link (OpenSSH's `lsetstat`, else a look first): a link is refused.
 
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
@@ -25,7 +28,7 @@ use uuid::Uuid;
 
 use super::files::{join, parent};
 use super::{audit_entry, quoted_name, Control, Terminals};
-use crate::adapters::remote::{sh_quote, EntryKind, RemoteFiles, SetAttrs};
+use crate::adapters::remote::{paths_script, sh_quote, via_sh, EntryKind, RemoteFiles, SetAttrs};
 use crate::domain::{Context, Target, TargetRef};
 use crate::error::{CoreError, Result};
 use crate::export::redact_secrets;
@@ -37,8 +40,6 @@ pub const MAX_FILE_OP_PATHS: usize = 1000;
 /// Linux's longest path and name.
 pub const MAX_PATH_BYTES: usize = 4096;
 pub const MAX_NAME_BYTES: usize = 255;
-/// A recursive delete stops after this many files and folders (A9: a folder that never ends).
-pub const MAX_DELETE_ENTRIES: u64 = 1_000_000;
 /// What `cp -a` may print before it counts as failed.
 const MAX_COPY_OUTPUT: usize = 64 * 1024;
 
@@ -374,15 +375,18 @@ impl FileOpSpec {
         (kept, changed)
     }
 
-    /// The `cp -a` lines a copy runs, one per path (the shell rules rate them). `None` for every other operation.
-    pub fn copy_script(&self) -> Option<String> {
-        let FileOp::Copy { paths, .. } = &self.op else {
-            return None;
+    /// What a copy or a recursive delete runs on the host, one line per path as the shell reads it (the shell rules
+    /// rate it, and the approval shows it): `cp -a -- '<from>' '<to>'`, `rm -rf --one-file-system -- '<path>'`. It
+    /// runs as [`host_command`] gives it, which passes the same paths byte for byte. `None` for every other operation.
+    pub fn shell_script(&self) -> Option<String> {
+        let lines: Vec<String> = match &self.op {
+            FileOp::Copy { paths, .. } => paths
+                .iter()
+                .filter_map(|p| self.op.destination(p).map(|to| copy_line(p, &to)))
+                .collect(),
+            FileOp::Delete { paths, recursive: true } => paths.iter().map(|p| delete_line(p)).collect(),
+            _ => return None,
         };
-        let lines: Vec<String> = paths
-            .iter()
-            .filter_map(|p| self.op.destination(p).map(|to| copy_line(p, &to)))
-            .collect();
         Some(lines.join("\n"))
     }
 
@@ -464,9 +468,31 @@ fn owner_text(uid: Option<u32>, gid: Option<u32>) -> String {
     }
 }
 
-/// One copy as the shell runs it: never reads a path as an option.
+/// One copy as the shell reads it: never takes a path as an option.
 pub fn copy_line(from: &str, to: &str) -> String {
     format!("cp -a -- {} {}", sh_quote(from), sh_quote(to))
+}
+
+/// One recursive delete as the shell reads it: GNU rm walks the folder by file descriptors and never follows a link,
+/// even one swapped in while it runs, and `--one-file-system` keeps it off other mounts inside.
+pub fn delete_line(path: &str) -> String {
+    format!("rm -rf --one-file-system -- {}", sh_quote(path))
+}
+
+/// The copy's or the delete's program, as [`host_command`] runs it.
+const COPY: &str = "cp -a";
+const DELETE: &str = "rm -rf --one-file-system";
+
+/// SS-14: `program` with `paths`, as a script for `/bin/sh` that gets each path from printf's octal escapes
+/// ([`paths_script`]), so no login shell (POSIX, fish, csh) ever parses a path. With `sudo`, the script itself (sudo
+/// runs it in `sh -c`); else the exec string that runs it in `/bin/sh`.
+pub fn host_command(program: &str, paths: &[&str], sudo: bool) -> String {
+    let script = paths_script(program, paths);
+    if sudo {
+        script
+    } else {
+        via_sh(&script)
+    }
 }
 
 /// SS-14: a file operation as the approval dialog shows it, besides its targets (each path).
@@ -512,7 +538,7 @@ impl FileOpDetails {
             replace,
             recursive,
             as_root: spec.as_root,
-            script: spec.copy_script(),
+            script: spec.shell_script(),
         }
     }
 }
@@ -529,28 +555,13 @@ pub struct FileOpRun<'a> {
     pub step: usize,
 }
 
-/// What a recursive delete took.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
-struct Deleted {
-    files: u64,
-    folders: u64,
-}
-
-impl Deleted {
-    fn note(self) -> String {
-        let count = |n: u64, one: &str, many: &str| {
-            if n == 1 {
-                format!("1 {one}")
-            } else {
-                format!("{n} {many}")
-            }
-        };
-        format!(
-            "with {} and {} in it",
-            count(self.files, "file", "files"),
-            count(self.folders.saturating_sub(1), "folder", "folders")
-        )
-    }
+/// SS-14: what a change through a link says: permissions and owners are never set through one (as root, a link
+/// another user made could point at `/etc/shadow`).
+fn link_refused(path: &str) -> CoreError {
+    CoreError::InvalidInput(format!(
+        "{} is a link, so nothing was changed: change the file it points to instead.",
+        shown(path)
+    ))
 }
 
 impl Terminals {
@@ -681,7 +692,8 @@ impl Terminals {
                 if files.lstat(&to).await?.is_some() {
                     return Err(CoreError::RemotePathTaken { path: to });
                 }
-                self.copy_on_host(control, path, &to, spec.as_root, cancel).await?;
+                self.run_on_host(control, COPY, &[path, &to], spec.as_root, cancel)
+                    .await?;
                 Ok((
                     format!("Copied {p} to {}", shown(&to)),
                     format!("copied to {}", shown(&to)),
@@ -701,15 +713,23 @@ impl Terminals {
                     files.remove_folder(path).await?;
                     return Ok((format!("Deleted the empty folder {p}"), "deleted".into()));
                 }
-                let deleted = delete_tree(files.as_ref(), path, cancel).await?;
-                let note = deleted.note();
-                Ok((format!("Deleted the folder {p} {note}"), format!("deleted, {note}")))
+                // GNU rm on the host: it walks the folder by file descriptors and never follows a link, even one
+                // another user swaps in while it runs (SFTP's paths would resolve through it).
+                self.run_on_host(control, DELETE, &[path], spec.as_root, cancel).await?;
+                Ok((
+                    format!("Deleted the folder {p} with everything in it"),
+                    "deleted, with everything in it".into(),
+                ))
             }
             FileOp::Mode { mode, .. } => {
                 let before = files
                     .lstat(path)
                     .await?
                     .ok_or_else(|| CoreError::RemoteNotFound { path: path.to_owned() })?;
+                // Never through a link: SETSTAT follows one. set_attrs never follows one either.
+                if before.link {
+                    return Err(link_refused(path));
+                }
                 files
                     .set_attrs(
                         path,
@@ -730,6 +750,9 @@ impl Terminals {
                     .lstat(path)
                     .await?
                     .ok_or_else(|| CoreError::RemoteNotFound { path: path.to_owned() })?;
+                if before.link {
+                    return Err(link_refused(path));
+                }
                 let owner = match (uid.or(before.uid), gid.or(before.gid)) {
                     (Some(u), Some(g)) => (u, g),
                     _ => {
@@ -761,22 +784,22 @@ impl Terminals {
         }
     }
 
-    /// `cp -a` on an exec channel of the terminal's connection; with sudo as root (the root browsing's password).
-    async fn copy_on_host(
+    /// `cp -a` or `rm -rf` on an exec channel of the terminal's connection, with its paths passed byte for byte
+    /// ([`host_command`]); with sudo as root (root browsing's password, or none when sudo asked for none).
+    async fn run_on_host(
         &self,
         control: &Control,
-        from: &str,
-        to: &str,
+        program: &str,
+        paths: &[&str],
         as_root: bool,
         cancel: &CancellationToken,
     ) -> Result<()> {
         let commands = crate::locks::lock(&control.commands).clone().ok_or_else(|| {
             CoreError::InvalidInput(format!(
-                "{} is not connected, so nothing can be copied on its host. Reconnect it first.",
+                "{} is not connected, so nothing can run on its host. Reconnect it first.",
                 quoted_name(control)
             ))
         })?;
-        let line = copy_line(from, to);
         let run = async {
             if as_root {
                 let password = crate::locks::lock(&control.root)
@@ -784,12 +807,21 @@ impl Terminals {
                     .map(|r| r.password.clone())
                     .ok_or_else(|| CoreError::InvalidInput("Root browsing ended; browse as root again.".into()))?;
                 match password {
-                    Some(password) => commands.run_sudo(&line, &password, MAX_COPY_OUTPUT).await,
-                    // sudo let root browsing start without a password: it does so for the copy too.
-                    None => commands.run(&format!("sudo -n {line}"), MAX_COPY_OUTPUT).await,
+                    Some(password) => {
+                        commands
+                            .run_sudo(&host_command(program, paths, true), &password, MAX_COPY_OUTPUT)
+                            .await
+                    }
+                    // sudo let root browsing start without a password: it does so for this too.
+                    None => {
+                        let line = format!("sudo -n -- {}", host_command(program, paths, false));
+                        commands.run(&line, MAX_COPY_OUTPUT).await
+                    }
                 }
             } else {
-                commands.run(&line, MAX_COPY_OUTPUT).await
+                commands
+                    .run(&host_command(program, paths, false), MAX_COPY_OUTPUT)
+                    .await
             }
         };
         let result = tokio::select! {
@@ -810,10 +842,12 @@ impl Terminals {
             .chars()
             .take(300)
             .collect();
+        let what = program.split_whitespace().next().unwrap_or(program);
+        let last = paths.last().map(|p| shown(p)).unwrap_or_default();
         Err(CoreError::Sftp(match (result.exit_code, said.is_empty()) {
-            (Some(code), true) => format!("cp -a ended with exit code {code}; {} may be incomplete", shown(to)),
-            (Some(code), false) => format!("cp -a ended with exit code {code}: {said}"),
-            (None, _) => format!("cp -a did not finish; {} may be incomplete", shown(to)),
+            (Some(code), true) => format!("{what} ended with exit code {code}; {last} may be as far as it got"),
+            (Some(code), false) => format!("{what} ended with exit code {code}: {said}"),
+            (None, _) => format!("{what} did not finish; {last} may be as far as it got"),
         }))
     }
 }
@@ -935,8 +969,14 @@ impl super::files::FileTransfers {
                 }
                 FileOp::Delete { paths, recursive }
             }
-            FileChange::Mode { paths, mode } => FileOp::Mode { paths, mode },
-            FileChange::Owner { paths, uid, gid } => FileOp::Owner { paths, uid, gid },
+            FileChange::Mode { paths, mode } => {
+                no_links(files, &paths).await?;
+                FileOp::Mode { paths, mode }
+            }
+            FileChange::Owner { paths, uid, gid } => {
+                no_links(files, &paths).await?;
+                FileOp::Owner { paths, uid, gid }
+            }
         };
         let spec = FileOpSpec {
             terminal_id,
@@ -963,6 +1003,20 @@ async fn new_path(files: &dyn RemoteFiles, folder: &str, name: &str) -> Result<S
     Ok(path)
 }
 
+/// Permissions and owners are set on paths themselves, never through a link: a link is refused before it is asked
+/// (and again by the job's step, which looks at each path right before it changes it).
+async fn no_links(files: &dyn RemoteFiles, paths: &[String]) -> Result<()> {
+    for path in paths {
+        check_path(path)?;
+        match files.lstat(path).await? {
+            Some(entry) if entry.link => return Err(link_refused(path)),
+            Some(_) => {}
+            None => return Err(CoreError::RemoteNotFound { path: path.clone() }),
+        }
+    }
+    Ok(())
+}
+
 /// Whether something is at `to` that a change would replace: an error unless `replace` (never a folder).
 async fn taken(files: &dyn RemoteFiles, to: &str, replace: bool) -> Result<bool> {
     match files.lstat(to).await? {
@@ -983,50 +1037,6 @@ async fn require_folder(files: &std::sync::Arc<dyn RemoteFiles>, into: &str) -> 
         Some(_) => Err(CoreError::InvalidInput(format!("{} is not a folder.", shown(into)))),
         None => Err(CoreError::RemoteNotFound { path: into.to_owned() }),
     }
-}
-
-/// Deletes `root` and everything in it over SFTP, deepest first. A link is deleted as a link, never followed; a folder
-/// that lists more than one listing holds is listed again once what was listed is gone.
-async fn delete_tree(files: &dyn RemoteFiles, root: &str, cancel: &CancellationToken) -> Result<Deleted> {
-    let mut deleted = Deleted::default();
-    // (folder, listed already): a listed folder is deleted when it comes up again, once what was in it is gone.
-    let mut stack = vec![(root.to_owned(), false)];
-    while let Some((folder, listed)) = stack.pop() {
-        if cancel.is_cancelled() {
-            return Err(CoreError::Cancelled);
-        }
-        if deleted.files + deleted.folders > MAX_DELETE_ENTRIES {
-            return Err(CoreError::Sftp(format!(
-                "{} holds more than {MAX_DELETE_ENTRIES} files and folders; what was deleted so far is gone. Delete \
-                 the rest in the terminal",
-                shown(root)
-            )));
-        }
-        if listed {
-            files.remove_folder(&folder).await?;
-            deleted.folders += 1;
-            continue;
-        }
-        let listing = files.list(&folder).await?;
-        stack.push((folder.clone(), true));
-        if listing.more {
-            // Listed again after what is listed now is gone.
-            stack.push((folder.clone(), false));
-        }
-        for entry in listing.entries {
-            let path = join(&folder, &entry.name);
-            if entry.kind == EntryKind::Folder && !entry.link {
-                stack.push((path, false));
-            } else {
-                if cancel.is_cancelled() {
-                    return Err(CoreError::Cancelled);
-                }
-                files.remove(&path).await?;
-                deleted.files += 1;
-            }
-        }
-    }
-    Ok(deleted)
 }
 
 #[cfg(test)]
@@ -1283,27 +1293,42 @@ mod tests {
     }
 
     #[test]
-    fn a_copy_is_cp_a_with_each_path_quoted() {
+    fn a_copy_and_a_recursive_delete_show_their_lines_and_run_them_with_paths_escaped() {
         let s = spec(FileOp::Copy {
             paths: paths(&["/srv/it's here", "/srv/-rf"]),
             into: "/backup".into(),
         });
         assert_eq!(
-            s.copy_script().unwrap(),
+            s.shell_script().unwrap(),
             "cp -a -- '/srv/it'\\''s here' '/backup/it'\\''s here'\ncp -a -- '/srv/-rf' '/backup/-rf'"
         );
-        assert!(spec(FileOp::NewFolder { path: "/a".into() }).copy_script().is_none());
-    }
-
-    #[test]
-    fn a_recursive_delete_counts_what_was_in_it() {
-        assert_eq!(
-            Deleted { files: 1, folders: 1 }.note(),
-            "with 1 file and 0 folders in it"
+        let d = spec(FileOp::Delete {
+            paths: paths(&["/srv/old"]),
+            recursive: true,
+        });
+        assert_eq!(d.shell_script().unwrap(), "rm -rf --one-file-system -- '/srv/old'");
+        assert!(spec(FileOp::Delete {
+            paths: paths(&["/srv/a"]),
+            recursive: false
+        })
+        .shell_script()
+        .is_none());
+        assert!(spec(FileOp::NewFolder { path: "/a".into() }).shell_script().is_none());
+        // What runs passes the paths as octal escapes, so a fish or csh login shell reads nothing in them: a source
+        // ending in a backslash can't end the quotes early, and a folder named like a command stays a name.
+        let hostile = "/srv/x\\";
+        let into = "/srv/x; touch /tmp/p; #";
+        let run = host_command(COPY, &[hostile, into], false);
+        assert!(
+            run.starts_with("/bin/sh -c 'p0=$(printf '\\''/srv/x\\134'\\''); "),
+            "{run}"
         );
+        assert!(!run.contains("touch /tmp/p"), "{run}");
+        assert!(run.contains(r"x\073\040touch\040/tmp/p\073\040\043"), "{run}");
+        let sudo = host_command(DELETE, &["/srv/old"], true);
         assert_eq!(
-            Deleted { files: 12, folders: 4 }.note(),
-            "with 12 files and 3 folders in it"
+            sudo,
+            "p0=$(printf '/srv/old'); exec rm -rf --one-file-system -- \"$p0\""
         );
     }
 }
