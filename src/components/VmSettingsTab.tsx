@@ -3,7 +3,8 @@
 // tools, each disk with its controller, type, sizes and snapshot chain, CD/DVD drives, network adapters, shared
 // folders, USB, sound, display, serial ports and the guest's addresses), read when the tab opens, after a VM job and
 // on Refresh. Each section has its Edit button; every change is a command on the bus (VmSettingsDialogs), and a
-// button that is off says why (QL-08). ISO and shared-folder paths are picked in dialogs the shell opens. MACs carry
+// button that is off says why (QL-08). ISO, shared-folder and (VM-31) existing disk paths are picked in dialogs the
+// shell opens. MACs carry
 // data-mask="mac" and addresses data-mask="ip" (FD-03).
 
 import { useEffect, useState, type ReactNode } from "react";
@@ -13,6 +14,7 @@ import {
   DiscIcon,
   EllipsisIcon,
   HardDriveIcon,
+  HardDriveUploadIcon,
   NetworkIcon,
   PencilIcon,
   PlusIcon,
@@ -34,6 +36,7 @@ import { FactList } from "@/components/HostDetailsSheet";
 import { NameDialog } from "@/components/NameDialog";
 import {
   DiskAddDialog,
+  DiskAttachDialog,
   DiskExpandDialog,
   FirmwareDialog,
   GuestOsDialog,
@@ -96,6 +99,7 @@ type Dialog =
   | { kind: "rename" }
   | { kind: "nic"; nic?: VirtualNic }
   | { kind: "diskAdd" }
+  | { kind: "diskAttach" }
   | { kind: "diskExpand"; disk: VirtualDisk }
   | { kind: "share" }
   | { kind: "screenshot" }
@@ -404,12 +408,20 @@ export function VmSettingsTab({
             title={`Disks (${h.disks.length})`}
             icon={<HardDriveIcon className="size-4 text-muted-foreground" />}
             action={
-              <ActionButton
-                label="Add…"
-                icon={<PlusIcon />}
-                reason={off}
-                onClick={() => setDialog({ kind: "diskAdd" })}
-              />
+              <>
+                <ActionButton
+                  label="Attach…"
+                  icon={<HardDriveUploadIcon />}
+                  reason={off}
+                  onClick={() => setDialog({ kind: "diskAttach" })}
+                />
+                <ActionButton
+                  label="Add…"
+                  icon={<PlusIcon />}
+                  reason={off}
+                  onClick={() => setDialog({ kind: "diskAdd" })}
+                />
+              </>
             }
           >
             {h.disks.length === 0 ? (
@@ -737,6 +749,9 @@ export function VmSettingsTab({
       )}
       {dialog?.kind === "diskAdd" && h && (
         <DiskAddDialog vm={vm} hardware={h} onSubmit={onSubmit} onClose={() => setDialog(null)} />
+      )}
+      {dialog?.kind === "diskAttach" && h && (
+        <DiskAttachDialog vm={vm} hardware={h} onSubmitted={onSubmitted} onClose={() => setDialog(null)} />
       )}
       {dialog?.kind === "diskExpand" && (
         <DiskExpandDialog vm={vm} disk={dialog.disk} onSubmit={onSubmit} onClose={() => setDialog(null)} />

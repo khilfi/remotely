@@ -729,6 +729,9 @@ impl Core {
         ));
         jobs.set_converter(converter.clone());
         deployer.set_converter(Arc::clone(&converter));
+        // VM-31: an attached disk is copied into its VM's folder through the same runner.
+        jobs.set_vm_converter(Arc::clone(&converter));
+        bus.set_vm_converter(Arc::clone(&converter));
         let convert = convert::service::Conversions::new(store.clone(), Arc::clone(&converter), Arc::clone(&bus));
         // FD-04: a support bundle is a job; the job runner writes its zip through the bundle runner.
         jobs.set_bundles(Arc::new(support_bundle::BundleRunner::new(store.clone())));

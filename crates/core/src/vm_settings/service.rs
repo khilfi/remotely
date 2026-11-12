@@ -1,6 +1,6 @@
-//! VM-23, VM-24: what the shell asks of VM settings besides commands the UI builds: the commands that carry
-//! a path of this PC (an ISO, a shared folder, an existing VM), built here from a dialog or a drop so no path
-//! comes from the UI; and reads: guest OS types, a VirtualBox screenshot, and Open console.
+//! VM-23, VM-24, VM-31: what the shell asks of VM settings besides commands the UI builds: the commands that carry
+//! a path of this PC (an ISO, a shared folder, an existing VM or disk), built here from a dialog or a drop so no
+//! path comes from the UI; and reads: guest OS types, a VirtualBox screenshot, and Open console.
 //!
 //! Open console opens the hypervisor's own window (`vmware.exe <vmx>`, `VirtualBoxVM --startvm <uuid>
 //! --separate`). It changes nothing about the VM, so it is not a command on the bus and has no tier; it is
@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use serde::Serialize;
 
-use super::ops::{VmConfigEdit, VmDeviceOp, VmLifecycleOp};
+use super::ops::{VmConfigEdit, VmDeviceOp, VmDiskOp, VmLifecycleOp};
 use crate::adapters::hypervisor::{virtualbox_key, Hypervisor, Hypervisors};
 use crate::adapters::virtualbox::VboxOsType;
 use crate::command_bus::{Command, CommandBus, PowerOp, SubmitOutcome};
@@ -119,6 +119,28 @@ impl VmSettings {
                 name: name.to_owned(),
                 host_path: path.display().to_string(),
                 writable,
+            },
+        };
+        self.bus.submit(&self.current.get(), command).await
+    }
+
+    /// VM-31: an existing disk image from a file dialog, attached to the VM: copied into its folder (`copy`), or used
+    /// where it is, on `bus` (or the boot disk's controller). Medium (a Prod VM High); the approval's preview says
+    /// what the file is, its size and where it goes.
+    pub async fn attach_disk(&self, key: &str, path: &Path, copy: bool, bus: Option<String>) -> Result<SubmitOutcome> {
+        if let Some(refusal) = path_refusal(path) {
+            return Err(CoreError::InvalidInput(format!(
+                "{} {}, so Remotely doesn't attach it: copy it to this PC first.",
+                path.display(),
+                refusal.describe()
+            )));
+        }
+        let command = Command::VmDisk {
+            targets: vec![vm_ref(key)],
+            op: VmDiskOp::Attach {
+                path: crate::adapters::vmware::with_backslashes(path).display().to_string(),
+                copy,
+                bus,
             },
         };
         self.bus.submit(&self.current.get(), command).await

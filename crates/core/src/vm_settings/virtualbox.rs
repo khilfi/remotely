@@ -494,6 +494,19 @@ pub fn add_disk_calls(
     ))
 }
 
+/// VM-31: an existing disk (its copy in the VM's folder, or the file where it is) attached to a free port on
+/// `controller` (or the boot disk's). Returns the calls and the slot.
+pub fn attach_existing_calls(
+    uuid: &str,
+    info: &VboxVmInfo,
+    file: &Path,
+    controller: Option<&str>,
+) -> Result<(Vec<Call>, String)> {
+    let (mut calls, slot) = free_slot(uuid, info, controller)?;
+    calls.push(attach_call(uuid, &slot, "hdd", &file.display().to_string())?);
+    Ok((calls, slot))
+}
+
 /// VM-16: the disk on `slot`, if the VM has one there.
 pub fn disk_on(info: &VboxVmInfo, slot: &str) -> Result<PathBuf> {
     info.disks

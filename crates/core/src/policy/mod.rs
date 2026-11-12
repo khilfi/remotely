@@ -170,6 +170,8 @@ pub enum ActionKind {
     VmToolsInstall,
     /// Add a virtual disk (VM-16).
     VmDiskAdd,
+    /// Attach an existing disk image, copied into the VM's folder or used where it is (VM-31).
+    VmDiskAttach,
     /// Compact or defragment a virtual disk (VM-16).
     VmDiskCompact,
     /// Expand a virtual disk: it can't be shrunk back (VM-16).
@@ -204,7 +206,7 @@ pub enum ActionKind {
 
 impl ActionKind {
     /// Every action, in the order Settings lists them (AP-01).
-    pub const ALL: [ActionKind; 58] = [
+    pub const ALL: [ActionKind; 59] = [
         ActionKind::VmStart,
         ActionKind::VmUnpause,
         ActionKind::VmPause,
@@ -225,6 +227,7 @@ impl ActionKind {
         ActionKind::VmConfigure,
         ActionKind::VmUpgradeHardware,
         ActionKind::VmDiskAdd,
+        ActionKind::VmDiskAttach,
         ActionKind::VmDiskCompact,
         ActionKind::VmDiskExpand,
         ActionKind::VmDiskRemove,
@@ -312,6 +315,7 @@ impl ActionKind {
             ActionKind::VmNicDisconnect => "Disconnect a VM's network adapter",
             ActionKind::VmToolsInstall => "Install or upgrade the guest tools",
             ActionKind::VmDiskAdd => "Add a virtual disk",
+            ActionKind::VmDiskAttach => "Attach an existing disk",
             ActionKind::VmDiskCompact => "Compact or defragment a virtual disk",
             ActionKind::VmDiskExpand => "Expand a virtual disk",
             ActionKind::VmDiskRemove => "Remove a virtual disk (deletes its files)",
@@ -1046,6 +1050,8 @@ impl Default for PolicyRules {
             ),
             (VmToolsInstall, TierRule::same(Medium)),
             (VmDiskAdd, TierRule::same(Medium)),
+            // VM-31 (docs/plan-0.8.md): VM-23's disk change, one VM at a time.
+            (VmDiskAttach, TierRule::same(Medium)),
             (VmDiskCompact, TierRule::same(Medium)),
             // Can't be shrunk back.
             (VmDiskExpand, TierRule::same(High)),
@@ -1394,6 +1400,7 @@ impl PolicyEngine {
             },
             Command::VmDisk { op, .. } => match op {
                 VmDiskOp::Add { .. } => ActionKind::VmDiskAdd,
+                VmDiskOp::Attach { .. } => ActionKind::VmDiskAttach,
                 VmDiskOp::Compact { .. } | VmDiskOp::Defragment { .. } => ActionKind::VmDiskCompact,
                 VmDiskOp::Expand { .. } => ActionKind::VmDiskExpand,
                 VmDiskOp::Remove { .. } => ActionKind::VmDiskRemove,
@@ -1701,6 +1708,11 @@ impl PolicyEngine {
                 op: VmDiskOp::Expand { .. },
                 ..
             } => reasons.push("a disk can't be shrunk back after it grows".into()),
+            // VM-31: the guest writes to the file itself, and deleting the VM keeps it.
+            Command::VmDisk {
+                op: VmDiskOp::Attach { copy: false, .. },
+                ..
+            } => reasons.push("the disk is used where it is: the VM writes to that file".into()),
             Command::VmLifecycle {
                 op: VmLifecycleOp::Delete,
                 ..

@@ -777,6 +777,11 @@ impl JobRunner {
         *locks::write(&self.converter) = Some(converter);
     }
 
+    /// VM-31: what copies an attached disk into its VM's folder.
+    pub fn set_vm_converter(&self, converter: Arc<crate::convert::Converter>) {
+        self.vm_editor.set_converter(converter);
+    }
+
     /// FD-04: what writes support bundles.
     pub fn set_bundles(&self, bundles: Arc<dyn crate::support_bundle::BundleActions>) {
         *locks::write(&self.bundles) = Some(bundles);

@@ -19,6 +19,13 @@
 //!   defragmenting or removing a disk of a VM with snapshots (the snapshots' deltas depend on the disk, and a
 //!   resized base under them leaves the guest seeing its old size); removing a disk outside the VM's folder
 //!   (another VM may use it); deleting a VM linked clones are made from ([`crate::linked_clones`]).
+//! * VM-31, attach an existing disk (a cloud server's data disk): the file from the shell's dialog is read by
+//!   CV-03's Inspect, then copied into the VM's folder through CV-01's conversion runner (vmware-vdiskmanager `-r`
+//!   for a VMDK on Workstation; VBoxManage, or qemu-img for qcow2 and VHDX, for the rest), the source only read, or
+//!   with "use it where it is" named where it is (a format the hypervisor runs: VMDK on Workstation; VDI, VMDK or VHD
+//!   on VirtualBox; never a stream-optimized VMDK or a disk with a parent). Refused for a disk a VM Remotely knows uses
+//!   (this one included), one inside another VM's folder, one Workstation holds open (its `.lck`), and with VM-23's
+//!   refusals (running, Workstation's lock on the VM). A copy the VM doesn't take is deleted again.
 
 pub mod ops;
 pub mod service;
@@ -29,9 +36,11 @@ pub use service::{ConsoleOutcome, GuestOsType, VmSettings};
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use serde::Serialize;
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 pub use ops::{
@@ -44,10 +53,14 @@ use crate::adapters::vm_hardware::VmHardware;
 use crate::adapters::vmware::{path_key, VmwareAdapter};
 use crate::adapters::vmx_file::VmxFile;
 use crate::command_bus::Command;
+use crate::convert::formats::{size_text, DiskFormat, OutputKind};
+use crate::convert::inspect::ImageInfo;
+use crate::convert::Converter;
 use crate::domain::{Context, PowerState, Target, TargetRef};
 use crate::error::{CoreError, Result};
 use crate::linked_clones::{LinkedClones, VboxMedia};
-use crate::store::Store;
+use crate::locks;
+use crate::store::{Store, VmRecord};
 
 /// VM-24: `.vmx` files added by hand (Add existing VM), which inventory refreshes list like the library's.
 pub const ADDED_VMS_KEY: &str = "vmware.addedVms";
@@ -124,6 +137,23 @@ enum Action {
     DeleteVmware,
     /// VM-24: a .vmx joins the added list.
     AddVmx,
+    /// VM-31: an existing disk: its copy made first (with `copy`), then the .vmx naming it; a copy the VM didn't
+    /// take is deleted again.
+    AttachDisk { copy: Option<DiskCopy>, file: VmxFile },
+    /// VM-31: the same on VirtualBox: `calls` attach the copy, or the disk where it is.
+    AttachVboxDisk {
+        copy: Option<DiskCopy>,
+        calls: Vec<Vec<String>>,
+    },
+}
+
+/// VM-31: an attached disk's copy into the VM's folder, through CV-01's conversion runner.
+struct DiskCopy {
+    source: PathBuf,
+    /// The source as Inspect read it when the change was planned.
+    info: ImageInfo,
+    target: PathBuf,
+    kind: OutputKind,
 }
 
 struct Plan {
@@ -141,9 +171,10 @@ impl Plan {
             | Action::Vdisk { .. }
             | Action::NewDisk { .. }
             | Action::DropDisk { .. }
-            | Action::DeleteVmware => true,
+            | Action::DeleteVmware
+            | Action::AttachDisk { .. } => true,
             Action::Vmrun { backup, .. } => *backup,
-            Action::Vbox { .. } | Action::NewVboxDisk { .. } | Action::AddVmx => false,
+            Action::Vbox { .. } | Action::NewVboxDisk { .. } | Action::AddVmx | Action::AttachVboxDisk { .. } => false,
         })
     }
 
@@ -261,6 +292,61 @@ fn check_growth(hardware: &VmHardware, slot: &str, size_mb: u64) -> Result<Strin
     Ok(format!("Disk {slot}: → {}", ops::size_mb(size_mb)))
 }
 
+/// VM-31: why the hypervisor can't run the disk where it is: a format it doesn't run (Workstation: VMDK only;
+/// VirtualBox: VDI, VMDK, VHD), a stream-optimized VMDK (read only by copying it), or a disk with a parent.
+fn in_place_refusal(info: &ImageInfo, hypervisor: Hypervisor) -> Result<()> {
+    let runs = match hypervisor {
+        Hypervisor::Vmware => info.format == DiskFormat::Vmdk,
+        Hypervisor::VirtualBox => matches!(info.format, DiskFormat::Vdi | DiskFormat::Vmdk | DiskFormat::Vhd),
+    };
+    if !runs {
+        return Err(refused(format!(
+            "{} doesn't run a {} disk as it is: copy it into the VM's folder, which converts it.",
+            hypervisor.label(),
+            info.format.label()
+        )));
+    }
+    if info
+        .subformat
+        .as_deref()
+        .is_some_and(|s| s.eq_ignore_ascii_case("streamOptimized"))
+    {
+        return Err(refused(
+            "It is a stream-optimized VMDK (as OVAs and cloud exports carry them), which a VM can't write to: copy it into the VM's folder, which makes it a disk the VM runs.",
+        ));
+    }
+    if let Some(parent) = &info.parent {
+        return Err(refused(format!(
+            "It is a snapshot's or differencing disk on {parent}: copy it, which flattens the chain into one disk."
+        )));
+    }
+    Ok(())
+}
+
+/// VM-31: the preview's words for a disk used where it is.
+fn used_where_it_is(inside: bool) -> String {
+    if inside {
+        "used where it is, in the VM's folder".to_owned()
+    } else {
+        "used where it is, outside the VM's folder: the VM writes to that file, and deleting the VM keeps it".to_owned()
+    }
+}
+
+/// VM-31: a copy the VM didn't take: the file, and a preallocated VMDK's `-flat.vmdk` extent.
+async fn delete_copy(copy: &DiskCopy) {
+    let mut files = vec![copy.target.clone()];
+    if let (Some(stem), Some(folder)) = (copy.target.file_stem(), copy.target.parent()) {
+        files.push(folder.join(format!("{}-flat.vmdk", stem.to_string_lossy())));
+    }
+    for file in files {
+        match tokio::fs::remove_file(&file).await {
+            Ok(()) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => tracing::warn!(error = %err, "could not delete an attached disk's copy the VM didn't take"),
+        }
+    }
+}
+
 /// The job's id in a backup's name (`ab12cd34`).
 fn tag_of(job_id: Uuid) -> String {
     job_id.simple().to_string()[..8].to_owned()
@@ -274,6 +360,9 @@ pub struct VmEditor {
     store: Store,
     /// VM-24, VM-21: a VM that linked clones depend on is not deleted.
     linked_clones: LinkedClones,
+    /// VM-31: CV-01's conversion runner, which copies an attached disk into the VM's folder (and says which tools
+    /// it takes); set once the core has made it.
+    converter: Arc<RwLock<Option<Arc<Converter>>>>,
 }
 
 impl VmEditor {
@@ -282,7 +371,19 @@ impl VmEditor {
             linked_clones: LinkedClones::new(hypervisors.clone()),
             hypervisors,
             store,
+            converter: Arc::default(),
         }
+    }
+
+    /// VM-31: the conversion runner attached disks are copied with.
+    pub fn set_converter(&self, converter: Arc<Converter>) {
+        *locks::write(&self.converter) = Some(converter);
+    }
+
+    fn converter(&self) -> Result<Arc<Converter>> {
+        locks::read(&self.converter)
+            .clone()
+            .ok_or(CoreError::NotImplemented("conversions"))
     }
 
     /// Carries out `command` on one VM. Returns a line for the job's end in the audit log: the VM and what
@@ -295,7 +396,7 @@ impl VmEditor {
             });
         };
         let state = self.state_for(command, vmx_path, None).await?;
-        let plan = self.plan(vmx_path, command, &state).await?;
+        let plan = self.plan(ctx, vmx_path, command, &state).await?;
         let tag = tag_of(job_id);
         let mut changes = plan.changes.clone();
         for action in plan.actions {
@@ -318,7 +419,7 @@ impl VmEditor {
     }
 
     /// AP-02: what `command` would do to each VM target now. `None` for other commands.
-    pub async fn preview(&self, command: &Command, targets: &[Target]) -> Option<VmChangePreview> {
+    pub async fn preview(&self, ctx: &Context, command: &Command, targets: &[Target]) -> Option<VmChangePreview> {
         if !matches!(
             command,
             Command::VmConfig { .. } | Command::VmDevice { .. } | Command::VmDisk { .. } | Command::VmLifecycle { .. }
@@ -345,7 +446,7 @@ impl VmEditor {
                 ..VmChangeTarget::default()
             };
             let planned = match self.state_for(command, vmx_path, running.as_ref()).await {
-                Ok(state) => self.plan(vmx_path, command, &state).await,
+                Ok(state) => self.plan(ctx, vmx_path, command, &state).await,
                 Err(err) => Err(err),
             };
             match planned {
@@ -421,7 +522,16 @@ impl VmEditor {
         }
     }
 
-    async fn plan(&self, key: &str, command: &Command, state: &VmState) -> Result<Plan> {
+    async fn plan(&self, ctx: &Context, key: &str, command: &Command, state: &VmState) -> Result<Plan> {
+        if let Command::VmDisk {
+            op: VmDiskOp::Attach { path, copy, bus },
+            ..
+        } = command
+        {
+            return self
+                .attach(ctx, key, Path::new(path), *copy, bus.as_deref(), state)
+                .await;
+        }
         match (command, Hypervisor::of_key(key)) {
             (Command::VmConfig { edit, .. }, Hypervisor::Vmware) => {
                 self.vmware_config(Path::new(key), edit, state).await
@@ -761,6 +871,8 @@ impl VmEditor {
                     keeps: Vec::new(),
                 })
             }
+            // Planned with the workspace's VMs in hand (Self::attach).
+            VmDiskOp::Attach { .. } => Err(CoreError::NotImplemented("attach without its context")),
         }
     }
 
@@ -837,7 +949,335 @@ impl VmEditor {
                     keeps: Vec::new(),
                 })
             }
+            // Planned with the workspace's VMs in hand (Self::attach).
+            VmDiskOp::Attach { .. } => Err(CoreError::NotImplemented("attach without its context")),
         }
+    }
+
+    // ---- VM-31: attach an existing disk ------------------------------------------------------------------------
+
+    /// VM-31: the plan that attaches the disk at `source` to the VM `key`: copied into its folder (`copy`), or used
+    /// where it is, on `bus` (or the boot disk's controller).
+    async fn attach(
+        &self,
+        ctx: &Context,
+        key: &str,
+        source: &Path,
+        copy: bool,
+        bus: Option<&str>,
+        state: &VmState,
+    ) -> Result<Plan> {
+        let hypervisor = Hypervisor::of_key(key);
+        require_off(state, hypervisor)?;
+        if hypervisor == Hypervisor::Vmware {
+            let file = self.vmx(Path::new(key)).await?;
+            self.require_unlocked(Path::new(key), &file).await?;
+        }
+        let info = self.attach_source(ctx, key, source).await?;
+        let what = format!(
+            "{} ({}{})",
+            source.display(),
+            info.describe(),
+            info.on_disk_bytes
+                .map(|b| format!("; {} on disk", size_text(b)))
+                .unwrap_or_default()
+        );
+        match hypervisor {
+            Hypervisor::Vmware => self.attach_vmware(Path::new(key), source, info, &what, copy, bus).await,
+            Hypervisor::VirtualBox => self.attach_vbox(key, source, info, &what, copy, bus).await,
+        }
+    }
+
+    /// VM-31: what the disk is (CV-03's Inspect), refused when it can't go on a VM as it is, when Workstation holds
+    /// it open, or when it is another VM's ([`Self::require_disk_free`]).
+    async fn attach_source(&self, ctx: &Context, key: &str, source: &Path) -> Result<ImageInfo> {
+        let info = crate::convert::inspect::inspect(source)
+            .await
+            .map_err(|err| refused(err.to_string()))?;
+        if let Some(problem) = info.problems.first() {
+            return Err(refused(format!("{}: {problem}.", source.display())));
+        }
+        let lock = lock_of(source);
+        if self.hypervisors.vmware().file_exists(&lock).await {
+            return Err(refused(format!(
+                "Workstation has {} open (its lock {} is there): a VM uses it now. Remotely never deletes a lock.",
+                source.display(),
+                lock.display()
+            )));
+        }
+        self.require_disk_free(ctx, key, source).await?;
+        Ok(info)
+    }
+
+    /// VM-31: a disk goes on one VM only. Refused when a VM Remotely knows (in any workspace) names it, this one
+    /// included, or when it is inside another VM's folder, where that VM or its snapshots may use it.
+    async fn require_disk_free(&self, ctx: &Context, key: &str, source: &Path) -> Result<()> {
+        let wanted = path_key(source);
+        let this = path_key(Path::new(key));
+        for vm in self.store.list_vms_all_workspaces(ctx.user_id).await? {
+            let own = path_key(Path::new(&vm.vmx_path)) == this;
+            let (folder, disks) = self.disk_files_of(&vm).await;
+            if disks.iter().any(|d| path_key(d) == wanted) {
+                return Err(refused(if own {
+                    format!("The VM has {} already.", source.display())
+                } else {
+                    format!(
+                        "The VM '{}' uses {} already, and a disk two VMs write to is lost: shut that VM down and remove the disk from it first, or attach a copy of your own.",
+                        vm.display_name,
+                        source.display()
+                    )
+                }));
+            }
+            let inside = folder.as_deref().is_some_and(|f| {
+                let folder = path_key(f);
+                wanted.starts_with(&format!("{}\\", folder.trim_end_matches('\\')))
+            });
+            if inside && !own {
+                return Err(refused(format!(
+                    "{} is in the folder of the VM '{}', where that VM or its snapshots may use it: Remotely doesn't take a disk from another VM's folder. Move it out of there first.",
+                    source.display(),
+                    vm.display_name
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// A known VM's folder and the disk files it names (none when its files can't be read).
+    async fn disk_files_of(&self, vm: &VmRecord) -> (Option<PathBuf>, Vec<PathBuf>) {
+        match vm.hypervisor {
+            Hypervisor::Vmware => {
+                let vmx = Path::new(&vm.vmx_path);
+                let folder = vmx.parent().map(Path::to_path_buf);
+                let disks = match self.vmx(vmx).await {
+                    Ok(file) => {
+                        let base = folder.clone().unwrap_or_default();
+                        file.pairs()
+                            .filter(|(k, v)| k.ends_with(".filename") && v.to_ascii_lowercase().ends_with(".vmdk"))
+                            .map(|(_, v)| vmware::resolve(&base, v))
+                            .collect()
+                    }
+                    Err(_) => Vec::new(),
+                };
+                (folder, disks)
+            }
+            Hypervisor::VirtualBox => {
+                let info = self.hypervisors.virtualbox().vm_info(&vm.vmx_path).await.ok();
+                let folder = vm
+                    .config_path
+                    .as_deref()
+                    .map(PathBuf::from)
+                    .or_else(|| info.as_ref().and_then(|i| i.config_file.clone()))
+                    .and_then(|cfg| cfg.parent().map(Path::to_path_buf));
+                let disks = info
+                    .map(|i| i.disks.into_iter().map(|d| d.path).collect())
+                    .unwrap_or_default();
+                (folder, disks)
+            }
+        }
+    }
+
+    /// VM-31: how the copy is made, in words ("vmware-vdiskmanager (VMDK to VMDK, growable...)"), or why it can't be
+    /// with the tools here; and the copy's free space on the VM's drive, which must hold at least what the source
+    /// takes now.
+    async fn copy_plan(&self, info: &ImageInfo, kind: OutputKind, folder: &Path) -> Result<String> {
+        let converter = self.converter()?;
+        let steps = crate::convert::plan::plan(
+            crate::convert::runner::source_of(info, false),
+            kind,
+            None,
+            &converter.tool_paths(),
+        )
+        .map_err(|why| refused(why.describe(info.format, kind)))?;
+        let at_least = info.on_disk_bytes.unwrap_or(0);
+        if let Some(free) = converter.free_bytes(folder).await {
+            if free < at_least {
+                return Err(refused(format!(
+                    "The copy takes at least {} and the VM's drive has {} free: free some space, or use the disk where it is.",
+                    size_text(at_least),
+                    size_text(free)
+                )));
+            }
+        }
+        Ok(crate::convert::plan::describe(&steps))
+    }
+
+    /// A file name in `folder` that neither the VM nor the folder has: `<stem>-<n>.<ext>` from `first`.
+    async fn free_name(&self, folder: &Path, stem: &str, ext: &str, first: u32, named: &[String]) -> Result<PathBuf> {
+        for n in first..1000 {
+            let candidate = folder.join(format!("{stem}-{n}.{ext}"));
+            let lower = path_key(&candidate);
+            let taken = named.contains(&lower)
+                || self.hypervisors.vmware().file_exists(&candidate).await
+                || tokio::fs::try_exists(&candidate).await.unwrap_or(true);
+            if !taken {
+                return Ok(candidate);
+            }
+        }
+        Err(refused("No free name for the disk's copy in the VM's folder."))
+    }
+
+    async fn attach_vmware(
+        &self,
+        vmx: &Path,
+        source: &Path,
+        info: ImageInfo,
+        what: &str,
+        copy: bool,
+        bus: Option<&str>,
+    ) -> Result<Plan> {
+        let folder = vmx.parent().unwrap_or(Path::new("")).to_path_buf();
+        let mut file = self.vmx(vmx).await?;
+        let stem = vmx
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "disk".into());
+        let named: Vec<String> = file
+            .pairs()
+            .filter(|(k, _)| k.ends_with(".filename"))
+            .map(|(_, v)| path_key(&vmware::resolve(&folder, v)))
+            .collect();
+        let (copy, file_name, how) = if copy {
+            // Workstation runs VMDKs: a VMDK is copied by vdiskmanager -r (a delta's chain flattened), the rest converted.
+            let kind = OutputKind::of(DiskFormat::Vmdk, info.thin != Some(false));
+            let how = self.copy_plan(&info, kind, &folder).await?;
+            let target = self.free_name(&folder, &stem, "vmdk", 1, &named).await?;
+            let name = target
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let line = format!(
+                "copied by {how} to {}{}; the source is only read",
+                target.display(),
+                info.virtual_bytes
+                    .map(|b| format!(" (it may grow to {})", size_text(b)))
+                    .unwrap_or_default()
+            );
+            (
+                Some(DiskCopy {
+                    source: source.to_path_buf(),
+                    info,
+                    target,
+                    kind,
+                }),
+                name,
+                line,
+            )
+        } else {
+            in_place_refusal(&info, Hypervisor::Vmware)?;
+            // Named by its own name when it is in the VM's folder, else by its whole path.
+            let inside = source.parent().map(path_key) == Some(path_key(&folder));
+            let name = if inside {
+                source
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default()
+            } else {
+                source.display().to_string()
+            };
+            (None, name, used_where_it_is(inside))
+        };
+        let mut disk = vmware::plan_new_disk(&file, &stem, bus, &|_| false)?;
+        disk.file_name = file_name;
+        let mut changes = vmware::attach_disk(&mut file, &disk)?;
+        changes[0] = format!("Attach {what} on {}: {how}", disk.slot);
+        Ok(Plan {
+            actions: vec![Action::AttachDisk { copy, file }],
+            changes,
+            deletes: Vec::new(),
+            keeps: Vec::new(),
+        })
+    }
+
+    async fn attach_vbox(
+        &self,
+        uuid: &str,
+        source: &Path,
+        info: ImageInfo,
+        what: &str,
+        copy: bool,
+        bus: Option<&str>,
+    ) -> Result<Plan> {
+        let vbox = self.hypervisors.virtualbox();
+        let vm = vbox.vm_info(uuid).await?;
+        let folder = vm
+            .config_file
+            .as_ref()
+            .and_then(|f| f.parent())
+            .ok_or_else(|| refused("VirtualBox didn't say where the VM's folder is."))?
+            .to_path_buf();
+        let (copy, path, how) = if copy {
+            // VirtualBox runs VDI, VMDK and VHD: those are copied as they are; the rest become a VDI.
+            let format = match info.format {
+                DiskFormat::Vdi | DiskFormat::Vmdk | DiskFormat::Vhd => info.format,
+                _ => DiskFormat::Vdi,
+            };
+            let kind = OutputKind::of(format, info.thin != Some(false));
+            let how = self.copy_plan(&info, kind, &folder).await?;
+            let named: Vec<String> = vm.disks.iter().map(|d| path_key(&d.path)).collect();
+            let target = self
+                .free_name(&folder, &format!("{}-disk", vm.name), kind.extension(), 2, &named)
+                .await?;
+            let line = format!(
+                "copied by {how} to {}{}; the source is only read",
+                target.display(),
+                info.virtual_bytes
+                    .map(|b| format!(" (it may grow to {})", size_text(b)))
+                    .unwrap_or_default()
+            );
+            (
+                Some(DiskCopy {
+                    source: source.to_path_buf(),
+                    info,
+                    target: target.clone(),
+                    kind,
+                }),
+                target,
+                line,
+            )
+        } else {
+            in_place_refusal(&info, Hypervisor::VirtualBox)?;
+            let inside = source.parent().map(path_key) == Some(path_key(&folder));
+            (None, source.to_path_buf(), used_where_it_is(inside))
+        };
+        let (calls, slot) = virtualbox::attach_existing_calls(uuid, &vm, &path, bus)?;
+        Ok(Plan::one(
+            Action::AttachVboxDisk { copy, calls },
+            vec![format!("Attach {what} on {slot}: {how}")],
+        ))
+    }
+
+    /// VM-31: the copy into the VM's folder, through a work folder beside it that goes either way. The source is
+    /// read again first: it may have changed since the approval.
+    async fn copy_disk(&self, copy: &DiskCopy) -> Result<()> {
+        let converter = self.converter()?;
+        let info = crate::convert::inspect::inspect(&copy.source).await?;
+        if info.format != copy.info.format || info.virtual_bytes != copy.info.virtual_bytes {
+            return Err(refused(format!(
+                "{} changed since the change was approved ({}, was {}): attach it again.",
+                copy.source.display(),
+                info.describe(),
+                copy.info.describe()
+            )));
+        }
+        let folder = copy.target.parent().unwrap_or(Path::new("."));
+        let work = folder.join(format!(".remotely-attach-{}", Uuid::new_v4().simple()));
+        tokio::fs::create_dir(&work).await?;
+        let ran = converter
+            .convert_into(
+                &copy.source,
+                &info,
+                copy.kind,
+                &copy.target,
+                &work,
+                &CancellationToken::new(),
+            )
+            .await;
+        let _ = tokio::fs::remove_dir_all(&work).await;
+        if ran.is_err() {
+            delete_copy(copy).await;
+        }
+        ran.map(drop)
     }
 
     async fn vmware_lifecycle(&self, vmx: &Path, op: &VmLifecycleOp, state: &VmState) -> Result<Plan> {
@@ -1078,6 +1518,42 @@ impl VmEditor {
                 self.forget_added(ctx, vmx).await?;
             }
             Action::AddVmx => self.remember_added(ctx, vmx).await?,
+            Action::AttachDisk { copy, file } => {
+                if let Some(copy) = &copy {
+                    self.copy_disk(copy).await?;
+                }
+                let bytes = file.to_bytes();
+                if let Err(err) = self
+                    .with_backup(vmx, tag, async { vmware.write_vmx(vmx, &bytes).await })
+                    .await
+                {
+                    if let Some(copy) = &copy {
+                        delete_copy(copy).await;
+                    }
+                    return Err(err);
+                }
+            }
+            Action::AttachVboxDisk { copy, calls } => {
+                if let Some(copy) = &copy {
+                    self.copy_disk(copy).await?;
+                }
+                for call in calls {
+                    if let Err(err) = vbox.change(call, CHANGE_TIMEOUT).await {
+                        if let Some(copy) = &copy {
+                            // The copy may be in VirtualBox's media list by now: out of it, then off the disk.
+                            let close = vec![
+                                "closemedium".into(),
+                                "disk".into(),
+                                copy.target.display().to_string(),
+                                "--delete".into(),
+                            ];
+                            let _ = vbox.change(close, CHANGE_TIMEOUT).await;
+                            delete_copy(copy).await;
+                        }
+                        return Err(err);
+                    }
+                }
+            }
         }
         Ok(None)
     }

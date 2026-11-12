@@ -137,7 +137,12 @@ impl ImpactPreviewer {
 
     /// VM-23, VM-24: for a VM settings or lifecycle command, what it changes on each VM, the files that go,
     /// and why a VM would be refused. `None` for other commands. Reads only.
-    pub async fn vm_change(&self, command: &Command, targets: &[Target]) -> Option<VmChangePreview> {
+    pub async fn vm_change(
+        &self,
+        ctx: &crate::domain::Context,
+        command: &Command,
+        targets: &[Target],
+    ) -> Option<VmChangePreview> {
         // VM-08: a teardown is R3's delete on each of the instance's VMs, so its preview is the delete's: every file
         // that goes, and why a VM would be refused (running, Workstation's lock).
         if let Command::Stack {
@@ -149,9 +154,14 @@ impl ImpactPreviewer {
                 targets: vms.clone(),
                 op: crate::vm_settings::VmLifecycleOp::Delete,
             };
-            return self.editor.preview(&delete, targets).await;
+            return self.editor.preview(ctx, &delete, targets).await;
         }
-        self.editor.preview(command, targets).await
+        self.editor.preview(ctx, command, targets).await
+    }
+
+    /// VM-31: the conversion runner, which says how an attached disk would be copied.
+    pub fn set_vm_converter(&self, converter: std::sync::Arc<crate::convert::Converter>) {
+        self.editor.set_converter(converter);
     }
 
     /// VM-08: for a stack command, the instance, its steps in order and each step's VMs (a deploy's with R2's

@@ -6,6 +6,7 @@ import { test } from "node:test";
 import type { VmHardware, VmRecord } from "./api.ts";
 import { READ_ONLY_REASON } from "./disabled-reasons.ts";
 import {
+  attachCopyHint,
   bulkResizeReason,
   cableReason,
   diskActionReason,
@@ -110,6 +111,14 @@ test("tools, ISOs and the TPM say why they are off", () => {
   assert.match(isoReason(running, null, noDrives)!, /no CD\/DVD drive/);
   assert.match(tpmReason("vmware")!, /encrypted/);
   assert.equal(tpmReason("virtualbox"), null);
+});
+
+test("an attached disk's copy says what each hypervisor makes of it", () => {
+  assert.match(attachCopyHint("vmware"), /becomes a VMDK/);
+  assert.match(attachCopyHint("virtualbox"), /becomes a VDI/);
+  for (const hypervisor of ["vmware", "virtualbox"] as const) {
+    assert.match(attachCopyHint(hypervisor), /only read$/);
+  }
 });
 
 test("Workstation's open window is a warning for its own VMs only", () => {
