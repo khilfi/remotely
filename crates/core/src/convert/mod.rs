@@ -7,6 +7,7 @@
 //!   only when the owner installed it) and their command lines.
 
 pub mod args;
+pub mod boot;
 pub mod describe;
 pub mod formats;
 pub mod import;

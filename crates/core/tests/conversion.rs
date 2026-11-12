@@ -594,6 +594,8 @@ fn import_request(source: &Path, hypervisor: Hypervisor, folder: &Path) -> Impor
             open_console: false,
         },
         cloud_init: None,
+        data_disks: Vec::new(),
+        controller: None,
     }
 }
 

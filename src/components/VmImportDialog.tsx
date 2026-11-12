@@ -4,12 +4,19 @@
 // reads what it is (specs from its description where there is one), and the import is a deploy: the same AP-02
 // preview, approval (Medium; a Prod label High), job with its step, and cleanup as every deploy. The source is only
 // read: each disk is copied or converted into the new VM's folder.
+//
+// CV-04: a disk image takes data disks after it, listed with their order and sizes (a `System_Disk` file brings its
+// `Data_Disk` siblings, which can be taken out); every disk counts in the preview and the capacity plan. Foreign
+// disks go on SATA unless another controller is picked, and the firmware follows the boot disk's partition table
+// unless chosen. A cloud server's export gets its first boot ready by default: a user with your SSH key and DHCP on
+// any network card, from a seed that holds no password.
 
 import { useEffect, useState } from "react";
-import { ExternalLinkIcon, FileSearchIcon } from "lucide-react";
+import { ArrowDownIcon, ArrowUpIcon, ExternalLinkIcon, FileSearchIcon, PlusIcon, XIcon } from "lucide-react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
+import { DropdownMenuItem } from "@/components/ui/dropdown-menu";
 import {
   Dialog,
   DialogContent,
@@ -25,12 +32,14 @@ import { DeployProgressView, useDeployProgress } from "@/components/DeployDialog
 import { DeployPreviewView } from "@/components/DeployPreviewView";
 import { CapacityPlanView } from "@/components/CapacityPlanView";
 import { useReadOnlyReason } from "@/components/Presentation";
+import { RowMenu } from "@/components/RowMenu";
 import { WhyDisabled } from "@/components/WhyDisabled";
 import { useDebounced } from "@/hooks/use-debounced";
 import {
   api,
   errorMessage,
   type DeployCheck,
+  type DiskController,
   type Environment,
   type Firmware,
   type Hypervisor,
@@ -41,8 +50,24 @@ import {
   type TemplateNetwork,
 } from "@/lib/api";
 import { HYPERVISOR_LABEL } from "@/lib/catalog";
-import { convertApi, type ImportAnalysis, type ImportRequest, type ToolsReport } from "@/lib/convert-api";
-import { describedText, FORMAT_LABEL, importKindText, importReasons, qemuNote, sizeText } from "@/lib/convert";
+import {
+  convertApi,
+  type ImportAnalysis,
+  type ImportDiskView,
+  type ImportRequest,
+  type ToolsReport,
+} from "@/lib/convert-api";
+import {
+  describedText,
+  importDiskRows,
+  importDisksBytes,
+  importFirmwareAuto,
+  importKindText,
+  importReasons,
+  moved,
+  qemuNote,
+  sizeText,
+} from "@/lib/convert";
 import { deployReason, newVmKey, parsePackages, startProgress } from "@/lib/deploy";
 
 interface Props {
@@ -87,6 +112,9 @@ export function VmImportDialog({ initialPath, onSubmitted, onClose }: Props) {
   const [guestUser, setGuestUser] = useState("");
   const [keyId, setKeyId] = useState<string | null>(null);
   const [packages, setPackages] = useState("");
+  // CV-04: the data disks after the boot disk, in order, and the disks' controller.
+  const [dataDisks, setDataDisks] = useState<ImportDiskView[]>([]);
+  const [controller, setController] = useState<DiskController>("sata");
   const [check, setCheck] = useState<{ key: string; check: DeployCheck } | null>(null);
   const [checkError, setCheckError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -122,6 +150,9 @@ export function VmImportDialog({ initialPath, onSubmitted, onClose }: Props) {
         if (stopped) return;
         setRead({ path, analysis: a });
         setName(a.suggestedName);
+        // CV-04: a cloud export's data disks come along, and its first boot gets ready, unless taken out.
+        setDataDisks(a.dataDiskOffers.filter((d) => d.path !== null));
+        setCloudInit(a.cloudExport);
         if (a.profile) setProfileId(a.profile);
         if (a.described.vcpus) setVcpus(String(a.described.vcpus));
         if (a.described.memoryMb) setMemory(String(a.described.memoryMb));
@@ -164,6 +195,22 @@ export function VmImportDialog({ initialPath, onSubmitted, onClose }: Props) {
     }
   }
 
+  /** CV-04: a data disk picked in the shell's dialog, read by Inspect for its format and size. */
+  async function addDataDisk() {
+    try {
+      const picked = await convertApi.pick("image");
+      if (!picked) return;
+      const info = await convertApi.inspect(picked);
+      const name = picked.slice(Math.max(picked.lastIndexOf("\\"), picked.lastIndexOf("/")) + 1);
+      setDataDisks((list) => [
+        ...list,
+        { name, path: picked, info, virtualBytes: info.virtualBytes, problem: info.problems[0] ?? null },
+      ]);
+    } catch (err) {
+      setError(errorMessage(err));
+    }
+  }
+
   async function chooseFolder() {
     try {
       const picked = await api.catalogFolderPick();
@@ -197,6 +244,8 @@ export function VmImportDialog({ initialPath, onSubmitted, onClose }: Props) {
             cloudInit && analysis.kind !== "appliance"
               ? { guestUser: guestUser.trim() || null, sshKeyId: keyId, packages: parsePackages(packages) }
               : null,
+          dataDisks: analysis.kind === "disk" ? dataDisks.flatMap((d) => (d.path ? [d.path] : [])) : [],
+          controller: analysis.kind === "appliance" ? null : controller,
         }
       : null;
   const requestKey = JSON.stringify(request);
@@ -289,15 +338,53 @@ export function VmImportDialog({ initialPath, onSubmitted, onClose }: Props) {
                 {specs && <div className="text-muted-foreground">It says: {specs}.</div>}
                 {analysis.disks.length > 0 && (
                   <ul className="grid gap-0.5">
-                    {analysis.disks.map((d, i) => (
-                      <li key={`${d.name}-${i}`} className="text-xs">
-                        Disk {i + 1}: <code className="font-mono">{d.name}</code>
-                        {d.info ? `, ${FORMAT_LABEL[d.info.format]}` : ""}
-                        {d.virtualBytes !== null ? `, ${sizeText(d.virtualBytes)}` : ""}
-                        {d.problem && <span className="text-destructive"> ({d.problem})</span>}
-                      </li>
-                    ))}
+                    {importDiskRows(analysis, dataDisks).map((row, i) => {
+                      const dataIndex = i - analysis.disks.length;
+                      return (
+                        <li key={`${row.name}-${i}`} className="flex min-h-7 items-center gap-2 text-xs">
+                          <span className="w-20 shrink-0 text-muted-foreground">{row.role}</span>
+                          <code className="min-w-0 truncate font-mono">{row.name}</code>
+                          <span className="shrink-0 text-muted-foreground">{row.detail}</span>
+                          {row.problem && <span className="text-destructive">({row.problem})</span>}
+                          {row.movable && (
+                            <RowMenu label={row.name} className="ml-auto">
+                              <DropdownMenuItem
+                                disabled={dataIndex === 0}
+                                onSelect={() => setDataDisks((list) => moved(list, dataIndex, -1))}
+                              >
+                                <ArrowUpIcon /> Move up
+                              </DropdownMenuItem>
+                              <DropdownMenuItem
+                                disabled={dataIndex === dataDisks.length - 1}
+                                onSelect={() => setDataDisks((list) => moved(list, dataIndex, 1))}
+                              >
+                                <ArrowDownIcon /> Move down
+                              </DropdownMenuItem>
+                              <DropdownMenuItem
+                                onSelect={() => setDataDisks((list) => list.filter((_, j) => j !== dataIndex))}
+                              >
+                                <XIcon /> Leave it out
+                              </DropdownMenuItem>
+                            </RowMenu>
+                          )}
+                        </li>
+                      );
+                    })}
                   </ul>
+                )}
+                {analysis.kind === "disk" && (
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Button variant="outline" size="sm" onClick={() => void addDataDisk()}>
+                      <PlusIcon data-icon="inline-start" />
+                      Add a data disk…
+                    </Button>
+                    {dataDisks.length > 0 && (
+                      <span className="text-xs text-muted-foreground">
+                        {analysis.disks.length + dataDisks.length} disks,{" "}
+                        {sizeText(importDisksBytes(analysis, dataDisks))} in all; they attach in this order
+                      </span>
+                    )}
+                  </div>
                 )}
                 {analysis.problems.map((p) => (
                   <p key={p} className="text-destructive" role="alert">
@@ -364,17 +451,29 @@ export function VmImportDialog({ initialPath, onSubmitted, onClose }: Props) {
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
-                      <SelectItem value="auto">
-                        {analysis.described.efi === null
-                          ? "The OS profile's"
-                          : `As the source says (${analysis.described.efi ? "UEFI" : "BIOS"})`}
-                      </SelectItem>
+                      <SelectItem value="auto">{importFirmwareAuto(analysis)}</SelectItem>
                       <SelectItem value="bios">BIOS</SelectItem>
                       <SelectItem value="efi">UEFI</SelectItem>
                       <SelectItem value="efiSecureBoot">UEFI with Secure Boot</SelectItem>
                     </SelectContent>
                   </Select>
                 </div>
+                {analysis.kind !== "appliance" && (
+                  <div className="grid gap-2">
+                    <Label htmlFor="import-controller">Disk controller</Label>
+                    <Select value={controller} onValueChange={(v) => setController(v as DiskController)}>
+                      <SelectTrigger id="import-controller" className="w-full">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="sata">SATA (boots most disks from other hypervisors)</SelectItem>
+                        <SelectItem value="scsi">SCSI</SelectItem>
+                        <SelectItem value="nvme">NVMe</SelectItem>
+                        <SelectItem value="ide">IDE</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                )}
                 <div className="grid gap-2">
                   <Label htmlFor="import-size">Size</Label>
                   <Select value={sizeId} onValueChange={setSizeId}>
@@ -487,12 +586,16 @@ export function VmImportDialog({ initialPath, onSubmitted, onClose }: Props) {
                   {analysis.kind !== "appliance" && (
                     <label className="flex items-center gap-2">
                       <Checkbox checked={cloudInit} onCheckedChange={(v) => setCloudInit(v === true)} />
-                      It&apos;s a cloud image: set it up with cloud-init on first boot
+                      Prepare its first boot with cloud-init: a user, your SSH key and DHCP
                     </label>
                   )}
                 </div>
                 {cloudInit && analysis.kind !== "appliance" && (
                   <>
+                    <p className="col-span-2 text-xs text-muted-foreground sm:col-span-3">
+                      Remotely can&apos;t tell whether the disk has cloud-init; without it the VM boots as it was. The
+                      seed never holds a password.
+                    </p>
                     <div className="grid gap-2">
                       <Label htmlFor="import-user">Guest user</Label>
                       <Input

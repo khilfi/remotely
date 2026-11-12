@@ -8,6 +8,7 @@ import {
   listen,
   type AfterDeploy,
   type DeployCheck,
+  type DiskController,
   type Environment,
   type Firmware,
   type Hypervisor,
@@ -48,6 +49,8 @@ export interface ImageInfo {
   chain: string[];
   encrypted: boolean;
   partitionTable: string | null;
+  /** CV-04: how it boots, from its partition table (UEFI with an EFI system partition, else BIOS); null: can't tell. */
+  firmwareHint: "bios" | "efi" | null;
   /** Why it can't be converted as it is. */
   problems: string[];
   notes: string[];
@@ -184,6 +187,12 @@ export interface ImportAnalysis {
   onVirtualbox: string | null;
   needsQemuImg: boolean;
   notes: string[];
+  /** CV-04: named like a cloud server's system disk (`System_Disk`): its first boot gets ready by default. */
+  cloudExport: boolean;
+  /** CV-04: the `Data_Disk` files beside a `System_Disk` one, in name order. */
+  dataDiskOffers: ImportDiskView[];
+  /** CV-04: how the boot disk boots, from its partition table; null: can't tell. */
+  firmwareHint: "bios" | "efi" | null;
 }
 
 export interface ImportRequest {
@@ -205,6 +214,10 @@ export interface ImportRequest {
   tags: string[];
   afterDeploy: AfterDeploy;
   cloudInit: { guestUser: string | null; sshKeyId: string | null; packages: string[] } | null;
+  /** CV-04: data disks after a disk image's boot disk, in the order they attach. */
+  dataDisks: string[];
+  /** CV-04: the disks' controller; null: SATA for foreign disks. */
+  controller: DiskController | null;
 }
 
 export type PickFor = "image" | "import";

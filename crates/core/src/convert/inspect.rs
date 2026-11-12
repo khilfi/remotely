@@ -15,6 +15,7 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
 use super::formats::{size_text, DiskFormat};
 use crate::adapters::vm_hardware::{self, DiskHeader};
+use crate::catalog::profiles::Firmware;
 use crate::error::{CoreError, Result};
 use crate::untrusted;
 
@@ -39,8 +40,12 @@ pub struct ImageInfo {
     /// A VMDK's parents down to its base disk, nearest first.
     pub chain: Vec<String>,
     pub encrypted: bool,
-    /// A raw disk's partition table (`MBR`, `GPT`), when it has one.
+    /// The guest's partition table (`MBR`, `GPT`), when it has one and its first sectors can be read
+    /// ([`super::boot`]: raw, VMDK, qcow2, VHD and VDI).
     pub partition_table: Option<String>,
+    /// CV-04: how the disk boots, from its partition table: UEFI with an EFI system partition, else BIOS. `None`
+    /// when it can't be told (a VHDX, a disk with a parent, no partition table).
+    pub firmware_hint: Option<Firmware>,
     /// Why it can't be converted as it is.
     pub problems: Vec<String>,
     /// What else to know.
@@ -290,6 +295,7 @@ pub async fn inspect(path: &Path) -> Result<ImageInfo> {
         chain: Vec::new(),
         encrypted: false,
         partition_table: None,
+        firmware_hint: None,
         problems: Vec::new(),
         notes: Vec::new(),
     };
@@ -414,6 +420,20 @@ pub async fn inspect(path: &Path) -> Result<ImageInfo> {
             if size % 512 != 0 {
                 info.problems
                     .push("its size isn't a whole number of 512-byte sectors, so it isn't a whole disk".into());
+            }
+        }
+    }
+    // CV-04: what the guest's partition table says about how it boots, read through the format's map.
+    if !info.has_parent() && !info.encrypted {
+        if let Some(table) = super::boot::partition_table(path, info.format).await {
+            info.partition_table = Some(table.kind.to_owned());
+            info.firmware_hint = table.firmware();
+            if let Some(firmware) = info.firmware_hint {
+                info.notes.push(format!(
+                    "its partition table ({}) says it boots with {}",
+                    table.describe(),
+                    if firmware == Firmware::Bios { "BIOS" } else { "UEFI" }
+                ));
             }
         }
     }

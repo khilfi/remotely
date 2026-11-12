@@ -6,9 +6,13 @@ import {
   exportGroups,
   exportLabel,
   exportReason,
+  importDiskRows,
+  importDisksBytes,
+  importFirmwareAuto,
   importKindText,
   importReasons,
   inspectRows,
+  moved,
   qemuNote,
   sizeText,
   targetKey,
@@ -28,6 +32,7 @@ const info: ImageInfo = {
   chain: [],
   encrypted: false,
   partitionTable: null,
+  firmwareHint: null,
   problems: [],
   notes: [],
 };
@@ -168,6 +173,9 @@ test("Import says where it can go and what the file is", () => {
     onVirtualbox: "qcow2 to VDI, dynamic needs qemu-img",
     needsQemuImg: true,
     notes: [],
+    cloudExport: false,
+    dataDiskOffers: [],
+    firmwareHint: null,
   };
   assert.deepEqual(importReasons(analysis), { vmware: null, virtualbox: "qcow2 to VDI, dynamic needs qemu-img" });
   assert.deepEqual(importReasons({ ...analysis, problems: ["Disk 1 is missing."] }), {
@@ -176,4 +184,62 @@ test("Import says where it can go and what the file is", () => {
   });
   assert.match(importKindText(analysis), /KVM \(libvirt\)/);
   assert.equal(importReasons(null).vmware, "Choose a file first");
+  assert.equal(importFirmwareAuto(analysis), "As the source says (UEFI)");
+  const bare = { ...analysis, described: { ...analysis.described, efi: null } };
+  assert.equal(importFirmwareAuto({ ...bare, firmwareHint: "bios" }), "As its partition table says (BIOS)");
+  assert.match(importFirmwareAuto(bare), /couldn't be read/);
+});
+
+test("a cloud server's disks list in order with their sizes, the data disks movable", () => {
+  const disk = (name: string, gb: number) => ({
+    name,
+    path: `C:\\Exports\\${name}`,
+    info: { ...info, format: "vmdk" as const, virtualBytes: gb * 2 ** 30 },
+    virtualBytes: gb * 2 ** 30,
+    problem: null,
+  });
+  const analysis: ImportAnalysis = {
+    path: "C:\\Exports\\web01_System_Disk.vmdk",
+    kind: "disk",
+    appliance: null,
+    described: {
+      name: null,
+      vcpus: null,
+      coresPerSocket: null,
+      memoryMb: null,
+      efi: null,
+      family: null,
+      os: null,
+      disks: [],
+    },
+    disks: [disk("web01_System_Disk.vmdk", 40)],
+    suggestedName: "web01_System_Disk",
+    profile: null,
+    problems: [],
+    onWorkstation: null,
+    onVirtualbox: null,
+    needsQemuImg: false,
+    notes: [],
+    cloudExport: true,
+    dataDiskOffers: [disk("web01_Data_Disk.vmdk", 100)],
+    firmwareHint: "efi",
+  };
+  const data = [disk("web01_Data_Disk.vmdk", 100), disk("logs.vmdk", 20)];
+  const rows = importDiskRows(analysis, data);
+  assert.deepEqual(
+    rows.map((r) => [r.role, r.name, r.detail, r.movable]),
+    [
+      ["Boots", "web01_System_Disk.vmdk", "VMDK, 40 GB", false],
+      ["Data disk 1", "web01_Data_Disk.vmdk", "VMDK, 100 GB", true],
+      ["Data disk 2", "logs.vmdk", "VMDK, 20 GB", true],
+    ],
+  );
+  assert.equal(importDisksBytes(analysis, data), 160 * 2 ** 30);
+  assert.deepEqual(
+    moved(data, 1, -1).map((d) => d.name),
+    ["logs.vmdk", "web01_Data_Disk.vmdk"],
+  );
+  assert.equal(moved(data, 0, -1), data, "the first can't go up");
+  assert.equal(importFirmwareAuto(analysis), "As its partition table says (UEFI)");
+  assert.ok(inspectRows({ ...info, firmwareHint: "efi" }).some(([k, v]) => k === "Boots with" && v === "UEFI"));
 });

@@ -69,6 +69,14 @@ pub struct ImportAnalysis {
     /// qemu-img would make an import possible that isn't now.
     pub needs_qemu_img: bool,
     pub notes: Vec<String>,
+    /// CV-04: the file is named like a cloud server's system disk (`System_Disk` or `system-disk`, any case): its
+    /// first boot gets ready for this PC by default (a user and key, DHCP on any network card).
+    pub cloud_export: bool,
+    /// CV-04: the `Data_Disk` files beside a `System_Disk` one, in name order, offered as its data disks.
+    pub data_disk_offers: Vec<ImportDiskView>,
+    /// CV-04: how the boot disk boots, from its partition table (CV-03's Inspect): UEFI with an EFI system
+    /// partition, else BIOS; `None` when it can't be told.
+    pub firmware_hint: Option<crate::catalog::profiles::Firmware>,
 }
 
 impl ImportAnalysis {
@@ -258,6 +266,9 @@ pub async fn analyze(path: &Path, tools: &ToolPaths) -> Result<ImportAnalysis> {
         on_virtualbox: None,
         needs_qemu_img: false,
         notes: Vec::new(),
+        cloud_export: false,
+        data_disk_offers: Vec::new(),
+        firmware_hint: None,
     };
     let read_text = |p: &Path| {
         let p = p.to_path_buf();
@@ -387,11 +398,27 @@ pub async fn analyze(path: &Path, tools: &ToolPaths) -> Result<ImportAnalysis> {
                 info: Some(info),
             });
             out.notes.push(
-                "A disk alone says nothing of its VM: CPU and memory come from the size you pick, and the OS profile and firmware from your choice."
+                "A disk alone says nothing of its VM: CPU and memory come from the size you pick, and the OS profile from your choice."
                     .into(),
             );
+            // CV-04: a cloud server's export, one image per disk: the data disks beside its system disk.
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            if is_system_disk(&name) {
+                out.cloud_export = true;
+                for sibling in data_disk_siblings(path).await {
+                    out.data_disk_offers.push(disk_view(&sibling).await);
+                }
+            }
         }
     }
+    out.firmware_hint = out
+        .disks
+        .first()
+        .and_then(|d| d.info.as_ref())
+        .and_then(|info| info.firmware_hint);
     if let Some(name) = out.described.name.as_deref().filter(|n| !n.trim().is_empty()) {
         out.suggested_name = vm_name(name);
     }
@@ -405,24 +432,184 @@ pub async fn analyze(path: &Path, tools: &ToolPaths) -> Result<ImportAnalysis> {
         out.problems
             .push(format!("An import takes at most {MAX_IMPORT_DISKS} disks."));
     }
-    if out.kind != ImportKind::Appliance {
-        let mut ws = None;
-        let mut vb = None;
-        for disk in &out.disks {
-            let Some(info) = &disk.info else { continue };
-            let (w, wq) = disk_refusal(Hypervisor::Vmware, info, tools);
-            let (v, vq) = disk_refusal(Hypervisor::VirtualBox, info, tools);
-            out.needs_qemu_img |= wq || vq;
-            ws = ws.or(w);
-            vb = vb.or(v);
-        }
-        out.on_workstation = ws;
-        out.on_virtualbox = vb;
-    }
+    refusals(&mut out, tools);
     if out.described.family == Some(GuestFamily::Windows) && out.kind != ImportKind::Appliance {
-        out.notes.push("A Windows guest boots only with a storage driver for its new disk controller: if it stops with INACCESSIBLE_BOOT_DEVICE, give the VM a SATA disk or install the driver where it came from.".into());
+        out.notes.push("A Windows guest boots only with a storage driver for its new disk controller: if it stops with INACCESSIBLE_BOOT_DEVICE, keep the disks on SATA or install the driver where it came from.".into());
     }
     Ok(out)
+}
+
+/// Why each hypervisor can't take the disks with the tools here (an appliance's are its import tool's).
+fn refusals(out: &mut ImportAnalysis, tools: &ToolPaths) {
+    if out.kind == ImportKind::Appliance {
+        return;
+    }
+    let mut ws = None;
+    let mut vb = None;
+    for disk in &out.disks {
+        let Some(info) = &disk.info else { continue };
+        let (w, wq) = disk_refusal(Hypervisor::Vmware, info, tools);
+        let (v, vq) = disk_refusal(Hypervisor::VirtualBox, info, tools);
+        out.needs_qemu_img |= wq || vq;
+        ws = ws.or(w);
+        vb = vb.or(v);
+    }
+    out.on_workstation = ws;
+    out.on_virtualbox = vb;
+}
+
+/// A file name as the cloud export check compares it: lower case, `-` and spaces as `_`.
+fn normal_name(name: &str) -> String {
+    name.to_ascii_lowercase().replace(['-', ' '], "_")
+}
+
+const DISK_EXTENSIONS: [&str; 7] = ["vmdk", "vhd", "vhdx", "vdi", "qcow2", "raw", "img"];
+
+/// CV-04: a cloud server's system disk by its name (`web01_System_Disk.vmdk`, `web01-system-disk.qcow2`).
+pub fn is_system_disk(file_name: &str) -> bool {
+    normal_name(file_name).contains("system_disk")
+}
+
+/// CV-04: the data disks a cloud export puts beside its system disk: files in the same folder with a disk image's
+/// extension whose name has `Data_Disk` (any case, `-` or `_`) where the system disk's has `System_Disk`, after the
+/// same beginning (`web01_Data_Disk.vmdk`, `web01_Data_Disk_2.vmdk`), in name order. Nothing for another name.
+pub async fn data_disk_siblings(system: &Path) -> Vec<PathBuf> {
+    let Some(name) = system.file_name().map(|n| n.to_string_lossy().into_owned()) else {
+        return Vec::new();
+    };
+    let normal = normal_name(&name);
+    let Some(at) = normal.find("system_disk") else {
+        return Vec::new();
+    };
+    let prefix = &normal[..at];
+    let Some(folder) = system.parent() else {
+        return Vec::new();
+    };
+    if untrusted::path_refusal(folder).is_some() {
+        return Vec::new();
+    }
+    let Ok(mut entries) = tokio::fs::read_dir(folder).await else {
+        return Vec::new();
+    };
+    let mut found: Vec<(String, PathBuf)> = Vec::new();
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let path = entry.path();
+        let file = entry.file_name().to_string_lossy().into_owned();
+        let candidate = normal_name(&file);
+        let is_image = Path::new(&file)
+            .extension()
+            .is_some_and(|e| DISK_EXTENSIONS.contains(&e.to_string_lossy().to_ascii_lowercase().as_str()));
+        let named = candidate
+            .strip_prefix(prefix)
+            .is_some_and(|rest| rest.starts_with("data_disk"));
+        if is_image && named && entry.file_type().await.is_ok_and(|t| t.is_file()) {
+            found.push((candidate, path));
+        }
+    }
+    found.sort_by(|a, b| natural_order(&a.0, &b.0));
+    found.into_iter().map(|(_, p)| p).take(MAX_IMPORT_DISKS - 1).collect()
+}
+
+/// Name order with numbers by value: `data_disk_2` before `data_disk_10`.
+fn natural_order(a: &str, b: &str) -> std::cmp::Ordering {
+    let key = |s: &str| -> Vec<(String, u64)> {
+        let mut out = Vec::new();
+        let mut text = String::new();
+        let mut digits = String::new();
+        for c in s.chars() {
+            if c.is_ascii_digit() {
+                digits.push(c);
+            } else {
+                if !digits.is_empty() {
+                    out.push((std::mem::take(&mut text), digits.parse().unwrap_or(0)));
+                    digits.clear();
+                }
+                text.push(c);
+            }
+        }
+        out.push((text, digits.parse().unwrap_or(0)));
+        out
+    };
+    key(a).cmp(&key(b)).then_with(|| a.cmp(b))
+}
+
+/// One disk image as Import lists it: what Inspect says, or why it can't be read.
+async fn disk_view(path: &Path) -> ImportDiskView {
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    match inspect(path).await {
+        Ok(info) => ImportDiskView {
+            name,
+            path: Some(path.display().to_string()),
+            virtual_bytes: info.virtual_bytes,
+            problem: info.problems.first().cloned(),
+            info: Some(info),
+        },
+        Err(err) => ImportDiskView {
+            name,
+            path: Some(path.display().to_string()),
+            info: None,
+            virtual_bytes: None,
+            problem: Some(err.to_string()),
+        },
+    }
+}
+
+/// CV-04: data disks after a disk image's boot disk, in order, each read as Inspect reads it; their problems and
+/// the tools they need join the analysis's. Only a disk image takes them: an appliance and a VM's description bring
+/// their own disks.
+pub async fn add_data_disks(analysis: &mut ImportAnalysis, paths: &[PathBuf], tools: &ToolPaths) {
+    if paths.is_empty() {
+        return;
+    }
+    if analysis.kind != ImportKind::Disk {
+        analysis
+            .problems
+            .push("Data disks go with one disk image: an appliance or a VM's description brings its own disks.".into());
+        return;
+    }
+    let mut seen: Vec<String> = analysis
+        .disks
+        .iter()
+        .filter_map(|d| d.path.as_deref())
+        .map(|p| crate::adapters::vmware::path_key(Path::new(p)))
+        .collect();
+    for path in paths {
+        if let Some(refusal) = untrusted::path_refusal(path) {
+            analysis.problems.push(format!(
+                "{} {}, so Remotely doesn't open it.",
+                path.display(),
+                refusal.describe()
+            ));
+            continue;
+        }
+        let key = crate::adapters::vmware::path_key(path);
+        if seen.contains(&key) {
+            analysis
+                .problems
+                .push(format!("{} is in the import twice.", path.display()));
+            continue;
+        }
+        seen.push(key);
+        let view = disk_view(path).await;
+        let n = analysis.disks.len() + 1;
+        if let Some(problem) = &view.problem {
+            analysis.problems.push(format!("Disk {n} ({}): {problem}.", view.name));
+        } else if view.info.is_none() {
+            analysis
+                .problems
+                .push(format!("Disk {n} ({}) couldn't be read.", view.name));
+        }
+        analysis.disks.push(view);
+    }
+    if analysis.disks.len() > MAX_IMPORT_DISKS {
+        analysis
+            .problems
+            .push(format!("An import takes at most {MAX_IMPORT_DISKS} disks."));
+    }
+    refusals(analysis, tools);
 }
 
 /// The most disks one import brings.
@@ -523,6 +710,83 @@ mod tests {
         assert!(a.problems[0].contains("qemu-img convert -O qcow2"), "{:?}", a.problems);
         // A volume name that tries to leave the folder is never looked for.
         assert_eq!(beside(dir.path(), r"..\..\Windows\win.ini").await, None);
+    }
+
+    #[tokio::test]
+    async fn a_system_disk_offers_its_data_disks_in_order() {
+        let dir = TempFolder::new("import-pair");
+        let sectors = img::boot_sectors(img::Table::GptEsp);
+        let system = dir.write(
+            "web01_System_Disk.vmdk",
+            &img::vmdk_sparse_with("web01_System_Disk.vmdk", &sectors, 64 << 20, true),
+        );
+        dir.write(
+            "web01-data-disk-10.vmdk",
+            &img::vmdk_sparse("web01-data-disk-10.vmdk", 32 << 20, false),
+        );
+        dir.write(
+            "web01_Data_Disk_2.vmdk",
+            &img::vmdk_sparse("web01_Data_Disk_2.vmdk", 16 << 20, true),
+        );
+        dir.write(
+            "other_Data_Disk.vmdk",
+            &img::vmdk_sparse("other_Data_Disk.vmdk", 1 << 20, false),
+        );
+        dir.write("web01_Data_Disk.txt", b"notes");
+        let a = analyze(&system, &ToolPaths::all()).await.unwrap();
+        assert!(a.cloud_export);
+        assert_eq!(a.firmware_hint, Some(crate::catalog::profiles::Firmware::Efi));
+        let offered: Vec<&str> = a.data_disk_offers.iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(
+            offered,
+            ["web01_Data_Disk_2.vmdk", "web01-data-disk-10.vmdk"],
+            "same beginning, disk images only, numbers by value"
+        );
+        assert_eq!(a.data_disk_offers[0].virtual_bytes, Some(16 << 20));
+        assert_eq!(a.disks.len(), 1, "offered, not added");
+        // Added: after the boot disk, in the order given, read like the boot disk.
+        let mut a = a;
+        let paths: Vec<PathBuf> = a
+            .data_disk_offers
+            .iter()
+            .rev()
+            .map(|d| PathBuf::from(d.path.clone().unwrap()))
+            .collect();
+        add_data_disks(&mut a, &paths, &ToolPaths::all()).await;
+        assert!(a.problems.is_empty(), "{:?}", a.problems);
+        assert_eq!(a.found_disks().len(), 3);
+        assert!(a.disks[1].name.contains("10"));
+        // Twice, or the boot disk again, is refused.
+        add_data_disks(&mut a, std::slice::from_ref(&system), &ToolPaths::all()).await;
+        assert!(a.problems[0].contains("twice"), "{:?}", a.problems);
+        // Another name has no pair.
+        let plain = dir.write("rocky.qcow2", &img::qcow2(64 << 20, None));
+        let a = analyze(&plain, &ToolPaths::all()).await.unwrap();
+        assert!(!a.cloud_export && a.data_disk_offers.is_empty());
+        assert!(is_system_disk("WEB01-SYSTEM-DISK.qcow2"));
+        assert!(!is_system_disk("web01-data-disk.vmdk"));
+    }
+
+    #[tokio::test]
+    async fn only_a_disk_image_takes_data_disks() {
+        let dir = TempFolder::new("import-data-ova");
+        let ovf = img::ovf(
+            "app01",
+            2,
+            4096,
+            false,
+            "debian11_64Guest",
+            &[("app01-disk1.vmdk", 64 << 20)],
+        );
+        let path = dir.write("app01.ovf", ovf.as_bytes());
+        let data = dir.write("data.vmdk", &img::vmdk_sparse("data.vmdk", 1 << 20, false));
+        let mut a = analyze(&path, &ToolPaths::all()).await.unwrap();
+        add_data_disks(&mut a, &[data], &ToolPaths::all()).await;
+        assert!(
+            a.problems.iter().any(|p| p.contains("brings its own disks")),
+            "{:?}",
+            a.problems
+        );
     }
 
     #[tokio::test]

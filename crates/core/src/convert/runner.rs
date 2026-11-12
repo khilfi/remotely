@@ -811,6 +811,7 @@ mod tests {
             chain: Vec::new(),
             encrypted: false,
             partition_table: None,
+            firmware_hint: None,
             problems: Vec::new(),
             notes: Vec::new(),
         }
