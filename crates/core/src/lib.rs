@@ -418,12 +418,13 @@ impl LockParts {
     /// `why`: what happened, for the log ("the vault locked", "the vault was reset").
     async fn vault_locked(&self, why: &'static str) {
         self.bindings.vault_locked();
-        // SS-08 (G4): editing sessions on this PC end without uploading more (as root browsing ends).
+        // SS-08 (G4): editing sessions as root end with root browsing (sudo's password is forgotten); the others hold
+        // no secret (their connection is signed in already) and go on.
         let edits = self
             .terminals
-            .end_edits(None, terminal::edit_local::EditEnd::VaultLocked);
+            .end_root_edits(terminal::edit_local::EditEnd::VaultLocked);
         if !edits.is_empty() {
-            tracing::info!(why, edits = edits.len(), "editing sessions on this PC end");
+            tracing::info!(why, edits = edits.len(), "editing sessions as root on this PC end");
         }
         self.terminals.forget_logins();
         let open = self.jobs.file_server_jobs(None);

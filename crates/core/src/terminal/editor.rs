@@ -264,13 +264,35 @@ pub(super) struct SudoAnswer {
     pub(super) password: std::sync::Mutex<Option<SecretString>>,
 }
 
+impl Control {
+    /// SS-14 (G4): an editor tab forgets sudoedit's password it has not given yet (the vault locked, or root browsing
+    /// ended); a later prompt then asks the user.
+    pub(super) fn forget_sudo_answer(&self) {
+        if let Some(answer) = self.editor.as_ref().and_then(|e| e.sudo.as_ref()) {
+            locks::lock(&answer.password).take();
+        }
+    }
+}
+
 /// SS-14: an editor tab's output while sudoedit may still ask: the marker comes out (the tab shows a plain prompt in its
 /// place when it has no password to give), the first one is answered, and a second one means sudo refused it.
 pub(super) struct SudoWatch {
     remover: Scrubber,
     seen: usize,
     answered: bool,
+    /// The password given, to tell root browsing which one sudo refused.
+    given: Option<SecretString>,
+    /// What the tab showed since the password went, for sudo's own words when it refused it: read only until the
+    /// editor starts drawing (its first escape sequence) or [`SUDO_SAYS`] bytes, so a file's text never counts.
+    tail: Vec<u8>,
+    listening: bool,
+    refused: bool,
 }
+
+/// sudo's words when it refused the password and tries no more (`passwd_tries=1`, or a PAM that doesn't ask again).
+const SUDO_GAVE_UP: &[&str] = &["incorrect password attempt"];
+/// How much of what follows the password can be sudo's own words.
+const SUDO_SAYS: usize = 512;
 
 /// What the tab does after a piece of output.
 pub(super) enum SudoStep {
@@ -287,7 +309,16 @@ impl SudoWatch {
             remover: Scrubber::remover(marker),
             seen: 0,
             answered: false,
+            given: None,
+            tail: Vec::new(),
+            listening: false,
+            refused: false,
         }
+    }
+
+    /// The password the tab gave sudoedit, if it gave one.
+    pub(super) fn given(&self) -> Option<SecretString> {
+        self.given.clone()
     }
 
     /// `bytes` as the tab shows them, and what to do.
@@ -296,16 +327,34 @@ impl SudoWatch {
         self.remover.push(bytes, &mut shown);
         let found = self.remover.found();
         if found == self.seen {
+            if self.listening && !self.refused {
+                // A sudo that tries once says so and exits without asking again; the editor's screen ends the watch.
+                let upto = shown.iter().position(|&b| b == 0x1b).unwrap_or(shown.len());
+                let room = SUDO_SAYS.saturating_sub(self.tail.len());
+                self.tail.extend_from_slice(&shown[..upto.min(room)]);
+                if upto < shown.len() || self.tail.len() >= SUDO_SAYS {
+                    self.listening = false;
+                }
+                let said = String::from_utf8_lossy(&self.tail);
+                if SUDO_GAVE_UP.iter().any(|m| said.contains(m)) {
+                    self.refused = true;
+                    self.listening = false;
+                    return (shown, SudoStep::Refused);
+                }
+            }
             return (shown, SudoStep::Nothing);
         }
         self.seen = found;
         if self.answered {
+            self.refused = true;
             return (shown, SudoStep::Refused);
         }
         let password = locks::lock(&answer.password).take();
         match password {
             Some(password) => {
                 self.answered = true;
+                self.listening = true;
+                self.given = Some(password.clone());
                 (shown, SudoStep::Answer(password))
             }
             None => {
@@ -447,6 +496,19 @@ impl Terminals {
                 tab,
             },
         );
+        drop(tabs);
+        // A tab the window never takes (the page reloaded while the job ran) closes by itself.
+        let this = self.clone();
+        let job = run.job_id;
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(async move {
+                tokio::time::sleep(TAB_KEPT).await;
+                let stale = locks::lock(&this.inner.editor_tabs).remove(&job);
+                if let Some(Handoff { tab: Ok(handle), .. }) = stale {
+                    this.close(handle.id).await;
+                }
+            });
+        }
         result
     }
 
@@ -481,7 +543,8 @@ impl Terminals {
             let (place, _) = self.place_of(&run.ctx, &source, None).await?;
             if place != given_to {
                 return Err(CoreError::InvalidInput(format!(
-                    "{} was changed since root browsing started, so sudo's password doesn't go to it. Browse as root                      again.",
+                    "{} was changed since root browsing started, so sudo's password doesn't go to it. Browse as root \
+                     again.",
                     quoted_name(&source)
                 )));
             }
@@ -554,9 +617,9 @@ impl Terminals {
 
     /// SS-14: sudoedit in an editor tab refused the password root browsing gave it: it parks, and root browsing on
     /// `source` ends, as when its own channel is refused.
-    pub(super) fn editor_sudo_refused(&self, source: Uuid) {
+    pub(super) fn editor_sudo_refused(&self, source: Uuid, given: Option<SecretString>) {
         if let Some(control) = self.control(source) {
-            self.root_refused(&control);
+            self.root_refused(&control, given.as_ref());
         }
     }
 }
@@ -815,5 +878,52 @@ mod tests {
         let (shown, step) = watch.output(b"remotely-sudo-xyz", &none);
         assert!(matches!(step, SudoStep::Nothing));
         assert_eq!(shown, b"[sudo] password: ");
+    }
+
+    #[test]
+    fn a_sudo_that_tries_once_and_gives_up_is_a_refusal_too() {
+        let answer = SudoAnswer {
+            marker: "remotely-sudo-one".into(),
+            password: std::sync::Mutex::new(Some(SecretString::new("pw-wrong"))),
+        };
+        let mut watch = SudoWatch::new(&answer.marker);
+        let (_, step) = watch.output(b"remotely-sudo-one", &answer);
+        assert!(matches!(step, SudoStep::Answer(_)));
+        assert_eq!(
+            watch.given().unwrap().expose(),
+            "pw-wrong",
+            "kept to tell which one was refused"
+        );
+        // passwd_tries=1: sudo says so (split across reads) and exits without asking again.
+        let (_, step) = watch.output(b"\r\nsudo: 1 incorrect pass", &answer);
+        assert!(matches!(step, SudoStep::Nothing));
+        let (_, step) = watch.output(b"word attempt\r\n", &answer);
+        assert!(matches!(step, SudoStep::Refused));
+        // Said once.
+        let (_, step) = watch.output(b"more output", &answer);
+        assert!(matches!(step, SudoStep::Nothing));
+
+        // Once the editor draws (an escape sequence), a file's text that says the same is just text.
+        let shown_file = SudoAnswer {
+            marker: "remotely-sudo-log".into(),
+            password: std::sync::Mutex::new(Some(SecretString::new("pw"))),
+        };
+        let mut watch = SudoWatch::new(&shown_file.marker);
+        let (_, step) = watch.output(b"remotely-sudo-log", &shown_file);
+        assert!(matches!(step, SudoStep::Answer(_)));
+        let (_, step) = watch.output(
+            b"\r\n\x1b[?1049h\x1b[H auth.log: 3 incorrect password attempts",
+            &shown_file,
+        );
+        assert!(matches!(step, SudoStep::Nothing));
+
+        // Before the password went, the same words in a file's text are just text.
+        let fresh = SudoAnswer {
+            marker: "remotely-sudo-two".into(),
+            password: std::sync::Mutex::new(Some(SecretString::new("pw"))),
+        };
+        let mut watch = SudoWatch::new(&fresh.marker);
+        let (_, step) = watch.output(b"1 incorrect password attempt", &fresh);
+        assert!(matches!(step, SudoStep::Nothing));
     }
 }

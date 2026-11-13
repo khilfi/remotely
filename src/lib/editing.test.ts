@@ -9,6 +9,7 @@ import {
   endsInText,
   fileName,
   savesText,
+  stopChoices,
 } from "./editing.ts";
 import type { EditInfo, HostEditors } from "./editing-api.ts";
 
@@ -31,6 +32,7 @@ const edit = (id: string, state: EditInfo["state"], saves = 0): EditInfo => ({
   note: null,
   startedAt: "2026-11-13T10:00:00Z",
   endsAt: "2026-11-13T14:00:00Z",
+  endedAt: null,
 });
 
 test("a file's name is its path's last part", () => {
@@ -87,4 +89,26 @@ test("the list follows the events: added, updated in place, gone when ended", ()
     list.map((e) => e.id),
     ["b"],
   );
+  // A copy kept with a save that didn't go up stays listed until it is discarded.
+  const kept = { state: "kept", reason: "terminalClosed", message: "its last save was not uploaded" } as const;
+  list = applyEdit(list, edit("b", kept));
+  assert.deepEqual(
+    list.map((e) => e.state.state),
+    ["kept"],
+  );
+  assert.equal(editStateText(kept).tone, "warn");
+  list = applyEdit(list, edit("b", { state: "ended", reason: "terminalClosed", message: "discarded" }));
+  assert.equal(list.length, 0);
+});
+
+test("Stop's question offers keeping the copy first, and Upload again only when it could help", () => {
+  assert.deepEqual(
+    stopChoices(false).map((c) => c.choice),
+    ["keep", "upload", "discard"],
+  );
+  assert.deepEqual(
+    stopChoices(true).map((c) => c.choice),
+    ["keep", "discard"],
+  );
+  assert.equal(editStateText({ state: "held", message: "The read-only lock is on" }).tone, "warn");
 });

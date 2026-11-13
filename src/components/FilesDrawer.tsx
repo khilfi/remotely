@@ -528,7 +528,8 @@ export function FilesDrawer({
       editable &&
         editInTerminalReason(hostEditors) === null &&
         item("editTerminal", editInTerminalLabel(hostEditors), <SquareTerminalIcon />, () => void editInTerminal(p[0])),
-      editable && item("editPc", "Edit on this PC", <LaptopIcon />, () => void editOnPc(p[0])),
+      // Never a link on this PC either: a save never goes through one.
+      editable && !one.link && item("editPc", "Edit on this PC", <LaptopIcon />, () => void editOnPc(p[0])),
       list.every((e) => e.kind !== "other") &&
         item("download", "Download", <DownloadIcon />, () => onDownload(p, "downloads", asRoot)),
       list.every((e) => e.kind !== "other") &&

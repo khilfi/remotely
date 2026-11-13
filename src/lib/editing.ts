@@ -60,12 +60,25 @@ export function editStateText(state: EditState): { text: string; tone: EditTone 
       return { text: "The host's copy changed", tone: "warn" };
     case "failed":
       return { text: state.message, tone: "error" };
+    case "held":
+      return { text: state.message, tone: "warn" };
     case "ended":
       return { text: `Ended: ${state.message}`, tone: "muted" };
+    case "kept":
+      return { text: `Ended: ${state.message}`, tone: "warn" };
   }
 }
 
-/** The list after an event: a session is added or updated in place, and one that ended goes. Oldest first. */
+/** Stop editing's question when the copy holds a save that didn't go up: the choices it offers, the first the primary.
+ * Upload again only when it could help (not while the host's copy changed: that asks for an answer first). */
+export function stopChoices(conflict: boolean): { choice: "upload" | "keep" | "discard"; label: string }[] {
+  const keep = { choice: "keep" as const, label: "Keep it on this PC" };
+  const discard = { choice: "discard" as const, label: "Discard it" };
+  return conflict ? [keep, discard] : [keep, { choice: "upload" as const, label: "Upload again" }, discard];
+}
+
+/** The list after an event: a session is added or updated in place, and one that ended goes (a kept copy stays until
+ * it is discarded). Oldest first. */
 export function applyEdit(list: EditInfo[], edit: EditInfo): EditInfo[] {
   if (edit.state.state === "ended") return list.filter((e) => e.id !== edit.id);
   const at = list.findIndex((e) => e.id === edit.id);

@@ -161,7 +161,8 @@ crates/core/          remotely-core: all app logic
                       chain over
                       direct-tcpip channels, each hop's own host key check and login; remote/sftp.rs SS-08 SFTP on a
                       terminal's own connection, behind the RemoteFiles trait (H8: a replace writes a hidden temp
-                      file, keeps mode and owner, posix-rename, else a .bak; RemoteWrite::abort; Written says how; A9
+                      file, keeps mode and owner, posix-rename, else a .bak; RemoteWrite::abort; Written says how; G4
+                      replace_file: the same, never through a link for any user; A9
                       a second RawSftpSession for capped listings, MAX_LISTING; SS-14 lstat, make_folder,
                       remove_folder, rename (posix-rename to replace), set_attrs (mode, owner, times; never through a
                       link: OpenSSH's lsetstat, else an lstat first that refuses one), read_from an offset,
@@ -697,18 +698,34 @@ crates/core/          remotely-core: all app logic
                       edit_local.rs SS-08 (0.8.0 G4) "Edit on this PC": Command::EditLocal (EditSpec; ActionKind::
                       FileEditLocal, Medium and never below MIN_REPLACE_TIER, one tier up as root and for Prod) whose job
                       is the editing session: the file (a regular file, not a link, MAX_EDIT_BYTES 16 MB) downloaded into
-                      `<edit folder>/<job>/` made by private_folder, named by local_name, with the Mark of the Web
-                      (audited file_edit_opened with its SHA-256), opened in the local editor; each save (the copy's size
-                      or time changed and settled for a poll, other bytes) goes up only while the host's SHA-256 is the
-                      one last read or written (H8 replace, audited file_changed with the save's SHA-256), else
-                      EditState::Conflict and EditAnswer: overwrite, save beside it (`name (edited).ext`, a new file),
-                      compare (the host's copy as `name (on the host).ext`, a diff in VS Code), keep editing; ends on
-                      Stop editing and EDIT_LIMIT (4 h; the last save goes up first), and without uploading on the job's
-                      cancel, a vault lock (LockParts), a workspace switch and app exit (Core::end_edits, waiting for the
-                      jobs), the terminal closing (Pane::finish) or root browsing ending; the copy's folder deleted
-                      however it ends (FolderGuard), leftovers at the next start (set_edit_folder, `<data>/editing`,
-                      never in a Git working tree); `edits` and `subscribe_edits` for the window (per workspace);
-                      JobOwner.editing keeps the job out of open_user_jobs;
+                      `<edit folder>/<job>/` made by private_folder, named by copy_name (local_name; a name Explorer or
+                      VS Code acts on, is_shell_file or `.code-workspace`, gets `.txt`; 255 UTF-16 units), with the Mark
+                      of the Web (audited file_edit_opened with its SHA-256), opened in the local editor; each save (the
+                      copy's size or time changed and settled for a poll, other bytes, the copy looked at again after
+                      it is read) goes up only when: the read-only lock is off (else EditState::Held until it is); the
+                      terminal's files now (files_for per save: a reconnect's new SFTP) come from a connection to the
+                      place and login the editing began on (Control.place, set at each connect; else
+                      EditEnd::ConnectionChanged); the session isn't Prod or protected since the approval
+                      (Terminals::target, as the bus's label_changes; else EditEnd::LabelsChanged); and the path is a
+                      regular file, not a link, whose SHA-256 is the one last read or written; then
+                      RemoteFiles::replace_file (H8, never through a link for any user; audited file_changed with the
+                      save's SHA-256), else EditState::Conflict and EditAnswer: overwrite (the path looked at first too),
+                      save beside it (`name (edited).ext`, a new file, 255 bytes), compare (the host's copy as `name (on
+                      the host).ext`, a diff in VS Code), keep editing; a failed save goes again after EditTuning.retry,
+                      doubling to 5 min, at once on a new save or Try again; ends on Stop editing and EDIT_LIMIT (4 h;
+                      the last save goes up first), and without uploading on the job's cancel, a workspace switch and app
+                      exit (Core::end_edits, waiting for the jobs), the terminal closing (Pane::finish), root browsing
+                      ending, and (as root only, end_root_edits) a vault lock: those ends go by Session.ending, a child
+                      of the job's token that interrupts a read or an upload; never deletes a save that didn't go up
+                      (the copy's SHA-256 against what the host has from this PC): Stop editing answers
+                      StopOutcome::Unsent until StopChoice says upload again, keep or discard, and every other end keeps
+                      the copy (EditState::Kept, `<job>.kept.json` beside its folder, listed again after set_edit_folder's
+                      sweep, which deletes everything else, links as links), open_kept, save_kept (the shell's save
+                      dialog, save_guard, the Mark of the Web, audited file_edit_copy_saved) and discard_kept (audited
+                      file_edit_copy_discarded); other copies' folders are deleted on a blocking thread; nothing is edited
+                      before set_edit_folder (`<data>/editing`, never in a Git working tree); `edits` and
+                      `subscribe_edits` for the window (per workspace); JobOwner.editing keeps the job out of
+                      open_user_jobs and the update install's wait_to_run_alone;
                       tunnels.rs SS-07 a terminal's tunnels: start (Command::OpenTunnel on the bus, also for forwards
                       that start with the terminal), approve, stop, the job's open_tunnel, reopened after a reconnect,
                       closed with the terminal, audited tunnel_opened and tunnel_closed;
@@ -1012,15 +1029,20 @@ crates/core/          remotely-core: all app logic
                       root upload, one sudo park per password shared with the Containers page), and the transfer queue
                       (four at a time, pause and resume both ways, a file changed on the host while paused, what to do
                       with files there both ways, keep both's numbers, times, folders up and down, never `.git`);
-                      file_links.rs: SS-14 on FakeFiles' links: permissions and owners never through a link, a folder
-                      swapped for a link before its delete, a paused upload's file swapped for one, the folder cap on
-                      downloads, Remotely's data folder; editing.rs: 0.8.0 G4 on the test SSH server's fake editors
+                      file_links.rs: SS-14 on FakeFiles' links (a replacing write follows one, as SftpFiles does for the
+                      login user): permissions and owners never through a link, a folder swapped for a link before its
+                      delete, a paused upload's file swapped for one, the folder cap on downloads, Remotely's data
+                      folder, G4's saves never through a link (Overwrite included); editing.rs: 0.8.0 G4 on the test SSH
+                      server's fake editors
                       (`with_host_editors`: an exec with a PTY running `exec nano <path>` or `sudoedit` starts one that
                       notes the path it got) and FakeLocalEditors: a path with quotes, `$(...)` and backticks reaching the
                       editor byte for byte, the tiers, sudoedit with root browsing's password given once and never shown,
                       a refused one ending root browsing, the session's editor, edit on this PC's private copy, saves,
-                      conflicts (compare, save beside, overwrite), Stop editing, a vault lock, the terminal closing, a
-                      workspace switch, leftovers; opt-in workstation_it.rs,
+                      conflicts (compare, save beside, overwrite), Stop editing, a vault lock (root sessions only), the
+                      terminal closing, a workspace switch, leftovers, and the PR 91 review's regressions: a save that
+                      didn't go up kept (Stop asks; kept copies saved elsewhere, discarded, through the start sweep), a
+                      reconnect's new connection used and another host's refused, a Prod relabel, the read-only lock;
+                      opt-in workstation_it.rs,
                       virtualbox_it.rs and
                       conversion_it.rs (the real conversion tools on small images in the temp folder)
 src-tauri/            Tauri 2 shell: window, IPC commands (ipc.rs), terminal bridge, MultiExec (multiexec.rs; groups.rs

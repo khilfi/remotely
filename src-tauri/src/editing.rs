@@ -2,19 +2,23 @@
 //! `remotely_core::terminal::editor` ("Edit in the terminal": a tab on the host running its editor) and
 //! `remotely_core::terminal::edit_local` ("Edit on this PC"); this is the IPC around them. Both are commands on the
 //! bus, built by the core after it looked at the file: the window sends a terminal and a host path, never a command or a
-//! path on this PC. Editing sessions' changes reach the window as `files://edit` events, the shown workspace's only.
+//! path on this PC. Editing sessions' changes reach the window as `files://edit` events, the shown workspace's only. A
+//! copy kept with a save that didn't go up is saved elsewhere through this shell's own save dialog: the window sends
+//! only its id.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
 use remotely_core::command_bus::SubmitOutcome;
 use remotely_core::jobs::JobStatus;
-use remotely_core::terminal::edit_local::{EditAnswer, EditInfo};
+use remotely_core::terminal::edit_local::{EditAnswer, EditInfo, StopChoice, StopOutcome};
 use remotely_core::terminal::editor::HostEditors;
 use remotely_core::terminal::TerminalEvent;
 use remotely_core::{Core, CoreError};
 use tauri::ipc::{Channel, InvokeResponseBody};
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State, WebviewWindow};
+use tauri_plugin_dialog::DialogExt;
 use tokio::sync::broadcast::error::RecvError;
 use uuid::Uuid;
 
@@ -93,18 +97,72 @@ pub async fn files_edit_on_pc(
     Ok(state.core.files.edit_on_pc(id, path, as_root).await?)
 }
 
-/// SS-08: the shown workspace's open editing sessions.
+/// SS-08: the shown workspace's editing sessions, and copies kept with a save that didn't go up.
 #[tauri::command]
 pub fn files_edits(state: State<'_, AppState>) -> Vec<EditInfo> {
     let core = &state.core;
     core.terminals.edits(&core.ctx())
 }
 
-/// SS-08: Stop editing: the last save goes up first (if the host's copy is unchanged), then the copy is deleted.
+/// SS-08: Stop editing: the last save goes up first (if the host's copy is unchanged), then the copy is deleted. A save
+/// that didn't go up stops nothing (`unsent`) until `choice` says to upload it again, keep it or discard it.
 #[tauri::command]
-pub async fn files_edit_stop(state: State<'_, AppState>, id: Uuid) -> IpcResult<()> {
+pub async fn files_edit_stop(
+    state: State<'_, AppState>,
+    id: Uuid,
+    choice: Option<StopChoice>,
+) -> IpcResult<StopOutcome> {
     let core = &state.core;
-    Ok(core.terminals.stop_edit(&core.ctx(), id).await?)
+    Ok(core.terminals.stop_edit(&core.ctx(), id, choice).await?)
+}
+
+/// SS-08: opens a kept copy in the editor on this PC again.
+#[tauri::command]
+pub async fn files_edit_kept_open(state: State<'_, AppState>, id: Uuid) -> IpcResult<()> {
+    let core = &state.core;
+    Ok(core.terminals.open_kept(&core.ctx(), id).await?)
+}
+
+/// SS-08: asks where to save a kept copy (in Downloads by default), then saves it there. False when the dialog was
+/// closed.
+#[tauri::command]
+pub async fn files_edit_kept_save(window: WebviewWindow, state: State<'_, AppState>, id: Uuid) -> IpcResult<bool> {
+    let core = &state.core;
+    let ctx = core.ctx();
+    // FD-03: the save dialog is out of the masker's reach, so it offers no host file name while presenting.
+    let name = if core.presentation.get().enabled {
+        "edited copy".to_owned()
+    } else {
+        core.terminals.kept_file_name(&ctx, id)?
+    };
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let mut dialog = window
+        .dialog()
+        .file()
+        .set_parent(&window)
+        .set_title("Save the edited copy as")
+        .set_file_name(name);
+    if let Ok(downloads) = window.path().download_dir() {
+        dialog = dialog.set_directory(downloads);
+    }
+    dialog.save_file(move |path| {
+        let _ = tx.send(path);
+    });
+    let Some(chosen) = rx.await.ok().flatten() else {
+        return Ok(false);
+    };
+    let chosen: PathBuf = chosen
+        .into_path()
+        .map_err(|err| CoreError::InvalidInput(format!("can't use that file: {err}")))?;
+    core.terminals.save_kept(&ctx, id, &chosen).await?;
+    Ok(true)
+}
+
+/// SS-08: deletes a kept copy and what didn't go up. Audited.
+#[tauri::command]
+pub async fn files_edit_kept_discard(state: State<'_, AppState>, id: Uuid) -> IpcResult<()> {
+    let core = &state.core;
+    Ok(core.terminals.discard_kept(&core.ctx(), id).await?)
 }
 
 /// SS-08: the answer to a save held because the host's copy changed; `None`: try a failed upload again.

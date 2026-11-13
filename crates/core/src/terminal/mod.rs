@@ -759,6 +759,9 @@ struct Control {
     dirty: AtomicBool,
     /// SS-08: the live connection's files (SFTP), while connected.
     files: Mutex<Option<Arc<dyn RemoteFiles>>>,
+    /// SS-08 (G4): where the last connection went (the session's host, port and jump host as saved when it connected),
+    /// so an editing session on this PC saves only while the connection goes where its editing began.
+    place: Mutex<Option<crate::vault::Destination>>,
     /// SS-14: root browsing on the live connection, while it lasts.
     root: Mutex<Option<root_files::RootFiles>>,
     /// SS-14: transfers at a time on this terminal's connection ([`files::TRANSFERS_PER_HOST`]).
@@ -1043,6 +1046,8 @@ impl Terminals {
         for control in open {
             locks::lock(&control.remembered).take();
             locks::lock(&control.jump_passwords).clear();
+            // SS-14 (G4): an editor tab forgets root browsing's password it has not given to sudoedit yet.
+            control.forget_sudo_answer();
             self.end_root(&control, root_files::RootEnd::VaultLocked);
         }
     }
@@ -1417,6 +1422,7 @@ impl Terminals {
             screen: Mutex::default(),
             dirty: AtomicBool::new(false),
             files: Mutex::default(),
+            place: Mutex::default(),
             root: Mutex::default(),
             slots: Arc::new(tokio::sync::Semaphore::new(files::TRANSFERS_PER_HOST)),
             folder: Mutex::default(),
@@ -2878,6 +2884,12 @@ impl Pane {
             .await;
         *locks::lock(&self.control.hop) = None;
         let shell = shell?;
+        // SS-08 (G4): where this connection goes (its files take the place of the last connection's in the pump).
+        *locks::lock(&self.control.place) = Some(Destination::new(
+            &spec.host,
+            spec.port,
+            spec.jump.as_ref().map(|j| j.id),
+        ));
         if self.size != size {
             let _ = shell
                 .input
@@ -3731,7 +3743,7 @@ impl Pane {
                 Terminals {
                     inner: Arc::clone(&self.inner),
                 }
-                .editor_sudo_refused(launch.source);
+                .editor_sudo_refused(launch.source, watch.given());
                 None
             }
         }

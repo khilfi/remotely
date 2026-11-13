@@ -892,7 +892,15 @@ impl JobRunner {
     /// Waits until `job_id` is the only open job. Cancelling the job stops the wait.
     async fn wait_to_run_alone(&self, job_id: Uuid, token: &CancellationToken) -> Result<()> {
         loop {
-            let others = locks::lock(&self.running).keys().filter(|id| **id != job_id).count();
+            // SS-08 (G4): an editing session on this PC (up to 4 hours) doesn't hold it up: the app's exit ends it, and
+            // a copy with a save that didn't go up stays on this PC.
+            let others = {
+                let owners = locks::lock(&self.owners);
+                locks::lock(&self.running)
+                    .keys()
+                    .filter(|id| **id != job_id && !owners.get(id).is_some_and(|o| o.editing))
+                    .count()
+            };
             if others == 0 {
                 return Ok(());
             }

@@ -3146,6 +3146,52 @@ impl FakeFiles {
     }
 }
 
+impl FakeFiles {
+    /// A write as SftpFiles makes it at `path` itself: a new file, or (H8) a replacement through a temporary file.
+    fn open_write(&self, path: &str, replace: bool) -> Result<Box<dyn RemoteWrite>> {
+        let opened = {
+            let mut fs = locks::lock(&self.inner);
+            let folder = fake_parent(path);
+            if fs.protected_folder(path) {
+                return Err(CoreError::RemotePermissionDenied {
+                    user: fs.user.clone(),
+                    what: "write to",
+                    path: path.to_owned(),
+                    advice: "",
+                });
+            }
+            if !fs.dirs.contains(&folder) {
+                return Err(CoreError::RemoteNotFound { path: folder });
+            }
+            let there = fs.files.contains_key(path) || fs.links.contains_key(path);
+            if there && !replace {
+                return Err(CoreError::RemoteFileExists { path: path.to_owned() });
+            }
+            // H8: a replacement goes to a temporary file beside the old one.
+            let target = (there && replace).then(|| path.to_owned());
+            let written_to = if target.is_some() {
+                let name = path.rsplit('/').next().unwrap_or(path);
+                let temp = format!("{folder}/.{name}.remotely-{}.part", fs.next_temp).replace("//", "/");
+                fs.next_temp += 1;
+                temp
+            } else {
+                path.to_owned()
+            };
+            fs.files.insert(written_to.clone(), Vec::new());
+            (written_to, target, fs.fail_after.take())
+        };
+        let (path, target, fail_after) = opened;
+        Ok(Box::new(FakeWrite {
+            files: self.clone(),
+            path,
+            target,
+            written: 0,
+            fail_after,
+            settled: false,
+        }))
+    }
+}
+
 #[async_trait]
 impl RemoteFiles for FakeFiles {
     fn user(&self) -> String {
@@ -3205,46 +3251,32 @@ impl RemoteFiles for FakeFiles {
     }
 
     async fn write(&self, path: &str, replace: bool) -> Result<Box<dyn RemoteWrite>> {
-        let opened = {
-            let mut fs = locks::lock(&self.inner);
-            let folder = fake_parent(path);
-            if fs.protected_folder(path) {
-                return Err(CoreError::RemotePermissionDenied {
-                    user: fs.user.clone(),
-                    what: "write to",
-                    path: path.to_owned(),
-                    advice: "",
-                });
+        // Like SftpFiles: a replacement through a link replaces the file it points to, so the link stays a link.
+        let followed = {
+            let fs = locks::lock(&self.inner);
+            match (replace, fs.links.contains_key(path)) {
+                (true, true) => fs.resolve(path).filter(|to| fs.files.contains_key(to)),
+                _ => None,
             }
-            if !fs.dirs.contains(&folder) {
-                return Err(CoreError::RemoteNotFound { path: folder });
-            }
-            let there = fs.files.contains_key(path) || fs.links.contains_key(path);
-            if there && !replace {
-                return Err(CoreError::RemoteFileExists { path: path.to_owned() });
-            }
-            // H8: a replacement goes to a temporary file beside the old one.
-            let target = (there && replace).then(|| path.to_owned());
-            let written_to = if target.is_some() {
-                let name = path.rsplit('/').next().unwrap_or(path);
-                let temp = format!("{folder}/.{name}.remotely-{}.part", fs.next_temp).replace("//", "/");
-                fs.next_temp += 1;
-                temp
-            } else {
-                path.to_owned()
-            };
-            fs.files.insert(written_to.clone(), Vec::new());
-            (written_to, target, fs.fail_after.take())
         };
-        let (path, target, fail_after) = opened;
-        Ok(Box::new(FakeWrite {
-            files: self.clone(),
-            path,
-            target,
-            written: 0,
-            fail_after,
-            settled: false,
-        }))
+        self.open_write(followed.as_deref().unwrap_or(path), replace)
+    }
+
+    async fn replace_file(&self, path: &str) -> Result<Box<dyn RemoteWrite>> {
+        {
+            let fs = locks::lock(&self.inner);
+            if fs.links.contains_key(path) {
+                return Err(CoreError::InvalidInput(format!(
+                    "{path} is a link now, and Remotely doesn't save through a link: nothing was written."
+                )));
+            }
+            if fs.dirs.contains(path) {
+                return Err(CoreError::InvalidInput(format!(
+                    "{path} is not a regular file now: nothing was written."
+                )));
+            }
+        }
+        self.open_write(path, true)
     }
 
     async fn remove(&self, path: &str) -> Result<()> {

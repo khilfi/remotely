@@ -523,6 +523,14 @@ pub trait RemoteFiles: Send + Sync {
     /// takes the old file's place only once all of it arrived ([`RemoteWrite::finish`]), keeping its
     /// permissions and owner; until then the old file stays as it was. [`Written`] says how it went.
     async fn write(&self, path: &str, replace: bool) -> Result<Box<dyn RemoteWrite>>;
+    /// SS-08 (G4): replaces the file at `path` itself, as [`RemoteFiles::write`] with `replace` does (H8), but never
+    /// through a link, for any user: a link at `path`, or anything but a regular file, is refused (a file that is gone
+    /// is made new). Editing on this PC saves through it, so a link swapped in on the host never takes a save elsewhere.
+    async fn replace_file(&self, _path: &str) -> Result<Box<dyn RemoteWrite>> {
+        Err(CoreError::NotImplemented(
+            "replacing a file without following links on this connection",
+        ))
+    }
     /// Deletes a file (a transfer's own leftover), or a link (never what it points to).
     async fn remove(&self, path: &str) -> Result<()>;
 

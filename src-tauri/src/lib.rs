@@ -822,6 +822,9 @@ fn commands() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         editing::files_edits,
         editing::files_edit_stop,
         editing::files_edit_answer,
+        editing::files_edit_kept_open,
+        editing::files_edit_kept_save,
+        editing::files_edit_kept_discard,
         // FD-04 support bundles.
         support_bundle::bundle_presets,
         support_bundle::bundle_limits,

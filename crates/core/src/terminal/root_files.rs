@@ -288,6 +288,15 @@ impl Terminals {
         let Some((root, cancelled)) = self.take_root(control) else {
             return;
         };
+        // G4: editor tabs opened as root from this terminal forget the password they have not given yet.
+        let tabs: Vec<Arc<Control>> = crate::locks::lock(&self.inner.open)
+            .values()
+            .filter(|tab| tab.editor.as_ref().is_some_and(|e| e.source == control.id))
+            .cloned()
+            .collect();
+        for tab in tabs {
+            tab.forget_sudo_answer();
+        }
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {
             root.files.revoke();
             return;
@@ -312,12 +321,20 @@ impl Terminals {
     }
 
     /// SS-14 (G4): sudo refused root browsing's password somewhere else on the session (an editor tab's sudoedit): it
-    /// parks as when root browsing's own channel is refused, and root browsing ends.
-    pub(super) fn root_refused(&self, control: &Arc<Control>) {
-        let parked = locks::lock(&control.root)
-            .as_ref()
-            .map(|r| (r.guard.clone(), r.park.clone()));
-        if let Some((Some(guard), park)) = parked {
+    /// parks as when root browsing's own channel is refused, and root browsing ends. `given`: the password that was
+    /// refused; when root browsing holds another one now (started again since), the new one is neither parked nor ended.
+    pub(super) fn root_refused(&self, control: &Arc<Control>, given: Option<&SecretString>) {
+        let parked = locks::lock(&control.root).as_ref().and_then(|r| {
+            let other = match (given, &r.password) {
+                (Some(given), Some(now)) => given.expose() != now.expose(),
+                _ => false,
+            };
+            (!other).then(|| (r.guard.clone(), r.park.clone()))
+        });
+        let Some((guard, park)) = parked else {
+            return;
+        };
+        if let Some(guard) = guard {
             guard.park(park.subject, park.scope, &park.key, refused(control));
         }
         self.end_root(control, RootEnd::SudoRefused);
@@ -455,6 +472,9 @@ impl RemoteFiles for ParkOnRefusal {
     }
     async fn write(&self, path: &str, replace: bool) -> Result<Box<dyn RemoteWrite>> {
         self.seen(self.files.write(path, replace).await)
+    }
+    async fn replace_file(&self, path: &str) -> Result<Box<dyn RemoteWrite>> {
+        self.seen(self.files.replace_file(path).await)
     }
     async fn remove(&self, path: &str) -> Result<()> {
         self.seen(self.files.remove(path).await)

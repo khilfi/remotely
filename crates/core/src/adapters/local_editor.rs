@@ -58,10 +58,12 @@ impl EditorKind {
     }
 }
 
-/// Programs that run what they are given: never an editor for a host's file.
-const RUNNERS: [&str; 12] = [
+/// Programs that run what they are given (shells, script hosts, interpreters, build and help engines): never an editor
+/// for a host's file.
+const RUNNERS: [&str; 33] = [
     "cmd.exe",
     "powershell.exe",
+    "powershell_ise.exe",
     "pwsh.exe",
     "wscript.exe",
     "cscript.exe",
@@ -72,6 +74,26 @@ const RUNNERS: [&str; 12] = [
     "conhost.exe",
     "wt.exe",
     "msiexec.exe",
+    "wsl.exe",
+    "wslhost.exe",
+    "bash.exe",
+    "sh.exe",
+    "python.exe",
+    "pythonw.exe",
+    "py.exe",
+    "pyw.exe",
+    "node.exe",
+    "perl.exe",
+    "ruby.exe",
+    "java.exe",
+    "javaw.exe",
+    "hh.exe",
+    "mmc.exe",
+    "forfiles.exe",
+    "msbuild.exe",
+    "installutil.exe",
+    "regasm.exe",
+    "certutil.exe",
 ];
 
 /// Where the editors install by themselves: (the environment variable, the path under it).
