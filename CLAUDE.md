@@ -1673,6 +1673,103 @@ ovftool 5.0, VirtualBox 7.2.22 and qemu-img 10.1 on images of a few MB.
   are identical."), 1 when they differ ("Content mismatch at offset N!"), 2 on an error. Remotely always passes `-f`
   (and `-F`), so it never probes, and never gives it a disk with a parent or a backing file.
 
+## Unattended installs (S1, Ubuntu)
+
+S1 for G6, from 0.8.0 (`docs/plan-0.8.md`, VM-29). Checked by hand on 13 Nov 2026 with
+`ubuntu-24.04.5-live-server-amd64.iso` and `ubuntu-26.04.1-live-server-amd64.iso`, Workstation 26 and VirtualBox
+7.2.22 on a Windows 11 PC with Hyper-V on. New VMs of 2 vCPUs, 4 GB and a 16 GB thin disk on NAT; G5's
+`ubuntu-24.04-minimal` starter rendered by `catalog::install::render::render` (a key and password made at run time),
+on a seed from `deploy::seed::write_seed` (`user-data` the rendered file, `meta-data` `instance-id` and
+`local-hostname`). Times are from power-on.
+
+- **The ISO** (both releases): ISO 9660's primary descriptor at sector 16 (Rock Ridge `PX`, `TF`, `NM` on its
+  records), El Torito's boot record at 17, Joliet (`%/E`) at 18, the terminator at 19; a GPT (protective MBR 0xEE)
+  of `ISO9660`, `Appended2` (the ESP) and `Gap1`. El Torito has a BIOS entry (`/boot/grub/i386-pc/eltorito.img`) and
+  an EFI entry (platform 0xEF) for the appended ESP, a 5 MB FAT12 with only `/EFI/BOOT/BOOTX64.EFI` (shim),
+  `GRUBX64.EFI` and `MMX64.EFI` (the same files are at `/EFI/boot` on the ISO). No `grub.cfg` in the ESP, under
+  `/boot/grub/x86_64-efi` or under `i386-pc`: BIOS, UEFI and Secure Boot all read `/boot/grub/grub.cfg`, so one change
+  covers all three. No libisofs checksum tag in the first 64 sectors.
+- `/boot/grub/grub.cfg`: LF line ends; 24.04.5: 573 bytes at sector 2395 (1,475 bytes free in its last sector);
+  26.04.1: 394 bytes at sector 1997 (1,654 free). A primary (Rock Ridge) and a Joliet record point at the same extent,
+  each with the size both-endian (record bytes 10 to 17): both change. `set timeout=30`. 24.04.5's entries are
+  `\tlinux\t/casper/vmlinuz  ---` and HWE's `\tlinux\t/casper/hwe-vmlinuz  ---`; 26.04.1 has one,
+  `    linux  /casper/vmlinuz  --- ` (four spaces, two after `linux`, a space after `---`) and no HWE or memtest entry,
+  so the line is found by `linux`, `/casper/vmlinuz` and ` ---`, not by its text. `/md5sum.txt` lists
+  `<md5>  ./boot/grub/grub.cfg`.
+- **The change that worked** on a copy (the original untouched): the new text written over the file's own sectors (the
+  rest of the last sector zeroed), the new size in both records, and the MD5 in the file's `md5sum.txt` line (the same
+  length). 24.04.5: `\tlinux\t/casper/vmlinuz  autoinstall console=tty0 console=ttyS0,115200n8 --- console=tty0
+  console=ttyS0,115200n8`; 26.04.1: the same after `    linux  /casper/vmlinuz  `, and `set timeout=1`. Words before
+  `---` are the installer's, those after it are copied to the installed system's command line (the consoles stayed
+  there). The kernel logs `Unknown kernel command line parameters "autoinstall ---", will be passed to user space.`
+  Only `autoinstall` added (no console, `md5sum.txt` left) installs too. Nothing checks the file before it runs: shim
+  and GRUB verify binaries only (vmware.log `SECUREBOOT: Image APPROVED.`), and casper's media check only reports:
+  with the old MD5 `/var/log/installer/casper-md5check.json` says `"result": "fail"` with `./boot/grub/grub.cfg` and the
+  install goes on; with the line updated, `"pass"`. GRUB's menu waits 30 s (the kernel at 40 s); with `set timeout=1`,
+  13 to 15 s.
+- Without `autoinstall` (seed found, config read) 26.04.1 stops before touching the disk and asks on every console
+  (at 115 s): `Confirmation is required to continue.`, `Add 'autoinstall' to your kernel command line to avoid this`,
+  `Continue with autoinstall? (yes|no)`. With it, no prompt on either release.
+- **The seed** in a second CD/DVD drive (Workstation `sata0:1` after the ISO's `sata0:0`; VirtualBox SATA port 2) was
+  found every time, BIOS and UEFI: `subiquity/load_cloud_config/extract_autoinstall`, then each controller's
+  `load_autoinstall_data` (80 s with a 30 s menu). The starter installs unchanged on both releases (both have the
+  `ubuntu-server-minimal` and `ubuntu-server` sources).
+- **Serial**: with `console=ttyS0,115200n8` last before `---`, the kernel, systemd and subiquity write to the port:
+  `start: subiquity/<Controller>/<step>: <text>` and `finish: ...` through the install (`start:
+  subiquity/Install/install/postinstall/run_unattended_upgrades: downloading and installing security updates` the
+  longest), then `start: subiquity/Shutdown/shutdown: mode=REBOOT`, `reboot: Restarting system`, the installed
+  kernel's `Command line: BOOT_IMAGE=/vmlinuz-<version> root=/dev/mapper/ubuntu--vg-ubuntu--lv ro ...` and `<hostname>
+  login:`. A failed install (a 3 GB disk) writes `start:  subiquity/ErrorReporter/<id>.install_fail/add_info:`,
+  `... written to /var/crash/<id>.install_fail.crash` and `An error occurred. Press enter to start a shell`, then waits.
+  Without `console=ttyS0` nothing reaches Workstation's port; VirtualBox's UEFI firmware echoes its console (GRUB's
+  menu) to the UART anyway. Workstation: `serial0.present`, `serial0.fileType = "file"`, `serial0.fileName =
+  "<absolute path>"`, `serial0.startConnected`; `vmrun start ... nogui` appends to an existing file without asking.
+  VirtualBox: `modifyvm --uart1 0x3F8 4 --uartmode1 file <path>`.
+- **Times** (the starter with `updates: security`): Workstation 24.04.5 UEFI the installed kernel at 374 s, SSH 461
+  s; BIOS 392 / 478 s; 26.04.1 (1 s menu) BIOS 485 / 503 s, UEFI 512 / 522 s, Secure Boot SSH 576 s. VirtualBox
+  (boots that didn't hang, below) 24.04.5 395 to 418 s / 411 to 439 s; 26.04.1 UEFI 503 / 641 s, BIOS 610 / 748 s:
+  26.04.1's first boot on VirtualBox spends 2 minutes in `systemd-networkd-wait-online` (which then fails: `degraded`)
+  and `cloud-init-network` although `enp0s3` has its address. With the network card unplugged 26.04.1 installs in
+  247 s: no step waits, `updates` is skipped, openssh-server comes from the ISO's pool (SSH works once a network is
+  there), the kernel stays the ISO's, and cloud-init's first boot ends `status: error` (its apt calls fail).
+- **The end of the install**: curtin adds an EFI boot entry (vmware.log `Guest: About to do EFI boot: Ubuntu`), and
+  casper ejects the install CD at shutdown. Workstation: `CDROM: Guest eject on 'sata0:0'. Disconnecting disc image.`
+  for the running VM only; the .vmx keeps `startConnected = "TRUE"`, so after a power-off a BIOS VM with
+  `bios.bootOrder = "cdrom,hdd"` (what `deploy::vmx` writes for an ISO install) boots the installer again, which with
+  `autoinstall` would wipe the disk. `bios.bootOrder = "hdd,cdrom"` works: the blank disk falls through to the CD, and
+  after the install a power-off and on boots the disk with the ISO still there. UEFI boots its `Ubuntu` entry first
+  either way. VirtualBox keeps the guest's eject in the VM's settings (`"SATA-1-0"="emptydrive"`,
+  `"SATA-IsEjected-1-0"="on"`), so `--boot1 dvd` boots the disk after the install and from then on. The seed's drive
+  stays attached on both.
+- **The installed system**: `/etc/cloud/cloud-init.disabled` (cloud-init `disabled-by-marker-file`, datasource None:
+  a seed left attached is never read again), the rendered file kept as `/var/log/installer/autoinstall-user-data`
+  (0400 root, with the password hash) beside the installer's logs. Layout `lvm`: UEFI `sda1` 763M `/boot/efi`, `sda2`
+  1.8G `/boot`, a PV on the rest with a 10G root LV (16 GB disk); BIOS `sda1` 1M (bios_grub). `ubuntu-server-minimal`
+  has no open-vm-tools: `vmrun checkToolsState` says `installed`, not `running`, and `getGuestIPAddress` fails ("The
+  VMware Tools are not running"). The installer runs open-vm-tools, and its DHCP lease (50 to 60 s; in
+  `C:\ProgramData\VMware\vmnetdhcp.leases` by `ethernet0.generatedAddress`) is the installed system's address too.
+- **VirtualBox on a PC with Hyper-V on** runs every VM through Windows' hypervisor platform (VBox.log `HM: HMR3Init:
+  Attempting fall back to NEM: AMD-V is not available`). About half the boots, installer and installed system alike,
+  then hang for good in the initramfs during the kernel's RAID6 benchmark (`Begin: Loading essential drivers ...
+  raid6: avx2x4 gen() ...`, a core busy); `controlvm reset`, once or a few times, gets past it. 1 vCPU,
+  `--paravirtprovider none` or `hyperv` changed nothing. Workstation on the same PC never hung.
+- **`VBoxManage unattended install --script-template=<rendered user-data>`** works for 24.04.5 and 26.04.1 (UEFI;
+  the VM made first with a disk on SATA): with no `@@VBOX_...@@` placeholder the template is copied byte for byte. It
+  writes, beside the .vbox, `Unattended-<uuid>-aux-iso.viso` (VirtualBox's virtual ISO: the install ISO imported,
+  `/boot/grub/grub.cfg` replaced, `/user-data`, `/meta-data` from its empty template and `/vboxpostinstall.sh` added),
+  `-grub.cfg`, `-user-data` and `-vboxpostinstall.sh`; adds a storage controller `IDE` (PIIX4) with the .viso at
+  `IDE-0-0`; sets `--boot1 disk --boot2 dvd --boot3 floppy`. Its grub.cfg: `set timeout=4`, every entry's `linux` line
+  `/casper/vmlinuz autoinstall ds=nocloud\;s=/cdrom/` with `---` and what follows dropped.
+  `--extra-install-kernel-parameters` replaces those words, so keep them when adding `console=tty0
+  console=ttyS0,115200n8` (26.04.1's installed system kept those two even without `---`). The .viso is ejected at the
+  end (`"IDE-0-0"="emptydrive"`); the four `Unattended-<uuid>-*` files (`-user-data` with the hash) stay beside the
+  .vbox and the .viso stays in `list dvds`, as an ejected ISO does. Times like the seed's (26.04.1: 450 s, SSH 593 s).
+  It prints the user's password in clear text in its `Using values:` block (from `--user-password-file` too), and
+  takes the locale, country and time zone from this PC; a template without placeholders uses none of them.
+  `unattended detect` exits 1 (`E_NOTIMPL`, `DetectIsoOS()`) after printing `IsInstallSupported="on"` with
+  `--machine-readable` (`Unattended installation supported = yes` without it): `Ubuntu24_64` for 24.04.5,
+  `Ubuntu25_64` for 26.04.1.
+
 ## Development safety
 
 - Unit and integration tests must never stop, reset, suspend, revert or delete snapshots on real VMs. Use the fake VMware adapter, and `fakes::FakeVirtualBox` for VirtualBox.
