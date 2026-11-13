@@ -2,6 +2,15 @@
 //! the hypervisor, an OS profile, a size or the source's own CPU and memory) becomes a [`DeploySpec`] whose source
 //! is the appliance (an OVA or OVF, R2's own import) or the foreign disks ([`DeploySource::Import`]), and goes
 //! through the same preview, bus command, tiers, job and cleanup as every deploy.
+//!
+//! CV-04 (G1), a cloud server's disks as one VM: a disk image takes data disks after it ([`ImportRequest::data_disks`],
+//! attached in order, each copied or converted as it needs; a `System_Disk` file offers its `Data_Disk` siblings),
+//! and every disk counts in the preview and the capacity plan. A foreign disk goes on SATA unless the request picks
+//! another controller (a disk built for KVM boots with virtio, and its initramfs often lacks VMware's SCSI drivers,
+//! while every Linux and Windows has AHCI's); its firmware is the request's, else the source's description's, else
+//! what its partition table says ([`crate::convert::boot`]), else the OS profile's. Its first boot, when asked, is a
+//! NoCloud seed with the hostname, a user with sudo, the vault key's public half and DHCP on any network card
+//! ([`crate::deploy::cloud_init`]), never a password.
 
 use std::path::Path;
 
@@ -10,11 +19,11 @@ use serde::Deserialize;
 use super::{problem, refused, DeployCheck, Deploys};
 use crate::adapters::hypervisor::Hypervisor;
 use crate::catalog::profiles::{profile, Firmware};
-use crate::catalog::sizes::Provisioning;
+use crate::catalog::sizes::{DiskController, Provisioning};
 use crate::catalog::templates::{self, check_guest_user, check_packages, AfterDeploy, Network, Problem, ProblemCode};
 use crate::command_bus::SubmitOutcome;
 use crate::convert::formats::GIB;
-use crate::convert::import::{analyze, copied_by_deploy, ImportAnalysis, ImportKind};
+use crate::convert::import::{add_data_disks, analyze, copied_by_deploy, ImportAnalysis, ImportKind};
 use crate::deploy::spec::{
     DeployOrigin, DeploySource, DeploySpec, DeployVm, DiskPlan, FirstBootSpec, ImportDisk, ProfileSpec, SizeSpec,
     DEFAULT_IP_WAIT_SECS,
@@ -72,8 +81,16 @@ pub struct ImportRequest {
     pub tags: Vec<String>,
     #[serde(default = "no_after_deploy")]
     pub after_deploy: AfterDeploy,
+    /// cloud-init's first boot, from a NoCloud seed (CV-04: on both hypervisors, with DHCP on any network card).
     #[serde(default)]
     pub cloud_init: Option<ImportCloudInit>,
+    /// CV-04: data disks after a disk image's boot disk, in the order they attach. Files the shell's dialog
+    /// picked, or the analysis offered; each is only read.
+    #[serde(default)]
+    pub data_disks: Vec<String>,
+    /// CV-04: the disks' controller; `None`: SATA for foreign disks.
+    #[serde(default)]
+    pub controller: Option<DiskController>,
 }
 
 fn no_after_deploy() -> AfterDeploy {
@@ -94,6 +111,37 @@ fn coded(code: ProblemCode, message: impl Into<String>) -> Problem {
         code,
         message: message.into(),
     }
+}
+
+/// CV-04, review of PR #86: what the disks' controller can't take. Workstation's IDE has four slots (`ide0:0` to
+/// `ide1:1`); VirtualBox's IDE as the deploy lays it out (each disk a port of its own, the DVD drive after them) has
+/// two ports, the seed's DVD taking one. A VM boots from NVMe only with UEFI.
+fn controller_problem(hv: Hypervisor, size: &SizeSpec, firmware: Firmware, seed: bool) -> Option<Problem> {
+    let on = |c: DiskController| size.disks.iter().filter(|d| d.controller == c).count();
+    let ide = on(DiskController::Ide);
+    let ide_slots = match hv {
+        Hypervisor::Vmware => 4,
+        Hypervisor::VirtualBox => {
+            if seed {
+                1
+            } else {
+                2
+            }
+        }
+    };
+    if ide > ide_slots {
+        return Some(problem(format!(
+            "IDE takes {ide_slots} disk{} here and the import has {ide}: pick SATA, or leave data disks out.",
+            if ide_slots == 1 { "" } else { "s" }
+        )));
+    }
+    let boots_from_nvme = size.disks.first().is_some_and(|d| d.controller == DiskController::Nvme);
+    if boots_from_nvme && firmware == Firmware::Bios {
+        return Some(problem(
+            "A VM boots from NVMe only with UEFI: pick UEFI, or another disk controller.",
+        ));
+    }
+    None
 }
 
 /// `bytes` as whole GB, at least 1.
@@ -122,7 +170,15 @@ impl Deploys {
         request: &ImportRequest,
     ) -> Result<std::result::Result<(DeploySpec, ImportAnalysis), Vec<Problem>>> {
         let hv = request.hypervisor;
-        let analysis = self.analyze_import(Path::new(&request.source)).await?;
+        let mut analysis = self.analyze_import(Path::new(&request.source)).await?;
+        if request.data_disks.len() >= crate::convert::import::MAX_IMPORT_DISKS {
+            return Err(CoreError::InvalidInput(format!(
+                "An import takes at most {} disks.",
+                crate::convert::import::MAX_IMPORT_DISKS
+            )));
+        }
+        let data: Vec<std::path::PathBuf> = request.data_disks.iter().map(std::path::PathBuf::from).collect();
+        add_data_disks(&mut analysis, &data, &self.tool_paths()?).await;
         let mut problems = Vec::new();
         if let Some(why) = analysis.refusal(hv) {
             problems.push(problem(format!("It can't be imported into {}: {why}", hv.label())));
@@ -169,8 +225,23 @@ impl Deploys {
         } else {
             Provisioning::Thin
         };
-        let controller = os.controller(hv);
-        let controller_model = templates::controller_model(hv, controller, &os).to_owned();
+        // CV-04: a foreign disk boots on SATA unless asked otherwise; an appliance keeps its import tool's.
+        let foreign = analysis.kind != ImportKind::Appliance;
+        // The user's pick, else what the disk says (review of PR #86: a VMware-made disk keeps its SCSI or IDE;
+        // a disk built for another hypervisor goes on SATA), else the profile's.
+        let hint = analysis.controller_hint.as_ref().filter(|_| foreign);
+        let controller = match (request.controller, hint) {
+            (Some(chosen), _) => chosen,
+            (None, Some(hint)) => hint.controller,
+            (None, None) => os.controller(hv),
+        };
+        let controller_model = match (request.controller, hint.and_then(|h| h.scsi_adapter.as_deref())) {
+            (None, Some("buslogic")) if controller == DiskController::Scsi => match hv {
+                Hypervisor::Vmware => "buslogic".to_owned(),
+                Hypervisor::VirtualBox => "BusLogic".to_owned(),
+            },
+            _ => templates::controller_model(hv, controller, &os).to_owned(),
+        };
         let disk = |size_gb: u32| DiskPlan {
             size_gb,
             provisioning,
@@ -202,7 +273,9 @@ impl Deploys {
                             } else {
                                 d.provisioning
                             };
-                            if let Some(c) = d.controller {
+                            // CV-04: foreign disks stay on the import's controller (SATA by default): the size's is
+                            // for its own new disks.
+                            if let (Some(c), false) = (d.controller, foreign && i < source_disks.len()) {
                                 plan.controller = c;
                                 plan.controller_model = templates::controller_model(hv, c, &os).to_owned();
                             }
@@ -287,6 +360,8 @@ impl Deploys {
                     user,
                     public_key,
                     packages,
+                    // An appliance is set up as a template's VM is (guestinfo on Workstation).
+                    imported: foreign,
                 })
             }
         };
@@ -316,11 +391,15 @@ impl Deploys {
             (Hypervisor::Vmware, Some(ws)) => (ws.guest_os, Some(ws.hardware_version), ws.nic, None),
             _ => (virtualbox.os_type, None, virtualbox.nic, virtualbox.tpm),
         };
+        // The user's choice, else the description's, else the boot disk's partition table (CV-04), else the profile's.
         let firmware = request.firmware.unwrap_or(match analysis.described.efi {
             Some(true) => Firmware::Efi,
             Some(false) => Firmware::Bios,
-            None => os.firmware,
+            None => analysis.firmware_hint.unwrap_or(os.firmware),
         });
+        if let Some(problem) = controller_problem(hv, &size, firmware, first_boot.is_some()) {
+            return Ok(Err(vec![problem]));
+        }
         let file_name = Path::new(&request.source)
             .file_name()
             .map_or_else(|| request.source.clone(), |n| n.to_string_lossy().into_owned());
@@ -378,12 +457,42 @@ impl Deploys {
         Ok(Ok((spec, analysis)))
     }
 
-    /// What the import's preview adds: how each disk is converted. (The dialog shows the analysis's own notes above
-    /// the preview, so they aren't repeated here.)
-    fn import_notes(&self, spec: &DeploySpec) -> Vec<String> {
+    /// What the import's preview adds: how each disk is converted, where it goes, how it boots and what to try when
+    /// it doesn't. (The dialog shows the analysis's own notes above the preview, so they aren't repeated here.)
+    fn import_notes(&self, spec: &DeploySpec, analysis: &ImportAnalysis, request: &ImportRequest) -> Vec<String> {
         let mut notes = Vec::new();
         if let DeploySource::Import { disks, .. } = &spec.source {
             let tools = self.tool_paths().unwrap_or_default();
+            if let (Some(size), Some(profile)) = (&spec.size, &spec.profile) {
+                let controller = size.disks.first().map_or("SATA", |d| d.controller.label());
+                let controller = match (&request.controller, &analysis.controller_hint) {
+                    (Some(_), _) => format!("{controller} (as you chose)"),
+                    (None, Some(hint)) => format!("{controller} (it was {})", hint.why),
+                    (None, None) => controller.to_owned(),
+                };
+                let how = match (request.firmware, analysis.described.efi, analysis.firmware_hint) {
+                    (Some(_), _, _) => "as you chose".to_owned(),
+                    (None, Some(_), _) => "as its description says".to_owned(),
+                    (None, None, Some(_)) => "as its partition table says".to_owned(),
+                    (None, None, None) => "the OS profile's: its partition table couldn't be read".to_owned(),
+                };
+                notes.push(format!(
+                    "{} on {controller}, booting with {} ({how}).",
+                    if disks.len() == 1 {
+                        "Its disk goes".to_owned()
+                    } else {
+                        format!(
+                            "Its {} disks go, the first booting and the others attached in order,",
+                            disks.len()
+                        )
+                    },
+                    match profile.firmware {
+                        Firmware::Bios => "BIOS",
+                        Firmware::Efi => "UEFI",
+                        Firmware::EfiSecureBoot => "UEFI with Secure Boot",
+                    }
+                ));
+            }
             for (i, disk) in disks.iter().enumerate() {
                 let thin = spec
                     .size
@@ -417,6 +526,27 @@ impl Deploys {
                     kind.label()
                 ));
             }
+            if let Some(first_boot) = &spec.first_boot {
+                notes.push(format!(
+                    "Its first boot gets a cloud-init seed: hostname {}, {} with sudo{}, and DHCP on whichever network card it has; never a password. It takes effect if the disk's cloud-init reads NoCloud seeds (most do); a disk without cloud-init boots as it was. {}",
+                    spec.vms.first().map_or("", |vm| vm.hostname.as_str()),
+                    first_boot.user.as_deref().unwrap_or("its default user"),
+                    if first_boot.public_key.is_some() {
+                        " and your SSH key"
+                    } else {
+                        ", but no SSH key: pick one, or sign in as before"
+                    },
+                    match spec.hypervisor {
+                        Hypervisor::VirtualBox => "The seed is ejected once the guest has booted.",
+                        Hypervisor::Vmware => "Its drive is disconnected once the guest has booted, and stays in the VM's settings until you eject it while the VM is off.",
+                    }
+                ));
+            }
+            let mut tip = crate::deploy::runner::IMPORT_BOOT_TIPS.to_owned();
+            if let Some(first) = tip.get_mut(0..1) {
+                first.make_ascii_uppercase();
+            }
+            notes.push(format!("{tip}."));
         }
         notes
     }
@@ -429,10 +559,10 @@ impl Deploys {
                 preview: None,
                 capacity: None,
             }),
-            Ok((spec, _)) => {
-                // VM-26: an import is a deploy, so it shows this PC after it too.
+            Ok((spec, analysis)) => {
+                // VM-26: an import is a deploy, so it shows this PC after it too (every disk counts).
                 let (mut checked, capacity) = self.preview_spec(ctx, &spec).await;
-                let mut notes = self.import_notes(&spec);
+                let mut notes = self.import_notes(&spec, &analysis, request);
                 notes.append(&mut checked.notes);
                 checked.notes = notes;
                 Ok(DeployCheck {

@@ -1938,6 +1938,10 @@ impl FakeVirtualBox {
                 let kind = option(args, "--type").unwrap_or_default().to_owned();
                 let medium = option(args, "--medium").unwrap_or_default().to_owned();
                 let slot = format!("{controller}-{port}-{device}");
+                // VM-31: a disk's attach fails (a DVD's still works).
+                if kind == "hdd" && self.fails("storageattach") {
+                    return Err(failed("storageattach", "Could not lock the medium"));
+                }
                 if !info.controllers.iter().any(|c| c.name == controller) {
                     return Err(failed(
                         "storageattach",
@@ -2219,7 +2223,8 @@ impl VirtualBoxAdapter for FakeVirtualBox {
 
     async fn vm_info(&self, uuid: &str) -> Result<VboxVmInfo> {
         self.installed()?;
-        if self.unreadable.contains(uuid) {
+        // VM-31: `set_failing("showvminfo", true)` makes every VM's settings unreadable from then on.
+        if self.unreadable.contains(uuid) || self.fails("showvminfo") {
             return Err(Self::failed("showvminfo", "The VM's settings could not be read"));
         }
         let mut info = self.find(uuid).ok_or_else(|| {

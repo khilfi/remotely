@@ -56,6 +56,7 @@ const GROUPS: { title: string; kinds: ActionKind[]; exec?: boolean; deploy?: boo
       "vmConfigure",
       "vmUpgradeHardware",
       "vmDiskAdd",
+      "vmDiskAttach",
       "vmDiskCompact",
       "vmDiskExpand",
       "vmDiskRemove",

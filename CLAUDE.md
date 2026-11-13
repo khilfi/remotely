@@ -314,13 +314,31 @@ crates/core/          remotely-core: all app logic
                       CV-01 service/import.rs: an import is a deploy (ImportRequest, check_import, submit_import;
                       DeploySource::Import, DeployOrigin::Import); the runner copies VMDK and raw (Workstation) or
                       VMDK, VDI, VHD and raw (VirtualBox) itself and converts the rest (qcow2, VHDX; VHD and VDI on
-                      Workstation) through Converter::convert_into, which also makes R1's qcow2 cloud images deploy
+                      Workstation) through Converter::convert_into, which also makes R1's qcow2 cloud images deploy;
+                      CV-04 (0.8.0) a cloud server's disks as one VM: ImportRequest.data_disks after a disk image's
+                      boot disk, attached in order and each copied or converted as it needs, every disk in the preview
+                      and the capacity plan; the controller is ImportRequest.controller, else the boot disk's
+                      (convert::import::controller_hint: a VMDK VMware's tools made, by `ddb.longContentID` or
+                      `ddb.uuid`, keeps its `ddb.adapterType`'s IDE, BusLogic or SCSI; every other disk goes on SATA),
+                      refused past IDE's slots (Workstation 4; VirtualBox 2, 1 with the seed's DVD) and for NVMe with
+                      BIOS;
+                      the firmware the request's, else the description's, else the boot disk's partition table's
+                      (convert/boot.rs), else the profile's; an import's first boot (FirstBootSpec.imported) is a
+                      NoCloud seed on both hypervisors (Workstation: a CD/DVD of its own after the SATA disks,
+                      vmx::seed_slot, disconnected with `disconnectNamedDevice` once the guest's IP shows) with
+                      cloud_init::DHCP_ANY_NIC's network-config and sshd's password setting left alone; the preview
+                      and the job's note say what to try when it doesn't boot (runner::IMPORT_BOOT_TIPS)
     convert/          CV-01 to CV-03, VM-17 conversion (other hypervisors' formats read and written, never managed).
                       formats.rs DiskFormat and OutputKind (VMDK sparse, flat, stream-optimized, ESXi's vmfs; VDI,
                       VHD, VHDX dynamic or fixed; qcow2; raw); inspect.rs CV-03 Inspect from each header (MO-13's
                       readers, VHDX's region and metadata tables, qcow2's backing file and encryption, a raw disk's
                       MBR or GPT; a parent or backing file is a problem but a Workstation delta, which vdiskmanager
-                      flattens); plan.rs which tools, pure: the hypervisors' own first (vdiskmanager for VMDK,
+                      flattens); boot.rs CV-04 the guest's first 34 sectors read through each format's own map (a
+                      sparse VMDK's grain directory and table, a stream-optimized one's deflated grains and footer, a
+                      flat VMDK's extent after path_refusal, qcow2's L1 and L2 entries and compressed clusters, a
+                      VHD's BAT, a VDI's block map; never a VHDX or a disk with a parent) and its partition table: an
+                      EFI system partition (GPT or MBR type 0xEF) boots UEFI, else BIOS (ImageInfo.firmware_hint,
+                      Inspect's "Boots with"); plan.rs which tools, pure: the hypervisors' own first (vdiskmanager for VMDK,
                       VBoxManage for VDI, VHD and raw, VirtualBox's own differencing chains), qemu-img for qcow2 and
                       VHDX, at most two steps through a growable VMDK or VDI, Azure's whole MB through a VDI or qcow2
                       a tool resizes; qemu-img never reads a disk with a parent; NoPlan::NeedsQemuImg says what
@@ -334,7 +352,9 @@ crates/core/          remotely-core: all app logic
                       the job made removed on failure or cancel; an export makes `<folder>\<vm>-<target>`; targets.rs
                       each target's README (how to import, driver changes), the libvirt domain XML and the Proxmox
                       script (names are slugs); describe.rs OVF, libvirt XML and Proxmox .conf read as untrusted
-                      (1 MB cap, no DTD, depth and element caps); import.rs CV-01 what a picked file is and brings;
+                      (1 MB cap, no DTD, depth and element caps); import.rs CV-01 what a picked file is and brings
+                      (CV-04: a `System_Disk` file, any case, `-` or `_`, is a cloud export and offers its
+                      `Data_Disk` siblings in name order, data_disk_siblings; add_data_disks for a disk image only);
                       verify.rs CV-03 Verify (sizes, SHA-256 of each file, qemu-img compare); service.rs
                       Conversions (Core.convert): tools, Inspect, options and submits, Verify, QEMU's download page
                       (checked_qemu_site)
@@ -472,7 +492,23 @@ crates/core/          remotely-core: all app logic
                       restored on failure, deleted once it went well; vmware.addedVms for Add existing VM); service.rs
                       Core.vm_settings: ISOs, shared folders and existing VMs from the shell's dialogs and drops (never
                       from the UI: check_from_ui), guest OS types, VirtualBox screenshots, Open console (audited
-                      vm_console_opened, no tier, refused by the read-only lock)
+                      vm_console_opened, no tier, refused by the read-only lock); VM-31 (0.8.0) VmDiskOp::Attach,
+                      "Attach an existing disk" (ActionKind::VmDiskAttach, Medium; one VM; the file from the shell's
+                      dialog, vm_pick_disk): CV-03's Inspect reads it, then it is copied into the VM's folder through
+                      the Converter (VmEditor::set_converter: vdiskmanager `-r` for a VMDK on Workstation, VBoxManage
+                      or qemu-img for the rest; a format the hypervisor doesn't run becomes VMDK or VDI) or named where
+                      it is (VMDK on Workstation; VDI, VMDK or VHD on VirtualBox only in the VM's own folder, since its
+                      deletes take every attached disk; never stream-optimized or with a parent); refused when any file
+                      the disk is made of (inspect::disk_files: itself, its extents, its parents) is, by its final
+                      path (`identity`: canonicalized, so `..`, junctions, 8.3 names and `subst` resolve; A3 paths only
+                      by text), a file a known VM's disks are made of (every workspace's VMs and the unassigned ones,
+                      VmEditor::set_attach_tools; a VirtualBox VM's whole media list; this VM too) or inside another
+                      VM's folder, when a VM's settings can't be read, for one with Workstation's `.lck`, and with
+                      VM-23's refusals; the command carries the files' sizes and times (VmDiskOp::Attach.seen, from
+                      the shell's dialog) and the job refuses a file that changed since; the preview names the file,
+                      its size and where it goes, and what Delete VM and Remove disk would do to it; a copy's files
+                      (with a flat VMDK's `-flat` extent) must be free before it starts, and only those go when it
+                      fails. VirtualBox's Remove disk keeps a disk outside the VM's folder, as Workstation's does
     host_networks/    VM-11 (Core.networks): mod.rs the report (vmnets with a NAT vmnet's forwards, VirtualBox's
                       host-only interfaces, NAT networks and rules, each VM's NAT adapter rules, the VMs on each from
                       QL-21's fresh adapter read, host_details::networks), networks_only (the networks alone: one vmrun
@@ -853,14 +889,20 @@ crates/core/          remotely-core: all app logic
     fakes/disk_tools.rs  CV-01 to CV-03 FakeDiskTools: no program runs; each tool's arguments read and small files
                       with the right header written (VirtualBox's media list kept as VirtualBox keeps it), failing
                       tools, delays, qemu-img only with_qemu_img; fakes/disk_images.rs small test images of every
-                      format (VMDK sparse and stream, VDI, VHD, VHDX, qcow2, raw, OVA tars, OVF text), TempFolder
+                      format (VMDK sparse and stream, VDI, VHD, VHDX, qcow2, raw, OVA tars, OVF text), TempFolder;
+                      CV-04 boot_sectors (a GPT or MBR, with or without an EFI system or BIOS boot partition) and
+                      images that hold them through each format's map (vmdk_sparse_with, qcow2_with,
+                      vhd_fixed_with, vhd_dynamic_with, vdi_with, raw_with)
   examples/           dev_ssh_server.rs: that server on a fixed port, to try the terminal, MultiExec, Compare, jump host
                       chains, tunnels, the Containers page and host details by hand
   tests/              end-to-end tests with fakes (virtualbox.rs: VM-18, mixed with Workstation; folder_defaults.rs:
                       QL-16; multiexec_groups.rs: QL-19; alerts.rs and dashboard.rs: MO-06, MO-07, MO-16;
                       host_networks.rs: VM-11; vm_insight.rs: VM-25; waste.rs: VM-16, VM-14; schedules.rs: VM-14,
                       VM-27 on a FakeClock, no sleeping; stacks.rs: VM-08 and VM-26 on the fakes and FakeStackClock;
-                      conversion.rs: CV-01 to CV-03, VM-17; workspaces.rs: FD-02 isolation of every service and
+                      conversion.rs: CV-01 to CV-03, VM-17; cloud_disks.rs: 0.8.0 G1, VM-31 attach on both
+                      hypervisors (copies by FakeDiskTools into VM folders in the temp folder, the refusals, Prod) and
+                      CV-04 a System_Disk and Data_Disk pair imported as one VM (SATA, firmware from the partition
+                      table, the seed read back with read_joliet); workspaces.rs: FD-02 isolation of every service and
                       switching; change_ids.rs: AP-08; support_bundle.rs: FD-04 on the test SSH server, zips in the
                       temp folder; reports.rs: FD-05, BX-12, FD-08 on the test SSH server's Ubuntu and RHEL hosts and
                       the fakes, files in the temp folder read back (the xlsx's XML, both Ansible formats, the zip's
@@ -913,8 +955,9 @@ src-tauri/            Tauri 2 shell: window, IPC commands (ipc.rs), terminal bri
                       (PowerRegisterSuspendResumeNotification) and new-address (NotifyUnicastIpAddressChange)
                       notifications wake terminals waiting to reconnect; P10 heavy commands (terminal output scrub,
                       the command library) run on spawn_blocking, never on the window's thread; VM-23, VM-24
-                      vm_settings.rs (ISO, shared folder and existing VM dialogs opened here, ISO drops taken from the
-                      staged drop, Open console, screenshots, guest OS types); VM-21, VM-10 deploy.rs (the Deploy and
+                      vm_settings.rs (ISO, shared folder, existing VM and, VM-31, existing disk dialogs opened here
+                      (vm_pick_disk), ISO drops taken from the staged drop, Open console, screenshots, guest OS
+                      types); VM-21, VM-10 deploy.rs (the Deploy and
                       Clone dialogs' checks and submits, host adapters, the default VM folder); R4 vm_insight.rs (VM-25
                       logs and the timeline, VM-11 host networks, VM-16 the waste report and Explorer at a folder the
                       core names); VM-14, VM-27 schedules.rs (the scheduler's loop, `schedules://event`, the
@@ -952,7 +995,8 @@ src/                  React + TypeScript UI
                       for FD-03: the Present button and menu, the confirm, the frame, page notices, the Settings card;
                       VmDetailsPanel and SnapshotTree for QL-14: a VM's Details and Snapshots tabs beside the list;
                       VmSettingsTab and VmSettingsDialogs for VM-23: the Settings tab and its edit dialogs (bulk
-                      resize too, VM-12); VmLogTab (follows through usePoll) and VmTimelineTab for VM-25;
+                      resize too, VM-12; VM-31 DiskAttachDialog, the Disks card's Attach…, copy or use in place, then
+                      the shell's file dialog); VmLogTab (follows through usePoll) and VmTimelineTab for VM-25;
                       HostNetworksSheet (VM-11, its add-forward dialog) and WasteFinderSheet (VM-16, VM-14), opened from
                       the VMs page's Networks and Waste finder buttons or the palette;
                       ContainerHostDialog, ContainerDetailsPanel (Overview, Logs, Stats) and ContainerResources (images,
@@ -972,7 +1016,10 @@ src/                  React + TypeScript UI
                       StackDialog, StackDeployDialog, StackDetailsView (also in the approval dialog), StackGroupRow
                       (an instance's header row on the VMs page), CapacityPlanView (the Deploy, Clone, Import and stack
                       deploy dialogs and the approval; Suspend what it suggests); CV-01 VmImportDialog (a file analysed,
-                      then a deploy with DeployPreviewView, CapacityPlanView and DeployProgressView), VM-17
+                      then a deploy with DeployPreviewView, CapacityPlanView and DeployProgressView; CV-04 the disks
+                      in order with their sizes (lib/convert.ts importDiskRows), a System_Disk's Data_Disk siblings
+                      taken in, Add a data disk…, a row menu to move or leave one out, the disk controller, SATA by
+                      default, and the first boot's cloud-init on for a cloud export), VM-17
                       VmExportDialog (each target with its plan or why not) (ImportDialog and ExportDialog are SS-02's
                       and FD-07's);
                       QL-16 FolderDefaultsDialog (a folder's Defaults…) and SessionDialog's "from folder X" values;
@@ -1489,6 +1536,10 @@ ovftool 5.0, VirtualBox 7.2.22 and qemu-img 10.1 on images of a few MB.
   never an image on a network share. The opt-in `conversion_it.rs` runs the real tools on 64 MB images in the temp
   folder and exports an `it-` Workstation VM made of files there, never registered; it checks VirtualBox's media
   list is as it was.
+- A cloud server's disks (0.8.0 G1: VM-31, CV-04): a real cloud export is never imported or attached in a test,
+  never copied into the repo, and its file names never appear in code, tests or docs. `tests/cloud_disks.rs` attaches
+  and imports `fakes::disk_images` made at run time in the system temp folder (`boot_sectors` gives each a GPT or MBR
+  through its format's map), with VM folders there too so `FakeDiskTools` can write the copies.
 - Support bundles (FD-04): tests collect from `TestSshServer` (its exec shell and SFTP) or in-memory hosts, and write
   their zips to the system temp folder, never the repo (`tests/support_bundle.rs`).
 - Containers (CT-01, CT-02): never start, stop, remove or prune real containers. Bus and policy tests use

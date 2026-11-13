@@ -117,6 +117,7 @@ VM settings and lifecycle (0.5.0, `docs/plan-0.5.md` "Approval tiers"; a Prod-la
 | Attach or eject an ISO; connect a network card | Low |
 | Disconnect a network card (2 or more VMs: Critical, the bulk network disconnect above) | Medium |
 | Add a disk; compact or defragment a disk; install or upgrade Tools | Medium |
+| Attach an existing disk (0.8.0, VM-31): copied into the VM's folder (converted when the hypervisor doesn't run its format) or used where it is; one VM at a time; never a disk another known VM uses or one in another VM's folder | Medium |
 | Expand a disk (can't be shrunk back); upgrade the hardware version (can't be undone) | High |
 | Remove a disk (deletes its files); delete a VM | Critical |
 | Add an existing VM (a `.vmx` to the list, a `.vbox` to VirtualBox) | Low |
@@ -149,6 +150,7 @@ Conversion (0.5.0, `docs/plan-0.5.md` "Approval tiers"; CV-01 to CV-03, VM-17). 
 | Export a powered-off VM for another hypervisor or a cloud (VM-17, CV-02) | Low |
 | Export a VM labelled Prod | Medium |
 | Import a foreign VM or disk as a new VM (CV-01) | As a deploy: Medium, High for Prod |
+| Import a cloud server's disks as one VM: the system disk boots, the data disks attach in order, with the first boot's NoCloud seed (0.8.0, CV-04) | As an import: Medium, High for Prod |
 
 Workspaces (0.5.0, FD-02). A VM belongs to one workspace, and the bus refuses an action on a VM from any other. Workspace edits and moving VMs between workspaces change nothing outside Remotely:
 

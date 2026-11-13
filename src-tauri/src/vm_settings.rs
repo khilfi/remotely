@@ -1,6 +1,6 @@
-//! VM-23, VM-24: the VM settings commands that carry a path of this PC (an ISO, a shared folder, an existing
-//! VM) are built here, from a dialog opened here or files dropped on the window, so no such path comes from
-//! the UI: the guest can read an attached ISO and a shared folder. The logic is in
+//! VM-23, VM-24, VM-31: the VM settings commands that carry a path of this PC (an ISO, a shared folder, an
+//! existing VM or disk) are built here, from a dialog opened here or files dropped on the window, so no such path
+//! comes from the UI: the guest can read an attached ISO, disk and shared folder. The logic is in
 //! `remotely_core::vm_settings`; changes go through the command bus like the UI's own commands.
 
 use std::path::PathBuf;
@@ -88,6 +88,36 @@ pub async fn vm_pick_shared_folder(
             .vm_settings
             .add_shared_folder(&vmx_path, &name, &path, writable)
             .await?,
+    ))
+}
+
+/// VM-31: asks for an existing disk image (a dialog opened here, in the folder the import or export left it) and
+/// attaches it to the VM through the bus: copied into its folder (`copy`), or used where it is, on `bus` (or the
+/// boot disk's controller). `None` when the user closed the dialog.
+#[tauri::command]
+pub async fn vm_pick_disk(
+    window: WebviewWindow,
+    state: State<'_, AppState>,
+    vmx_path: String,
+    copy: bool,
+    bus: Option<String>,
+) -> IpcResult<Option<SubmitOutcome>> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    window
+        .dialog()
+        .file()
+        .set_parent(&window)
+        .set_title("Attach an existing disk to the VM")
+        .add_filter("Disk images", &remotely_core::vm_settings::ops::DISK_IMAGE_EXTENSIONS)
+        .pick_file(move |path| {
+            let _ = tx.send(path);
+        });
+    let Some(path) = rx.await.ok().flatten() else {
+        return Ok(None);
+    };
+    let path = into_path(path)?;
+    Ok(Some(
+        state.core.vm_settings.attach_disk(&vmx_path, &path, copy, bus).await?,
     ))
 }
 

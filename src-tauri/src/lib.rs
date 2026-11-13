@@ -571,6 +571,7 @@ fn commands() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         vm_settings::vm_attach_dropped_iso,
         vm_settings::vm_pick_shared_folder,
         vm_settings::vm_pick_existing,
+        vm_settings::vm_pick_disk,
         vm_settings::vm_open_console,
         vm_settings::vm_screenshot,
         vm_settings::vm_guest_os_types,
