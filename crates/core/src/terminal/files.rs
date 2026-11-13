@@ -500,7 +500,7 @@ pub fn resolve(base: &str, home: &str, path: &str) -> String {
 /// A8: Unicode format characters (Cf: U+202E RIGHT-TO-LEFT OVERRIDE, zero-width spaces and joiners,
 /// bidi isolates, U+FEFF, the soft hyphen...) and the line and paragraph separators become `_` too, so
 /// `invoice\u{202E}fdp.exe` is saved as `invoice_fdp.exe`, not shown as `invoiceexe.pdf`.
-fn local_name(name: &str) -> String {
+pub(crate) fn local_name(name: &str) -> String {
     let cleaned: String = name
         .chars()
         .map(|c| match c {

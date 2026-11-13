@@ -132,6 +132,7 @@ import {
   type DroppedFiles,
   type SessionRecord,
   type StagedFiles,
+  type FileDoubleClick,
   type SubmitOutcome,
   type TerminalAlert,
   type TerminalRule,
@@ -410,6 +411,8 @@ export function TerminalPage({
   // FD-03: the read-only lock turns MultiExec and uploads off (QL-08 says why); typing into one terminal stays.
   const presentation = usePresentation();
   const [tabs, setTabs] = useState<Tab[]>([]);
+  /** SS-14 (G4): what a double-click on a file in Files here does (Settings, Terminal). */
+  const [doubleClick, setDoubleClick] = useState<FileDoubleClick>("terminalEditor");
   const [activeTab, setActiveTab] = useState<string | null>(null);
   const [selection, setSelection] = useState<TabSelection>(NO_SELECTION);
   const [sessions, setSessions] = useState<SessionRecord[]>([]);
@@ -521,6 +524,7 @@ export function TerminalPage({
           confirmMultilinePaste: s.confirmMultilinePaste,
         });
         setNotify({ on: s.notifyFinished, when: s.notifyWhen, afterSecs: s.notifyAfterSecs });
+        setDoubleClick(s.fileDoubleClick ?? "terminalEditor");
       },
       () => undefined,
     );
@@ -1567,6 +1571,12 @@ export function TerminalPage({
       }}
       onRetry={(t) => void retryTransfer(t)}
       onSubmitted={onSubmitted}
+      onEditorJob={(jobId, title) => {
+        // SS-14 (G4): the editor's own tab, named after the file.
+        const tab = addTab(createPane({ kind: "editor", jobId }, title, true));
+        setActiveTab(tab);
+      }}
+      doubleClick={doubleClick}
     />
   );
 

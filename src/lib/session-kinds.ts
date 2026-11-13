@@ -297,6 +297,8 @@ export function joinReason(kind: PaneKind | null | undefined): string | null {
       return "Serial tabs don't join: typing in all tabs and Compare hosts are for SSH and PowerShell tabs.";
     case "tunnel":
       return "Tunnel tabs carry a remote desktop or VNC window, so they don't join.";
+    case "editor":
+      return "Editor tabs run one file's editor, so they don't join.";
   }
 }
 

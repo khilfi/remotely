@@ -541,6 +541,34 @@ impl FileOpDetails {
             script: spec.shell_script(),
         }
     }
+
+    /// SS-14 (G4): an editor tab: what it runs, as the shell reads it.
+    pub fn editor(spec: &super::editor::EditorSpec) -> Self {
+        Self {
+            kind: "editInTerminal",
+            into: Some(spec.editor.clone()),
+            mode: None,
+            owner: None,
+            replace: false,
+            recursive: false,
+            as_root: spec.as_root,
+            script: Some(spec.command_line()),
+        }
+    }
+
+    /// SS-08 (G4): an editing session on this PC: every save replaces the file.
+    pub fn edit(spec: &super::edit_local::EditSpec) -> Self {
+        Self {
+            kind: "editOnPc",
+            into: None,
+            mode: None,
+            owner: None,
+            replace: true,
+            recursive: false,
+            as_root: spec.as_root,
+            script: None,
+        }
+    }
 }
 
 /// SS-14: one step of a [`Command::FileOp`] the job runner hands to the terminal it goes through.

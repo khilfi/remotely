@@ -15,6 +15,7 @@
 use serde::de::DeserializeOwned;
 use uuid::Uuid;
 
+use crate::adapters::local_editor::LOCAL_EDITOR_PATH_KEY;
 use crate::command_bus::{ChangeIdRules, CHANGE_ID_KEY};
 use crate::containers::DOCKER_PATH_KEY;
 use crate::dashboard::{DashboardLayout, LAYOUT_KEY};
@@ -28,6 +29,7 @@ use crate::retention::{Retention, RETENTION_KEY};
 use crate::schedules::{ChainLimits, CHAIN_LIMITS_KEY};
 use crate::store::{self, NewAuditEntry, Store};
 use crate::terminal::console::VNC_VIEWER_PATH_KEY;
+use crate::terminal::editor::HOST_EDITORS_KEY;
 use crate::terminal::{TerminalSettings, TERMINAL_SETTINGS_KEY};
 use crate::toolbox::file_server::{FileServerSpec, LAST_KEY as FILE_SERVER_LAST_KEY};
 use crate::updates::{UPDATE_TOKEN_EXPIRES_KEY, UPDATE_TOKEN_KEY};
@@ -39,7 +41,7 @@ use crate::workspaces::CURRENT_WORKSPACE_KEY;
 /// VMs the PC has, how many jobs it runs at once, update checks, how long the journal and the dashboard's history are
 /// kept, the terminal and presentation settings, the approval rules (one safety policy for the one user), the
 /// snapshot chain warnings, and which workspace was shown last.
-pub const MACHINE_KEYS: [&str; 22] = [
+pub const MACHINE_KEYS: [&str; 23] = [
     store::POLICY_RULES_KEY,
     store::VMRUN_PATH_KEY,
     store::OVFTOOL_PATH_KEY,
@@ -47,6 +49,8 @@ pub const MACHINE_KEYS: [&str; 22] = [
     store::QEMU_IMG_PATH_KEY,
     DOCKER_PATH_KEY,
     VNC_VIEWER_PATH_KEY,
+    // SS-08 (G4): the editor "Edit on this PC" opens copies in.
+    LOCAL_EDITOR_PATH_KEY,
     store::SCAN_FOLDERS_KEY,
     ADDED_VMS_KEY,
     store::POWER_ON_LIMIT_KEY,
@@ -66,7 +70,14 @@ pub const MACHINE_KEYS: [&str; 22] = [
 
 /// FD-02: each engagement's own settings: the dashboard's layout, the hosts it watches, and whether a High or
 /// Critical action on a Prod target needs a change ID (AP-08), and the file server's last choices (FD-09).
-pub const WORKSPACE_KEYS: [&str; 4] = [LAYOUT_KEY, WATCHED_KEY, CHANGE_ID_KEY, FILE_SERVER_LAST_KEY];
+pub const WORKSPACE_KEYS: [&str; 5] = [
+    LAYOUT_KEY,
+    WATCHED_KEY,
+    CHANGE_ID_KEY,
+    FILE_SERVER_LAST_KEY,
+    // SS-14 (G4): each session's terminal editor.
+    HOST_EDITORS_KEY,
+];
 
 /// Whether `key` is one of this PC's settings rather than an engagement's.
 pub fn is_machine_key(key: &str) -> bool {
@@ -166,6 +177,14 @@ pub async fn repair(store: &Store, ctx: &Context) -> Result<Vec<&'static str>> {
     )
     .await?;
     check::<ChainLimits>(store, ctx, CHAIN_LIMITS_KEY, "the snapshot chain warnings", &mut reset).await?;
+    check::<Option<String>>(
+        store,
+        ctx,
+        LOCAL_EDITOR_PATH_KEY,
+        "the editor for files from hosts",
+        &mut reset,
+    )
+    .await?;
     reset.extend(repair_workspace(store, ctx).await?);
     Ok(reset)
 }
@@ -181,6 +200,14 @@ pub async fn repair_workspace(store: &Store, ctx: &Context) -> Result<Vec<&'stat
         ctx,
         FILE_SERVER_LAST_KEY,
         "the file server's last choices",
+        &mut reset,
+    )
+    .await?;
+    check::<std::collections::BTreeMap<String, String>>(
+        store,
+        ctx,
+        HOST_EDITORS_KEY,
+        "the sessions' terminal editors",
         &mut reset,
     )
     .await?;

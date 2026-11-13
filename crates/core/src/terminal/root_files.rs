@@ -46,6 +46,11 @@ pub(crate) struct RootFiles {
     pub(crate) server: String,
     /// Who started it: the entry when it ends is theirs.
     ctx: Context,
+    /// G4: where a refused password parks when an editor tab's sudoedit is refused it ([`Terminals::root_refused`]).
+    park: SudoPark,
+    guard: Option<LoginGuard>,
+    /// G4: where sudo's password went (rule 7): an editor tab's sudoedit gives it only to the same place.
+    pub(crate) place: crate::vault::Destination,
 }
 
 /// SS-14: how long root browsing's cancelled transfers get to delete what they made before its channels close.
@@ -66,7 +71,9 @@ impl RootEnd {
             RootEnd::Stopped => "stopped by the user",
             RootEnd::VaultLocked => "the vault locked",
             RootEnd::ConnectionEnded => "the terminal's connection ended or reconnected",
-            RootEnd::SudoRefused => "sudo refused the password when the root channel opened again",
+            RootEnd::SudoRefused => {
+                "sudo refused the password when a root channel or an editor tab's sudoedit asked again"
+            }
         }
     }
 }
@@ -231,8 +238,8 @@ impl Terminals {
             files: root.files,
             terminals: Arc::downgrade(&self.inner),
             control: Arc::downgrade(&control),
-            guard,
-            park,
+            guard: guard.clone(),
+            park: park.clone(),
         });
         // One at a time: a root browsing started twice ends the first.
         let before = locks::lock(&control.root).replace(RootFiles {
@@ -241,6 +248,9 @@ impl Terminals {
             password: sudo.password.filter(|_| with_password),
             server: server.clone(),
             ctx: *ctx,
+            park,
+            guard,
+            place,
         });
         if let Some(before) = before {
             before.files.revoke();
@@ -278,6 +288,15 @@ impl Terminals {
         let Some((root, cancelled)) = self.take_root(control) else {
             return;
         };
+        // G4: editor tabs opened as root from this terminal forget the password they have not given yet.
+        let tabs: Vec<Arc<Control>> = crate::locks::lock(&self.inner.open)
+            .values()
+            .filter(|tab| tab.editor.as_ref().is_some_and(|e| e.source == control.id))
+            .cloned()
+            .collect();
+        for tab in tabs {
+            tab.forget_sudo_answer();
+        }
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {
             root.files.revoke();
             return;
@@ -299,6 +318,26 @@ impl Terminals {
                 tracing::error!(error = %err, "could not audit the end of root browsing");
             }
         });
+    }
+
+    /// SS-14 (G4): sudo refused root browsing's password somewhere else on the session (an editor tab's sudoedit): it
+    /// parks as when root browsing's own channel is refused, and root browsing ends. `given`: the password that was
+    /// refused; when root browsing holds another one now (started again since), the new one is neither parked nor ended.
+    pub(super) fn root_refused(&self, control: &Arc<Control>, given: Option<&SecretString>) {
+        let parked = locks::lock(&control.root).as_ref().and_then(|r| {
+            let other = match (given, &r.password) {
+                (Some(given), Some(now)) => given.expose() != now.expose(),
+                _ => false,
+            };
+            (!other).then(|| (r.guard.clone(), r.park.clone()))
+        });
+        let Some((guard, park)) = parked else {
+            return;
+        };
+        if let Some(guard) = guard {
+            guard.park(park.subject, park.scope, &park.key, refused(control));
+        }
+        self.end_root(control, RootEnd::SudoRefused);
     }
 
     /// Takes the terminal's root browsing, so nothing new goes through it, and cancels its transfers; the ids of
@@ -433,6 +472,9 @@ impl RemoteFiles for ParkOnRefusal {
     }
     async fn write(&self, path: &str, replace: bool) -> Result<Box<dyn RemoteWrite>> {
         self.seen(self.files.write(path, replace).await)
+    }
+    async fn replace_file(&self, path: &str) -> Result<Box<dyn RemoteWrite>> {
+        self.seen(self.files.replace_file(path).await)
     }
     async fn remove(&self, path: &str) -> Result<()> {
         self.seen(self.files.remove(path).await)

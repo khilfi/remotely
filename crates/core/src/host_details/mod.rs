@@ -412,6 +412,11 @@ impl SpecsCollector {
                 specs
             }
         };
+        // SS-14 (G4): the host's editors, looked for once, stay with the facts.
+        let mut specs = specs;
+        if specs.editors.is_none() {
+            specs.editors = self.stored_editors(ctx, session_id).await?;
+        }
         let collected_at = now_rfc3339();
         let json = serde_json::to_string(&specs).map_err(|err| CoreError::InvalidInput(err.to_string()))?;
         self.inner
@@ -438,6 +443,44 @@ impl SpecsCollector {
             return Ok(None);
         }
         self.collect(ctx, session_id, exec, by).await.map(Some)
+    }
+
+    /// SS-14 (G4): the host's terminal editors kept with the session's facts; `None` when not looked for yet (or no facts
+    /// are stored).
+    pub async fn stored_editors(&self, ctx: &Context, session_id: Uuid) -> Result<Option<Vec<String>>> {
+        let Some(stored) = self.inner.store.session_specs(ctx, session_id).await? else {
+            return Ok(None);
+        };
+        let specs: HostSpecs = serde_json::from_str(&stored.specs).unwrap_or_default();
+        Ok(specs.editors.map(|found| {
+            found
+                .into_iter()
+                .filter(|e| crate::terminal::editor::HOST_EDITORS.contains(&e.as_str()))
+                .collect()
+        }))
+    }
+
+    /// SS-14 (G4): keeps the host's terminal editors with the session's stored facts (their time and source as they
+    /// were). Without stored facts nothing is written: the terminal keeps them while it is open.
+    pub async fn keep_editors(&self, ctx: &Context, session_id: Uuid, editors: &[String]) -> Result<()> {
+        let Some(stored) = self.inner.store.session_specs(ctx, session_id).await? else {
+            return Ok(());
+        };
+        let Ok(mut specs) = serde_json::from_str::<HostSpecs>(&stored.specs) else {
+            return Ok(());
+        };
+        specs.editors = Some(editors.to_vec());
+        let json = serde_json::to_string(&specs).map_err(|err| CoreError::InvalidInput(err.to_string()))?;
+        self.inner
+            .store
+            .put_session_specs(
+                ctx,
+                session_id,
+                &json,
+                &stored.collected_at,
+                stored.collected_by.as_deref().unwrap_or("refresh"),
+            )
+            .await
     }
 
     /// MO-13: a terminal to a saved session connected. Runs beside the shell, on its connection's exec

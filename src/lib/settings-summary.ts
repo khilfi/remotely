@@ -6,7 +6,8 @@ import type { PolicyRules, Settings, Tier } from "./api.ts";
 
 // ---- Tool paths ----
 
-export type ToolId = "vmrun" | "vdiskmanager" | "ovftool" | "vboxmanage" | "qemuImg" | "docker" | "vncViewer";
+export type ToolId =
+  "vmrun" | "vdiskmanager" | "ovftool" | "vboxmanage" | "qemuImg" | "docker" | "vncViewer" | "localEditor";
 
 export interface ToolRow {
   id: ToolId;
@@ -89,6 +90,16 @@ export function toolRows(settings: Settings, vdiskmanager: string | null): ToolR
       saved: settings.vncViewerPathSaved,
       editable: true,
     },
+    {
+      // SS-08 (G4): Edit on this PC opens a host's file in it; never Windows' default action for the file's type.
+      id: "localEditor",
+      section: "local-editor",
+      exe: "Editor for files from hosts",
+      purpose: "Edit on this PC: VS Code, Notepad++, Notepad or another editor's .exe",
+      inUse: settings.localEditorPathInUse,
+      saved: settings.localEditorPathSaved,
+      editable: true,
+    },
   ];
 }
 
@@ -107,6 +118,8 @@ export function toolStatus(row: Pick<ToolRow, "id" | "inUse" | "saved">): string
       return "Not installed";
     case "vncViewer":
       return "None found: VNC sessions can't open";
+    case "localEditor":
+      return "None found: files can't be edited on this PC";
     default:
       return "Not found";
   }

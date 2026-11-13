@@ -326,12 +326,24 @@ impl SftpFiles {
     }
 
     /// H8: an upload over the file at `path`, through a temporary file where it can keep the old
-    /// file as it was ([`Plan::Swap`]), else in place ([`Plan::InPlace`]).
-    async fn replace(&self, path: &str) -> Result<SftpWrite> {
+    /// file as it was ([`Plan::Swap`]), else in place ([`Plan::InPlace`]). `follow`: a link is followed, so the file it
+    /// points to is replaced (never as root); without it (G4's [`RemoteFiles::replace_file`]) a link, or anything but
+    /// a regular file, is refused, and the rename replaces the name itself.
+    async fn replace(&self, path: &str, follow: bool) -> Result<SftpWrite> {
         let session = self.sftp().await?;
         // Through a link, the file it points to is replaced, so the link stays a link. SS-14: never as root, where a
         // link another user made could point anywhere.
         let target = match session.symlink_metadata(path).await {
+            Ok(meta) if meta.file_type() == FileType::Symlink && !follow => {
+                return Err(CoreError::InvalidInput(format!(
+                    "{path} is a link now, and Remotely doesn't save through a link: nothing was written."
+                )))
+            }
+            Ok(meta) if !follow && meta.file_type() != FileType::File => {
+                return Err(CoreError::InvalidInput(format!(
+                    "{path} is not a regular file now: nothing was written."
+                )))
+            }
             Ok(meta) if meta.file_type() == FileType::Symlink && self.is_root() => {
                 return Err(CoreError::InvalidInput(format!(
                     "{path} is a link, and as root Remotely doesn't write through links: upload to the file it points \
@@ -370,6 +382,9 @@ impl SftpFiles {
                     "{} can't create a temporary file in {folder}, so a broken transfer leaves it incomplete",
                     self.inner.user
                 );
+                if !follow {
+                    return self.in_place_no_link(&session, path, why).await;
+                }
                 return self.in_place(&session, path, why).await;
             }
             Err(err) => return Err(self.error(err, "write to", &temp).await),
@@ -386,6 +401,9 @@ impl SftpFiles {
                     "it belongs to another user or group (uid {uid}, gid {gid}), which a replacement made by {} can't keep, so a broken transfer leaves it incomplete",
                     self.inner.user
                 );
+                if !follow {
+                    return self.in_place_no_link(&session, path, why).await;
+                }
                 return self.in_place(&session, path, why).await;
             }
         }
@@ -428,6 +446,19 @@ impl SftpFiles {
                 Plan::InPlace { why },
             )),
             Err(err) => Err(self.error(err, "write to", path).await),
+        }
+    }
+
+    /// G4: [`Self::in_place`] for [`RemoteFiles::replace_file`]: what is at `path` is looked at again just before it
+    /// is opened, and a link refused (an open follows one). Only a user who may change the folder could swap one in
+    /// between, and this way is taken because the login can't write into the folder.
+    async fn in_place_no_link(&self, session: &SftpSession, path: &str, why: String) -> Result<SftpWrite> {
+        match session.symlink_metadata(path).await {
+            Ok(meta) if meta.file_type() == FileType::File => self.in_place(session, path, why).await,
+            Ok(_) => Err(CoreError::InvalidInput(format!(
+                "{path} is a link now, or not a regular file: nothing was written."
+            ))),
+            Err(err) => Err(self.error(err, "look at", path).await),
         }
     }
 
@@ -673,10 +704,14 @@ impl RemoteFiles for SftpFiles {
 
     async fn write(&self, path: &str, replace: bool) -> Result<Box<dyn RemoteWrite>> {
         if replace {
-            return Ok(Box::new(self.replace(path).await?));
+            return Ok(Box::new(self.replace(path, true).await?));
         }
         let session = self.sftp().await?;
         Ok(Box::new(self.create(&session, path).await?))
+    }
+
+    async fn replace_file(&self, path: &str) -> Result<Box<dyn RemoteWrite>> {
+        Ok(Box::new(self.replace(path, false).await?))
     }
 
     async fn remove(&self, path: &str) -> Result<()> {
@@ -980,8 +1015,8 @@ impl SftpWrite {
         }
         let fresh = match &self.plan {
             Plan::Create => self.files.create(&session, &self.path).await?,
-            Plan::Swap { target, .. } => self.files.replace(target).await?,
-            Plan::InPlace { .. } => self.files.replace(&self.path).await?,
+            Plan::Swap { target, .. } => self.files.replace(target, true).await?,
+            Plan::InPlace { .. } => self.files.replace(&self.path, true).await?,
         };
         // The old one made nothing that is still there.
         self.settled = true;

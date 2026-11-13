@@ -52,6 +52,7 @@ import { SearchAddon } from "@xterm/addon-search";
 import { SerializeAddon } from "@xterm/addon-serialize";
 import { toast } from "sonner";
 import { latestOnly } from "@/lib/clipboard-copy";
+import { editingApi } from "@/lib/editing-api";
 import { forgetTerminal, reportTunnels } from "@/lib/open-tunnels";
 import { WebglAddon } from "@xterm/addon-webgl";
 import { masker, TerminalMasker } from "@/lib/presentation";
@@ -131,7 +132,9 @@ export type PaneOpener =
   /** Another connection like an open pane, with a password typed for it (a split). */
   | { kind: "like"; terminalId: string }
   /** CT-01: a shell in a running container on a session's host (`docker exec -it`), audited like a terminal. */
-  | { kind: "container"; sessionId: string; engine: EngineKind; containerId: string };
+  | { kind: "container"; sessionId: string; engine: EngineKind; containerId: string }
+  /** SS-14 (G4): the tab an "Edit in the terminal" job opened on the host, running its editor on the file. */
+  | { kind: "editor"; jobId: string };
 
 export interface PaneSnapshot {
   status: PaneStatus;
@@ -351,7 +354,7 @@ export class PaneSession {
       searchResults: null,
       folder: null,
       tunnels: null,
-      paneKind: "ssh",
+      paneKind: opener.kind === "editor" ? "editor" : "ssh",
       window: null,
     };
     this.element = document.createElement("div");
@@ -842,6 +845,10 @@ export class PaneSession {
         // A saved quick connection is a session from now on: reconnects and splits follow it.
         this.opener = opened.session ? { kind: "session", sessionId: opened.session.id } : null;
         if (opened.session) this.update({ sessionId: opened.session.id });
+      } else if (opener.kind === "editor") {
+        // SS-14 (G4): the job opened the tab; it runs its editor once, so it never opens again.
+        id = await editingApi.attach(opener.jobId, cols, rows, this.onOutput, this.onEvent);
+        this.opener = null;
       } else if (opener.kind === "container") {
         const opened = await api.containerShellOpen(
           opener.sessionId,

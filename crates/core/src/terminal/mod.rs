@@ -59,6 +59,8 @@
 pub mod activity;
 pub mod alerts;
 pub mod console;
+pub mod edit_local;
+pub mod editor;
 pub mod file_ops;
 pub mod files;
 pub mod folder;
@@ -184,6 +186,17 @@ pub enum NotifyWhen {
     Any,
 }
 
+/// SS-14, SS-08 (0.8.0 G4): what double-clicking a file in Files here does.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum FileDoubleClick {
+    /// Opens it in a terminal editor on the host (the owner's choice, 12 Nov 2026).
+    #[default]
+    TerminalEditor,
+    /// Edits it on this PC.
+    ThisPc,
+}
+
 /// SS-03 and QL-04/QL-05 settings, edited on the Settings page.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -219,6 +232,8 @@ pub struct TerminalSettings {
     /// QL-05: the UI asks before pasting text that holds a line break (each one presses Enter). On
     /// for settings saved before it.
     pub confirm_multiline_paste: bool,
+    /// SS-14 (G4): what double-clicking a file in Files here does; the terminal editor for settings saved before it.
+    pub file_double_click: FileDoubleClick,
 }
 
 impl Default for TerminalSettings {
@@ -237,6 +252,7 @@ impl Default for TerminalSettings {
             notify_quiet_secs: 30,
             prompt_hook: true,
             confirm_multiline_paste: true,
+            file_double_click: FileDoubleClick::TerminalEditor,
         }
     }
 }
@@ -315,8 +331,12 @@ impl TerminalSettings {
         } else {
             ", multi-line pastes without asking"
         };
+        let double_click = match self.file_double_click {
+            FileDoubleClick::TerminalEditor => "",
+            FileDoubleClick::ThisPc => ", double-clicked files edited on this PC",
+        };
         format!(
-            "{keepalive}, auto-reconnect {}, copy on select {}, font {} pt, {} lines of scrollback, reachability checks {} (every {} s), {notify}{hook}{paste}",
+            "{keepalive}, auto-reconnect {}, copy on select {}, font {} pt, {} lines of scrollback, reachability checks {} (every {} s), {notify}{hook}{paste}{double_click}",
             on(self.auto_reconnect),
             on(self.copy_on_select),
             self.font_size,
@@ -676,6 +696,11 @@ pub trait TerminalActions: Send + Sync {
     async fn file_op(&self, run: file_ops::FileOpRun<'_>, cancel: &CancellationToken) -> Result<String>;
     /// Opens the forward of a [`crate::command_bus::Command::OpenTunnel`]. Returns where it listens.
     async fn open_tunnel(&self, run: TunnelRun<'_>) -> Result<String>;
+    /// SS-14 (G4): opens the editor tab of a [`crate::command_bus::Command::EditorOpen`]. Returns its note.
+    async fn open_editor(&self, run: editor::EditorRun<'_>) -> Result<String>;
+    /// SS-08 (G4): runs the editing session of a [`crate::command_bus::Command::EditLocal`] until it ends (each save
+    /// uploaded and audited). Returns its note.
+    async fn edit_locally(&self, run: edit_local::EditRun<'_>, cancel: &CancellationToken) -> Result<String>;
 }
 
 /// A pane's connection, from [`Terminals::open`]. Input goes through [`Terminals`] by id.
@@ -734,6 +759,9 @@ struct Control {
     dirty: AtomicBool,
     /// SS-08: the live connection's files (SFTP), while connected.
     files: Mutex<Option<Arc<dyn RemoteFiles>>>,
+    /// SS-08 (G4): where the last connection went (the session's host, port and jump host as saved when it connected),
+    /// so an editing session on this PC saves only while the connection goes where its editing began.
+    place: Mutex<Option<crate::vault::Destination>>,
     /// SS-14: root browsing on the live connection, while it lasts.
     root: Mutex<Option<root_files::RootFiles>>,
     /// SS-14: transfers at a time on this terminal's connection ([`files::TRANSFERS_PER_HOST`]).
@@ -772,6 +800,10 @@ struct Control {
     clear_text_confirmed: std::sync::atomic::AtomicU64,
     /// BX-13: a PowerShell pane's console status (at its prompt or running), while connected.
     console: Mutex<Option<Arc<crate::adapters::winrm::console::ConsoleStatus>>>,
+    /// SS-14 (G4): an editor tab's one command, and sudoedit's answer as root.
+    editor: Option<editor::EditorLaunch>,
+    /// SS-14 (G4): the host's editors, once looked for (a saved session keeps them with its facts too).
+    editors: Mutex<Option<Vec<String>>>,
 }
 
 /// SS-12: what a new pane is for, with what that kind needs.
@@ -869,6 +901,10 @@ struct Inner {
     winrm_tuning: Mutex<WinrmTuning>,
     /// SS-14: folders no download lands in (Remotely's data and logs), as final paths.
     protected: Mutex<Vec<std::path::PathBuf>>,
+    /// SS-14 (G4): editor tabs the job runner opened, until the window takes them.
+    editor_tabs: Mutex<HashMap<Uuid, editor::Handoff>>,
+    /// SS-08 (G4): "Edit on this PC": the open editing sessions, the editor on this PC and the private folder.
+    edits: edit_local::Edits,
 }
 
 /// SS-12: the longest a serial pane waits for the port's last connection to let go of it (a write held up by flow
@@ -908,6 +944,8 @@ struct NewPane {
     container: Option<ContainerShell>,
     /// SS-12: SSH, Telnet, serial, or a tunnel tab.
     kind: PaneKindInfo,
+    /// SS-14 (G4): an editor tab's command.
+    editor: Option<editor::EditorLaunch>,
 }
 
 /// The open terminal panes. Cloning gives another handle to the same panes.
@@ -948,6 +986,8 @@ impl Terminals {
                 rules: OnceLock::new(),
                 alert_timing: Mutex::new(AlertTiming::default()),
                 protected: Mutex::new(Vec::new()),
+                editor_tabs: Mutex::default(),
+                edits: edit_local::Edits::default(),
                 launcher: std::sync::RwLock::new(launcher),
                 serial: std::sync::RwLock::new(serial),
                 serial_held: Mutex::default(),
@@ -1006,6 +1046,8 @@ impl Terminals {
         for control in open {
             locks::lock(&control.remembered).take();
             locks::lock(&control.jump_passwords).clear();
+            // SS-14 (G4): an editor tab forgets root browsing's password it has not given to sudoedit yet.
+            control.forget_sudo_answer();
             self.end_root(&control, root_files::RootEnd::VaultLocked);
         }
     }
@@ -1159,6 +1201,7 @@ impl Terminals {
             jump_passwords,
             container,
             kind: PaneKindInfo::ssh(),
+            editor: None,
         };
         let handle = self.start(ctx, pane, size).await?;
         // QL-02: Recent sessions. Not worth failing the terminal over.
@@ -1239,6 +1282,7 @@ impl Terminals {
             detail: format!("{address}, {auth}; not saved as a session"),
             container: None,
             kind: PaneKindInfo::ssh(),
+            editor: None,
         };
         let handle = self.start(ctx, pane, size).await?;
         self.inner
@@ -1277,6 +1321,11 @@ impl Terminals {
                         .into(),
                 ))
             }
+            PaneKind::Editor => {
+                return Err(CoreError::InvalidInput(
+                    "An editor tab runs one file, so it can't be split. Open the file again from Files here.".into(),
+                ))
+            }
         }
         match &control.source {
             Source::Saved(session_id) => {
@@ -1313,6 +1362,7 @@ impl Terminals {
                     detail: format!("{address}, {auth}; not saved as a session"),
                     container: None,
                     kind: PaneKindInfo::ssh(),
+                    editor: None,
                 };
                 self.start(ctx, pane, size).await
             }
@@ -1372,6 +1422,7 @@ impl Terminals {
             screen: Mutex::default(),
             dirty: AtomicBool::new(false),
             files: Mutex::default(),
+            place: Mutex::default(),
             root: Mutex::default(),
             slots: Arc::new(tokio::sync::Semaphore::new(files::TRANSFERS_PER_HOST)),
             folder: Mutex::default(),
@@ -1394,6 +1445,8 @@ impl Terminals {
             connection: std::sync::atomic::AtomicU64::new(0),
             clear_text_confirmed: std::sync::atomic::AtomicU64::new(0),
             console: Mutex::new(None),
+            editor: pane.editor,
+            editors: Mutex::default(),
         });
         audit(
             &self.inner.store,
@@ -2089,6 +2142,14 @@ impl TerminalActions for Terminals {
     async fn open_tunnel(&self, run: TunnelRun<'_>) -> Result<String> {
         Terminals::open_tunnel(self, run).await
     }
+
+    async fn open_editor(&self, run: editor::EditorRun<'_>) -> Result<String> {
+        self.run_open_editor(run).await
+    }
+
+    async fn edit_locally(&self, run: edit_local::EditRun<'_>, cancel: &CancellationToken) -> Result<String> {
+        self.run_edit(run, cancel).await
+    }
 }
 
 /// Where a `select!` timer waits when there is nothing to wait for.
@@ -2550,6 +2611,32 @@ impl Pane {
                     match self.pump(shell, typed).await {
                         Pump::Closed => break,
                         Pump::Reconnect => continue,
+                        // SS-14 (G4): an editor tab runs its file once.
+                        Pump::Ended(ShellEnd::Exited { status }) if self.control.kind == PaneKind::Editor => {
+                            self.say(notice(
+                                DIM,
+                                "The editor closed. Close this tab; open the file again from Files here",
+                            ))
+                            .await;
+                            self.status(TerminalStatus::Ended { exit_status: status }).await;
+                            self.wait_for_close().await
+                        }
+                        Pump::Ended(ShellEnd::Lost { reason }) if self.control.kind == PaneKind::Editor => {
+                            self.say(notice(
+                                YELLOW,
+                                &format!(
+                                    "Connection lost: {reason}. What the editor had not saved is gone; close this tab and \
+                                     open the file again from Files here"
+                                ),
+                            ))
+                            .await;
+                            self.status(TerminalStatus::Disconnected {
+                                code: "connection_lost".into(),
+                                message: reason,
+                            })
+                            .await;
+                            self.wait_for_close().await
+                        }
                         Pump::Ended(ShellEnd::Exited { status }) => {
                             let text = match status {
                                 Some(code) => format!("Session ended (exit status {code}). Press Enter to reconnect"),
@@ -2579,6 +2666,25 @@ impl Pane {
                             }
                         }
                     }
+                }
+                Err(err) if self.control.kind == PaneKind::Editor => {
+                    let message = err.to_string();
+                    last_error = Some(message.clone());
+                    if !matches!(err, CoreError::Cancelled) || !self.control.cancel.is_cancelled() {
+                        self.say(notice(
+                            RED,
+                            &format!(
+                                "Not connected: {message}. Close this tab and open the file again from Files here"
+                            ),
+                        ))
+                        .await;
+                    }
+                    self.status(TerminalStatus::Disconnected {
+                        code: err.code().to_owned(),
+                        message,
+                    })
+                    .await;
+                    self.wait_for_close().await
                 }
                 Err(err) => {
                     let message = err.to_string();
@@ -2643,6 +2749,8 @@ impl Pane {
             inner: Arc::clone(&self.inner),
         };
         tunnels::closed(&terminals, &self.ctx, &self.control).await;
+        // SS-08 (G4): so do its editing sessions on this PC.
+        terminals.end_edits_of(self.id);
         // Nothing typed outlives the terminal.
         locks::lock(&self.control.remembered).take();
         locks::lock(&self.control.jump_passwords).clear();
@@ -2749,6 +2857,8 @@ impl Pane {
         });
         let remote = Arc::clone(&self.inner.remote);
         let size = self.size;
+        // SS-14 (G4): an editor tab's channel runs its one command instead of a shell.
+        let command = self.control.editor.as_ref().map(|e| e.command.clone());
         let mut prompter = PanePrompter {
             input: &mut self.input,
             output: &self.output,
@@ -2767,12 +2877,19 @@ impl Pane {
                     size,
                     options: &options,
                     verifier,
+                    command: command.as_deref(),
                 },
                 &mut prompter,
             )
             .await;
         *locks::lock(&self.control.hop) = None;
         let shell = shell?;
+        // SS-08 (G4): where this connection goes (its files take the place of the last connection's in the pump).
+        *locks::lock(&self.control.place) = Some(Destination::new(
+            &spec.host,
+            spec.port,
+            spec.jump.as_ref().map(|j| j.id),
+        ));
         if self.size != size {
             let _ = shell
                 .input
@@ -2786,6 +2903,8 @@ impl Pane {
         // the user opens, and after an automatic reconnect only when the session asks for it. CT-01: a
         // container's shell instead, in a pane opened for one (what the pane is for).
         let startup = match &self.control.container {
+            // SS-14 (G4): an editor tab types nothing.
+            _ if self.control.editor.is_some() => Vec::new(),
             Some(shell) => vec![shell.command.clone()],
             None if automatic && !spec.startup_on_reconnect && spec.startup_command.is_some() => {
                 self.say(notice(
@@ -2802,9 +2921,10 @@ impl Pane {
                 .unwrap_or_default(),
         };
         // SS-08: the session's choice, else Settings, and off for Prod unless the session turns it on.
-        let hook = spec
-            .prompt_hook
-            .unwrap_or(self.settings.prompt_hook && spec.environment != Environment::Prod);
+        let hook = self.control.editor.is_none()
+            && spec
+                .prompt_hook
+                .unwrap_or(self.settings.prompt_hook && spec.environment != Environment::Prod);
         if let Some(ip) = shell.peer_ip {
             self.learn(|facts| facts.learn_ip(ip, FactSource::Host)).await;
         }
@@ -3235,9 +3355,12 @@ impl Pane {
                 control: Arc::clone(&self.control),
             })
         });
-        if let (Some(exec), Some(session_id), Some(collector)) =
-            (&commands, self.control.session_id(), self.inner.specs.get())
-        {
+        if let (Some(exec), Some(session_id), Some(collector), false) = (
+            &commands,
+            self.control.session_id(),
+            self.inner.specs.get(),
+            self.control.kind == PaneKind::Editor,
+        ) {
             collector.on_terminal(self.ctx, session_id, Arc::clone(exec));
         }
         *locks::lock(&self.control.commands) = commands;
@@ -3352,6 +3475,13 @@ impl Pane {
         let mut hostname_pending = true;
         let mut shell_pending = true;
         let cancel = self.control.cancel.clone();
+        // SS-14 (G4): sudoedit's prompt in an editor tab as root.
+        let mut sudo = self
+            .control
+            .editor
+            .as_ref()
+            .and_then(|e| e.sudo.as_ref())
+            .map(|a| editor::SudoWatch::new(&a.marker));
         loop {
             if !self.type_startup(&mut live).await {
                 let _ = live.input.send(ShellInput::Close).await;
@@ -3546,6 +3676,8 @@ impl Pane {
                         Some(TerminalInput::Break) => {
                             let _ = live.input.send(ShellInput::Break).await;
                         }
+                        // SS-14 (G4): an editor tab runs its file once.
+                        Some(TerminalInput::Reconnect) if self.control.kind == PaneKind::Editor => {}
                         Some(TerminalInput::Reconnect) => {
                             let _ = live.input.send(ShellInput::Close).await;
                             self.say(notice(DIM, "Reconnecting")).await;
@@ -3555,6 +3687,13 @@ impl Pane {
                 }
                 out = shell_output.recv() => match out {
                     Some(ShellOutput::Data(bytes)) => {
+                        let bytes = match (sudo.as_mut(), self.control.editor.as_ref()) {
+                            (Some(watch), Some(launch)) => match self.sudo_output(watch, launch, bytes, &mut live).await {
+                                Some(bytes) => bytes,
+                                None => return Pump::Ended(ShellEnd::Exited { status: None }),
+                            },
+                            _ => bytes,
+                        };
                         // SS-08: the hook's own echo stays hidden.
                         let shown = live.hook.output(&bytes, Instant::now());
                         if !self.pass(shown, &mut live).await {
@@ -3566,6 +3705,46 @@ impl Pane {
                     Some(ShellOutput::Closed(end)) => return Pump::Ended(end),
                     None => return Pump::Ended(ShellEnd::Lost { reason: "the connection was lost".into() }),
                 },
+            }
+        }
+    }
+
+    /// SS-14 (G4): an editor tab's output while sudoedit may ask: what to show, or `None` once sudo refused the
+    /// password (the channel is closed, the password parks and root browsing ends).
+    async fn sudo_output(
+        &self,
+        watch: &mut editor::SudoWatch,
+        launch: &editor::EditorLaunch,
+        bytes: Vec<u8>,
+        live: &mut Live,
+    ) -> Option<Vec<u8>> {
+        let Some(answer) = launch.sudo.as_ref() else {
+            return Some(bytes);
+        };
+        let (shown, step) = watch.output(&bytes, answer);
+        match step {
+            editor::SudoStep::Nothing => Some(shown),
+            editor::SudoStep::Answer(password) => {
+                // Scrubbed from saved output and logs, like a typed vault password.
+                locks::lock(&self.control.typed).push(password.clone());
+                let mut line = Zeroizing::new(password.expose().as_bytes().to_vec());
+                line.push(b'\r');
+                let _ = live.input.send(ShellInput::Secret(line.to_vec())).await;
+                Some(shown)
+            }
+            editor::SudoStep::Refused => {
+                let _ = live.input.send(ShellInput::Close).await;
+                self.say(notice(
+                    RED,
+                    "sudo refused the password root browsing gave it, so nothing was opened. Root browsing ended: \
+                     browse as root again once the password is right",
+                ))
+                .await;
+                Terminals {
+                    inner: Arc::clone(&self.inner),
+                }
+                .editor_sudo_refused(launch.source, watch.given());
+                None
             }
         }
     }
@@ -3684,6 +3863,15 @@ impl Pane {
         .await
         {
             tracing::error!(error = %err, "could not audit the folder prompt hook");
+        }
+    }
+
+    /// SS-14 (G4): an editor tab waits to be closed; Enter and Reconnect don't run its command again.
+    async fn wait_for_close(&mut self) -> Wait {
+        loop {
+            if self.wait_for_user().await == Wait::Close {
+                return Wait::Close;
+            }
         }
     }
 

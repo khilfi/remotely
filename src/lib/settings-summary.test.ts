@@ -19,20 +19,22 @@ const settings = {
   dockerPathInUse: null,
   vncViewerPathSaved: null,
   vncViewerPathInUse: "C:\\Program Files\\TigerVNC\\vncviewer.exe",
+  localEditorPathSaved: null,
+  localEditorPathInUse: null,
 } as unknown as Settings;
 
 test("the tools table has one row per tool, the editable ones and vdiskmanager beside vmrun", () => {
   const rows = toolRows(settings, "C:\\Program Files\\VMware\\VMware Workstation\\vmware-vdiskmanager.exe");
   assert.deepEqual(
     rows.map((r) => r.id),
-    ["vmrun", "vdiskmanager", "ovftool", "vboxmanage", "qemuImg", "docker", "vncViewer"],
+    ["vmrun", "vdiskmanager", "ovftool", "vboxmanage", "qemuImg", "docker", "vncViewer", "localEditor"],
   );
   assert.equal(rows.find((r) => r.id === "vdiskmanager")?.editable, false);
   assert.ok(rows.filter((r) => r.id !== "vdiskmanager").every((r) => r.editable));
   // Links to the old cards open their rows.
   assert.deepEqual(
     rows.filter((r) => r.section).map((r) => r.section),
-    ["vmware", "virtualbox", "qemu-img", "docker", "vnc-viewer"],
+    ["vmware", "virtualbox", "qemu-img", "docker", "vnc-viewer", "local-editor"],
   );
 });
 
@@ -43,6 +45,8 @@ test("each tool's status is a few words", () => {
   assert.equal(status("vboxmanage"), "Found · path set here");
   assert.equal(status("qemuImg"), "Not at the path set here");
   assert.equal(status("docker"), "Not installed");
+  // SS-08 (G4): no editor on this PC.
+  assert.equal(status("localEditor"), "None found: files can't be edited on this PC");
   assert.equal(status("ovftool"), "Not found");
   assert.equal(status("vdiskmanager"), "Not found");
   assert.equal(status("vncViewer"), "Found");

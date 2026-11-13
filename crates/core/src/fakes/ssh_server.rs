@@ -178,6 +178,9 @@ struct State {
     host: Mutex<Option<HostFixture>>,
     /// R9: new connections are closed at once, as when sshd is down or the network is gone.
     refusing: AtomicBool,
+    /// SS-14 (G4): the terminal editors the host has, for `command -v` (Remotely's editor probe) and the fake editors an
+    /// exec with a PTY starts.
+    host_editors: Mutex<Vec<String>>,
 }
 
 struct Link {
@@ -483,6 +486,15 @@ impl TestSshServer {
         self
     }
 
+    /// SS-14 (G4): the terminal editors the host has (`nano`, `vi`...). Remotely's probe finds them, and an exec with a
+    /// PTY that runs one starts a fake editor: it shows `fake <editor>: <path>` and the file, notes `editor <editor>
+    /// <path> in <folder> as <user>` in the log, and quits on Ctrl+X or `q`. `sudoedit` asks for the toy sudo's
+    /// password on the PTY with its `-p` prompt first (three tries), then edits as root.
+    pub fn with_host_editors(self, editors: &[&str]) -> Self {
+        *locks::lock(&self.state.host_editors) = editors.iter().map(|e| (*e).to_owned()).collect();
+        self
+    }
+
     pub fn with_sudo(self, mode: SudoMode) -> Self {
         *locks::lock(&self.state.sudo) = mode;
         self
@@ -513,6 +525,11 @@ impl TestSshServer {
 
     /// R9: closes new connections at once (or, with `false`, takes them again), like a host whose
     /// network went away and came back. Open connections are left as they are.
+    /// SS-14 (G4): sudo changes on a running server (its password changed after root browsing started).
+    pub fn set_sudo(&self, mode: SudoMode) {
+        *locks::lock(&self.state.sudo) = mode;
+    }
+
     pub fn set_refusing(&self, on: bool) {
         self.state.refusing.store(on, Ordering::SeqCst);
     }
@@ -597,6 +614,8 @@ async fn accept_loop(listener: TcpListener, state: Arc<State>) {
             hooked: HashSet::new(),
             switched: HashMap::new(),
             in_container: HashMap::new(),
+            ptys: HashSet::new(),
+            editing: HashMap::new(),
         };
         let session = {
             let state = Arc::clone(&state);
@@ -787,6 +806,10 @@ struct ServerHandler {
     switched: HashMap<ChannelId, Vec<(String, String)>>,
     /// CT-01: shells that went into a container (`exec docker exec -it`), with its short id.
     in_container: HashMap<ChannelId, String>,
+    /// SS-14 (G4): channels that asked for a PTY: an exec on one runs at once, interactively.
+    ptys: HashSet<ChannelId>,
+    /// SS-14 (G4): channels running a fake editor, and where their keys go.
+    editing: HashMap<ChannelId, tokio::sync::mpsc::UnboundedSender<Vec<u8>>>,
 }
 
 impl ServerHandler {
@@ -1223,6 +1246,7 @@ impl server::Handler for ServerHandler {
         session: &mut Session,
     ) -> Result<(), Self::Error> {
         self.unclaimed.remove(&channel);
+        self.ptys.insert(channel);
         self.state.note(format!("pty {term} {cols}x{rows}"));
         session.channel_success(channel)
     }
@@ -1276,6 +1300,39 @@ impl server::Handler for ServerHandler {
             }
         }
         self.unclaimed.remove(&channel);
+        // SS-14 (G4): an exec with a PTY (an editor tab) runs at once and reads its keys as they come.
+        if self.ptys.remove(&channel) {
+            session.channel_success(channel)?;
+            let mut shell = ToyShell::new(&self.state, &self.user, Vec::new());
+            let status = shell.run(&command);
+            let handle = session.handle();
+            match shell.launched.take() {
+                Some(launch) => {
+                    let (keys_tx, keys) = tokio::sync::mpsc::unbounded_channel();
+                    self.editing.insert(channel, keys_tx);
+                    let editor = FakeEditor {
+                        state: Arc::clone(&self.state),
+                        user: self.user.clone(),
+                        handle,
+                        channel,
+                        launch,
+                    };
+                    tokio::spawn(editor.run(keys));
+                }
+                None => {
+                    let (stdout, stderr) = (shell.stdout, shell.stderr);
+                    tokio::spawn(async move {
+                        let mut out = stdout;
+                        out.extend_from_slice(&stderr);
+                        let _ = handle.data(channel, out).await;
+                        let _ = handle.exit_status_request(channel, status).await;
+                        let _ = handle.eof(channel).await;
+                        let _ = handle.close(channel).await;
+                    });
+                }
+            }
+            return Ok(());
+        }
         self.execs.insert(channel, (command, Vec::new()));
         session.channel_success(channel)
     }
@@ -1295,6 +1352,14 @@ impl server::Handler for ServerHandler {
                 let status = match login {
                     Some(name) if command == crate::adapters::remote::SHELL_PROBE => {
                         shell.print(&format!("{name}\n"));
+                        0
+                    }
+                    // SS-14 (G4): which terminal editors the host has.
+                    _ if command == crate::terminal::editor::EDITOR_PROBE => {
+                        for editor in locks::lock(&state.host_editors).clone() {
+                            shell.print(&format!("{editor}\n"));
+                        }
+                        state.note("editor probe");
                         0
                     }
                     // SS-14: root browsing's probe for the host's sftp-server.
@@ -1441,6 +1506,10 @@ impl server::Handler for ServerHandler {
 
     async fn channel_close(&mut self, channel: ChannelId, _: &mut Session) -> Result<(), Self::Error> {
         self.unclaimed.remove(&channel);
+        self.ptys.remove(&channel);
+        if self.editing.remove(&channel).is_some() {
+            self.state.note("editor channel closed");
+        }
         self.sftp.remove(&channel);
         self.forwarded.remove(&channel);
         self.folders.remove(&channel);
@@ -1452,6 +1521,11 @@ impl server::Handler for ServerHandler {
     async fn data(&mut self, channel: ChannelId, data: &[u8], session: &mut Session) -> Result<(), Self::Error> {
         // SS-08: SFTP reads its own channel; SS-07: so does a forwarded connection's relay.
         if self.sftp.contains(&channel) || self.forwarded.contains(&channel) {
+            return Ok(());
+        }
+        // SS-14 (G4): keys for a fake editor (or sudoedit's prompt before it).
+        if let Some(keys) = self.editing.get(&channel) {
+            let _ = keys.send(data.to_vec());
             return Ok(());
         }
         if let Some((_, stdin)) = self.execs.get_mut(&channel) {
@@ -1542,6 +1616,112 @@ impl ServerHandler {
             channel,
             format!("Sorry, try again.\r\n[sudo] password for {}: ", self.user).into_bytes(),
         )
+    }
+}
+
+/// SS-14 (G4): an editor an exec with a PTY started: sudoedit's prompt first (as root), then a screen with the file,
+/// until Ctrl+X or `q`.
+struct FakeEditor {
+    state: Arc<State>,
+    user: String,
+    handle: russh::server::Handle,
+    channel: ChannelId,
+    launch: EditorLaunch,
+}
+
+impl FakeEditor {
+    async fn send(&self, text: &[u8]) {
+        let _ = self.handle.data(self.channel, text.to_vec()).await;
+    }
+
+    async fn end(&self, status: u32) {
+        let _ = self.handle.exit_status_request(self.channel, status).await;
+        let _ = self.handle.eof(self.channel).await;
+        let _ = self.handle.close(self.channel).await;
+    }
+
+    /// One line typed at the PTY (not echoed, as sudo reads it); `None` when the channel went.
+    async fn line(keys: &mut tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>) -> Option<String> {
+        let mut typed = Vec::new();
+        loop {
+            for byte in keys.recv().await? {
+                if byte == b'\r' || byte == b'\n' {
+                    return Some(String::from_utf8_lossy(&typed).into_owned());
+                }
+                typed.push(byte);
+            }
+        }
+    }
+
+    async fn run(self, mut keys: tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>) {
+        let mut as_user = self.user.clone();
+        let mut editor = self.launch.program.clone();
+        let path = self.launch.args.last().cloned().unwrap_or_default();
+        if self.launch.program == "sudoedit" {
+            let mut prompt = format!("[sudo] password for {}: ", self.user);
+            let mut args = self.launch.args.iter();
+            while let Some(arg) = args.next() {
+                if arg == "-p" {
+                    prompt = args.next().cloned().unwrap_or_default();
+                }
+            }
+            editor = self.launch.sudo_editor.clone().unwrap_or_else(|| "vi".into());
+            let mode = locks::lock(&self.state.sudo).clone();
+            match mode {
+                SudoMode::Missing => {
+                    self.send(b"sh: 1: exec: sudoedit: not found\r\n").await;
+                    return self.end(127).await;
+                }
+                SudoMode::NoPassword => {}
+                SudoMode::Password(password) | SudoMode::EchoesPassword(password) => {
+                    let mut right = false;
+                    for tries_left in (0..3).rev() {
+                        self.send(prompt.as_bytes()).await;
+                        let Some(typed) = Self::line(&mut keys).await else {
+                            self.state.note("sudoedit channel went at the prompt");
+                            return;
+                        };
+                        self.send(b"\r\n").await;
+                        if typed == password {
+                            right = true;
+                            break;
+                        }
+                        self.state.note(format!("sudo {} refused", self.user));
+                        if tries_left > 0 {
+                            self.send(b"Sorry, try again.\r\n").await;
+                        }
+                    }
+                    if !right {
+                        self.send(b"sudo: 3 incorrect password attempts\r\n").await;
+                        return self.end(1).await;
+                    }
+                    self.state.note(format!("sudo {} ok", self.user));
+                }
+            }
+            as_user = "root".into();
+        }
+        let cwd = self.launch.cwd.clone().unwrap_or_else(|| "~".into());
+        self.state.note(format!("editor {editor} {path} in {cwd} as {as_user}"));
+        let root = locks::lock(&self.state.sftp_root).clone();
+        let text = root
+            .and_then(|root| std::fs::read(sftp::local(&root, &path)).ok())
+            .unwrap_or_default();
+        let mut screen = format!("\x1b[?1049hfake {editor}: {path}\r\n").into_bytes();
+        screen.extend_from_slice(&text);
+        self.send(&screen).await;
+        let mut typed = Vec::new();
+        'keys: while let Some(bytes) = keys.recv().await {
+            for byte in bytes {
+                if byte == 0x18 || byte == b'q' {
+                    break 'keys;
+                }
+                typed.push(byte);
+            }
+        }
+        self.state
+            .note(format!("{editor} keys {:?}", String::from_utf8_lossy(&typed)));
+        self.send(b"\x1b[?1049l").await;
+        self.end(0).await;
     }
 }
 
@@ -1789,6 +1969,19 @@ struct ToyShell<'a> {
     last_status: u32,
     /// SS-14: variables set by `NAME=value` on its own.
     vars: HashMap<String, String>,
+    /// SS-14 (G4): the folder `cd` went to.
+    cwd: Option<String>,
+    /// SS-14 (G4): an editor (or sudoedit) that `exec` started, for an exec with a PTY to run.
+    launched: Option<EditorLaunch>,
+}
+
+/// SS-14 (G4): what `exec <editor> <path>` or `exec sudoedit ... <path>` asked for.
+#[derive(Debug, Clone)]
+struct EditorLaunch {
+    program: String,
+    args: Vec<String>,
+    cwd: Option<String>,
+    sudo_editor: Option<String>,
 }
 
 impl<'a> ToyShell<'a> {
@@ -1804,6 +1997,8 @@ impl<'a> ToyShell<'a> {
             umask: 0o022,
             last_status: 0,
             vars: HashMap::new(),
+            cwd: None,
+            launched: None,
         }
     }
 
@@ -2160,10 +2355,33 @@ impl<'a> ToyShell<'a> {
                 self.exited = true;
                 args.first().and_then(|c| c.parse().ok()).unwrap_or(0)
             }
-            "true" | "cd" => 0,
+            "true" => 0,
+            // SS-14 (G4): an editor tab starts at its file's folder.
+            "cd" => {
+                if let Some(dir) = args.iter().find(|a| *a != "--") {
+                    self.cwd = Some(dir.clone());
+                }
+                0
+            }
+            "export" => 0,
             "false" => 1,
             "exec" if args.iter().any(|a| a == "</dev/null") => {
                 self.stdin.clear();
+                0
+            }
+            // SS-14 (G4): `exec nano <path>`, `exec sudoedit -p <marker> -- <path>`: an editor for the PTY to run.
+            "exec"
+                if args.first().is_some_and(|program| {
+                    program == "sudoedit" || locks::lock(&self.state.host_editors).iter().any(|e| e == program)
+                }) =>
+            {
+                self.launched = Some(EditorLaunch {
+                    program: args[0].clone(),
+                    args: args[1..].to_vec(),
+                    cwd: self.cwd.clone(),
+                    sudo_editor: self.vars.get("SUDO_EDITOR").cloned(),
+                });
+                self.exited = true;
                 0
             }
             // SS-14: `exec cp ...`: the command, then the shell ends.
