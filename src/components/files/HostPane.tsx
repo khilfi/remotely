@@ -136,7 +136,8 @@ interface Props {
   onDownloads: (start: DownloadStart, asRoot: boolean) => void;
   /** The folder shown and whether it is root's, for uploads from the local pane and drops. */
   onFolder: (key: string, folder: string | null, asRoot: boolean) => void;
-  onDragStart: (items: DragItems, event: React.PointerEvent) => void;
+  onDragStart: (items: DragItems, at: { clientX: number; clientY: number }) => void;
+  onDragEnd: (x: number, y: number) => void;
   onShowTerminal: (terminalId: string) => void;
   onCloseTab: (key: string) => void;
 }
@@ -158,6 +159,7 @@ export function HostPane({
   onDownloads,
   onFolder,
   onDragStart,
+  onDragEnd,
   onShowTerminal,
   onCloseTab,
 }: Props) {
@@ -763,6 +765,7 @@ export function HostPane({
                   ev,
                 )
               }
+              onDragEnd={onDragEnd}
               empty="This folder is empty."
               loading={loading}
               menu={(e) => actions([e], menuItem)}

@@ -357,15 +357,15 @@ export function FilesPage({ active, request, onSubmitted, onOpenTerminal, onShow
     };
   }
 
-  const dropRef = useRef<(x: number, y: number) => void>(() => undefined);
+  /** What is dragged now, for the drop (which may come before the next render). */
+  const dragged = useRef<DragItems | null>(null);
+  const dropRef = useRef<(items: DragItems, x: number, y: number) => void>(() => undefined);
   useEffect(() => {
-    dropRef.current = (x, y) => {
-      if (!drag) return;
+    dropRef.current = (items, x, y) => {
       const target = targetAt(x, y);
       if (!target) return;
-      const action = dropAction(drag.items, target);
+      const action = dropAction(items, target);
       if (!action) return;
-      const items = drag.items;
       if (action.kind === "upload" && items.from === "local" && target.pane === "host") {
         void uploadLocal(target.terminalId, items.listing, items.names, action.folder, target.asRoot);
       } else if (action.kind === "download" && items.from === "host") {
@@ -379,29 +379,39 @@ export function FilesPage({ active, request, onSubmitted, onOpenTerminal, onShow
     };
   });
 
+  // While a drag goes on, its label follows the pointer; Esc drops nothing.
+  const dragging = drag !== null;
   useEffect(() => {
-    if (!drag) return;
+    if (!dragging) return;
     const move = (e: PointerEvent) => setDrag((d) => (d ? { ...d, x: e.clientX, y: e.clientY } : d));
-    const up = (e: PointerEvent) => {
-      dropRef.current(e.clientX, e.clientY);
+    const key = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      dragged.current = null;
       setDrag(null);
     };
-    const key = (e: KeyboardEvent) => e.key === "Escape" && setDrag(null);
     window.addEventListener("pointermove", move);
-    window.addEventListener("pointerup", up, { once: true });
     window.addEventListener("keydown", key);
     return () => {
       window.removeEventListener("pointermove", move);
-      window.removeEventListener("pointerup", up);
       window.removeEventListener("keydown", key);
     };
-    // Only a drag starting or ending adds or takes the listeners away.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [drag !== null]);
+  }, [dragging]);
 
   const startDrag = useCallback(
-    (items: DragItems, event: React.PointerEvent) => {
+    (items: DragItems, event: { clientX: number; clientY: number }) => {
+      dragged.current = items;
       setDrag({ items, x: event.clientX, y: event.clientY });
+    },
+    [setDrag],
+  );
+
+  /** The row a drag started on was let go here: the drop, unless Esc ended the drag. */
+  const endDrag = useCallback(
+    (x: number, y: number) => {
+      const items = dragged.current;
+      dragged.current = null;
+      setDrag(null);
+      if (items) dropRef.current(items, x, y);
     },
     [setDrag],
   );
@@ -529,6 +539,7 @@ export function FilesPage({ active, request, onSubmitted, onOpenTerminal, onShow
           onListing={setLocal}
           onPicked={setLocalPicked}
           onDragStart={startDrag}
+          onDragEnd={endDrag}
           refresh={downloads}
         />
         <div className="flex min-h-0 min-w-0 flex-1 flex-col">
@@ -543,6 +554,7 @@ export function FilesPage({ active, request, onSubmitted, onOpenTerminal, onShow
                 onDownloads={(start) => queued(start)}
                 onFolder={onFolder}
                 onDragStart={startDrag}
+                onDragEnd={endDrag}
                 onShowTerminal={onShowTerminal}
                 onCloseTab={closeTab}
               />

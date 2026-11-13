@@ -93,7 +93,7 @@ The key feature is grouped output: identical results collapse into one group, so
 | BX-07 | Run with sudo using the password from the vault; never echo or log it | MVP |
 | BX-08 | Snippet and runbook library with variables (`{{host}}`, values asked at run time) and versions per OS | v2 |
 | BX-09 | Rolling runs: one test host first, set batch size, stop when failures exceed a set percentage | v2 |
-| BX-10 | Bulk file upload and download with checksum check | v2 |
+| BX-10 | Bulk file upload and download with checksum check: push files to many hosts (Medium, High from the bulk threshold for commands on hosts, 5), or fetch the same file from each (Low, a Prod host Medium), each copy's SHA-256 checked and the hosts grouped like Compare hosts (0.8.0, the Files page) | v2 |
 | BX-11 | Scheduled and recurring jobs | v2 |
 | BX-12 | Export the selection as an Ansible inventory file (0.7.0): YAML or INI from BX-01's targets, grouped by folder, tag, environment and workspace, with each host's address, port, user and jump hosts (ProxyJump); never a secret; playbooks run outside the app | 0.7.0 |
 | BX-13 | Windows in bulk (0.7.0): Compare hosts and Type in all tabs on WinRM hosts and PowerShell tabs, and support bundles from Windows hosts, rated by editable PowerShell rules (read-only commands Low, dangerous ones High, anything else, or anything the parser can't read, Medium); a selection with SSH and WinRM hosts rates each host by its own rules | 0.7.0 |
@@ -258,6 +258,9 @@ Files on hosts (0.8.0, SS-14, `docs/plan-0.8.md` "Approval tiers"). Every change
 | Delete a file, a link or an empty folder | Medium; never below Medium |
 | Delete a folder with what is in it (never `/` or a top-level folder; `rm -rf --one-file-system` on the host, rated by this tier) | High; never below Medium |
 | Any of these as root (sudo) | One tier higher |
+| Find files, preview a file, a file's SHA-256, compare a folder of this PC with the host's (0.8.0 G3, the Files page) | Reads: no tier, not audited |
+| Sync a folder to the host: its uploads and replacements as above, in one job; deleting on the host what this PC's folder doesn't have, only when chosen | Its biggest change counts; deleting there is High, never below Medium. A sync to this PC is downloads, and deletes nothing here |
+| Edit the Files page's bookmarks (per session) | No tier; audited (`file_bookmark_changed`), refused by the read-only lock |
 | Start or stop root browsing | No tier; audited (`files_root_started`, `files_root_stopped` with why it ended: stopped, the vault locked, the connection ended, sudo refused; `files_root_refused`); a vault password new to the host asks for the vault password (AP-06); its transfers are cancelled when it ends |
 
 | ID | Requirement | Phase |

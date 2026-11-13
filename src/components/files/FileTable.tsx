@@ -27,7 +27,9 @@ interface Props<T extends PaneEntry> {
   /** The "⋯" menu's items for a row. */
   menu: (entry: T) => ReactNode;
   /** A drag of these names began (the pointer moved with the button down). */
-  onDragStart?: (names: string[], event: ReactPointerEvent) => void;
+  onDragStart?: (names: string[], at: { clientX: number; clientY: number }) => void;
+  /** The drag ended there (the row keeps the pointer while it drags, so this comes wherever it is let go). */
+  onDragEnd?: (x: number, y: number) => void;
   /** Folder rows carry `data-files-folder` with this path, so a drop can go into them. */
   folderPath?: (entry: T) => string | null;
   /** A row's title (what double-click does). */
@@ -51,6 +53,7 @@ export function FileTable<T extends PaneEntry>({
   onOpen,
   menu,
   onDragStart,
+  onDragEnd,
   folderPath,
   rowTitle,
   isDrive,
@@ -67,23 +70,39 @@ export function FileTable<T extends PaneEntry>({
   function down(e: ReactPointerEvent, entry: T) {
     if (e.button !== 0) return;
     press.current = { x: e.clientX, y: e.clientY, name: entry.name, started: false };
-  }
-
-  function move(e: ReactPointerEvent) {
-    const p = press.current;
-    if (!p || p.started || !onDragStart) return;
-    if (Math.hypot(e.clientX - p.x, e.clientY - p.y) < DRAG_START_PX) return;
-    p.started = true;
-    // Dragging a row that isn't picked drags that row alone.
-    const dragged = picked.includes(p.name) ? picked : [p.name];
-    if (!picked.includes(p.name)) onPick([p.name], p.name);
-    onDragStart(dragged, e);
+    if (!onDragStart) return;
+    // The window follows the pointer until it is let go, wherever it goes: a quick drag leaves the row at once.
+    const startDrag = onDragStart;
+    const move = (ev: PointerEvent) => {
+      const p = press.current;
+      if (!p || p.started) return;
+      if (Math.hypot(ev.clientX - p.x, ev.clientY - p.y) < DRAG_START_PX) return;
+      p.started = true;
+      // While it drags, the pointer selects no text on the page.
+      document.body.classList.add("select-none");
+      window.getSelection()?.removeAllRanges();
+      // Dragging a row that isn't picked drags that row alone.
+      const dragged = picked.includes(p.name) ? picked : [p.name];
+      if (!picked.includes(p.name)) onPick([p.name], p.name);
+      startDrag(dragged, ev);
+    };
+    const up = (ev: PointerEvent) => {
+      window.removeEventListener("pointermove", move);
+      const p = press.current;
+      if (!p?.started) return;
+      press.current = null;
+      document.body.classList.remove("select-none");
+      onDragEnd?.(ev.clientX, ev.clientY);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up, { once: true });
   }
 
   function up(e: ReactPointerEvent, entry: T) {
     const p = press.current;
-    press.current = null;
+    // A drag ends in the window's own listener, wherever it is let go.
     if (p?.started) return;
+    press.current = null;
     if (e.button !== 0) return;
     const next = clickPick(names, picked, anchor, entry.name, { ctrl: e.ctrlKey || e.metaKey, shift: e.shiftKey });
     onPick(next.picked, next.anchor);
@@ -148,7 +167,6 @@ export function FileTable<T extends PaneEntry>({
                 data-files-folder={folder ?? undefined}
                 tabIndex={0}
                 onPointerDown={(ev) => down(ev, e)}
-                onPointerMove={move}
                 onPointerUp={(ev) => up(ev, e)}
                 onDoubleClick={() => onOpen(e)}
                 onKeyDown={(ev) => {

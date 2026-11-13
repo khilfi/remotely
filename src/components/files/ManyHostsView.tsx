@@ -125,136 +125,138 @@ export function ManyHostsView({ active, local, localPicked, onSubmitted, onOpenS
   }
 
   return (
-    <div className="grid min-h-0 flex-1 gap-4 overflow-auto lg:grid-cols-[minmax(0,1fr)_minmax(0,1.2fr)]">
-      <div className="grid content-start gap-4">
-        <BulkTargetPicker
-          active={active}
-          picks={picks}
-          onPicksChange={setPicks}
-          resolved={resolved}
-          onOpenSessions={onOpenSessions}
-        />
-      </div>
-      <div className="grid content-start gap-4">
-        <div className="flex items-center gap-1">
-          <h2 className="text-sm font-medium">What to do on {plural(hosts, "host")}</h2>
-          <HelpTip topic="files.manyHosts" />
+    <div className="@container min-h-0 flex-1 overflow-auto">
+      <div className="grid gap-4 @4xl:grid-cols-[minmax(0,1fr)_minmax(0,1.2fr)]">
+        <div className="grid content-start gap-4">
+          <BulkTargetPicker
+            active={active}
+            picks={picks}
+            onPicksChange={setPicks}
+            resolved={resolved}
+            onOpenSessions={onOpenSessions}
+          />
         </div>
-        <RadioGroup value={mode} onValueChange={(v) => setMode(v as Mode)} className="flex flex-wrap gap-4">
-          <div className="flex items-center gap-2">
-            <RadioGroupItem id="many-push" value="push" />
-            <Label htmlFor="many-push" className="font-normal">
-              Push files to each
-            </Label>
+        <div className="grid content-start gap-4">
+          <div className="flex items-center gap-1">
+            <h2 className="text-sm font-medium">What to do on {plural(hosts, "host")}</h2>
+            <HelpTip topic="files.manyHosts" />
           </div>
-          <div className="flex items-center gap-2">
-            <RadioGroupItem id="many-fetch" value="fetch" />
-            <Label htmlFor="many-fetch" className="font-normal">
-              Fetch a file from each
-            </Label>
-          </div>
-        </RadioGroup>
-        {mode === "push" ? (
-          <div className="grid gap-3">
-            <div className="flex flex-wrap items-center gap-2">
-              <Button variant="outline" size="sm" onClick={() => void choose()}>
-                <FileUpIcon data-icon="inline-start" />
-                Choose files…
-              </Button>
-              <span className="text-xs text-muted-foreground">
-                {staged
-                  ? `${plural(staged.files.length, "file")} chosen`
-                  : localFiles.length > 0
-                    ? `${plural(localFiles.length, "file")} picked on this PC's side`
-                    : "or pick files on this PC's side"}
-              </span>
-              {staged && (
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => {
-                    void api.filesUnstage(staged.id).catch(() => undefined);
-                    setStaged(null);
-                  }}
-                >
-                  Clear
-                </Button>
-              )}
+          <RadioGroup value={mode} onValueChange={(v) => setMode(v as Mode)} className="flex flex-wrap gap-4">
+            <div className="flex items-center gap-2">
+              <RadioGroupItem id="many-push" value="push" />
+              <Label htmlFor="many-push" className="font-normal">
+                Push files to each
+              </Label>
             </div>
+            <div className="flex items-center gap-2">
+              <RadioGroupItem id="many-fetch" value="fetch" />
+              <Label htmlFor="many-fetch" className="font-normal">
+                Fetch a file from each
+              </Label>
+            </div>
+          </RadioGroup>
+          {mode === "push" ? (
+            <div className="grid gap-3">
+              <div className="flex flex-wrap items-center gap-2">
+                <Button variant="outline" size="sm" onClick={() => void choose()}>
+                  <FileUpIcon data-icon="inline-start" />
+                  Choose files…
+                </Button>
+                <span className="text-xs text-muted-foreground">
+                  {staged
+                    ? `${plural(staged.files.length, "file")} chosen`
+                    : localFiles.length > 0
+                      ? `${plural(localFiles.length, "file")} picked on this PC's side`
+                      : "or pick files on this PC's side"}
+                </span>
+                {staged && (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => {
+                      void api.filesUnstage(staged.id).catch(() => undefined);
+                      setStaged(null);
+                    }}
+                  >
+                    Clear
+                  </Button>
+                )}
+              </div>
+              <div className="grid gap-1.5">
+                <Label htmlFor="many-folder">Into this folder on each host</Label>
+                <Input
+                  id="many-folder"
+                  className="font-mono"
+                  placeholder="/etc/app"
+                  value={folder}
+                  onChange={(e) => setFolder(e.target.value)}
+                  spellCheck={false}
+                />
+              </div>
+              <div className="flex items-center gap-2">
+                <Checkbox id="many-replace" checked={replace} onCheckedChange={(v) => setReplace(v === true)} />
+                <Label htmlFor="many-replace" className="font-normal">
+                  Replace files of the same name there
+                </Label>
+              </div>
+            </div>
+          ) : (
             <div className="grid gap-1.5">
-              <Label htmlFor="many-folder">Into this folder on each host</Label>
+              <Label htmlFor="many-path">The file on each host</Label>
               <Input
-                id="many-folder"
+                id="many-path"
                 className="font-mono"
-                placeholder="/etc/app"
-                value={folder}
-                onChange={(e) => setFolder(e.target.value)}
+                placeholder="/etc/ssh/sshd_config"
+                value={path}
+                onChange={(e) => setPath(e.target.value)}
                 spellCheck={false}
               />
             </div>
-            <div className="flex items-center gap-2">
-              <Checkbox id="many-replace" checked={replace} onCheckedChange={(v) => setReplace(v === true)} />
-              <Label htmlFor="many-replace" className="font-normal">
-                Replace files of the same name there
-              </Label>
-            </div>
+          )}
+          <div className="flex items-center gap-2">
+            <Checkbox id="many-trust" checked={trust} onCheckedChange={(v) => setTrust(v === true)} />
+            <Label htmlFor="many-trust" className="font-normal">
+              Trust host keys never seen before
+            </Label>
           </div>
-        ) : (
-          <div className="grid gap-1.5">
-            <Label htmlFor="many-path">The file on each host</Label>
-            <Input
-              id="many-path"
-              className="font-mono"
-              placeholder="/etc/ssh/sshd_config"
-              value={path}
-              onChange={(e) => setPath(e.target.value)}
-              spellCheck={false}
-            />
-          </div>
-        )}
-        <div className="flex items-center gap-2">
-          <Checkbox id="many-trust" checked={trust} onCheckedChange={(v) => setTrust(v === true)} />
-          <Label htmlFor="many-trust" className="font-normal">
-            Trust host keys never seen before
-          </Label>
-        </div>
-        <div className="flex flex-wrap gap-2">
-          {mode === "push" ? (
-            <WhyDisabled reason={why}>
-              <Button disabled={why !== null || busy} onClick={() => void go()}>
-                <UploadIcon data-icon="inline-start" />
-                Push {fileCount > 0 ? plural(fileCount, "file") : "files"} to {plural(hosts, "host")}…
-              </Button>
-            </WhyDisabled>
-          ) : (
-            <>
-              <WhyDisabled reason={why ?? (local?.path ? null : "Open a folder of this PC on the Files tab first")}>
-                <Button
-                  disabled={why !== null || busy || !local?.path}
-                  onClick={() => local && void go({ kind: "local", listing: local.id })}
-                >
-                  <DownloadIcon data-icon="inline-start" />
-                  Fetch into this PC's folder
-                </Button>
-              </WhyDisabled>
+          <div className="flex flex-wrap gap-2">
+            {mode === "push" ? (
               <WhyDisabled reason={why}>
-                <Button variant="outline" disabled={why !== null || busy} onClick={() => void go({ kind: "choose" })}>
-                  Fetch into…
+                <Button disabled={why !== null || busy} onClick={() => void go()}>
+                  <UploadIcon data-icon="inline-start" />
+                  Push {fileCount > 0 ? plural(fileCount, "file") : "files"} to {plural(hosts, "host")}…
                 </Button>
               </WhyDisabled>
-            </>
+            ) : (
+              <>
+                <WhyDisabled reason={why ?? (local?.path ? null : "Open a folder of this PC on the Files tab first")}>
+                  <Button
+                    disabled={why !== null || busy || !local?.path}
+                    onClick={() => local && void go({ kind: "local", listing: local.id })}
+                  >
+                    <DownloadIcon data-icon="inline-start" />
+                    Fetch into this PC's folder
+                  </Button>
+                </WhyDisabled>
+                <WhyDisabled reason={why}>
+                  <Button variant="outline" disabled={why !== null || busy} onClick={() => void go({ kind: "choose" })}>
+                    Fetch into…
+                  </Button>
+                </WhyDisabled>
+              </>
+            )}
+          </div>
+          {mode === "fetch" && local?.path && (
+            <p className="text-xs text-muted-foreground">
+              Each host's file goes into a folder of its own under <span className="font-mono">{local.path}</span>.
+            </p>
+          )}
+          {jobId && (
+            <div className="rounded-lg border p-3">
+              <BulkResultsView jobId={jobId} onRetry={(outcome) => onSubmitted(outcome, setJobId)} />
+            </div>
           )}
         </div>
-        {mode === "fetch" && local?.path && (
-          <p className="text-xs text-muted-foreground">
-            Each host's file goes into a folder of its own under <span className="font-mono">{local.path}</span>.
-          </p>
-        )}
-        {jobId && (
-          <div className="rounded-lg border p-3">
-            <BulkResultsView jobId={jobId} onRetry={(outcome) => onSubmitted(outcome, setJobId)} />
-          </div>
-        )}
       </div>
     </div>
   );

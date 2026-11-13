@@ -3,7 +3,7 @@
 // that listing and their names, never by a path it made up (a typed folder goes through the core's checks). Links and
 // junctions are listed but not opened, and Remotely's own data folder isn't opened at all.
 
-import { useCallback, useEffect, useState, type FormEvent, type PointerEvent as ReactPointerEvent } from "react";
+import { useCallback, useEffect, useState, type FormEvent } from "react";
 import {
   ArrowLeftIcon,
   ArrowRightIcon,
@@ -53,7 +53,8 @@ interface Props {
   onUpload: (listing: string, names: string[]) => void;
   /** The listing shown, for downloads into it and comparisons. */
   onListing: (listing: LocalListing | null) => void;
-  onDragStart: (items: DragItems, event: ReactPointerEvent) => void;
+  onDragStart: (items: DragItems, at: { clientX: number; clientY: number }) => void;
+  onDragEnd: (x: number, y: number) => void;
   /** Bumped when something landed here (a download), to list the folder again. */
   refresh: number;
   /** What is picked (a push to many hosts takes picked files). */
@@ -69,6 +70,7 @@ export function LocalPane({
   onUpload,
   onListing,
   onDragStart,
+  onDragEnd,
   refresh,
   onPicked,
 }: Props) {
@@ -299,6 +301,7 @@ export function LocalPane({
           if (!listing || drives) return;
           onDragStart({ from: "local", listing: listing.id, names }, ev);
         }}
+        onDragEnd={onDragEnd}
         empty={drives ? "No drives found." : "This folder is empty."}
         loading={loading}
         menu={(e) => (
