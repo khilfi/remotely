@@ -305,3 +305,244 @@ pub fn raw_mbr(bytes: u64) -> Vec<u8> {
     }
     out
 }
+
+/// CV-04: the partition table a test disk starts with.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Table {
+    /// A GPT with an EFI system partition and a Linux one: boots with UEFI.
+    GptEsp,
+    /// A GPT with a BIOS boot partition, an EFI system partition and a Linux one, as Ubuntu's cloud images.
+    GptHybrid,
+    /// A GPT with a BIOS boot partition and a Linux one: GRUB on a GPT disk with BIOS.
+    GptBiosBoot,
+    /// An MBR with one Linux partition: BIOS.
+    Mbr,
+    /// An MBR with an EFI system partition (type 0xEF) and a Linux one.
+    MbrEsp,
+}
+
+/// GPT type GUIDs as GPT stores them (the first three fields little-endian).
+const ESP: [u8; 16] = [
+    0x28, 0x73, 0x2a, 0xc1, 0x1f, 0xf8, 0xd2, 0x11, 0xba, 0x4b, 0x00, 0xa0, 0xc9, 0x3e, 0xc9, 0x3b,
+];
+const BIOS_BOOT: [u8; 16] = *b"Hah!IdontNeedEFI";
+const LINUX_DATA: [u8; 16] = [
+    0xaf, 0x3d, 0xc6, 0x0f, 0x83, 0x84, 0x72, 0x47, 0x8e, 0x79, 0x3d, 0x69, 0xd8, 0x47, 0x7d, 0xe4,
+];
+
+/// The first 34 sectors of a disk with `table`: the MBR, and for a GPT its header and 128 entries.
+pub fn boot_sectors(table: Table) -> Vec<u8> {
+    let mut out = vec![0u8; 34 * 512];
+    out[510] = 0x55;
+    out[511] = 0xaa;
+    let gpt: &[[u8; 16]] = match table {
+        Table::GptEsp => &[ESP, LINUX_DATA],
+        Table::GptHybrid => &[BIOS_BOOT, ESP, LINUX_DATA],
+        Table::GptBiosBoot => &[BIOS_BOOT, LINUX_DATA],
+        Table::Mbr | Table::MbrEsp => {
+            let types: &[u8] = if table == Table::Mbr { &[0x83] } else { &[0xef, 0x83] };
+            for (i, kind) in types.iter().enumerate() {
+                let at = 446 + 16 * i;
+                out[at] = if i == 0 { 0x80 } else { 0 };
+                out[at + 4] = *kind;
+                put_u32_le(&mut out, at + 8, 2048 + i as u32 * 204_800);
+                put_u32_le(&mut out, at + 12, 204_800);
+            }
+            return out;
+        }
+    };
+    // The protective MBR, then the GPT header in sector 1 and its entries from sector 2.
+    out[446 + 4] = 0xee;
+    put_u32_le(&mut out, 446 + 8, 1);
+    put_u32_le(&mut out, 446 + 12, u32::MAX);
+    out[512..520].copy_from_slice(b"EFI PART");
+    put_u32_le(&mut out, 520, 0x0001_0000);
+    put_u32_le(&mut out, 524, 92);
+    put_u64_le(&mut out, 536, 1);
+    put_u64_le(&mut out, 584, 2);
+    put_u32_le(&mut out, 592, 128);
+    put_u32_le(&mut out, 596, 128);
+    for (i, kind) in gpt.iter().enumerate() {
+        let at = 1024 + 128 * i;
+        out[at..at + 16].copy_from_slice(kind);
+        out[at + 16] = i as u8 + 1;
+        put_u64_le(&mut out, at + 32, 2048 + i as u64 * 204_800);
+        put_u64_le(&mut out, at + 40, 2048 + (i as u64 + 1) * 204_800 - 1);
+    }
+    out
+}
+
+fn zlib(data: &[u8]) -> Vec<u8> {
+    use std::io::Write;
+    let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+    let _ = encoder.write_all(data);
+    encoder.finish().unwrap_or_default()
+}
+
+fn raw_deflate(data: &[u8]) -> Vec<u8> {
+    use std::io::Write;
+    let mut encoder = flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::default());
+    let _ = encoder.write_all(data);
+    encoder.finish().unwrap_or_default()
+}
+
+/// A raw disk of `bytes` that starts with `sectors`.
+pub fn raw_with(sectors: &[u8], bytes: u64) -> Vec<u8> {
+    let mut out = vec![0u8; small(bytes).max(sectors.len())];
+    out[..sectors.len()].copy_from_slice(sectors);
+    out
+}
+
+/// A sparse VMDK of `virtual_bytes` whose first grain holds `sectors`, with its grain directory and tables as
+/// Workstation writes them; `stream` makes it stream-optimized (the grain deflated behind its marker, the grain
+/// directory named in the footer).
+pub fn vmdk_sparse_with(name: &str, sectors: &[u8], virtual_bytes: u64, stream: bool) -> Vec<u8> {
+    const GRAIN: usize = 128 * 512;
+    const GTES: usize = 512;
+    let mut out = vmdk_sparse(name, virtual_bytes, stream);
+    let grains = (virtual_bytes as usize).div_ceil(GRAIN);
+    let tables = grains.div_ceil(GTES).max(1);
+    put_u32_le(&mut out, 44, GTES as u32);
+    let mut grain = sectors.to_vec();
+    grain.resize(GRAIN, 0);
+    if !stream {
+        // The grain directory at sector 24, the tables after it, the first grain at sector 128.
+        let gd = 24usize;
+        let gt = gd + (tables * 4).div_ceil(512);
+        put_u32_le(&mut out, 8, 3);
+        put_u64_le(&mut out, 48, gd as u64);
+        put_u64_le(&mut out, 56, gd as u64);
+        put_u64_le(&mut out, 64, 128);
+        out.resize(128 * 512, 0);
+        for t in 0..tables {
+            put_u32_le(&mut out, gd * 512 + t * 4, (gt + t * GTES * 4 / 512) as u32);
+        }
+        put_u32_le(&mut out, gt * 512, 128);
+        out.extend_from_slice(&grain);
+        return out;
+    }
+    // Stream-optimized: flags 0x30000 (compressed, markers) and 0x3, the grain directory at the end.
+    put_u32_le(&mut out, 8, 0x3_0003);
+    put_u64_le(&mut out, 56, u64::MAX);
+    let header: Vec<u8> = out[..512].to_vec();
+    // Grain 0 at sector 24: its marker (LBA 0, compressed size), then the data.
+    let packed = zlib(&grain);
+    let grain_sector = out.len() / 512;
+    let mut marker = vec![0u8; 12];
+    put_u32_le(&mut marker, 8, packed.len() as u32);
+    out.extend_from_slice(&marker);
+    out.extend_from_slice(&packed);
+    out.resize(out.len().div_ceil(512) * 512, 0);
+    // A grain table marker (type 1), then the tables.
+    let mut gt_marker = vec![0u8; 512];
+    put_u64_le(&mut gt_marker, 0, (tables * GTES * 4 / 512) as u64);
+    put_u32_le(&mut gt_marker, 12, 1);
+    out.extend_from_slice(&gt_marker);
+    let gt = out.len() / 512;
+    let mut table = vec![0u8; tables * GTES * 4];
+    put_u32_le(&mut table, 0, grain_sector as u32);
+    out.extend_from_slice(&table);
+    // A grain directory marker (type 2), then the directory.
+    let mut gd_marker = vec![0u8; 512];
+    put_u64_le(&mut gd_marker, 0, 1);
+    put_u32_le(&mut gd_marker, 12, 2);
+    out.extend_from_slice(&gd_marker);
+    let gd = out.len() / 512;
+    let mut directory = vec![0u8; (tables * 4).div_ceil(512) * 512];
+    for t in 0..tables {
+        put_u32_le(&mut directory, t * 4, (gt + t * GTES * 4 / 512) as u32);
+    }
+    out.extend_from_slice(&directory);
+    // The footer marker (type 3), the footer (the header with the directory's place), the end-of-stream marker.
+    let mut footer_marker = vec![0u8; 512];
+    put_u64_le(&mut footer_marker, 0, 1);
+    put_u32_le(&mut footer_marker, 12, 3);
+    out.extend_from_slice(&footer_marker);
+    let mut footer = header;
+    put_u64_le(&mut footer, 56, gd as u64);
+    out.extend_from_slice(&footer);
+    out.extend_from_slice(&[0u8; 512]);
+    out
+}
+
+/// A qcow2 v3 of `virtual_bytes` (64 KB clusters) whose first cluster holds `sectors`, deflated when `compressed`.
+pub fn qcow2_with(sectors: &[u8], virtual_bytes: u64, compressed: bool) -> Vec<u8> {
+    const CLUSTER: usize = 64 * 1024;
+    let mut out = qcow2(virtual_bytes, None);
+    let l1_entries = (virtual_bytes as usize).div_ceil(CLUSTER * (CLUSTER / 8)).max(1);
+    put_u32_be(&mut out, 36, l1_entries as u32);
+    put_u64_be(&mut out, 40, CLUSTER as u64);
+    out.resize(3 * CLUSTER, 0);
+    // The L1 table in cluster 1, the L2 table in cluster 2, the data in cluster 3.
+    put_u64_be(&mut out, CLUSTER, (2 * CLUSTER) as u64 | 1 << 63);
+    let mut data = sectors.to_vec();
+    data.resize(CLUSTER, 0);
+    let host = 3 * CLUSTER;
+    if compressed {
+        let packed = raw_deflate(&data);
+        let x = 62 - (16 - 8);
+        let count = packed.len().div_ceil(512) as u64 - 1;
+        put_u64_be(&mut out, 2 * CLUSTER, 1 << 62 | count << x | host as u64);
+        out.extend_from_slice(&packed);
+    } else {
+        put_u64_be(&mut out, 2 * CLUSTER, host as u64 | 1 << 63);
+        out.extend_from_slice(&data);
+    }
+    out
+}
+
+/// A fixed VHD of `virtual_bytes` that starts with `sectors`.
+pub fn vhd_fixed_with(sectors: &[u8], virtual_bytes: u64) -> Vec<u8> {
+    let mut out = raw_with(sectors, virtual_bytes);
+    out.extend_from_slice(&vhd_footer(virtual_bytes, 2));
+    out
+}
+
+/// A dynamic VHD of `virtual_bytes` (2 MB blocks) whose first block holds `sectors`.
+pub fn vhd_dynamic_with(sectors: &[u8], virtual_bytes: u64) -> Vec<u8> {
+    const BLOCK: usize = 2 << 20;
+    let footer = vhd_footer(virtual_bytes, 3);
+    let entries = (virtual_bytes as usize).div_ceil(BLOCK);
+    let mut out = footer.to_vec();
+    let mut header = vec![0u8; 1024];
+    header[0..8].copy_from_slice(b"cxsparse");
+    put_u64_be(&mut header, 8, u64::MAX);
+    put_u64_be(&mut header, 16, 1536);
+    put_u32_be(&mut header, 24, 0x0001_0000);
+    put_u32_be(&mut header, 28, entries as u32);
+    put_u32_be(&mut header, 32, BLOCK as u32);
+    out.extend_from_slice(&header);
+    let mut bat = vec![0xffu8; (entries * 4).div_ceil(512) * 512];
+    let block_sector = (1536 + bat.len()) / 512;
+    put_u32_be(&mut bat, 0, block_sector as u32);
+    out.extend_from_slice(&bat);
+    // The block's sector bitmap (all written), then its data.
+    out.extend_from_slice(&[0xffu8; 512]);
+    let mut data = sectors.to_vec();
+    data.resize(BLOCK, 0);
+    out.extend_from_slice(&data);
+    out.extend_from_slice(&footer);
+    out
+}
+
+/// A dynamic VDI of `virtual_bytes` (1 MB blocks) whose first block holds `sectors`.
+pub fn vdi_with(sectors: &[u8], virtual_bytes: u64) -> Vec<u8> {
+    const BLOCK: usize = 1 << 20;
+    let mut out = vdi(virtual_bytes, 1);
+    let blocks = (virtual_bytes as usize).div_ceil(BLOCK);
+    let map_at = out.len();
+    let data_at = (map_at + blocks * 4).div_ceil(512) * 512;
+    put_u32_le(&mut out, 0x154, map_at as u32);
+    put_u32_le(&mut out, 0x158, data_at as u32);
+    put_u32_le(&mut out, 0x17c, 0);
+    put_u32_le(&mut out, 0x180, blocks as u32);
+    put_u32_le(&mut out, 0x184, 1);
+    let mut map = vec![0xffu8; blocks * 4];
+    put_u32_le(&mut map, 0, 0);
+    out.extend_from_slice(&map);
+    out.resize(data_at, 0);
+    let mut data = sectors.to_vec();
+    data.resize(BLOCK, 0);
+    out.extend_from_slice(&data);
+    out
+}

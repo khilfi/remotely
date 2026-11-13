@@ -34,6 +34,9 @@ pub struct NewVmx {
     pub disks: Vec<VmxDisk>,
     /// An ISO in the CD/DVD drive, connected at power-on, which the VM boots from first.
     pub iso: Option<String>,
+    /// CV-04: cloud-init's NoCloud seed in a CD/DVD drive of its own ([`seed_slot`]), connected at power-on; the
+    /// VM still boots from its disk.
+    pub seed: Option<String>,
     pub network: Network,
     /// `ethernet0.virtualDev`: `vmxnet3`, `e1000e`.
     pub nic: String,
@@ -100,6 +103,16 @@ pub fn disk_slots(disks: &[VmxDisk]) -> Vec<String> {
         .collect()
 }
 
+/// The SATA slot of a new VM's first CD/DVD drive: after its SATA disks.
+fn first_cdrom_slot(disks: &[VmxDisk]) -> u32 {
+    disks.iter().filter(|d| d.controller == DiskController::Sata).count() as u32
+}
+
+/// CV-04: where the NoCloud seed's CD/DVD drive goes: after the SATA disks and an ISO's drive.
+pub fn seed_slot(disks: &[VmxDisk], iso: bool) -> String {
+    format!("sata0:{}", first_cdrom_slot(disks) + u32::from(iso))
+}
+
 /// The `.vmx` text, with Windows line ends as Workstation writes them.
 pub fn render(vmx: &NewVmx) -> String {
     let mut lines: Vec<(String, String)> = Vec::new();
@@ -142,7 +155,7 @@ pub fn render(vmx: &NewVmx) -> String {
         set("scsi0.present", "TRUE".into());
         set("scsi0.virtualDev", scsi.controller_model.clone());
     }
-    if has(DiskController::Sata) || vmx.iso.is_some() {
+    if has(DiskController::Sata) || vmx.iso.is_some() || vmx.seed.is_some() {
         set("sata0.present", "TRUE".into());
     }
     if has(DiskController::Nvme) {
@@ -152,16 +165,20 @@ pub fn render(vmx: &NewVmx) -> String {
         set(&format!("{slot}.present"), "TRUE".into());
         set(&format!("{slot}.fileName"), disk.file_name.clone());
     }
-    if let Some(iso) = &vmx.iso {
-        let next = vmx
-            .disks
-            .iter()
-            .filter(|d| d.controller == DiskController::Sata)
-            .count();
-        let slot = format!("sata0:{next}");
+    for (slot, image) in [
+        vmx.iso
+            .as_ref()
+            .map(|iso| (format!("sata0:{}", first_cdrom_slot(&vmx.disks)), iso)),
+        vmx.seed
+            .as_ref()
+            .map(|seed| (seed_slot(&vmx.disks, vmx.iso.is_some()), seed)),
+    ]
+    .into_iter()
+    .flatten()
+    {
         set(&format!("{slot}.present"), "TRUE".into());
         set(&format!("{slot}.deviceType"), "cdrom-image".into());
-        set(&format!("{slot}.fileName"), iso.clone());
+        set(&format!("{slot}.fileName"), image.clone());
         set(&format!("{slot}.startConnected"), "TRUE".into());
     }
     if let Some((kind, vnet)) = connection(&vmx.network) {
@@ -211,6 +228,7 @@ mod tests {
                 },
             ],
             iso: None,
+            seed: None,
             network: Network::Vmnet { number: 3 },
             nic: "vmxnet3".into(),
             extra: vec![("guestinfo.userdata.encoding".into(), "base64".into())],
@@ -311,6 +329,36 @@ mod tests {
             Some("cdrom-image"),
             "the CD after the SATA disk"
         );
+    }
+
+    #[test]
+    fn an_imported_disks_seed_is_a_cd_of_its_own_and_the_vm_boots_its_disk() {
+        let sata = |name: &str| VmxDisk {
+            file_name: name.into(),
+            controller: DiskController::Sata,
+            controller_model: "ahci".into(),
+        };
+        let cloud = NewVmx {
+            firmware: Firmware::Bios,
+            disks: vec![sata("db01.vmdk"), sata("db01-1.vmdk")],
+            seed: Some("db01-cidata.iso".into()),
+            extra: Vec::new(),
+            ..ubuntu()
+        };
+        assert_eq!(seed_slot(&cloud.disks, false), "sata0:2");
+        let k = keys(&render(&cloud));
+        assert_eq!(get(&k, "sata0:0.fileName"), Some("db01.vmdk"));
+        assert_eq!(get(&k, "sata0:1.fileName"), Some("db01-1.vmdk"));
+        assert_eq!(get(&k, "sata0:2.deviceType"), Some("cdrom-image"));
+        assert_eq!(get(&k, "sata0:2.fileName"), Some("db01-cidata.iso"));
+        assert_eq!(get(&k, "sata0:2.startConnected"), Some("TRUE"));
+        assert_eq!(get(&k, "bios.bootOrder"), None, "it boots its disk, not the seed");
+        let both = NewVmx {
+            iso: Some(r"C:\ISOs\x.iso".into()),
+            ..cloud
+        };
+        assert_eq!(seed_slot(&both.disks, true), "sata0:3");
+        assert_eq!(get(&keys(&render(&both)), "sata0:3.fileName"), Some("db01-cidata.iso"));
     }
 
     #[test]

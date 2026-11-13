@@ -207,6 +207,11 @@ pub struct FirstBootSpec {
     /// The `authorized_keys` line.
     pub public_key: Option<String>,
     pub packages: Vec<String>,
+    /// CV-04: an imported disk's first boot (a cloud server's export): a NoCloud seed on both hypervisors with a
+    /// network-config that takes DHCP on any network card, ejected after the first boot ([`super::cloud_init`]).
+    /// Deploys journalled before it read as a template's.
+    #[serde(default)]
+    pub imported: bool,
 }
 
 /// VirtualBox's unattended install of an ISO: the user it makes and the vault password it gets. Only the vault
@@ -342,6 +347,7 @@ impl DeploySpec {
                 user: plan.guest_user.clone(),
                 public_key: plan.ssh_key.as_ref().map(|k| k.public_key.clone()),
                 packages: plan.packages.clone(),
+                imported: false,
             });
         Self {
             origin,
@@ -465,8 +471,13 @@ impl DeploySpec {
                 "without an SSH key"
             };
             parts.push(format!(
-                "cloud-init: {user} {key}, packages {}",
-                templates::tags_text(&first_boot.packages)
+                "cloud-init: {user} {key}, packages {}{}",
+                templates::tags_text(&first_boot.packages),
+                if first_boot.imported {
+                    ", from a NoCloud seed with DHCP on any network card"
+                } else {
+                    ""
+                }
             ));
         }
         parts.push(format!("environment {}", self.environment.as_str()));

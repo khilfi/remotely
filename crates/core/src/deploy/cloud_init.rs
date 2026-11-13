@@ -6,6 +6,12 @@
 //! * VirtualBox: a NoCloud seed, a small ISO with the volume label `cidata` and the files `user-data` and
 //!   `meta-data` ([`super::seed`]), attached as a DVD and ejected after the first boot.
 //!
+//! * CV-04, an imported disk (a cloud server's export, a KVM or OpenStack image): a NoCloud seed on both
+//!   hypervisors, since a disk from another hypervisor has no open-vm-tools to read Workstation's guestinfo, with
+//!   a `network-config` ([`FirstBoot::network_config`]) that takes DHCP on whichever network card the guest has:
+//!   the server's own settings name the cloud's card (its MAC, or `eth0` where this PC's VM says `ens160`).
+//!   sshd's password setting is left as the server had it (`ssh_pwauth` isn't written).
+//!
 //! The user data never holds a password: the `.vmx` and the seed are readable on this PC. The guest user has a
 //! locked password and logs in with the key; sudo needs no password, as on the clouds' own images. Every value
 //! is written as a double-quoted YAML scalar (JSON's escapes, which YAML reads the same), and names and packages
@@ -26,7 +32,15 @@ pub struct FirstBoot {
     /// The `authorized_keys` line, public half only.
     pub public_key: Option<String>,
     pub packages: Vec<String>,
+    /// CV-04: an imported disk's first boot: the NoCloud seed on both hypervisors, with [`Self::network_config`].
+    pub imported: bool,
 }
+
+/// CV-04: network-config version 2: DHCP on every network card whose name starts with `e` (`eth0`, `ens160`,
+/// `enp0s3`), which netplan matches by name. Renderers that can't match a name (sysconfig, ENI) configure the
+/// entry's own name, `eth0`, the name most cloud images give their card (`net.ifnames=0`).
+pub const DHCP_ANY_NIC: &str =
+    "version: 2\nethernets:\n  eth0:\n    match:\n      name: \"e*\"\n    dhcp4: true\n    dhcp6: false\n";
 
 /// A YAML scalar that reads back as `text` whatever it holds.
 fn quoted(text: &str) -> String {
@@ -70,7 +84,9 @@ impl FirstBoot {
                 }
             }
         }
-        out.push_str("ssh_pwauth: false\n");
+        if !self.imported {
+            out.push_str("ssh_pwauth: false\n");
+        }
         if !self.packages.is_empty() {
             out.push_str("package_update: true\n");
             out.push_str("packages:\n");
@@ -81,6 +97,24 @@ impl FirstBoot {
         // The guest's disk may be larger than the image's: grow its root partition into the rest.
         out.push_str("growpart:\n  mode: auto\n  devices: [\"/\"]\nresize_rootfs: true\n");
         out
+    }
+
+    /// CV-04: the seed's `network-config` for an imported disk; none for a template's cloud image, whose own
+    /// settings fit (cloud-init's fallback takes DHCP on its first card).
+    pub fn network_config(&self) -> Option<&'static str> {
+        self.imported.then_some(DHCP_ANY_NIC)
+    }
+
+    /// The NoCloud seed's files: `user-data`, `meta-data`, and `network-config` for an import.
+    pub fn seed_files(&self) -> Vec<(&'static str, Vec<u8>)> {
+        let mut files = vec![
+            ("user-data", self.user_data().into_bytes()),
+            ("meta-data", self.meta_data().into_bytes()),
+        ];
+        if let Some(network) = self.network_config() {
+            files.push(("network-config", network.as_bytes().to_vec()));
+        }
+        files
     }
 }
 
@@ -106,7 +140,40 @@ mod tests {
             user: Some("alice".into()),
             public_key: Some("ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExample alice@example.com".into()),
             packages: vec!["nginx".into(), "libstdc++6".into()],
+            imported: false,
         }
+    }
+
+    #[test]
+    fn an_imported_disk_gets_dhcp_on_any_card_and_keeps_its_sshd_setting() {
+        let imported = FirstBoot {
+            imported: true,
+            packages: Vec::new(),
+            ..first_boot()
+        };
+        let text = imported.user_data();
+        assert!(!text.contains("ssh_pwauth"), "{text}");
+        assert!(text.contains("    sudo: \"ALL=(ALL) NOPASSWD:ALL\""));
+        assert!(text.contains("      - \"ssh-ed25519 "));
+        assert!(text.contains("hostname: \"web-1\""));
+        for key in [
+            "plain_text_passwd",
+            "hashed_passwd",
+            "chpasswd",
+            "password:",
+            " passwd:",
+        ] {
+            assert!(!text.contains(key), "{key}");
+        }
+        let names: Vec<&str> = imported.seed_files().iter().map(|(n, _)| *n).collect();
+        assert_eq!(names, ["user-data", "meta-data", "network-config"]);
+        let network = imported.network_config().unwrap();
+        assert!(network.starts_with("version: 2\n"), "{network}");
+        assert!(network.contains("      name: \"e*\"\n    dhcp4: true"), "{network}");
+        // A template's cloud image: its own network settings, and password logins off as before.
+        assert_eq!(first_boot().network_config(), None);
+        assert_eq!(first_boot().seed_files().len(), 2);
+        assert!(first_boot().user_data().contains("ssh_pwauth: false"));
     }
 
     #[test]

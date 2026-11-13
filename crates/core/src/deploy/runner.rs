@@ -45,6 +45,9 @@ const SHORT: Duration = Duration::from_secs(2 * 60);
 /// A power-on.
 const START: Duration = Duration::from_secs(10 * 60);
 
+/// CV-04: what to try when an imported disk doesn't boot, in the job's note for the VM and the import's preview.
+pub const IMPORT_BOOT_TIPS: &str = "if it doesn't boot: an emergency shell or \"can't find root\" means its kernel has no driver for the disk controller, so import it again on SATA, or IDE if SATA fails too; \"no operating system\" or a boot menu that finds no disk means the firmware, so import it again with the other one (BIOS or UEFI)";
+
 /// How the runner waits; tests shorten it.
 #[derive(Debug, Clone, Copy)]
 pub struct DeployTuning {
@@ -84,6 +87,8 @@ struct Made {
     /// VirtualBox: the seed's DVD drive (controller, port, device), ejected after the first boot.
     seed: Option<(String, u32, u32)>,
     seed_file: Option<PathBuf>,
+    /// CV-04, Workstation: the seed's CD/DVD slot (`sata0:2`), disconnected after the first boot.
+    workstation_seed: Option<String>,
     /// VM-08: the VM's key as its stack instance records it.
     member: Option<String>,
     /// What the job says about the VM besides where it is.
@@ -231,6 +236,7 @@ impl Deployer {
             user: f.user.clone(),
             public_key: f.public_key.clone(),
             packages: f.packages.clone(),
+            imported: f.imported,
         });
         let key = match spec.hypervisor {
             Hypervisor::Vmware => {
@@ -322,7 +328,11 @@ impl Deployer {
     ) -> Result<String> {
         let vmware = self.hypervisors.vmware();
         let vmx_path = folder.join(format!("{}.vmx", vm.name));
-        let guestinfo = first_boot.map(cloud_init::guestinfo_keys).unwrap_or_default();
+        // CV-04: an imported disk reads a NoCloud seed instead (no open-vm-tools to read guestinfo).
+        let guestinfo = first_boot
+            .filter(|f| !f.imported)
+            .map(cloud_init::guestinfo_keys)
+            .unwrap_or_default();
         let settings = ws::vmx_settings(&vm.name, spec.size.as_ref(), spec.network.as_ref(), &guestinfo);
         match &spec.source {
             DeploySource::GoldenVm {
@@ -387,21 +397,32 @@ impl Deployer {
                     .new_workstation_disks(spec, vm, folder, &[(path.clone(), disk_format(*format))])
                     .await?;
                 made.vmx = Some(vmx_path.clone());
-                self.write_new_vmx(spec, vm, &vmx_path, disks, None, guestinfo).await?;
+                self.write_new_vmx(spec, vm, &vmx_path, disks, (None, None), guestinfo)
+                    .await?;
                 self.grow_workstation(&vmx_path, spec, made).await?;
             }
-            // CV-01: each imported disk converted into the VM's folder.
+            // CV-01, CV-04: each imported disk converted into the VM's folder, in order (the first boots), and the
+            // first boot's NoCloud seed in a CD/DVD drive of its own.
             DeploySource::Import { disks: sources, .. } => {
                 let sources: Vec<(String, DiskFormat)> = sources.iter().map(|d| (d.path.clone(), d.format)).collect();
                 let disks = self.new_workstation_disks(spec, vm, folder, &sources).await?;
+                let seed = match first_boot.filter(|f| f.imported) {
+                    Some(first_boot) => {
+                        let file = self.write_seed_file(folder, vm, first_boot, made).await?;
+                        made.workstation_seed = Some(vmx::seed_slot(&disks, false));
+                        file.file_name().map(|n| n.to_string_lossy().into_owned())
+                    }
+                    None => None,
+                };
                 made.vmx = Some(vmx_path.clone());
-                self.write_new_vmx(spec, vm, &vmx_path, disks, None, guestinfo).await?;
+                self.write_new_vmx(spec, vm, &vmx_path, disks, (None, seed), guestinfo)
+                    .await?;
                 self.grow_workstation(&vmx_path, spec, made).await?;
             }
             DeploySource::Iso { path } => {
                 let disks = self.new_workstation_disks(spec, vm, folder, &[]).await?;
                 made.vmx = Some(vmx_path.clone());
-                self.write_new_vmx(spec, vm, &vmx_path, disks, Some(path.clone()), guestinfo)
+                self.write_new_vmx(spec, vm, &vmx_path, disks, (Some(path.clone()), None), guestinfo)
                     .await?;
             }
         }
@@ -481,13 +502,14 @@ impl Deployer {
         Ok(out)
     }
 
+    /// A new VM's .vmx. `cds`: an ISO it boots from first, and (CV-04) cloud-init's seed in a drive of its own.
     async fn write_new_vmx(
         &self,
         spec: &DeploySpec,
         vm: &DeployVm,
         path: &Path,
         disks: Vec<vmx::VmxDisk>,
-        iso: Option<String>,
+        (iso, seed): (Option<String>, Option<String>),
         guestinfo: Vec<(&'static str, String)>,
     ) -> Result<()> {
         let (Some(size), Some(profile)) = (&spec.size, &spec.profile) else {
@@ -507,6 +529,7 @@ impl Deployer {
             memory_mb: size.memory_mb,
             disks,
             iso,
+            seed,
             network: spec.network.clone().unwrap_or(Network::Nat),
             nic: profile.nic.clone(),
             extra: guestinfo.into_iter().map(|(k, v)| (k.to_owned(), v)).collect(),
@@ -827,15 +850,7 @@ impl Deployer {
         let Some(first_boot) = first_boot else {
             return Ok(());
         };
-        let user_data = first_boot.user_data();
-        let meta_data = first_boot.meta_data();
-        let image = seed::write_seed(
-            &[("user-data", user_data.as_bytes()), ("meta-data", meta_data.as_bytes())],
-            time::OffsetDateTime::now_utc(),
-        )?;
-        let file = folder.join(format!("{}-cidata.iso", vm.name));
-        tokio::fs::write(&file, image).await?;
-        made.seed_file = Some(file.clone());
+        let file = self.write_seed_file(folder, vm, first_boot, made).await?;
         let (controller, port, device) = match dvd {
             Some((controller, port)) => (vb::controller_name(controller).to_owned(), port, 0),
             None => self.dvd_slot(uuid).await?,
@@ -847,6 +862,24 @@ impl Deployer {
         .await?;
         made.seed = Some((controller, port, device));
         Ok(())
+    }
+
+    /// VM-22, CV-04: the NoCloud seed (`user-data`, `meta-data`, and an import's `network-config`) written into the
+    /// VM's folder as `<name>-cidata.iso`.
+    async fn write_seed_file(
+        &self,
+        folder: &Path,
+        vm: &DeployVm,
+        first_boot: &FirstBoot,
+        made: &mut Made,
+    ) -> Result<PathBuf> {
+        let files = first_boot.seed_files();
+        let named: Vec<(&str, &[u8])> = files.iter().map(|(n, b)| (*n, b.as_slice())).collect();
+        let image = seed::write_seed(&named, time::OffsetDateTime::now_utc())?;
+        let file = folder.join(format!("{}-cidata.iso", vm.name));
+        tokio::fs::write(&file, image).await?;
+        made.seed_file = Some(file.clone());
+        Ok(file)
     }
 
     /// A clone's or an import's DVD drive, or a new one on its boot disk's controller (one more port).
@@ -1149,7 +1182,8 @@ impl Deployer {
         notes.append(&mut made.notes);
         // An ISO install has no OS yet, and a bulk clone keeps its own sessions and network.
         let has_os = !matches!(spec.source, DeploySource::Iso { .. } | DeploySource::BulkClone);
-        let wants_ip = has_os && (spec.after_deploy.create_session || made.seed.is_some());
+        let wants_ip =
+            has_os && (spec.after_deploy.create_session || made.seed.is_some() || made.workstation_seed.is_some());
         let ip = if wants_ip {
             let ip = self.wait_for_ip(spec, key, token).await;
             match &ip {
@@ -1188,6 +1222,31 @@ impl Deployer {
                 }
                 Err(err) => notes.push(format!("cloud-init's seed is still in its DVD drive ({err})")),
             }
+        }
+        if let Some(slot) = &made.workstation_seed {
+            notes.push(match &ip {
+                // CV-04: the guest has booted, so cloud-init has read its seed. Workstation keeps the drive in the
+                // .vmx while the VM runs (a running VM's .vmx isn't written), and cloud-init reads a seed it has
+                // read once never again.
+                Some(_) => match self
+                    .hypervisors
+                    .vmware()
+                    .vmrun_change(
+                        vec!["disconnectNamedDevice".into(), key.into(), slot.into()],
+                        SHORT,
+                    )
+                    .await
+                {
+                    Ok(_) => format!(
+                        "cloud-init's seed disconnected after the first boot (its drive {slot} stays in the settings until you eject it while the VM is off)"
+                    ),
+                    Err(err) => format!("cloud-init's seed is still connected on {slot} ({err})"),
+                },
+                None => format!("cloud-init's seed stays on {slot} until the guest has booted: eject it once it has"),
+            });
+        }
+        if matches!(spec.source, DeploySource::Import { .. }) {
+            notes.push(IMPORT_BOOT_TIPS.into());
         }
         if spec.after_deploy.create_session && has_os {
             if spec.hypervisor == Hypervisor::VirtualBox && spec.network == Some(Network::Nat) {

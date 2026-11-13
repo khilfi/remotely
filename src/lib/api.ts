@@ -437,7 +437,9 @@ export type VmDiskOp =
   | { kind: "expand"; slot: string; sizeMb: number }
   | { kind: "compact"; slot: string }
   | { kind: "defragment"; slot: string }
-  | { kind: "remove"; slot: string };
+  | { kind: "remove"; slot: string }
+  /** VM-31: only through `vmPickDisk` (the shell's file dialog); the bus refuses it from the window. */
+  | { kind: "attach"; path: string; copy: boolean; bus?: string | null };
 
 export type VmLifecycleOp = { kind: "delete" } | { kind: "register"; path: string };
 
@@ -981,6 +983,7 @@ export type ActionKind =
   | "vmNicDisconnect"
   | "vmToolsInstall"
   | "vmDiskAdd"
+  | "vmDiskAttach"
   | "vmDiskCompact"
   | "vmDiskExpand"
   | "vmDiskRemove"
@@ -3643,6 +3646,9 @@ export const api = {
     invoke<SubmitOutcome>("vm_attach_dropped_iso", { stagedId, vmxPath }),
   vmPickSharedFolder: (vmxPath: string, name: string, writable: boolean) =>
     invoke<SubmitOutcome | null>("vm_pick_shared_folder", { vmxPath, name, writable }),
+  /** VM-31: the shell asks for an existing disk image and attaches it (copied in, or used where it is). */
+  vmPickDisk: (vmxPath: string, copy: boolean, bus: string | null) =>
+    invoke<SubmitOutcome | null>("vm_pick_disk", { vmxPath, copy, bus }),
   vmPickExisting: () => invoke<SubmitOutcome | null>("vm_pick_existing"),
   /** VM-24: the hypervisor's own window; audited, no tier. */
   vmOpenConsole: (vmxPath: string) => invoke<ConsoleOutcome>("vm_open_console", { vmxPath }),

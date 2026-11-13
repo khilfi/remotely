@@ -645,6 +645,11 @@ impl Command {
                 op: VmLifecycleOp::Register { .. },
                 ..
             } => "An existing VM is added from a file dialog.",
+            // VM-31: the guest reads (and, used where it is, writes) the disk's file.
+            Command::VmDisk {
+                op: VmDiskOp::Attach { .. },
+                ..
+            } => "An existing disk is attached from a file dialog.",
             // CV-03, VM-17: the new files' place comes from a save or folder dialog.
             Command::ImageConvert { .. } => "Conversions start from Image tools, which asks where the new image goes.",
             Command::VmExport { .. } => "Exports start from a VM's Export, which asks for the folder.",
@@ -807,6 +812,15 @@ impl Command {
     pub fn with_targets(&self, new: Vec<TargetRef>) -> Option<Command> {
         let mut command = self.clone();
         match &mut command {
+            // VM-31: an attached disk is for its one VM.
+            Command::VmDisk {
+                targets,
+                op: VmDiskOp::Attach { .. },
+            } => {
+                if *targets != new {
+                    return None;
+                }
+            }
             Command::VmPower { targets, .. }
             | Command::VmSnapshot { targets, .. }
             | Command::VmProtect { targets, .. }
@@ -1422,6 +1436,15 @@ impl CommandBus {
     /// SS-04, AP-06: the core's checks of where vault passwords go.
     pub fn set_bindings(&self, bindings: SecretBindings) {
         let _ = self.bindings.set(bindings);
+    }
+
+    /// VM-31: the conversion runner and the inventory, for the approval preview of an attached disk.
+    pub fn set_attach_tools(
+        &self,
+        converter: Arc<crate::convert::Converter>,
+        inventory: Arc<crate::inventory::Inventory>,
+    ) {
+        self.impact.set_attach_tools(converter, inventory);
     }
 
     fn bindings(&self) -> SecretBindings {
@@ -2234,7 +2257,7 @@ impl CommandBus {
         if matches!(command, Command::VmSnapshot { .. }) {
             decision.add_warnings(linked_clones.iter().map(|b| b.reason.clone()).collect());
         }
-        let vm_change = self.impact.vm_change(command, &decision.targets).await;
+        let vm_change = self.impact.vm_change(ctx, command, &decision.targets).await;
         if let Some(preview) = &vm_change {
             // VM-23: a Low change (an ISO, a cable) gets a confirm too when a VM would refuse it, so it is seen.
             let mut problems: Vec<String> = preview

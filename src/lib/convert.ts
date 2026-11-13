@@ -8,6 +8,7 @@ import type {
   ExportTarget,
   ImageInfo,
   ImportAnalysis,
+  ImportDiskView,
   OutputKind,
   OutputOption,
   ToolsReport,
@@ -76,8 +77,79 @@ export function inspectRows(info: ImageInfo): [string, string][] {
   if (info.parent) rows.push(["Parent", info.parent]);
   if (info.chain.length > 1) rows.push(["Chain", info.chain.join(" → ")]);
   if (info.partitionTable) rows.push(["Partition table", info.partitionTable]);
+  if (info.firmwareHint) rows.push(["Boots with", info.firmwareHint === "efi" ? "UEFI" : "BIOS"]);
   if (info.encrypted) rows.push(["Encrypted", "Yes"]);
   return rows;
+}
+
+/** CV-04: one disk of an import as the dialog lists it, in the order the VM gets them. */
+export interface ImportDiskRow {
+  name: string;
+  /** "Boots" for the first, "Data disk 1"… for the others. */
+  role: string;
+  /** "VMDK, 40 GB", or why it can't be read. */
+  detail: string;
+  problem: string | null;
+  /** A data disk the user added or kept, which can move or go; the boot disk and a description's disks can't. */
+  movable: boolean;
+}
+
+function diskDetail(disk: ImportDiskView): string {
+  const format = disk.info ? FORMAT_LABEL[disk.info.format] : null;
+  const size = disk.virtualBytes !== null ? sizeText(disk.virtualBytes) : null;
+  return [format, size].filter((p) => p !== null).join(", ") || "unknown";
+}
+
+/** CV-04: the import's disks: the analysis's own, then the data disks in their order. */
+export function importDiskRows(analysis: ImportAnalysis, dataDisks: ImportDiskView[]): ImportDiskRow[] {
+  const own = analysis.disks.map((d, i) => ({
+    name: d.name,
+    role: i === 0 ? "Boots" : `Data disk ${i}`,
+    detail: diskDetail(d),
+    problem: d.problem,
+    movable: false,
+  }));
+  const data = dataDisks.map((d, i) => ({
+    name: d.name,
+    role: `Data disk ${analysis.disks.length + i}`,
+    detail: diskDetail(d),
+    problem: d.problem,
+    movable: true,
+  }));
+  return [...own, ...data];
+}
+
+/** CV-04: what the disks take in all at their full size, as the preview counts them. */
+export function importDisksBytes(analysis: ImportAnalysis, dataDisks: ImportDiskView[]): number {
+  return [...analysis.disks, ...dataDisks].reduce((sum, d) => sum + (d.virtualBytes ?? 0), 0);
+}
+
+/** `list` with the item at `index` moved by `delta` (-1 up, 1 down); the same list when it can't move. */
+export function moved<T>(list: T[], index: number, delta: number): T[] {
+  const to = index + delta;
+  if (index < 0 || index >= list.length || to < 0 || to >= list.length) return list;
+  const out = [...list];
+  const [item] = out.splice(index, 1);
+  out.splice(to, 0, item);
+  return out;
+}
+
+const CONTROLLER_LABEL: Record<string, string> = { scsi: "SCSI", sata: "SATA", nvme: "NVMe", ide: "IDE" };
+
+/** CV-04: the controller list's "as the disk says" choice: what the boot disk was made for, and why. */
+export function importControllerAuto(analysis: ImportAnalysis): string {
+  const hint = analysis.controllerHint;
+  if (!hint) return "The OS profile's";
+  return `${CONTROLLER_LABEL[hint.controller] ?? hint.controller}: ${hint.why}`;
+}
+
+/** CV-04: the firmware dialog's "as found" choice: the description's, else the boot disk's partition table's. */
+export function importFirmwareAuto(analysis: ImportAnalysis): string {
+  if (analysis.described.efi !== null) return `As the source says (${analysis.described.efi ? "UEFI" : "BIOS"})`;
+  if (analysis.firmwareHint) {
+    return `As its partition table says (${analysis.firmwareHint === "efi" ? "UEFI" : "BIOS"})`;
+  }
+  return "The OS profile's (its partition table couldn't be read)";
 }
 
 /** QL-08: why Convert can't start with this output, or null. */

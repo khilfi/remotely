@@ -1,6 +1,7 @@
-// VM-23, VM-12, VM-11, VM-16: the Settings tab's edit dialogs. Each builds one command for the bus and hands it
-// to `onSubmit` (the page's submit, which shows the approval dialog when the tier asks for one); the shared folder's
-// path is picked in a dialog the shell opens (api.vmPickSharedFolder), never typed here. The core checks every
+// VM-23, VM-12, VM-11, VM-16, VM-31: the Settings tab's edit dialogs. Each builds one command for the bus and hands
+// it to `onSubmit` (the page's submit, which shows the approval dialog when the tier asks for one); the shared
+// folder's and an existing disk's paths are picked in dialogs the shell opens (api.vmPickSharedFolder,
+// api.vmPickDisk), never typed here. The core checks every
 // value again and the approval preview shows what changes on each VM.
 
 import { useEffect, useState, type ReactNode } from "react";
@@ -37,6 +38,7 @@ import {
   type VmRecord,
 } from "@/lib/api";
 import {
+  attachCopyHint,
   cardModels,
   formatMb,
   gbToMb,
@@ -617,6 +619,74 @@ export function DiskAddDialog({
         <Field id="disk-bus" label="Controller">
           <Select value={bus} onValueChange={setBus}>
             <SelectTrigger id="disk-bus" className="w-full">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="boot">The boot disk&apos;s</SelectItem>
+              {hardware.controllers.map((c) => (
+                <SelectItem key={c.name} value={c.name}>
+                  {c.name}
+                  {c.kind ? ` (${c.kind})` : ""}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </Field>
+      )}
+    </EditDialog>
+  );
+}
+
+/**
+ * VM-31: an existing disk image (a cloud server's data disk) attached to the VM. The file is chosen in a dialog the
+ * shell opens, so its path never comes from the UI; the approval preview says what it is, its size and where it goes.
+ */
+export function DiskAttachDialog({
+  vm,
+  hardware,
+  onSubmitted,
+  onClose,
+}: {
+  vm: VmRecord;
+  hardware: VmHardware;
+  onSubmitted: (outcome: SubmitOutcome) => void;
+  onClose: () => void;
+}) {
+  const [copy, setCopy] = useState(true);
+  const [bus, setBus] = useState("boot");
+  const [error, setError] = useState<string | null>(null);
+  return (
+    <EditDialog
+      vms={[vm]}
+      title={`Attach an existing disk to ${vm.displayName}`}
+      description="A VMDK, VDI, VHD, VHDX, qcow2 or raw disk you pick next, from this PC."
+      submitLabel="Choose the disk…"
+      problem={error}
+      onSubmit={async () => {
+        setError(null);
+        try {
+          const outcome = await api.vmPickDisk(vm.vmxPath, copy, bus === "boot" ? null : bus);
+          if (!outcome) return false;
+          onSubmitted(outcome);
+          return true;
+        } catch (err) {
+          setError(errorMessage(err));
+          return false;
+        }
+      }}
+      onClose={onClose}
+    >
+      <SwitchRow
+        id="attach-copy"
+        label="Copy it into the VM's folder"
+        checked={copy}
+        onChange={setCopy}
+        hint={copy ? attachCopyHint(vm.hypervisor) : "The VM writes to the file where it is; deleting the VM keeps it"}
+      />
+      {hardware.controllers.length > 1 && (
+        <Field id="attach-bus" label="Controller">
+          <Select value={bus} onValueChange={setBus}>
+            <SelectTrigger id="attach-bus" className="w-full">
               <SelectValue />
             </SelectTrigger>
             <SelectContent>

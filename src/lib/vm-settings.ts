@@ -96,6 +96,13 @@ export function diskFileLabel(diskPath: string, vmFolder: string | null): string
   return diskPath.slice(Math.max(diskPath.lastIndexOf("\\"), diskPath.lastIndexOf("/")) + 1);
 }
 
+/** VM-31: what copying an attached disk does on the VM's hypervisor, for the attach dialog's switch. */
+export function attachCopyHint(hypervisor: Hypervisor): string {
+  return hypervisor === "vmware"
+    ? "A VMDK is copied as it is; another format becomes a VMDK. The file you pick is only read"
+    : "A VDI, VMDK or VHD is copied as it is; another format becomes a VDI. The file you pick is only read";
+}
+
 /** VM-23: why the firmware dialog can't offer a TPM. */
 export function tpmReason(hypervisor: Hypervisor): string | null {
   return hypervisor === "vmware"

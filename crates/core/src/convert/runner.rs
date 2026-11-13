@@ -811,6 +811,9 @@ mod tests {
             chain: Vec::new(),
             encrypted: false,
             partition_table: None,
+            firmware_hint: None,
+            adapter_type: None,
+            made_by_vmware: false,
             problems: Vec::new(),
             notes: Vec::new(),
         }

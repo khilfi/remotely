@@ -70,6 +70,48 @@ fn tier(command: &Command, targets: &[Target]) -> Tier {
     engine().evaluate(command, targets).tier
 }
 
+/// VM-31: a cloud server's data disk, copied in or used where it is.
+fn attach(copy: bool) -> VmDiskOp {
+    VmDiskOp::Attach {
+        path: r"C:\Exports\web01_Data_Disk.vmdk".into(),
+        copy,
+        bus: None,
+        seen: None,
+    }
+}
+
+#[test]
+fn attaching_an_existing_disk_is_medium_and_high_on_prod() {
+    let one = lab(1);
+    for copy in [true, false] {
+        let command = disk(attach(copy), &one);
+        let decision = engine().evaluate(&command, &one);
+        assert_eq!(decision.action, ActionKind::VmDiskAttach);
+        assert_eq!(decision.tier, Tier::Medium);
+        assert_eq!(decision.steps, [ApprovalStep::Confirm]);
+        // Used where it is, the guest writes to the file itself: the dialog and the audit log say so.
+        assert_eq!(
+            decision.reasons.iter().any(|r| r.contains("used where it is")),
+            !copy,
+            "{:?}",
+            decision.reasons
+        );
+    }
+    let prod = vec![vm(0, Environment::Prod)];
+    assert_eq!(tier(&disk(attach(true), &prod), &prod), Tier::High);
+    // The file comes from the shell's dialog, never from the window.
+    assert!(disk(attach(true), &one).check_from_ui().is_err());
+    assert!(ActionKind::ALL.contains(&ActionKind::VmDiskAttach));
+    // Rules saved before 0.8.0 get its default.
+    let mut old = PolicyRules::default();
+    old.tiers.remove(&ActionKind::VmDiskAttach);
+    old.fill_missing_tiers();
+    assert_eq!(
+        old.tiers.get(&ActionKind::VmDiskAttach),
+        Some(&TierRule::same(Tier::Medium))
+    );
+}
+
 /// One command of every VM settings kind, for the policy tests that cover every action.
 pub(super) fn every_vm_settings_command() -> Vec<(Command, Vec<Target>)> {
     let one = lab(1);
@@ -123,6 +165,7 @@ pub(super) fn every_vm_settings_command() -> Vec<(Command, Vec<Target>)> {
             one.clone(),
         ),
         (disk(VmDiskOp::Remove { slot: "scsi0:1".into() }, &one), one.clone()),
+        (disk(attach(true), &one), one.clone()),
         (lifecycle(VmLifecycleOp::Delete, &one), one.clone()),
         (
             lifecycle(

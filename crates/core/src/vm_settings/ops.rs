@@ -206,11 +206,44 @@ pub enum VmDiskOp {
     Defragment { slot: String },
     /// Takes the disk off the VM and deletes its files.
     Remove { slot: String },
+    /// VM-31: an existing disk image, on the boot disk's controller (or `bus`). The file comes from a file dialog
+    /// in the shell, never from the UI ([`crate::command_bus::Command::check_from_ui`]): the guest reads, and with
+    /// `copy` off writes, what it holds.
+    Attach {
+        path: String,
+        /// Copied into the VM's folder (converted when the hypervisor doesn't run its format), the source only read;
+        /// `false`: the VM uses the file where it is.
+        #[serde(default = "copy_by_default")]
+        copy: bool,
+        #[serde(default)]
+        bus: Option<String>,
+        /// The disk's files when the command was made (the shell's dialog): the job refuses a file that changed
+        /// since, so what was approved is what is attached.
+        #[serde(default)]
+        seen: Option<Vec<FileStamp>>,
+    },
+}
+
+/// VM-31: one file of an attached disk as it was: its size and its last write.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileStamp {
+    pub path: String,
+    pub bytes: u64,
+    /// Milliseconds since 1970.
+    pub modified_ms: i64,
 }
 
 fn thin_by_default() -> bool {
     true
 }
+
+fn copy_by_default() -> bool {
+    true
+}
+
+/// VM-31: the extensions of the disk images a VM can be given.
+pub const DISK_IMAGE_EXTENSIONS: [&str; 7] = ["vmdk", "vdi", "vhd", "vhdx", "qcow2", "raw", "img"];
 
 /// VM-24: a VM as a whole.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -545,25 +578,46 @@ pub fn validate_device(targets: &[TargetRef], op: &VmDeviceOp) -> Result<()> {
     Ok(())
 }
 
+fn validate_bus(bus: &Option<String>, hypervisor: Hypervisor) -> Result<()> {
+    if let Some(bus) = bus {
+        validate_slot(bus)?;
+        if hypervisor == Hypervisor::Vmware
+            && !["scsi", "sata", "nvme", "ide"]
+                .iter()
+                .any(|f| bus.strip_prefix(f).is_some_and(|n| n.parse::<u32>().is_ok()))
+        {
+            return invalid(format!(
+                "'{bus}' is not a Workstation disk controller (scsi0, sata0, nvme0, ide0)."
+            ));
+        }
+    }
+    Ok(())
+}
+
 pub fn validate_disk(targets: &[TargetRef], op: &VmDiskOp) -> Result<()> {
-    for hypervisor in vm_hypervisors(targets)? {
+    let hypervisors = vm_hypervisors(targets)?;
+    if matches!(op, VmDiskOp::Attach { .. }) && hypervisors.len() != 1 {
+        return invalid("Attach a disk to one VM at a time.");
+    }
+    for hypervisor in hypervisors {
         match op {
             VmDiskOp::Add { size_mb: mb, bus, .. } => {
                 if !(1..=MAX_DISK_MB).contains(mb) {
                     return invalid(format!("A disk can be 1 MB to {}.", size_mb(MAX_DISK_MB)));
                 }
-                if let Some(bus) = bus {
-                    validate_slot(bus)?;
-                    if hypervisor == Hypervisor::Vmware
-                        && !["scsi", "sata", "nvme", "ide"]
-                            .iter()
-                            .any(|f| bus.strip_prefix(f).is_some_and(|n| n.parse::<u32>().is_ok()))
-                    {
-                        return invalid(format!(
-                            "'{bus}' is not a Workstation disk controller (scsi0, sata0, nvme0, ide0)."
-                        ));
-                    }
+                validate_bus(bus, hypervisor)?;
+            }
+            VmDiskOp::Attach { path, bus, .. } => {
+                validate_host_path("the disk image", path)?;
+                let image = Path::new(path).extension().is_some_and(|e| {
+                    DISK_IMAGE_EXTENSIONS.contains(&e.to_string_lossy().to_ascii_lowercase().as_str())
+                });
+                if !image {
+                    return invalid(format!(
+                        "'{path}' is not a disk image (VMDK, VDI, VHD, VHDX, qcow2 or raw)."
+                    ));
                 }
+                validate_bus(bus, hypervisor)?;
             }
             VmDiskOp::Expand { slot, size_mb: mb } => {
                 validate_slot(slot)?;
@@ -713,12 +767,21 @@ impl VmDiskOp {
             VmDiskOp::Compact { slot } => format!("Compact disk {slot} of {vms}"),
             VmDiskOp::Defragment { slot } => format!("Defragment disk {slot} of {vms}"),
             VmDiskOp::Remove { slot } => format!("Remove disk {slot} from {vms} and delete its files"),
+            VmDiskOp::Attach { path, copy, .. } => format!(
+                "Attach {} to {vms} ({})",
+                file_name(path),
+                if *copy {
+                    "copied into its folder"
+                } else {
+                    "used where it is"
+                }
+            ),
         }
     }
 
     pub fn slot(&self) -> Option<&str> {
         match self {
-            VmDiskOp::Add { .. } => None,
+            VmDiskOp::Add { .. } | VmDiskOp::Attach { .. } => None,
             VmDiskOp::Expand { slot, .. }
             | VmDiskOp::Compact { slot }
             | VmDiskOp::Defragment { slot }
@@ -887,6 +950,53 @@ mod tests {
         assert!(validate_disk(&vm(WEB), &disk(20 * 1024)).is_ok());
         assert!(validate_disk(&vm(WEB), &disk(0)).is_err());
         assert!(validate_disk(&vm(WEB), &disk(MAX_DISK_MB + 1)).is_err());
+    }
+
+    #[test]
+    fn an_attached_disk_is_a_local_disk_image_for_one_vm() {
+        let attach = |path: &str, copy: bool| VmDiskOp::Attach {
+            path: path.into(),
+            copy,
+            bus: None,
+            seen: None,
+        };
+        assert!(validate_disk(&vm(WEB), &attach(r"C:\Exports\web01_Data_Disk.vmdk", true)).is_ok());
+        assert!(validate_disk(&vm(VBOX), &attach(r"C:\Exports\data.qcow2", true)).is_ok());
+        assert!(validate_disk(&vm(WEB), &attach(r"C:\Exports\notes.txt", true)).is_err());
+        assert!(validate_disk(&vm(WEB), &attach(r"\\nas.example.com\exports\data.vmdk", false)).is_err());
+        assert!(validate_disk(&vm(WEB), &attach(r"\\?\C:\Exports\data.vmdk", false)).is_err());
+        assert!(
+            validate_disk(&vm(WEB), &attach("data.vmdk", true)).is_err(),
+            "not a full path"
+        );
+        let two = vec![
+            TargetRef::Vm { vmx_path: WEB.into() },
+            TargetRef::Vm {
+                vmx_path: r"C:\VMs\db01\db01.vmx".into(),
+            },
+        ];
+        assert!(
+            validate_disk(&two, &attach(r"C:\Exports\data.vmdk", true)).is_err(),
+            "one disk, one VM"
+        );
+        let on_bus = VmDiskOp::Attach {
+            path: r"C:\Exports\data.vmdk".into(),
+            copy: true,
+            bus: Some("pci0".into()),
+            seen: None,
+        };
+        assert!(validate_disk(&vm(WEB), &on_bus).is_err());
+        assert_eq!(
+            attach(r"C:\Exports\web01_Data_Disk.vmdk", false).summary(1),
+            "Attach web01_Data_Disk.vmdk to 1 VM (used where it is)"
+        );
+        assert_eq!(
+            attach(r"C:\Exports\data.vmdk", true).summary(1),
+            "Attach data.vmdk to 1 VM (copied into its folder)"
+        );
+        // Copied unless the command says otherwise.
+        let parsed: VmDiskOp = serde_json::from_str(r#"{"kind":"attach","path":"C:\\Exports\\data.vmdk"}"#).unwrap();
+        assert_eq!(parsed, attach(r"C:\Exports\data.vmdk", true));
     }
 
     #[test]
