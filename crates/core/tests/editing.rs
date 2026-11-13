@@ -712,7 +712,8 @@ async fn edit_on_this_pc_uploads_each_save_once_the_host_s_copy_is_checked() {
     {
         // Protected (nothing inherited from above), one entry: this user, full control.
         let acl = remotely_core::private_folder::describe(copy.parent().unwrap()).unwrap();
-        assert!(acl.starts_with("D:P") && acl.contains("(A;OICI;FA;;;S-1-"), "{acl}");
+        let entry = remotely_core::private_folder::user_entry().unwrap();
+        assert!(acl.starts_with("D:P") && acl.ends_with(&entry), "{acl} vs {entry}");
         assert_eq!(acl.matches("(A;").count(), 1, "{acl}");
         let mut stream = copy.as_os_str().to_owned();
         stream.push(":Zone.Identifier");

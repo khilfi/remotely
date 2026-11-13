@@ -28,24 +28,17 @@ fn io_error(text: String) -> CoreError {
     CoreError::Io(std::io::Error::other(text))
 }
 
+/// The SID of the user Remotely runs as, as `S-1-5-21-...`.
 #[cfg(windows)]
-fn restrict(path: &Path) -> Result<()> {
-    use std::os::windows::ffi::OsStrExt;
-    use windows::core::{PCWSTR, PWSTR};
-    use windows::Win32::Foundation::{CloseHandle, LocalFree, HANDLE, HLOCAL, WIN32_ERROR};
-    use windows::Win32::Security::Authorization::{
-        ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, SetNamedSecurityInfoW,
-        SDDL_REVISION_1, SE_FILE_OBJECT,
-    };
-    use windows::Win32::Security::{
-        GetSecurityDescriptorDacl, GetTokenInformation, TokenUser, ACL, DACL_SECURITY_INFORMATION,
-        PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, TOKEN_QUERY, TOKEN_USER,
-    };
+fn user_sid() -> Result<String> {
+    use windows::core::PWSTR;
+    use windows::Win32::Foundation::{CloseHandle, LocalFree, HANDLE, HLOCAL};
+    use windows::Win32::Security::Authorization::ConvertSidToStringSidW;
+    use windows::Win32::Security::{GetTokenInformation, TokenUser, TOKEN_QUERY, TOKEN_USER};
     use windows::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
-    let failed =
-        |what: &str, err: String| io_error(format!("could not make {} private: {what}: {err}", path.display()));
-    // SAFETY: each call gets buffers sized as the API asks; every handle and LocalAlloc'd buffer is freed below.
+    let failed = |what: &str, err: String| io_error(format!("could not read this user's SID: {what}: {err}"));
+    // SAFETY: the token buffer is sized as the API asks; the handle and the LocalAlloc'd string are freed here.
     unsafe {
         let mut token = HANDLE::default();
         OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token)
@@ -58,13 +51,82 @@ fn restrict(path: &Path) -> Result<()> {
         read.map_err(|e| failed("the user", e.to_string()))?;
         let user = &*(buffer.as_ptr().cast::<TOKEN_USER>());
         let mut sid_text = PWSTR::null();
-        ConvertSidToStringSidW(user.User.Sid, &mut sid_text).map_err(|e| failed("the user's SID", e.to_string()))?;
+        ConvertSidToStringSidW(user.User.Sid, &mut sid_text).map_err(|e| failed("the SID", e.to_string()))?;
         let sid = sid_text.to_string().unwrap_or_default();
         let _ = LocalFree(Some(HLOCAL(sid_text.0.cast())));
         if !sid.starts_with("S-1-") {
-            return Err(failed("the user's SID", "unreadable".into()));
+            return Err(failed("the SID", "unreadable".into()));
         }
-        let sddl: Vec<u16> = format!("D:P(A;OICI;FA;;;{sid})").encode_utf16().chain([0]).collect();
+        Ok(sid)
+    }
+}
+
+/// The DACL [`make`] gives a folder, as SDDL.
+#[cfg(windows)]
+fn private_sddl() -> Result<String> {
+    Ok(format!("D:P(A;OICI;FA;;;{})", user_sid()?))
+}
+
+/// The one entry [`make`] gives, as Windows writes it back ([`describe`]): a well-known account is written by its alias
+/// (the built-in Administrator's SID as `LA`), any other by its SID. For tests.
+#[cfg(windows)]
+pub fn user_entry() -> Result<String> {
+    use windows::core::{PCWSTR, PWSTR};
+    use windows::Win32::Foundation::{LocalFree, HLOCAL};
+    use windows::Win32::Security::Authorization::{
+        ConvertSecurityDescriptorToStringSecurityDescriptorW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
+        SDDL_REVISION_1,
+    };
+    use windows::Win32::Security::{DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR};
+
+    let sddl: Vec<u16> = private_sddl()?.encode_utf16().chain([0]).collect();
+    // SAFETY: the descriptor and the string are LocalAlloc'd by the API and freed here.
+    let written = unsafe {
+        let mut descriptor = PSECURITY_DESCRIPTOR::default();
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            PCWSTR(sddl.as_ptr()),
+            SDDL_REVISION_1,
+            &mut descriptor,
+            None,
+        )
+        .map_err(|e| io_error(format!("could not read the access list: {e}")))?;
+        let mut text = PWSTR::null();
+        let converted = ConvertSecurityDescriptorToStringSecurityDescriptorW(
+            descriptor,
+            SDDL_REVISION_1,
+            DACL_SECURITY_INFORMATION,
+            &mut text,
+            None,
+        );
+        let written = converted.map(|()| text.to_string().unwrap_or_default());
+        let _ = LocalFree(Some(HLOCAL(text.0.cast())));
+        let _ = LocalFree(Some(HLOCAL(descriptor.0)));
+        written.map_err(|e| io_error(format!("could not read the access list: {e}")))?
+    };
+    written
+        .find("(A;")
+        .map(|at| written[at..].to_owned())
+        .ok_or_else(|| io_error(format!("the access list {written} has no entry")))
+}
+
+#[cfg(windows)]
+fn restrict(path: &Path) -> Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::core::PCWSTR;
+    use windows::Win32::Foundation::{LocalFree, HLOCAL, WIN32_ERROR};
+    use windows::Win32::Security::Authorization::{
+        ConvertStringSecurityDescriptorToSecurityDescriptorW, SetNamedSecurityInfoW, SDDL_REVISION_1, SE_FILE_OBJECT,
+    };
+    use windows::Win32::Security::{
+        GetSecurityDescriptorDacl, ACL, DACL_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION,
+        PSECURITY_DESCRIPTOR,
+    };
+
+    let failed =
+        |what: &str, err: String| io_error(format!("could not make {} private: {what}: {err}", path.display()));
+    let sddl: Vec<u16> = private_sddl()?.encode_utf16().chain([0]).collect();
+    // SAFETY: the descriptor is LocalAlloc'd by the API and freed below; the DACL points into it.
+    unsafe {
         let mut descriptor = PSECURITY_DESCRIPTOR::default();
         ConvertStringSecurityDescriptorToSecurityDescriptorW(
             PCWSTR(sddl.as_ptr()),
@@ -105,7 +167,7 @@ fn restrict(path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// The folder's DACL as SDDL (`D:P(A;OICI;FA;;;S-1-5-21-...)`), for tests and the log.
+/// The folder's DACL as SDDL (`D:PAI(A;OICI;FA;;;S-1-5-21-...)`), for tests and the log.
 #[cfg(windows)]
 pub fn describe(path: &Path) -> Result<String> {
     use std::os::windows::ffi::OsStrExt;
@@ -162,8 +224,11 @@ mod tests {
         let folder = root.join("edit");
         make(&folder).unwrap();
         let sddl = describe(&folder).unwrap();
-        // Protected (P: nothing from the folder above), one entry: full control, inherited by files and folders in it.
-        assert!(sddl.starts_with("D:P") && sddl.contains("(A;OICI;FA;;;S-1-"), "{sddl}");
+        // Protected (P: nothing from the folder above), one entry: this user's full control, inherited by files and
+        // folders in it. (A CI runner's built-in Administrator is written `LA`, another user by their SID.)
+        let entry = user_entry().unwrap();
+        assert!(entry.starts_with("(A;OICI;FA;;;"), "{entry}");
+        assert!(sddl.starts_with("D:P") && sddl.ends_with(&entry), "{sddl} vs {entry}");
         assert_eq!(sddl.matches("(A;").count(), 1, "{sddl}");
         // A file made in it inherits the one entry.
         let file = folder.join("hosts");
