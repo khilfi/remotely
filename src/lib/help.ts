@@ -91,6 +91,34 @@ export const HELP = {
       "A session behind a jump host has its ports and certificate checked from the jump host. Ping and trace route can't go that way.",
     ],
   },
+  "page.files": {
+    title: "Files",
+    body: [
+      "This PC's folders on the left, a host's on the right, a tab per host. Each host tab rides on an open terminal's connection, so it logs in once, in its terminal.",
+      "Every change to a host's files goes through the approval rules, as uploads do. Nothing on this PC is changed here, except what a download writes.",
+    ],
+  },
+  "files.find": {
+    title: "Find files",
+    body: [
+      "Runs find on the host, under the folder shown, for names matching a pattern such as *.conf. It stays on that folder's drive, stops after about a minute, and shows at most 2,000 results.",
+      "It only reads, so it needs no approval. As root, it can look in folders the login user can't open.",
+    ],
+  },
+  "files.compare": {
+    title: "Compare and sync",
+    body: [
+      "Compares the folder of this PC with the host's: what is missing on either side, newer or larger, and with Compare contents each file's SHA-256. Git's data (.git) and links are left out.",
+      "Syncing to the host uploads what you pick in one job: new files need no approval, replacing asks once, and deleting what only the host has (only when you tick it) asks for the full approval. Syncing to this PC downloads; nothing here is deleted.",
+    ],
+  },
+  "files.manyHosts": {
+    title: "Many hosts",
+    body: [
+      "Push files of this PC into one folder on every picked host, or fetch the same file from each into a folder of this PC, each host's in a folder of its own.",
+      "Each copy's SHA-256 is checked, and the results group hosts that got or hold the same bytes, like Compare hosts. A push asks once, and for the full approval from 5 hosts; a fetch from a Prod host asks once.",
+    ],
+  },
   "toolbox.ports": {
     title: "Check ports",
     body: [

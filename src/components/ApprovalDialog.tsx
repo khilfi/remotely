@@ -938,6 +938,8 @@ function BundleSummary({ bundle }: { bundle: NonNullable<ApprovalRequest["bundle
 function UploadSummary({ upload }: { upload: NonNullable<ApprovalRequest["upload"]> }) {
   const replacing = upload.files.filter((f) => f.replace).length + (upload.moreReplacing ?? 0);
   const folders = upload.folders ?? 0;
+  // SS-14 (0.8.0 G3): a folder sync's deletes on the host.
+  const deleting = (upload.delete?.length ?? 0) + (upload.moreDeleting ?? 0);
   return (
     <div className="grid gap-2">
       <p className="text-sm text-muted-foreground">
@@ -947,6 +949,26 @@ function UploadSummary({ upload }: { upload: NonNullable<ApprovalRequest["upload
         {replacing > 0 && ` ${plural(replacing, "file")} there ${replacing === 1 ? "is" : "are"} replaced.`}
         {(upload.more ?? 0) > 0 && ` ${plural(upload.more ?? 0, "more file")} not listed.`}
       </p>
+      {deleting > 0 && (
+        <div className="grid gap-1">
+          <p className="text-sm text-tier-high">
+            Deletes {plural(deleting, "item")} on the host that this PC's folder doesn't have, folders with what is in
+            them, once everything is sent:
+          </p>
+          <ul className="max-h-32 divide-y overflow-auto rounded-md border border-tier-high/40 text-sm">
+            {upload.delete?.map((name) => (
+              <li key={name} className="px-3 py-1 font-mono text-xs">
+                {name}
+              </li>
+            ))}
+            {(upload.moreDeleting ?? 0) > 0 && (
+              <li className="px-3 py-1 text-xs text-muted-foreground">
+                and {plural(upload.moreDeleting ?? 0, "more item")}
+              </li>
+            )}
+          </ul>
+        </div>
+      )}
       <ul className="max-h-40 divide-y overflow-auto rounded-md border text-sm">
         {upload.files.map((f) => (
           <li key={f.name} className="flex items-center gap-2 px-3 py-1">

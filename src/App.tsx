@@ -71,6 +71,7 @@ import {
   ShieldCheckIcon,
   SunIcon,
   TerminalIcon,
+  FolderTreeIcon,
   TextSearchIcon,
   WrenchIcon,
   type LucideIcon,
@@ -166,6 +167,7 @@ import { SettingsPage } from "@/pages/SettingsPage";
 import { TemplatesPage, type TemplatesTab } from "@/pages/TemplatesPage";
 import { TerminalPage } from "@/pages/TerminalPage";
 import { ToolboxPage, type ToolboxRequest } from "@/pages/ToolboxPage";
+import { FilesPage, type FilesRequest } from "@/pages/FilesPage";
 import type { ChecksRequest } from "@/components/checks/ChecksTab";
 import { TOOLBOX_TOOLS, type ToolboxTool } from "@/lib/toolbox";
 import { VaultPage } from "@/pages/VaultPage";
@@ -216,6 +218,7 @@ const PAGE_ICONS: Record<PageId, LucideIcon> = {
   schedules: CalendarClockIcon,
   sessions: ListTreeIcon,
   terminal: TerminalIcon,
+  files: FolderTreeIcon,
   containers: ContainerIcon,
   toolbox: WrenchIcon,
   dashboard: LayoutDashboardIcon,
@@ -250,6 +253,7 @@ const Schedules = memo(SchedulesPage);
 const Dashboard = memo(DashboardPage);
 const Containers = memo(ContainersPage);
 const Toolbox = memo(ToolboxPage);
+const Files = memo(FilesPage);
 const Sessions = memo(SessionsPage);
 const Terminal = memo(TerminalPage);
 const Vault = memo(VaultPage);
@@ -313,6 +317,8 @@ export default function App() {
   const [containerRequest, setContainerRequest] = useState<ContainerRequest | null>(null);
   // FD-09: a Toolbox tool, with the session, VM or host a row handed it.
   const [toolboxRequest, setToolboxRequest] = useState<ToolboxRequest | null>(null);
+  // SS-14 (0.8.0 G3): a terminal's host (and folder) for the Files page: the Terminal's "Open in Files".
+  const [filesRequest, setFilesRequest] = useState<FilesRequest | null>(null);
   /** MO-08: a check's history, or a new check on a row, for the Dashboard's Checks tab. */
   const [checksRequest, setChecksRequest] = useState<ChecksRequest | null>(null);
   // QL-25, QL-24, QL-23: the notification centre, the shortcut sheet and the first-run wizard.
@@ -667,6 +673,16 @@ export default function App() {
     setPage("terminal");
   }, []);
 
+  /** SS-14 (0.8.0 G3): a session's terminal tab opened for the Files page, which stays on screen. */
+  const openTerminalBehind = useCallback((sessionId: string) => {
+    setTerminalOpen((prev) => ({ sessionId, n: (prev?.n ?? 0) + 1 }));
+  }, []);
+
+  const showTerminal = useCallback((terminalId: string) => {
+    setTerminalFocus((prev) => ({ terminalId, n: (prev?.n ?? 0) + 1 }));
+    setPage("terminal");
+  }, []);
+
   /** CT-01 "Open a shell": a terminal tab inside a container on a session's host. */
   const openContainerShell = useCallback((container: ContainerShellRequest) => {
     setTerminalOpen((prev) => ({ sessionId: container.sessionId, n: (prev?.n ?? 0) + 1, container }));
@@ -755,6 +771,10 @@ export default function App() {
         case "toolbox":
           setToolboxRequest((prev) => ({ tool: link.tool, target: link.target, n: (prev?.n ?? 0) + 1 }));
           setPage("toolbox");
+          break;
+        case "files":
+          setFilesRequest((prev) => ({ terminalId: link.terminalId, path: link.path, n: (prev?.n ?? 0) + 1 }));
+          setPage("files");
           break;
       }
     },
@@ -1342,6 +1362,18 @@ export default function App() {
             <section hidden={page !== "toolbox"}>
               <ErrorBoundary name="Toolbox">
                 <Toolbox active={page === "toolbox"} request={toolboxRequest} onSubmitted={submitted} />
+              </ErrorBoundary>
+            </section>
+            <section hidden={page !== "files"} className="h-full">
+              <ErrorBoundary name="Files">
+                <Files
+                  active={page === "files"}
+                  request={filesRequest}
+                  onSubmitted={submitted}
+                  onOpenTerminal={openTerminalBehind}
+                  onShowTerminal={showTerminal}
+                  onOpenSessions={show.sessions}
+                />
               </ErrorBoundary>
             </section>
             <section hidden={page !== "sessions"}>

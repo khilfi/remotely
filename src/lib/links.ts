@@ -19,6 +19,8 @@ export type AppLink =
   | { kind: "session"; sessionId: string }
   /** An open terminal's tab (SS-07: with its tunnels panel). */
   | { kind: "terminal"; terminalId: string; tunnels?: boolean }
+  /** SS-14 (0.8.0 G3): the Files page, on an open terminal's host at a folder (the Terminal's "Files here"). */
+  | { kind: "files"; terminalId?: string; path?: string }
   /** A job's results in Activity. */
   | { kind: "job"; jobId: string }
   /** CT-01: a container's details on the Containers page. */
@@ -68,6 +70,7 @@ const KINDS: Record<AppLinkKind, readonly string[]> = {
   hostNetworks: [],
   note: ["noteKind", "key"],
   toolbox: ["tool"],
+  files: [],
   checks: [],
 };
 
@@ -152,5 +155,7 @@ export function linkLabel(link: AppLink): string {
       return "Open the toolbox";
     case "checks":
       return link.add ? "Add a check" : link.checkId ? "Show the check" : "Show the checks";
+    case "files":
+      return "Open in Files";
   }
 }

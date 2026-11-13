@@ -15,6 +15,7 @@ export type PageId =
   | "schedules"
   | "sessions"
   | "terminal"
+  | "files"
   | "containers"
   | "toolbox"
   | "dashboard"
@@ -47,6 +48,8 @@ export const PAGES: readonly PageInfo[] = [
   { id: "schedules", label: "Schedules", group: "machines", shortcut: "Ctrl+3" },
   { id: "sessions", label: "Sessions", group: "remote", shortcut: "Ctrl+4" },
   { id: "terminal", label: "Terminal", group: "remote", shortcut: "Ctrl+5" },
+  // SS-14 (0.8.0 G3): no digit is free either; it opens from Ctrl+K, links and the Terminal's "Files here".
+  { id: "files", label: "Files", group: "remote" },
   { id: "containers", label: "Containers", group: "remote", shortcut: "Ctrl+6" },
   // FD-09: no digit is free; it opens from Ctrl+K and from session and VM rows.
   { id: "toolbox", label: "Toolbox", group: "remote" },

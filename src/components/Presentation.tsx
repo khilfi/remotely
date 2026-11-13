@@ -300,6 +300,10 @@ export const READ_ONLY_PAGES: Record<string, { blocked: string; still?: string }
     blocked: "Starting, stopping and removing containers, pulling and pruning, and marking container hosts",
     still: "Reading containers, logs, stats, images, volumes and networks, and opening a shell still work.",
   },
+  files: {
+    blocked: "Uploads, changes to a host's files, syncs to a host, many-hosts pushes and fetches, and bookmark edits",
+    still: "Browsing, find, previews, checksums, comparing and downloads still work.",
+  },
   sessions: {
     blocked: "New sessions, edits, folders, imports, links to VMs and port forwards",
     still: "Connecting and exporting still work.",
