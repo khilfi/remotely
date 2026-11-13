@@ -1,4 +1,5 @@
 // SS-08: the transfers panel: each file going up or down through a terminal, with its progress, speed and time left.
+// SS-14: four run at a time per host (the rest wait); pause one and it goes on later from where it stopped.
 // Cancel while it runs, retry once it failed or was cancelled (an upload goes through the approval flow again), and
 // "Open folder" for a finished download. The core keeps the list; "Clear finished" only hides rows here. P6: the list
 // comes from the transfers store (src/lib/transfers-store.ts), so a transfer's progress re-renders this panel and its
@@ -10,6 +11,8 @@ import {
   CircleCheckIcon,
   CircleXIcon,
   FolderOpenIcon,
+  PauseIcon,
+  PlayIcon,
   RotateCcwIcon,
   XIcon,
 } from "lucide-react";
@@ -86,6 +89,7 @@ const TransferRow = memo(function TransferRow({
   const where = t.direction === "upload" ? `to ${t.remotePath}` : `from ${t.remotePath}`;
   let line: string;
   if (t.state === "queued") line = `Waiting · ${formatSize(t.size)}`;
+  else if (t.state === "paused") line = `Paused · ${formatSize(t.done)} of ${formatSize(t.size)}`;
   else if (t.state === "running")
     line = [`${formatSize(t.done)} of ${formatSize(t.size)}`, speed, left !== null && `${formatDuration(left)} left`]
       .filter(Boolean)
@@ -110,6 +114,16 @@ const TransferRow = memo(function TransferRow({
     }
   }
 
+  /** SS-14: stops after the current chunk, or goes on from where it stopped. */
+  async function pauseOrResume() {
+    try {
+      if (t.state === "paused") await api.filesResume(t.id);
+      else await api.filesPause(t.id);
+    } catch (err) {
+      toast.error(errorMessage(err));
+    }
+  }
+
   return (
     <li className="grid gap-1 px-2 py-1.5 text-xs">
       <div className="flex min-w-0 items-center gap-1.5">
@@ -122,9 +136,15 @@ const TransferRow = memo(function TransferRow({
           {t.name}
         </span>
         {t.replace && <span className="shrink-0 text-tier-medium">replaces</span>}
+        {t.asRoot && <span className="shrink-0 text-tier-high">as root</span>}
         {t.state === "done" && <CircleCheckIcon className="size-3.5 shrink-0 text-success" aria-label="Done" />}
         {t.state === "failed" && <CircleXIcon className="size-3.5 shrink-0 text-destructive" aria-label="Failed" />}
         <span className="ml-auto flex shrink-0 items-center">
+          {active && (
+            <RowButton label={t.state === "paused" ? "Resume" : "Pause"} onClick={() => void pauseOrResume()}>
+              {t.state === "paused" ? <PlayIcon /> : <PauseIcon />}
+            </RowButton>
+          )}
           {active && (
             <RowButton label="Cancel" onClick={() => void cancel()}>
               <XIcon />

@@ -3213,8 +3213,12 @@ fn upload(files: &[(&str, bool)], targets: &[Target]) -> Command {
                 name: (*name).into(),
                 size: 1500,
                 replace: *replace,
+                modified: None,
             })
             .collect(),
+        folders: vec![],
+        keep_times: true,
+        as_root: false,
     }
 }
 
@@ -3290,6 +3294,9 @@ fn uploads_go_to_one_open_terminal_with_plain_names() {
         targets: targets.clone(),
         folder: "srv/www".into(),
         files: files.clone(),
+        folders: vec![],
+        keep_times: true,
+        as_root: false,
     };
     assert!(relative.validate().is_err(), "the host folder must be absolute");
     let mut local = files;
@@ -3298,6 +3305,9 @@ fn uploads_go_to_one_open_terminal_with_plain_names() {
         targets,
         folder: "/srv".into(),
         files: local,
+        folders: vec![],
+        keep_times: true,
+        as_root: false,
     };
     assert!(local.validate().is_err(), "the PC's path must be absolute");
 }
@@ -3561,6 +3571,7 @@ fn every_command() -> Vec<(Command, Vec<Target>)> {
     .chain(super::host_networks_tests::every_host_network_command())
     .chain([super::wake_tests::wake_on_lan()])
     .chain(super::file_server_tests::every_file_server_command())
+    .chain(super::file_ops_tests::every_file_op_command())
     .collect()
 }
 
@@ -3596,7 +3607,14 @@ fn the_read_only_lock_ignores_tiers_labels_and_protection() {
     // Rules that make everything Low change nothing about the lock.
     let mut rules = PolicyRules::default();
     for kind in ActionKind::ALL {
-        if kind != ActionKind::FileReplace && kind != ActionKind::TunnelShared {
+        if !matches!(
+            kind,
+            ActionKind::FileReplace
+                | ActionKind::TunnelShared
+                | ActionKind::FileMoveReplace
+                | ActionKind::FileDelete
+                | ActionKind::FileDeleteFolder
+        ) {
             rules.tiers.insert(kind, TierRule::same(Tier::Low));
         }
     }

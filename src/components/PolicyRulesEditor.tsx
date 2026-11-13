@@ -68,7 +68,20 @@ const GROUPS: { title: string; kinds: ActionKind[]; exec?: boolean; deploy?: boo
   { title: "Stacks", kinds: ["stackTeardown"] },
   { title: "Commands on hosts", kinds: ["execReadOnly", "execOther", "execDangerous"], exec: true },
   { title: "SSH keys", kinds: ["sshKeyPush", "sshKeyRemove"] },
-  { title: "Files", kinds: ["fileUpload", "fileReplace"] },
+  {
+    title: "Files",
+    kinds: [
+      "fileUpload",
+      "fileReplace",
+      "fileNew",
+      "fileMove",
+      "fileMoveReplace",
+      "fileCopy",
+      "filePermissions",
+      "fileDelete",
+      "fileDeleteFolder",
+    ],
+  },
   { title: "Tunnels", kinds: ["tunnelLocal", "tunnelRemote", "tunnelShared"] },
   {
     title: "Containers",

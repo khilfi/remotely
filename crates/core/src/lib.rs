@@ -495,9 +495,10 @@ impl Core {
             JobLimits::default(),
         )
         .await?;
-        // FD-09: the database's folder (the vault, logs and WebView2's profile beside it) is never served.
+        // FD-09: the database's folder (the vault, logs and WebView2's profile beside it) is never served; SS-14: and
+        // no download lands in it.
         if let Some(folder) = data_folder.filter(|f| !f.as_os_str().is_empty()) {
-            core.file_server.runner().protect(&folder);
+            core.protect_folder(&folder);
         }
         Ok(core)
     }
@@ -551,6 +552,7 @@ impl Core {
             Arc::clone(&links),
         );
         terminals.set_bindings(bindings.clone());
+        terminals.set_login_guard(login_guard.clone());
         // F4: one WinRM client for PowerShell consoles, Windows guest metrics and facts, and Windows service checks. It
         // checks an HTTPS certificate against Windows' trust store through the network tools (a fake in tests).
         let winrm: Arc<dyn adapters::winrm::WinrmAdapter> =
@@ -1034,6 +1036,13 @@ impl Core {
             }
         }
         jobs.len()
+    }
+
+    /// FD-09, SS-14: Remotely's own data (its database's folder, the logs): the file server never serves it or writes
+    /// into it, and no download lands in it.
+    pub fn protect_folder(&self, folder: &std::path::Path) {
+        self.file_server.runner().protect(folder);
+        self.terminals.protect_folder(folder);
     }
 
     /// Before the app exits, also when an update's installer is about to end it (FD-14, QL-15): every terminal

@@ -2889,7 +2889,14 @@ struct FakeFs {
     atomic_rename: bool,
     /// For temporary file names.
     next_temp: u64,
+    /// SS-14: modes, owners and times set for a path (else 0644 or 0755, 1000:1000, and 1700000000).
+    meta: HashMap<String, (u32, u32, u32, u64)>,
+    /// SS-14: symbolic links, each path to its target (absolute). Only a path's last part is followed.
+    links: HashMap<String, String>,
 }
+
+/// SS-14: what [`FakeFiles`] reports for a path nobody changed.
+const FAKE_MTIME: u64 = 1_700_000_000;
 
 impl Default for FakeFiles {
     fn default() -> Self {
@@ -2908,8 +2915,53 @@ impl Default for FakeFiles {
                 fail_after: None,
                 atomic_rename: true,
                 next_temp: 1,
+                meta: HashMap::new(),
+                links: HashMap::new(),
             })),
         }
+    }
+}
+
+impl FakeFs {
+    fn protected_folder(&self, path: &str) -> bool {
+        let folder = fake_parent(path);
+        self.protected
+            .iter()
+            .any(|p| folder == *p || folder.starts_with(&format!("{p}/")))
+    }
+
+    fn refused(&self, what: &'static str, path: &str) -> CoreError {
+        CoreError::RemotePermissionDenied {
+            user: self.user.clone(),
+            what,
+            path: path.to_owned(),
+            advice: "",
+        }
+    }
+
+    fn exists(&self, path: &str) -> bool {
+        self.dirs.contains(path) || self.files.contains_key(path) || self.links.contains_key(path)
+    }
+
+    /// Where `path` leads, links followed (at most 8); `None` for a loop.
+    fn resolve(&self, path: &str) -> Option<String> {
+        let mut at = path.to_owned();
+        for _ in 0..8 {
+            match self.links.get(&at) {
+                Some(to) => at = to.clone(),
+                None => return Some(at),
+            }
+        }
+        None
+    }
+
+    /// Everything at and under `path` goes: files, folders, links and what was set on them.
+    fn clear(&mut self, path: &str) {
+        let under = |p: &String| p == path || p.starts_with(&format!("{path}/"));
+        self.files.retain(|p, _| !under(p));
+        self.dirs.retain(|p| !under(p));
+        self.links.retain(|p, _| !under(p));
+        self.meta.retain(|p, _| !under(p));
     }
 }
 
@@ -2932,8 +2984,30 @@ impl FakeFiles {
         self
     }
 
+    /// A regular file at `path` (in place of a link there).
     pub fn set_file(&self, path: &str, content: &[u8]) {
-        locks::lock(&self.inner).files.insert(path.to_owned(), content.to_vec());
+        let mut fs = locks::lock(&self.inner);
+        fs.links.remove(path);
+        fs.files.insert(path.to_owned(), content.to_vec());
+    }
+
+    /// SS-14: a symbolic link at `path` to `target`.
+    pub fn with_link(self, path: &str, target: &str) -> Self {
+        self.set_link(path, target);
+        self
+    }
+
+    /// SS-14: whatever is at `path` (a folder with everything in it) goes, and a link to `target` takes its place: what
+    /// another user on the host could do between a look and a change.
+    pub fn set_link(&self, path: &str, target: &str) {
+        let mut fs = locks::lock(&self.inner);
+        fs.clear(path);
+        fs.links.insert(path.to_owned(), target.to_owned());
+    }
+
+    /// SS-14: the target of the link at `path`, if one is there.
+    pub fn link(&self, path: &str) -> Option<String> {
+        locks::lock(&self.inner).links.get(path).cloned()
     }
 
     /// Writes into this folder (and below) are refused, like a folder the user may not write to.
@@ -2970,26 +3044,68 @@ impl FakeFiles {
         paths
     }
 
+    /// SS-14: the mode, uid, gid and modification time the host reports for a path.
+    pub fn meta(&self, path: &str) -> Option<(u32, u32, u32, u64)> {
+        let fs = locks::lock(&self.inner);
+        Self::entry(&fs, path).map(|e| {
+            (
+                e.mode.unwrap_or(0),
+                e.uid.unwrap_or(0),
+                e.gid.unwrap_or(0),
+                e.modified.unwrap_or(0),
+            )
+        })
+    }
+
+    /// Every folder's path, sorted.
+    pub fn folders(&self) -> Vec<String> {
+        let mut dirs: Vec<String> = locks::lock(&self.inner).dirs.iter().cloned().collect();
+        dirs.sort();
+        dirs
+    }
+
+    /// What is at `path` itself (lstat): a link is a link.
     fn entry(fs: &FakeFs, path: &str) -> Option<RemoteEntry> {
         let name = path.trim_end_matches('/').rsplit('/').next().unwrap_or(path).to_owned();
-        if fs.dirs.contains(path) {
+        if fs.links.contains_key(path) {
+            let (mode, uid, gid, modified) = fs.meta.get(path).copied().unwrap_or((0o777, 1000, 1000, FAKE_MTIME));
             return Some(RemoteEntry {
                 name,
-                kind: EntryKind::Folder,
-                link: false,
-                size: 4096,
-                modified: Some(1_700_000_000),
-                mode: Some(0o755),
+                kind: EntryKind::Other,
+                link: true,
+                size: 0,
+                modified: Some(modified),
+                mode: Some(mode),
+                uid: Some(uid),
+                gid: Some(gid),
             });
         }
-        fs.files.get(path).map(|content| RemoteEntry {
+        let (kind, size, mode) = if fs.dirs.contains(path) {
+            (EntryKind::Folder, 4096, 0o755)
+        } else {
+            let content = fs.files.get(path)?;
+            (EntryKind::File, content.len() as u64, 0o644)
+        };
+        let (mode, uid, gid, modified) = fs.meta.get(path).copied().unwrap_or((mode, 1000, 1000, FAKE_MTIME));
+        Some(RemoteEntry {
             name,
-            kind: EntryKind::File,
+            kind,
             link: false,
-            size: content.len() as u64,
-            modified: Some(1_700_000_000),
-            mode: Some(0o644),
+            size,
+            modified: Some(modified),
+            mode: Some(mode),
+            uid: Some(uid),
+            gid: Some(gid),
         })
+    }
+
+    /// What `path` leads to (stat), a link followed. `listed`: as a listing shows it, a link marked as one.
+    fn followed(fs: &FakeFs, path: &str, listed: bool) -> Option<RemoteEntry> {
+        let to = fs.resolve(path)?;
+        let mut entry = Self::entry(fs, &to)?;
+        entry.name = path.trim_end_matches('/').rsplit('/').next().unwrap_or(path).to_owned();
+        entry.link = listed && fs.links.contains_key(path);
+        Some(entry)
     }
 }
 
@@ -3016,17 +3132,25 @@ impl RemoteFiles for FakeFiles {
             .iter()
             .filter(inside)
             .chain(fs.files.keys().filter(inside))
+            .chain(fs.links.keys().filter(inside))
             .collect();
         paths.sort();
         let more = paths.len() > crate::adapters::remote::MAX_LISTING;
         paths.truncate(crate::adapters::remote::MAX_LISTING);
         Ok(RemoteListing {
-            entries: paths.into_iter().filter_map(|path| Self::entry(&fs, path)).collect(),
+            entries: paths
+                .into_iter()
+                .filter_map(|path| Self::followed(&fs, path, true).or_else(|| Self::entry(&fs, path)))
+                .collect(),
             more,
         })
     }
 
     async fn stat(&self, path: &str) -> Result<Option<RemoteEntry>> {
+        Ok(Self::followed(&locks::lock(&self.inner), path, false))
+    }
+
+    async fn lstat(&self, path: &str) -> Result<Option<RemoteEntry>> {
         Ok(Self::entry(&locks::lock(&self.inner), path))
     }
 
@@ -3034,8 +3158,8 @@ impl RemoteFiles for FakeFiles {
         let (content, delay) = {
             let fs = locks::lock(&self.inner);
             let content = fs
-                .files
-                .get(path)
+                .resolve(path)
+                .and_then(|to| fs.files.get(&to))
                 .cloned()
                 .ok_or_else(|| CoreError::RemoteNotFound { path: path.to_owned() })?;
             (content, fs.delay)
@@ -3047,11 +3171,7 @@ impl RemoteFiles for FakeFiles {
         let opened = {
             let mut fs = locks::lock(&self.inner);
             let folder = fake_parent(path);
-            if fs
-                .protected
-                .iter()
-                .any(|p| folder == *p || folder.starts_with(&format!("{p}/")))
-            {
+            if fs.protected_folder(path) {
                 return Err(CoreError::RemotePermissionDenied {
                     user: fs.user.clone(),
                     what: "write to",
@@ -3062,7 +3182,7 @@ impl RemoteFiles for FakeFiles {
             if !fs.dirs.contains(&folder) {
                 return Err(CoreError::RemoteNotFound { path: folder });
             }
-            let there = fs.files.contains_key(path);
+            let there = fs.files.contains_key(path) || fs.links.contains_key(path);
             if there && !replace {
                 return Err(CoreError::RemoteFileExists { path: path.to_owned() });
             }
@@ -3091,11 +3211,150 @@ impl RemoteFiles for FakeFiles {
     }
 
     async fn remove(&self, path: &str) -> Result<()> {
-        locks::lock(&self.inner)
-            .files
+        let mut fs = locks::lock(&self.inner);
+        if (fs.files.contains_key(path) || fs.links.contains_key(path)) && fs.protected_folder(path) {
+            return Err(fs.refused("delete", path));
+        }
+        if fs.links.remove(path).is_some() {
+            fs.meta.remove(path);
+            return Ok(());
+        }
+        fs.meta.remove(path);
+        fs.files
             .remove(path)
             .map(drop)
             .ok_or_else(|| CoreError::RemoteNotFound { path: path.to_owned() })
+    }
+
+    async fn make_folder(&self, path: &str) -> Result<()> {
+        let mut fs = locks::lock(&self.inner);
+        if fs.protected_folder(path) {
+            return Err(fs.refused("make the folder", path));
+        }
+        if fs.exists(path) {
+            return Err(CoreError::RemotePathTaken { path: path.to_owned() });
+        }
+        if !fs.dirs.contains(&fake_parent(path)) {
+            return Err(CoreError::RemoteNotFound {
+                path: fake_parent(path),
+            });
+        }
+        fs.dirs.insert(path.to_owned());
+        Ok(())
+    }
+
+    async fn remove_folder(&self, path: &str) -> Result<()> {
+        let mut fs = locks::lock(&self.inner);
+        if fs.links.contains_key(path) {
+            return Err(CoreError::Sftp(format!(
+                "deleting {path} on the host failed: not a folder"
+            )));
+        }
+        if !fs.dirs.contains(path) {
+            return Err(CoreError::RemoteNotFound { path: path.to_owned() });
+        }
+        if fs.protected_folder(path) {
+            return Err(fs.refused("delete", path));
+        }
+        let inside = |p: &String| fake_parent(p) == path && p != path;
+        if fs.dirs.iter().any(inside) || fs.files.keys().any(inside) || fs.links.keys().any(inside) {
+            return Err(CoreError::RemoteFolderNotEmpty { path: path.to_owned() });
+        }
+        fs.dirs.remove(path);
+        fs.meta.remove(path);
+        Ok(())
+    }
+
+    async fn rename(&self, from: &str, to: &str, replace: bool) -> Result<()> {
+        let mut fs = locks::lock(&self.inner);
+        if !fs.exists(from) {
+            return Err(CoreError::RemoteNotFound { path: from.to_owned() });
+        }
+        if fs.protected_folder(from) || fs.protected_folder(to) {
+            return Err(fs.refused("rename", from));
+        }
+        if fs.exists(to) && (!replace || fs.dirs.contains(to)) {
+            return Err(CoreError::RemotePathTaken { path: to.to_owned() });
+        }
+        // A rename over a link replaces the link.
+        fs.links.remove(to);
+        // Everything at and under `from` moves.
+        let moved = |p: &str| p == from || p.starts_with(&format!("{from}/"));
+        let renamed = |p: &str| format!("{to}{}", &p[from.len()..]);
+        let dirs: Vec<String> = fs.dirs.iter().filter(|p| moved(p)).cloned().collect();
+        for dir in dirs {
+            fs.dirs.remove(&dir);
+            fs.dirs.insert(renamed(&dir));
+        }
+        let files: Vec<String> = fs.files.keys().filter(|p| moved(p)).cloned().collect();
+        for file in files {
+            if let Some(content) = fs.files.remove(&file) {
+                fs.files.insert(renamed(&file), content);
+            }
+        }
+        let links: Vec<String> = fs.links.keys().filter(|p| moved(p)).cloned().collect();
+        for link in links {
+            if let Some(target) = fs.links.remove(&link) {
+                fs.links.insert(renamed(&link), target);
+            }
+        }
+        let metas: Vec<String> = fs.meta.keys().filter(|p| moved(p)).cloned().collect();
+        for path in metas {
+            if let Some(meta) = fs.meta.remove(&path) {
+                fs.meta.insert(renamed(&path), meta);
+            }
+        }
+        Ok(())
+    }
+
+    async fn set_attrs(&self, path: &str, attrs: crate::adapters::remote::SetAttrs) -> Result<()> {
+        let mut fs = locks::lock(&self.inner);
+        let entry = Self::entry(&fs, path).ok_or_else(|| CoreError::RemoteNotFound { path: path.to_owned() })?;
+        // Like OpenSSH's lsetstat: on the path itself, and a link takes no mode, so nothing goes through it.
+        if entry.link {
+            return Err(CoreError::Sftp(format!(
+                "{path} on the host is a link; nothing is changed through it"
+            )));
+        }
+        if fs.protected_folder(path) && (attrs.mode.is_some() || attrs.owner.is_some()) {
+            return Err(fs.refused("change the permissions of", path));
+        }
+        if let Some((uid, gid)) = attrs.owner {
+            if (uid, gid) != (1000, 1000) && fs.user != "root" {
+                return Err(fs.refused("change the owner of", path));
+            }
+        }
+        let mut meta = (
+            entry.mode.unwrap_or(0o644),
+            entry.uid.unwrap_or(1000),
+            entry.gid.unwrap_or(1000),
+            entry.modified.unwrap_or(FAKE_MTIME),
+        );
+        if let Some(mode) = attrs.mode {
+            meta.0 = mode & 0o7777;
+        }
+        if let Some((uid, gid)) = attrs.owner {
+            (meta.1, meta.2) = (uid, gid);
+        }
+        if let Some(at) = attrs.modified {
+            meta.3 = at;
+        }
+        fs.meta.insert(path.to_owned(), meta);
+        Ok(())
+    }
+
+    async fn read_from(&self, path: &str, offset: u64) -> Result<Box<dyn RemoteRead>> {
+        let (content, delay) = {
+            let fs = locks::lock(&self.inner);
+            let content = fs
+                .resolve(path)
+                .and_then(|to| fs.files.get(&to))
+                .cloned()
+                .ok_or_else(|| CoreError::RemoteNotFound { path: path.to_owned() })?;
+            (content, fs.delay)
+        };
+        let at = usize::try_from(offset).unwrap_or(usize::MAX).min(content.len());
+        Ok(Box::new(FakeRead { content, at, delay }))
     }
 }
 
@@ -3168,6 +3427,8 @@ impl RemoteWrite for FakeWrite {
         let mut fs = locks::lock(&self.files.inner);
         let content = fs.files.remove(&self.path).unwrap_or_default();
         if fs.atomic_rename {
+            // A rename over a link replaces the link, never what it points to.
+            fs.links.remove(&target);
             fs.files.insert(target, content);
             return Ok(Written::Replaced);
         }
@@ -3186,6 +3447,30 @@ impl RemoteWrite for FakeWrite {
             Some(target) => format!("{target} on the host is as it was"),
             None => "nothing was left on the host".to_owned(),
         }
+    }
+
+    async fn pause(&mut self) -> Result<()> {
+        Ok(())
+    }
+
+    async fn resume(&mut self, offset: u64, sent_sha256: &str) -> Result<crate::adapters::remote::Resumed> {
+        use sha2::Digest;
+        let mut fs = locks::lock(&self.files.inner);
+        // Like the real one: only a file that holds exactly what was sent goes on.
+        let holds = !fs.links.contains_key(&self.path)
+            && fs
+                .files
+                .get(&self.path)
+                .is_some_and(|c| c.len() as u64 == offset && hex::encode(sha2::Sha256::digest(c)) == sent_sha256);
+        if holds {
+            self.written = offset;
+            return Ok(crate::adapters::remote::Resumed::GoesOn);
+        }
+        // What is there goes (a link as a link) and a new, empty file takes its place.
+        fs.links.remove(&self.path);
+        fs.files.insert(self.path.clone(), Vec::new());
+        self.written = 0;
+        Ok(crate::adapters::remote::Resumed::FromStart)
     }
 }
 

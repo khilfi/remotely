@@ -23,6 +23,7 @@
 
 pub mod forward;
 mod sftp;
+pub(crate) mod sftp_root;
 mod socks;
 
 use std::net::IpAddr;
@@ -480,6 +481,22 @@ pub struct RemoteEntry {
     pub modified: Option<u64>,
     /// The permission bits, e.g. 0o644.
     pub mode: Option<u32>,
+    /// SS-14: the owner's and group's numbers, as the host says.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub uid: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gid: Option<u32>,
+}
+
+/// SS-14: what [`RemoteFiles::set_attrs`] changes; `None` leaves it as it is.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SetAttrs {
+    /// The permission bits (`chmod`), at most 0o7777.
+    pub mode: Option<u32>,
+    /// The owner and group together (SFTP sets both at once).
+    pub owner: Option<(u32, u32)>,
+    /// The modification time, seconds since 1970 (the access time gets the same).
+    pub modified: Option<u64>,
 }
 
 /// SS-08: files on the host, on an SFTP channel of a terminal's connection. Paths are the host's:
@@ -503,8 +520,90 @@ pub trait RemoteFiles: Send + Sync {
     /// takes the old file's place only once all of it arrived ([`RemoteWrite::finish`]), keeping its
     /// permissions and owner; until then the old file stays as it was. [`Written`] says how it went.
     async fn write(&self, path: &str, replace: bool) -> Result<Box<dyn RemoteWrite>>;
-    /// Deletes a file (a transfer's own leftover).
+    /// Deletes a file (a transfer's own leftover), or a link (never what it points to).
     async fn remove(&self, path: &str) -> Result<()>;
+
+    /// SS-14: what is at `path` itself: a link is a link ([`RemoteEntry::link`], its kind
+    /// [`EntryKind::Other`]), never followed. `None` when nothing is.
+    async fn lstat(&self, path: &str) -> Result<Option<RemoteEntry>> {
+        self.stat(path).await
+    }
+    /// SS-14: a new, empty folder; fails when something is at `path`.
+    async fn make_folder(&self, _path: &str) -> Result<()> {
+        Err(CoreError::NotImplemented("making folders on this connection"))
+    }
+    /// SS-14: deletes an empty folder ([`CoreError::RemoteFolderNotEmpty`] when it isn't).
+    async fn remove_folder(&self, _path: &str) -> Result<()> {
+        Err(CoreError::NotImplemented("deleting folders on this connection"))
+    }
+    /// SS-14: `from` takes the name `to`. Without `replace` it fails when something is at `to`; with it, a file
+    /// there is replaced in one step (OpenSSH's posix-rename), and a host that can't do that refuses.
+    async fn rename(&self, _from: &str, _to: &str, _replace: bool) -> Result<()> {
+        Err(CoreError::NotImplemented("renaming on this connection"))
+    }
+    /// SS-14: sets a file's or folder's permissions, owner or modification time.
+    async fn set_attrs(&self, _path: &str, _attrs: SetAttrs) -> Result<()> {
+        Err(CoreError::NotImplemented("changing permissions on this connection"))
+    }
+    /// SS-14: a file read from `offset` on: a paused download going on where it stopped.
+    async fn read_from(&self, path: &str, offset: u64) -> Result<Box<dyn RemoteRead>> {
+        if offset == 0 {
+            return self.read(path).await;
+        }
+        Err(CoreError::NotImplemented("resuming a download on this connection"))
+    }
+    /// SS-14: files as root on this same connection: `server` (the host's sftp-server, from
+    /// [`SFTP_SERVER_PROBE`]) started under sudo on an exec channel, with `password` on its stdin when sudo asks.
+    /// [`CoreError::SudoPasswordRefused`] when sudo did not take it.
+    async fn open_as_root(&self, _server: &str, _password: Option<&SecretString>) -> Result<RootOpened> {
+        Err(CoreError::NotImplemented("browsing as root on this connection"))
+    }
+    /// SS-14: these files are root's (an SFTP server started with sudo).
+    fn as_root(&self) -> bool {
+        false
+    }
+    /// SS-14: root browsing ended (stopped, the vault locked, the connection went): sudo's password is forgotten, the
+    /// root SFTP channels close, and nothing through these files (a paused upload's writer included) works again.
+    fn revoke(&self) {}
+}
+
+/// SS-14: how a paused upload went on ([`RemoteWrite::resume`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Resumed {
+    /// From the offset: what was written before the pause is on the host as it was sent.
+    GoesOn,
+    /// The host's file changed while paused (another size or time, other bytes, a link): what was made was deleted,
+    /// a new file made in its place, and the upload starts again from 0.
+    FromStart,
+}
+
+/// SS-14: root browsing's files, from [`RemoteFiles::open_as_root`].
+pub struct RootOpened {
+    pub files: Arc<dyn RemoteFiles>,
+    /// sudo asked for the password and took it (false: it asked for none, so none went to the host).
+    pub took_password: bool,
+}
+
+/// SS-14: finds the host's SFTP server program, to start it under sudo for root browsing. A read, as the login user,
+/// run by `/bin/sh` (not the login shell, whose rc files and PATH the result would otherwise depend on): the first of
+/// the distributions' fixed places that is there (Debian and Ubuntu, RHEL and Fedora, Arch, Alpine, SUSE). Never the
+/// PATH, which the login user controls and what is found runs as root. Prints one absolute path, or nothing.
+pub const SFTP_SERVER_PROBE: &str =
+    "/bin/sh -c 'for p in /usr/lib/openssh/sftp-server /usr/libexec/openssh/sftp-server \
+/usr/lib/ssh/sftp-server /usr/libexec/sftp-server /usr/lib/sftp-server /usr/libexec/ssh/sftp-server; do \
+if [ -x \"$p\" ]; then printf \"%s\\n\" \"$p\"; exit 0; fi; done; exit 1'";
+
+/// SS-14: the server [`SFTP_SERVER_PROBE`] found: an absolute path of plain characters, so it can go on a command
+/// line as it is.
+pub fn parse_sftp_server(stdout: &str) -> Option<String> {
+    let path = stdout.lines().map(str::trim).find(|l| !l.is_empty())?;
+    let plain = path.starts_with('/')
+        && path.len() <= 256
+        && !path.contains("/../")
+        && path
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '.' | '-' | '_' | '+'));
+    plain.then(|| path.to_owned())
 }
 
 /// A9: a folder listing stops after this many entries, and [`RemoteListing::more`] says so. Folders
@@ -538,6 +637,17 @@ pub trait RemoteWrite: Send {
     /// replacement's temporary file too, so the old file stays as it was. Says what is left on the
     /// host, for the transfers panel.
     async fn abort(self: Box<Self>) -> String;
+    /// SS-14: the transfer pauses: the host's file handle closes, and what was written so far stays (the new file,
+    /// or a replacement's temporary file), for [`RemoteWrite::resume`].
+    async fn pause(&mut self) -> Result<()> {
+        Err(CoreError::NotImplemented("pausing an upload on this connection"))
+    }
+    /// SS-14: goes on after a pause, writing from `offset` (what was written before the pause), once the host's file is
+    /// checked to be what was written: a regular file, not a link, of `offset` bytes and the time it had at the pause,
+    /// whose bytes read back hash to `sent_sha256`. Otherwise it starts again from 0 ([`Resumed::FromStart`]).
+    async fn resume(&mut self, _offset: u64, _sent_sha256: &str) -> Result<Resumed> {
+        Err(CoreError::NotImplemented("resuming an upload on this connection"))
+    }
 }
 
 /// H8: how an upload's file landed on the host.
@@ -1973,10 +2083,24 @@ impl ExecSession for ShellCommands {
         })
     }
 
-    async fn run_sudo(&self, _: &str, _: &SecretString, _: usize) -> Result<ExecResult> {
-        Err(CoreError::InvalidInput(
-            "a terminal's connection runs no sudo commands for Remotely".into(),
-        ))
+    /// SS-14: only a copy made as root (root browsing's `cp -a`, approved on the bus one tier higher) runs under sudo
+    /// here, with the password root browsing gave sudo (BX-07's, which passed rule 7's checks then). Scrubbed from the
+    /// output like any sudo password.
+    async fn run_sudo(&self, script: &str, password: &SecretString, max_output: usize) -> Result<ExecResult> {
+        if self.handle.is_closed() {
+            return Err(CoreError::Ssh("the terminal's connection is closed".into()));
+        }
+        let started = std::time::Instant::now();
+        let secrets = [password.clone()];
+        let (exit_code, signal, output) =
+            run_command(&self.handle, &self.shared, script, Some(password), &secrets, max_output).await?;
+        Ok(ExecResult {
+            exit_code,
+            signal,
+            output,
+            duration_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
+            peer_ip: None,
+        })
     }
 
     fn is_closed(&self) -> bool {
@@ -2062,6 +2186,41 @@ impl Prompter for NoPrompter {
 /// `text` as one word for a POSIX shell: in single quotes, with each `'` written as `'\''`.
 pub(crate) fn sh_quote(text: &str) -> String {
     format!("'{}'", text.replace('\'', r"'\''"))
+}
+
+/// SS-14: `text` as `printf` octal escapes: only `A-Z a-z 0-9 / . _ -` stay as they are, every other byte is `\NNN`.
+/// Nothing in it is special to any login shell an exec string passes through (POSIX shells, fish, csh): no quote, no
+/// `\\` or `\'`, no `$`, `!` or white space.
+pub(crate) fn printf_escaped(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for byte in text.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'.' | b'_' | b'-') {
+            out.push(char::from(byte));
+        } else {
+            out.push_str(&format!("\\{byte:03o}"));
+        }
+    }
+    out
+}
+
+/// SS-14: a `/bin/sh` script running `program` (fixed words) with `paths` as its last arguments, each passed byte for
+/// byte whatever it holds: the script gets them from `printf` of their octal escapes ([`printf_escaped`]), so neither
+/// the login shell nor sh ever parses a path. A path can't end in a line break (`$(...)` would drop it); Remotely's
+/// paths hold none.
+pub(crate) fn paths_script(program: &str, paths: &[&str]) -> String {
+    let mut script = String::new();
+    let mut args = Vec::new();
+    for (i, path) in paths.iter().enumerate() {
+        script.push_str(&format!("p{i}=$(printf '{}'); ", printf_escaped(path)));
+        args.push(format!("\"$p{i}\""));
+    }
+    script.push_str(&format!("exec {program} -- {}", args.join(" ")));
+    script
+}
+
+/// SS-14: a script run by `/bin/sh`, as one exec string for whatever the login shell is.
+pub(crate) fn via_sh(script: &str) -> String {
+    format!("/bin/sh -c {}", sh_quote(script))
 }
 
 /// BX-07: the script under sudo. `sudo -S` reads the password from stdin, and `-p` makes its prompt
@@ -2281,6 +2440,30 @@ mod tests {
         assert_eq!(sh_quote("plain"), "'plain'");
         assert_eq!(sh_quote("it's"), r"'it'\''s'");
         assert_eq!(sh_quote(""), "''");
+    }
+
+    #[test]
+    fn paths_reach_sh_as_octal_escapes_that_no_login_shell_reads() {
+        assert_eq!(printf_escaped("/srv/www/a-b_c.1"), "/srv/www/a-b_c.1");
+        assert_eq!(
+            printf_escaped("/srv/x; touch /tmp/p; #"),
+            r"/srv/x\073\040touch\040/tmp/p\073\040\043"
+        );
+        assert_eq!(printf_escaped("a\\"), r"a\134", "a backslash is a byte too");
+        assert_eq!(printf_escaped("it's %s $HOME!"), r"it\047s\040\045s\040\044HOME\041");
+        assert_eq!(printf_escaped("é"), r"\303\251", "UTF-8 byte by byte");
+        let script = paths_script("cp -a", &["/srv/a b", "/backup/a b"]);
+        assert_eq!(
+            script,
+            r#"p0=$(printf '/srv/a\040b'); p1=$(printf '/backup/a\040b'); exec cp -a -- "$p0" "$p1""#
+        );
+        let command = via_sh(&script);
+        // What the login shell parses: no `\\`, no `\'` inside quotes, no `!` (fish and csh read those).
+        let inner = &command["/bin/sh -c ".len()..];
+        assert!(!inner.contains(r"\\") && !inner.contains('!'), "{command}");
+        for quoted in inner.split(r"'\''") {
+            assert!(!quoted.trim_end_matches('\'').ends_with('\\'), "{command}");
+        }
     }
 
     #[test]

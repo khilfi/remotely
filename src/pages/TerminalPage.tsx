@@ -462,13 +462,29 @@ export function TerminalPage({
   const [tunnelsOpen, setTunnelsOpen] = useState(false);
   /** SS-12: a break on a Prod or protected serial line waits for this confirm. */
   const [breakAsk, setBreakAsk] = useState<{ pane: PaneSession; name: string } | null>(null);
-  /** SS-08: files picked or dropped for upload that are in the folder already. */
-  const [conflict, setConflict] = useState<{
-    pane: PaneSession;
-    staged: StagedFiles;
-    folder: string;
-    existing: string[];
-  } | null>(null);
+  /** SS-08: files picked or dropped for upload that are in the folder already. SS-14: as root, or a download's. */
+  const [conflict, setConflict] = useState<
+    | {
+        kind: "upload";
+        pane: PaneSession;
+        staged: StagedFiles;
+        folder: string;
+        existing: string[];
+        asRoot: boolean;
+      }
+    | {
+        kind: "download";
+        pane: PaneSession;
+        paths: string[];
+        to: "downloads" | "choose";
+        /** The folder on this PC, kept by the core for the answer. */
+        choice: string | null;
+        folder: string;
+        existing: string[];
+        asRoot: boolean;
+      }
+    | null
+  >(null);
   /** SS-08: a file name right-clicked in a terminal, offered for download. */
   const [fileMenu, setFileMenu] = useState<{
     pane: PaneSession;
@@ -1362,14 +1378,15 @@ export function TerminalPage({
     return pane.getSnapshot().folder?.path ?? (await api.filesList(terminalId, null)).path;
   }
 
-  function handleStart(pane: PaneSession, staged: StagedFiles, start: UploadStart) {
-    if (start.status === "conflicts") setConflict({ pane, staged, folder: start.folder, existing: start.existing });
-    else if (start.status === "submitted") onSubmitted(start.outcome, () => undefined);
+  function handleStart(pane: PaneSession, staged: StagedFiles, start: UploadStart, asRoot = false) {
+    if (start.status === "conflicts") {
+      setConflict({ kind: "upload", pane, staged, folder: start.folder, existing: start.existing, asRoot });
+    } else if (start.status === "submitted") onSubmitted(start.outcome, () => undefined);
     else toast.info("Every file is in the folder already, so nothing was uploaded.");
   }
 
-  /** Uploads staged files through a pane: into `folder`, or the terminal's own folder. */
-  async function uploadStaged(pane: PaneSession, staged: StagedFiles, folder: string | null) {
+  /** Uploads staged files through a pane: into `folder`, or the terminal's own folder. SS-14: as root if asked. */
+  async function uploadStaged(pane: PaneSession, staged: StagedFiles, folder: string | null, asRoot = false) {
     const id = pane.terminalId;
     const why = uploadReason({ open: true, connected: pane.connected, readOnly: readOnlyLocked() });
     if (!id || why) {
@@ -1377,37 +1394,73 @@ export function TerminalPage({
       toast.info(`Not uploaded: ${why ?? "this terminal has not connected yet"}`);
       return;
     }
+    if ((staged.leftOut ?? 0) > 0) {
+      toast.info(`${plural(staged.leftOut ?? 0, "link")} in the folder left out: links and junctions aren't followed`);
+    }
     try {
       const into = folder ?? (await folderOf(pane, id));
-      handleStart(pane, staged, await api.filesUpload(id, staged.id, into, "ask"));
+      handleStart(pane, staged, await api.filesUpload(id, staged.id, into, "ask", asRoot), asRoot);
     } catch (err) {
       void api.filesUnstage(staged.id).catch(() => undefined);
       toast.error(`Upload failed: ${errorMessage(err)}`);
     }
   }
 
-  /** The upload buttons: files from a dialog the shell opens. */
-  async function pickAndUpload(pane: PaneSession | undefined, folder: string | null) {
+  /** The upload buttons: files (SS-14: or a folder) from a dialog the shell opens. */
+  async function pickAndUpload(
+    pane: PaneSession | undefined,
+    folder: string | null,
+    asRoot = false,
+    pick: "files" | "folder" = "files",
+  ) {
     if (!pane) return;
     try {
-      const staged = await api.filesPickUpload();
-      if (staged) await uploadStaged(pane, staged, folder);
+      const staged = pick === "folder" ? await api.filesPickUploadFolder() : await api.filesPickUpload();
+      if (staged) await uploadStaged(pane, staged, folder, asRoot);
     } catch (err) {
       toast.error(errorMessage(err));
     }
   }
 
-  async function download(pane: PaneSession, paths: string[], to: "downloads" | "choose") {
+  /** SS-08: a download, after the shell asked for its folder; SS-14: files already there are asked about first. */
+  async function download(pane: PaneSession, paths: string[], to: "downloads" | "choose", asRoot = false) {
     const id = pane.terminalId;
     if (!id) return;
     try {
-      const queued = await api.filesDownload(id, paths, to);
-      if (queued && !filesShown) {
-        const what = queued.length === 1 ? queued[0].name : plural(queued.length, "file");
-        toast.info(`Downloading ${what}…`, { action: { label: "Show", onClick: () => setSide("files") } });
+      const start = await api.filesDownload(id, paths, to, "ask", asRoot);
+      if (!start) return;
+      if (start.status === "conflicts") {
+        setConflict({
+          kind: "download",
+          pane,
+          paths,
+          to,
+          choice: start.choice,
+          folder: start.dest,
+          existing: start.existing,
+          asRoot,
+        });
+        return;
       }
+      queuedDownloads(start.transfers, start.skipped, start.leftOut);
     } catch (err) {
       toast.error(`Download failed: ${errorMessage(err)}`);
+    }
+  }
+
+  function queuedDownloads(queued: TransferInfo[], skipped: number, leftOut = 0) {
+    if (leftOut > 0) {
+      toast.info(
+        `${plural(leftOut, "item")} left out: Git's data, links to folders and what isn't a file stay on the host.`,
+      );
+    }
+    if (queued.length === 0) {
+      toast.info(skipped > 0 ? "Every file is here already, so nothing was downloaded." : "Nothing to download.");
+      return;
+    }
+    if (!filesShown) {
+      const what = queued.length === 1 ? queued[0].name : plural(queued.length, "file");
+      toast.info(`Downloading ${what}…`, { action: { label: "Show", onClick: () => setSide("files") } });
     }
   }
 
@@ -1508,11 +1561,12 @@ export function TerminalPage({
       snapshot={currentSnapshot}
       name={currentPane ? nameOf(currentPane) : "No terminal"}
       multiExecTerminals={multiExec ? pickedPanes.length : 0}
-      onUpload={(folder) => void pickAndUpload(currentPane, folder)}
-      onDownload={(paths, to) => {
-        if (currentPane) void download(currentPane, paths, to);
+      onUpload={(folder, asRoot, pick) => void pickAndUpload(currentPane, folder, asRoot, pick)}
+      onDownload={(paths, to, asRoot) => {
+        if (currentPane) void download(currentPane, paths, to, asRoot);
       }}
       onRetry={(t) => void retryTransfer(t)}
+      onSubmitted={onSubmitted}
     />
   );
 
@@ -2012,24 +2066,42 @@ export function TerminalPage({
           onClose={() => setGroupsDialog(null)}
         />
       )}
-      {conflict && (
+      {conflict?.kind === "upload" && (
         <UploadConflictDialog
           folder={conflict.folder}
           existing={conflict.existing}
-          total={conflict.staged.files.length}
+          total={conflict.staged.count ?? conflict.staged.files.length}
           terminal={nameOf(conflict.pane)}
           onAnswer={async (answer) => {
-            const { pane, staged, folder } = conflict;
+            const { pane, staged, folder, asRoot } = conflict;
             const id = pane.terminalId;
             if (!id) throw new Error("The terminal has closed.");
-            const start = await api.filesUpload(id, staged.id, folder, answer);
+            const start = await api.filesUpload(id, staged.id, folder, answer, asRoot);
             setConflict(null);
-            handleStart(pane, staged, start);
+            handleStart(pane, staged, start, asRoot);
           }}
           onCancel={() => {
             void api.filesUnstage(conflict.staged.id).catch(() => undefined);
             setConflict(null);
           }}
+        />
+      )}
+      {conflict?.kind === "download" && (
+        <UploadConflictDialog
+          direction="download"
+          folder={conflict.folder}
+          existing={conflict.existing}
+          total={Math.max(conflict.paths.length, conflict.existing.length)}
+          terminal={nameOf(conflict.pane)}
+          onAnswer={async (answer) => {
+            const { pane, paths, to, choice, asRoot } = conflict;
+            const id = pane.terminalId;
+            if (!id) throw new Error("The terminal has closed.");
+            const start = await api.filesDownload(id, paths, to, answer, asRoot, choice);
+            setConflict(null);
+            if (start?.status === "queued") queuedDownloads(start.transfers, start.skipped, start.leftOut);
+          }}
+          onCancel={() => setConflict(null)}
         />
       )}
       {fileMenu && (

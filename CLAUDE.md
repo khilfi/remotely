@@ -111,7 +111,12 @@ crates/core/          remotely-core: all app logic
                       dot-sourcing a script, file redirections, assignments to anything but a plain variable, splatting,
                       --%, function definitions, class/using/param, anything left open, nesting past 64);
                       PolicyEngine::evaluate_on rates each target's script in its own language (ScriptKind; the
-                      highest counts; Decision.script_kinds for the job runner) and classify_script_as
+                      highest counts; Decision.script_kinds for the job runner) and classify_script_as;
+                      SS-14 file_op_kind (FileNew, FileMove Low; FileMoveReplace, FileCopy, FilePermissions,
+                      FileDelete Medium; FileDeleteFolder High; MIN_REPLACE_TIER and MIN_DELETE_TIER floors), a
+                      copy's `cp -a` rated by the shell rules on one host too (a recursive delete's fixed `rm -rf`
+                      line only by its own tier), Command::as_root one tier up (FileOp and FileUpload) before the Prod
+                      rule (file_ops_tests.rs)
     presentation.rs   FD-03 presentation mode (saved, fail closed, audited) and ReadOnlyLock, which the store shares
                       with the bus and every service that edits the app's data (Change)
     workspaces.rs     FD-02 (migration 0029): Workspaces (create, rename, colour, archive, restore; audited in the
@@ -154,7 +159,22 @@ crates/core/          remotely-core: all app logic
                       direct-tcpip channels, each hop's own host key check and login; remote/sftp.rs SS-08 SFTP on a
                       terminal's own connection, behind the RemoteFiles trait (H8: a replace writes a hidden temp
                       file, keeps mode and owner, posix-rename, else a .bak; RemoteWrite::abort; Written says how; A9
-                      a second RawSftpSession for capped listings, MAX_LISTING); remote/forward.rs SS-07 port forwards on
+                      a second RawSftpSession for capped listings, MAX_LISTING; SS-14 lstat, make_folder,
+                      remove_folder, rename (posix-rename to replace), set_attrs (mode, owner, times; never through a
+                      link: OpenSSH's lsetstat, else an lstat first that refuses one), read_from an offset,
+                      RemoteWrite::pause and resume (Resumed: GoesOn only when the host's file is a regular file of the
+                      size and time it had at the pause whose bytes, read back, hash to what was sent; else FromStart:
+                      what is there deleted, a link as a link, and a new file made), finish checks the host's size,
+                      open_as_root and revoke (the root opener shared by every writer: forgets sudo's password and
+                      closes its channels)); remote/sftp_root.rs SS-14 root browsing's channel: SFTP_SERVER_PROBE
+                      (by /bin/sh, the distributions' fixed places only, never the PATH) finds the host's sftp-server,
+                      root_command runs it as `sudo -S -p <marker> -- /bin/sh -c 'printf READY-<nonce> >&2; exec "$1"'`,
+                      the password only once sudo prompts (a second prompt: SudoPasswordRefused, the channel closed;
+                      none under NOPASSWD), SFTP after the ready line with its nonce on a line of its own (sudo's
+                      prompt counts as a line break), the password scrubbed from what sudo said; ShellCommands (a
+                      terminal's exec channels) runs sudo only for root browsing's `cp -a` and `rm -rf`; paths_script
+                      and via_sh pass paths as printf octal escapes through /bin/sh, so no login shell (fish, csh)
+                      reads anything in them; remote/forward.rs SS-07 port forwards on
                       it, local, remote and SOCKS, behind RemoteForwards; remote/socks.rs SOCKS 4/4a/5),
                       telnet.rs (SS-12 RFC 854 client: NAWS, TTYPE, ECHO, SGA, Enter as the session's line ending,
                       local echo when the server won't; the same shell channels as SSH), serial.rs (SS-12 COM ports from
@@ -610,7 +630,45 @@ crates/core/          remotely-core: all app logic
                       characters such as U+202E in a name become `_`, and each file gets a Mark of the Web, its
                       `Zone.Identifier` stream with ZoneId=3 and no host, or a note when its drive has no streams), the
                       upload job's work (Command::FileUpload on the bus), the transfers list with cancel and retry, and
-                      FileTransfers (Core.files: staged files, uploads, retries);
+                      FileTransfers (Core.files: staged files, uploads, retries); SS-14 the transfer queue in files.rs:
+                      TRANSFERS_PER_HOST (4) slots per terminal's connection, uploads and downloads together, held
+                      until a transfer shows as ended; pause and resume between chunks (the slot goes on; an upload
+                      writes on into its file or H8's temporary one once RemoteWrite::resume checked it, else from the
+                      start; a download comes down again from the start, since SFTP's whole-second times can't tell a
+                      file rewritten in place); the audit's SHA-256 is of the bytes sent or saved; Existing: ask,
+                      replace, replace if newer (by each side's clock), skip, keep both (`name (1).ext`, never a name
+                      another file of the upload has) both ways (plan_upload lists each host folder once; a download's
+                      conflict keeps its folder by a `choice` id, DownloadDest::Chosen, so no path comes back from the
+                      UI); times kept both ways (after the Mark of the Web, whose stream would move it); folders up
+                      (walk_local: links, junctions and reparse points left out; FileUpload.folders made first) and down
+                      (walk_remote: Git's data (`.git`, is_git_name, as Windows would save it) never comes down and a
+                      picked one is refused, links to folders and what isn't a file left out, each counted in
+                      DownloadStart::Queued's left_out); MAX_UPLOAD_FILES 10,000 files (and folders, down), MAX_FOLDER_DEPTH
+                      32; no download lands in Remotely's data or logs folder (Core::protect_folder, which the file
+                      server's Runner::protect shares; lands_in compares without letter case); file_ops.rs SS-14
+                      Command::FileOp's spec
+                      (FileOpSpec, FileOp: new folder or file, rename, move, copy, delete (recursive), mode, owner;
+                      `as_root`): a step per path (TargetRef::RemotePath by its step; the path stays in the spec, so
+                      targets_json names it only in the redacted target name; migration 0039), check_path and
+                      check_name (never resolved: no . or .. part, empty part, control or Cf character; a recursive
+                      delete never `/` or a top-level folder; nothing into itself), for_journal redacts every path,
+                      only for retries, FileOpDetails for the approval, the job runner's step (run_file_op: looks at
+                      what is there first, audited `file_changed` with the path; a copy is `cp -a --` and a recursive
+                      delete GNU `rm -rf --one-file-system --` on an exec channel (host_command: the paths as octal
+                      escapes through /bin/sh), with sudo as root; rm walks by file descriptors, so a link swapped in
+                      is deleted as a link; permissions and owners refuse a link), and FileTransfers::change
+                      (FileChange from the drawer: what is there decides replace and recursive; RemotePathTaken unless
+                      replace was asked; a link refused for permissions and owners); root_files.rs SS-14 root browsing
+                      (Terminals::browse_as_root, stop_root, root_browsing): the server probed, BX-07's sudo password
+                      (chosen, the session's login password, or the typed login), rule 7 (SecretBindings::may_go,
+                      confirm, allow), a refused password parked per session and password (login_guard
+                      ParkScope::Sudo { secret } with sudo_key, shared with Containers' SudoWatch; a quick connection
+                      parks on the terminal; `retry` lifts that park alone; ParkOnRefusal parks a password refused as
+                      a root channel opens again and ends root browsing), audited files_root_started,
+                      files_root_stopped (with why: stopped, the vault locked, the connection ended, sudo refused) and
+                      files_root_refused; ends with the connection and on a vault lock (forget_logins): its transfers
+                      are cancelled and get ROOT_SETTLE (5 s) to delete what they made, then the root files are
+                      revoked;
                       tunnels.rs SS-07 a terminal's tunnels: start (Command::OpenTunnel on the bus, also for forwards
                       that start with the terminal), approve, stop, the job's open_tunnel, reopened after a reconnect,
                       closed with the terminal, audited tunnel_opened and tunnel_closed;
@@ -844,7 +902,12 @@ crates/core/          remotely-core: all app logic
     fakes.rs          one fake per adapter (feature `fakes`; tests only); FakeVirtualBox for VM-18; vmrun_runs and
                       vboxmanage_runs count the processes the real adapters would start (VM-01 refresh cost)
     fakes/ssh_server.rs  russh server on 127.0.0.1 with run-time keys, for SSH tests; ssh_server/sftp.rs its SFTP
-                      subsystem on a temp folder (SS-08; QL-09 with_unreadable folders it can't open); SS-07
+                      subsystem on a temp folder (SS-08; QL-09 with_unreadable folders it can't open; SS-14 mkdir,
+                      rmdir, setstat with times and a size, and root browsing: an exec of root_command meets the toy
+                      sudo (its prompt marker, a line of stdin per try, the ready marker) and then SFTP as root on the
+                      same channel, SftpServer::new_root; SFTP_SERVER_PROBE answers with_sftp_server's path; lsetstat;
+                      its toy shell's `cp -a` and `rm -rf` work in the SFTP folder, protected folders only as root,
+                      and it knows `/bin/sh -c`, `exec`, variables and printf's octal escapes); SS-07
                       direct-tcpip (with_route names reach another port on 127.0.0.1, so a server is reachable only
                       through another) and tcpip-forward; QL-09 `su [-] [user]` in its shell, a shell without the hook;
                       ssh_server/docker.rs CT-01 its `docker` and `podman` programs (each CLI's JSON from a fixture);
@@ -901,7 +964,16 @@ crates/core/          remotely-core: all app logic
                       `systemctl is-active` and a jump host held to one login; file_server.rs: FD-09 TFTP and HTTP on
                       127.0.0.1 with port 0 and the test's own clients, folders made in the temp folder: every
                       traversal form on both protocols, links, junctions and streams, uploads and their caps, slow and
-                      flooding clients, every stop path giving the ports back); opt-in workstation_it.rs,
+                      flooding clients, every stop path giving the ports back); file_ops.rs: SS-14 on the test SSH
+                      server's SFTP folder: file changes at their tiers with a step per path and their audit, paths
+                      checked as sent, a failed step retried alone, root browsing under the toy sudo (as root one tier
+                      more, a refused password parked, rule 7, NOPASSWD, no sftp-server, a vault lock ending a paused
+                      root upload, one sudo park per password shared with the Containers page), and the transfer queue
+                      (four at a time, pause and resume both ways, a file changed on the host while paused, what to do
+                      with files there both ways, keep both's numbers, times, folders up and down, never `.git`);
+                      file_links.rs: SS-14 on FakeFiles' links: permissions and owners never through a link, a folder
+                      swapped for a link before its delete, a paused upload's file swapped for one, the folder cap on
+                      downloads, Remotely's data folder; opt-in workstation_it.rs,
                       virtualbox_it.rs and
                       conversion_it.rs (the real conversion tools on small images in the temp folder)
 src-tauri/            Tauri 2 shell: window, IPC commands (ipc.rs), terminal bridge, MultiExec (multiexec.rs; groups.rs
@@ -911,7 +983,9 @@ src-tauri/            Tauri 2 shell: window, IPC commands (ipc.rs), terminal bri
                       copies: selections through terminal_copy_selection, Copy output through terminal_output_copy,
                       scrubbed by the core and written with Windows' clipboard-history, cloud and monitor exclusion
                       formats), SS-08 file
-                      transfer (files.rs: upload and folder dialogs, drops caught in Rust, Explorer for "Open folder"),
+                      transfer (files.rs: upload and folder dialogs, drops caught in Rust, Explorer for "Open folder";
+                      SS-14 files_change, files_root_start/stop/status, files_pause/resume, a folder's upload dialog,
+                      downloads with the existing-file choice and its `choice` id),
                       SS-07 port forwards and tunnels (tunnels.rs), VM-19 to VM-21 the Templates page (catalog.rs: VM-28
                       install_configs, install_config_check, install_config_apply_form (pure), install_config_preview
                       (masked), add, update, delete;
@@ -959,7 +1033,13 @@ src/                  React + TypeScript UI
   components/         app components (approval dialog, badges, Compare panel with its one-shot and MultiExec views
                       (RecordedLinesView, QL-12; BulkResultsView's GroupCard and OutputDiffDialog serve both), MultiExec
                       bar, WhyDisabled for QL-08, PasteConfirmDialog for QL-05,
-                      FilesDrawer and TransfersList for SS-08, ForwardsEditor and TunnelsPanel for SS-07, Presentation
+                      FilesDrawer and TransfersList for SS-08 (SS-14: each row's "⋯" and the selection bar rename, move,
+                      copy, delete, set permissions or the owner; the header's "⋯" makes folders and files, uploads a
+                      folder and browses as root; transfers pause and resume; no permissions or owner on a link),
+                      FileChangeDialog (SS-14: a name, a folder, a mode or an owner before a change), SudoPasswordDialog
+                      (SS-14: sudo's password from the vault when the session saves none), UploadConflictDialog (SS-08,
+                      SS-14: replace, replace
+                      if newer, keep both or skip, for uploads and downloads), ForwardsEditor and TunnelsPanel for SS-07, Presentation
                       for FD-03: the Present button and menu, the confirm, the frame, page notices, the Settings card;
                       VmDetailsPanel and SnapshotTree for QL-14: a VM's Details and Snapshots tabs beside the list;
                       VmSettingsTab and VmSettingsDialogs for VM-23: the Settings tab and its edit dialogs (bulk
@@ -1080,7 +1160,9 @@ src/                  React + TypeScript UI
                       screen; one per terminal including the FD-03 masked twin), terminal-alerts.ts (QL-17 recent
                       alerts with subscribe, for QL-25; notification text), recordings.ts (QL-12 view texts,
                       QL-07 notify choice and the one notification per MultiExec line), transfers.ts,
-                      transfers-store.ts (SS-08, P6 every transfer outside React state), job-events.ts (P6, VM-01
+                      transfers-store.ts (SS-08, P6 every transfer outside React state), file-ops.ts (SS-14 the
+                      drawer's checks of names, folders, modes and owners; mode text; the existing-file choices),
+                      job-events.ts (P6, VM-01
                       which job events and setting changes render or refresh what), chart-gaps.ts (MO-02 a guest
                       polled less often keeps its line on a VM's charts), terminal-render.ts (SS-03 WebGL for panes on
                       screen, at most 12, released 2 s after a pane hides, DOM after failures; FD-03 the masked copy's
@@ -1540,7 +1622,9 @@ ovftool 5.0, VirtualBox 7.2.22 and qemu-img 10.1 on images of a few MB.
   prints the user, one fresh password for all of them, which sudo takes too, and each host key fingerprint). Each also
   serves moving /proc counters, so watching it on the dashboard shows live guest metrics, and SFTP from a temp folder
   (SS-08) with a bash login, so the "Files here" drawer follows `cd` (QL-09: `cd /home/bob/.app`, a folder alice
-  can't open over SFTP, and `su bob` to switch user). SS-07: the servers reach each other as
+  can't open over SFTP, and `su bob` to switch user; SS-14: the drawer's "Browse as root" starts its sftp-server under
+  the toy sudo, which takes the same password, so /etc and /root open and change as root). SS-07: the servers reach
+  each other as
   `dev-host-01.test`, `dev-host-02.test`... (names this PC can't resolve, so they need a jump host) and a web page as
   `web.test:80`, for trying chains and tunnels. CT-01: each has `docker` and `podman` with a small shop of containers
   (from the second server on, docker needs sudo); mark a session as a container host on the Containers page. SS-12: a

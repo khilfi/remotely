@@ -132,6 +132,24 @@ pub enum Command {
         /// The host folder, absolute.
         folder: String,
         files: Vec<UploadFile>,
+        /// SS-14: folders made first (folders uploaded with what is in them), relative to `folder`, parents first. One
+        /// that is there already is used as it is.
+        #[serde(default)]
+        folders: Vec<String>,
+        /// SS-14: each file gets its modification time on this PC.
+        #[serde(default)]
+        keep_times: bool,
+        /// SS-14: through the terminal's root browsing, as root (one tier higher).
+        #[serde(default)]
+        as_root: bool,
+    },
+    /// SS-14 a change to files on one open terminal's host ([`crate::terminal::file_ops`]): rename, move, copy within
+    /// the host, delete, new folder or file, permissions, owner. One job, a step per path: each target is one of the
+    /// spec's [`TargetRef::RemotePath`]s. Never built by the UI: `Core.files` builds it from what the Files drawer
+    /// asks, after looking at what is there.
+    FileOp {
+        targets: Vec<TargetRef>,
+        spec: Box<crate::terminal::file_ops::FileOpSpec>,
     },
     /// SS-07 open a saved port forward on one open terminal's connection
     /// ([`crate::terminal::tunnels`]): it listens until it is stopped or the terminal closes, and
@@ -321,16 +339,22 @@ fn validate_container(targets: &[TargetRef], op: &ContainerOp) -> Result<()> {
 pub struct UploadFile {
     /// The file on this PC.
     pub local_path: String,
-    /// Its name in the host folder.
+    /// Its name in the host folder; SS-14: with `/` between the parts for a file of an uploaded folder.
     pub name: String,
     pub size: u64,
     /// A file of that name is there, and this upload replaces it.
     #[serde(default)]
     pub replace: bool,
+    /// SS-14: its modification time on this PC, seconds since 1970, which it keeps on the host.
+    #[serde(default)]
+    pub modified: Option<u64>,
 }
 
-/// SS-08: the most files one upload takes.
-pub const MAX_UPLOAD_FILES: usize = 1000;
+/// SS-08: the most files one upload takes (SS-14: a folder's files count one by one).
+pub const MAX_UPLOAD_FILES: usize = 10_000;
+
+/// SS-14: how deep an uploaded or downloaded folder may go.
+pub const MAX_FOLDER_DEPTH: usize = 32;
 
 /// The one target of commands that act on the app itself.
 const APP_TARGET: &[TargetRef] = &[TargetRef::App];
@@ -453,33 +477,65 @@ fn run_key(keys: &str) -> Option<RunKey> {
         .filter(|key| !key.is_enter())
 }
 
+/// SS-14: a name in an upload, `/` between its parts for one inside an uploaded folder: each part a plain name
+/// (SS-14's [`check_name`](crate::terminal::file_ops::check_name)), at most [`MAX_FOLDER_DEPTH`] deep.
+fn upload_name_problem(name: &str) -> Option<String> {
+    if name.split('/').count() > MAX_FOLDER_DEPTH {
+        return Some(format!("'{name}' is more than {MAX_FOLDER_DEPTH} folders deep."));
+    }
+    name.split('/')
+        .find_map(|part| crate::terminal::file_ops::check_name(part).err())
+        .map(|err| format!("'{name}' can't be a file name on the host ({err})"))
+}
+
 /// SS-08: an upload Remotely can carry out: one open terminal, an absolute host folder, plain file
-/// names (no folder parts) once each, and files on this PC given by their full path.
-fn validate_upload(targets: &[TargetRef], folder: &str, files: &[UploadFile]) -> Result<()> {
+/// names once each (SS-14: a folder's files with their folder parts, each part a plain name, and every folder
+/// they are in made first), and files on this PC given by their full path.
+fn validate_upload(targets: &[TargetRef], folder: &str, files: &[UploadFile], folders: &[String]) -> Result<()> {
     let invalid = |message: String| Err(CoreError::InvalidInput(message));
     match targets {
         [TargetRef::Terminal { .. }] => {}
         [_] => return invalid("Files are uploaded through an open terminal.".into()),
         _ => return invalid("Files are uploaded to one terminal at a time.".into()),
     }
-    if !folder.starts_with('/') || folder.contains(['\0', '\n', '\r']) {
+    if !folder.starts_with('/') || crate::terminal::file_ops::check_path(folder).is_err() {
         return invalid(format!(
             "'{folder}' is not a folder on the host (it must start with /)."
         ));
     }
-    if files.is_empty() {
+    if files.is_empty() && folders.is_empty() {
         return invalid("Choose at least one file to upload.".into());
     }
-    if files.len() > MAX_UPLOAD_FILES {
+    if files.len() > MAX_UPLOAD_FILES || folders.len() > MAX_UPLOAD_FILES {
         return invalid(format!("One upload takes at most {MAX_UPLOAD_FILES} files."));
+    }
+    let mut made = std::collections::HashSet::new();
+    for name in folders {
+        if let Some(why) = upload_name_problem(name) {
+            return invalid(why);
+        }
+        // Parents first, so each is made before what is in it.
+        if let Some((above, _)) = name.rsplit_once('/') {
+            if !made.contains(above) {
+                return invalid(format!("'{name}' comes before the folder it is in."));
+            }
+        }
+        if !made.insert(name.as_str()) {
+            return invalid(format!("The folder '{name}' is listed twice."));
+        }
     }
     let mut names = std::collections::HashSet::new();
     for file in files {
         let name = file.name.as_str();
-        if name.is_empty() || name == "." || name == ".." || name.contains(['/', '\0', '\n', '\r']) {
-            return invalid(format!("'{name}' can't be a file name on the host."));
+        if let Some(why) = upload_name_problem(name) {
+            return invalid(why);
         }
-        if !names.insert(name) {
+        if let Some((above, _)) = name.rsplit_once('/') {
+            if !made.contains(above) {
+                return invalid(format!("'{name}' is in a folder the upload doesn't make."));
+            }
+        }
+        if made.contains(name) || !names.insert(name) {
             return invalid(format!("Two files are named '{name}'; upload them one at a time."));
         }
         if !std::path::Path::new(&file.local_path).is_absolute() {
@@ -527,6 +583,15 @@ fn virtualbox_revert_warnings(targets: &[Target], impact: &[TargetImpact]) -> Ve
         "VirtualBox restores a snapshot only on a VM that is not running, so Remotely powers off {} first, without shutting the guest down.",
         names.join(", ")
     )]
+}
+
+/// "1 file", "12 files".
+fn plural_files(n: usize) -> String {
+    if n == 1 {
+        "1 file".to_owned()
+    } else {
+        format!("{n} files")
+    }
 }
 
 /// "1.2 MB", for summaries and messages.
@@ -621,6 +686,8 @@ impl Command {
     pub fn check_from_ui(&self) -> Result<()> {
         let refused = match self {
             Command::FileUpload { .. } => "Uploads start from a terminal: its upload button, or files dropped on it.",
+            // SS-14: the paths are looked at on the host before the command is built.
+            Command::FileOp { .. } => "File changes start from the Files here drawer.",
             Command::OpenTunnel { .. } => {
                 "Tunnels start from a terminal's Tunnels panel, from the session's saved port forwards."
             }
@@ -708,7 +775,22 @@ impl Command {
                 }
                 validate_line(line, keys, *unreliable)
             }
-            Command::FileUpload { targets, folder, files } => validate_upload(targets, folder, files),
+            Command::FileUpload {
+                targets,
+                folder,
+                files,
+                folders,
+                ..
+            } => validate_upload(targets, folder, files, folders),
+            Command::FileOp { targets, spec } => {
+                spec.validate()?;
+                if *targets != spec.targets() {
+                    return Err(CoreError::InvalidInput(
+                        "A file change's targets are its paths, one each.".into(),
+                    ));
+                }
+                Ok(())
+            }
             Command::OpenTunnel { targets, .. } => validate_tunnel(targets),
             Command::Container { targets, op } => validate_container(targets, op),
             Command::Deploy { targets, spec } => {
@@ -841,6 +923,11 @@ impl Command {
                 **spec = spec.only(&new);
                 *targets = spec.targets();
             }
+            // SS-14: the paths that failed, in their order.
+            Command::FileOp { targets, spec } => {
+                **spec = spec.only(&new)?;
+                *targets = spec.targets();
+            }
             // VM-08: the instance's VMs that failed or never started, in their steps and order.
             Command::Stack { targets, op } => {
                 *op = op.only(&new);
@@ -882,6 +969,7 @@ impl Command {
             | Command::RemoveSshKey { targets, .. }
             | Command::TerminalLine { targets, .. }
             | Command::FileUpload { targets, .. }
+            | Command::FileOp { targets, .. }
             | Command::OpenTunnel { targets, .. }
             | Command::Container { targets, .. }
             | Command::VmConfig { targets, .. }
@@ -912,6 +1000,7 @@ impl Command {
             Command::RemoveSshKey { .. } => "removeSshKey",
             Command::TerminalLine { .. } => "terminalLine",
             Command::FileUpload { .. } => "fileUpload",
+            Command::FileOp { .. } => "fileOp",
             Command::OpenTunnel { .. } => "openTunnel",
             Command::Container { .. } => "container",
             Command::Deploy { .. } => "deploy",
@@ -951,9 +1040,24 @@ impl Command {
                 **spec = redacted;
                 changed
             }
+            // SS-14: every path and name of a file change.
+            Command::FileOp { spec, .. } => {
+                let (redacted, changed) = spec.for_journal();
+                **spec = redacted;
+                changed
+            }
             _ => false,
         };
         (kept, changed)
+    }
+
+    /// SS-14: the command changes files as root (root browsing): one tier higher.
+    pub fn as_root(&self) -> bool {
+        match self {
+            Command::FileOp { spec, .. } => spec.as_root,
+            Command::FileUpload { as_root, .. } => *as_root,
+            _ => false,
+        }
     }
 
     /// Short human summary for dialogs, job lists and the audit log.
@@ -1026,11 +1130,25 @@ impl Command {
                     format!("MultiExec: run `{first}`{more}{with} in {}", noun("terminal"))
                 }
             }
-            Command::FileUpload { folder, files, .. } => {
+            Command::FileUpload {
+                folder,
+                files,
+                folders,
+                as_root,
+                ..
+            } => {
                 let size = human_size(files.iter().map(|f| f.size).sum());
-                let what = match files.as_slice() {
-                    [one] => format!("'{}' ({size})", one.name),
-                    several => format!("{} files ({size})", several.len()),
+                // SS-14: the folders uploaded, counted by their top-level ones.
+                let tops = folders.iter().filter(|f| !f.contains('/')).count();
+                let what = match (files.as_slice(), tops) {
+                    ([one], 0) => format!("'{}' ({size})", one.name),
+                    (several, 0) => format!("{} files ({size})", several.len()),
+                    (several, 1) => format!(
+                        "the folder '{}' with {} ({size})",
+                        folders[0],
+                        plural_files(several.len())
+                    ),
+                    (several, n) => format!("{n} folders with {} ({size})", plural_files(several.len())),
                 };
                 let replaced = files.iter().filter(|f| f.replace).count();
                 let replacing = match (replaced, files.len()) {
@@ -1039,8 +1157,10 @@ impl Command {
                     (1, _) => ", replacing 1 file there".to_owned(),
                     (n, _) => format!(", replacing {n} files there"),
                 };
-                format!("Upload {what} to {folder}{replacing}")
+                let root = if *as_root { ", as root" } else { "" };
+                format!("Upload {what} to {folder}{replacing}{root}")
             }
+            Command::FileOp { spec, .. } => spec.summary(),
             Command::OpenTunnel { forward, .. } => format!("Open a tunnel: {}", forward.describe()),
             Command::Container { op, .. } => match op {
                 ContainerOp::Pull { reference } => {
@@ -1085,6 +1205,9 @@ pub trait TargetDirectory: Send + Sync {
 }
 
 /// What happened to a submitted command.
+// Built once per submit and handed straight to the UI; the approval request it carries grew past the lint's size with
+// SS-14's file change details, and boxing it would stop every caller matching into it (as `UploadStart` says).
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "status", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum SubmitOutcome {
@@ -1135,6 +1258,9 @@ pub struct ApprovalRequest {
     pub standing: Option<Box<StandingDetails>>,
     /// FD-04: for a support bundle, the files each host gives and where the zip goes (its commands are in `exec`).
     pub bundle: Option<Box<BundleDetails>>,
+    /// SS-14: for a file change, what it does besides its paths (the targets): where they go, the new mode or owner,
+    /// whether it replaces, deletes what is in a folder, or runs as root.
+    pub file_op: Option<Box<crate::terminal::file_ops::FileOpDetails>>,
 }
 
 /// FD-04: a support bundle as the approval dialog shows it, besides its commands.
@@ -1256,8 +1382,19 @@ impl TunnelDetails {
 #[serde(rename_all = "camelCase")]
 pub struct UploadDetails {
     pub folder: String,
+    /// The first [`UPLOAD_DETAILS_SHOWN`] files.
     pub files: Vec<UploadFileDetails>,
+    /// SS-14: files beyond those, and how many replace a file there.
+    pub more: usize,
+    pub more_replacing: usize,
+    /// SS-14: folders made (an uploaded folder's).
+    pub folders: usize,
+    /// SS-14: as root.
+    pub as_root: bool,
 }
+
+/// SS-14: the files an upload's approval lists by name; a folder of thousands is counted beyond them.
+pub const UPLOAD_DETAILS_SHOWN: usize = 500;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1269,12 +1406,23 @@ pub struct UploadFileDetails {
 
 impl UploadDetails {
     fn of(command: &Command) -> Option<Box<Self>> {
-        let Command::FileUpload { folder, files, .. } = command else {
+        let Command::FileUpload {
+            folder,
+            files,
+            folders,
+            as_root,
+            ..
+        } = command
+        else {
             return None;
         };
+        // Replacing files first, so none hides beyond the list.
+        let mut ordered: Vec<&UploadFile> = files.iter().collect();
+        ordered.sort_by_key(|f| !f.replace);
+        let rest = ordered.split_off(ordered.len().min(UPLOAD_DETAILS_SHOWN));
         Some(Box::new(Self {
             folder: folder.clone(),
-            files: files
+            files: ordered
                 .iter()
                 .map(|f| UploadFileDetails {
                     name: f.name.clone(),
@@ -1282,6 +1430,10 @@ impl UploadDetails {
                     replace: f.replace,
                 })
                 .collect(),
+            more: rest.len(),
+            more_replacing: rest.iter().filter(|f| f.replace).count(),
+            folders: folders.len(),
+            as_root: *as_root,
         }))
     }
 }
@@ -1820,6 +1972,12 @@ impl CommandBus {
                 "That run's script was removed from the journal when it got older than the retention period (Settings, General), so it can't be retried. Run it again from Compare.".into(),
             ));
         }
+        // SS-14: a file change's paths, redacted in the journal, can't be found again.
+        if job.command_redacted && matches!(command, Command::FileOp { .. }) {
+            return Err(CoreError::InvalidInput(
+                "That change's paths had something that looked like a secret, which the journal doesn't keep, so it can't be retried as it ran. Make the change again from the Files here drawer.".into(),
+            ));
+        }
         if job.command_redacted {
             return Err(CoreError::InvalidInput(
                 "That run's script had something that looked like a secret, which the journal doesn't keep, so it can't be retried as it ran. Run it again from Compare.".into(),
@@ -2190,6 +2348,8 @@ impl CommandBus {
             spec.require_sources_here(&self.store, ctx).await?;
         }
         let mut targets = Vec::with_capacity(command.targets().len());
+        // SS-14: a file change's paths are all on one terminal, looked up once.
+        let mut terminal: Option<Target> = None;
         let adding = matches!(
             command,
             Command::VmLifecycle {
@@ -2239,6 +2399,46 @@ impl CommandBus {
                         name: format!("this PC ({address})"),
                         environment: Environment::None,
                         protected: false,
+                    });
+                }
+                // SS-14: a path has its terminal's labels, and is named by it; the path is redacted like free text.
+                TargetRef::RemotePath { terminal_id, step, .. } => {
+                    let Command::FileOp { spec, .. } = command else {
+                        return Err(CoreError::InvalidInput(
+                            "Paths are targets of file changes only.".into(),
+                        ));
+                    };
+                    let on = match &terminal {
+                        Some(found) => found.clone(),
+                        None => {
+                            let found = self
+                                .directory
+                                .resolve(
+                                    ctx,
+                                    &TargetRef::Terminal {
+                                        terminal_id: *terminal_id,
+                                        session_id: None,
+                                    },
+                                )
+                                .await?;
+                            terminal = Some(found.clone());
+                            found
+                        }
+                    };
+                    let session_id = match &on.target {
+                        TargetRef::Terminal { session_id, .. } => *session_id,
+                        _ => None,
+                    };
+                    let path = spec.path(*step).unwrap_or_default();
+                    targets.push(Target {
+                        target: TargetRef::RemotePath {
+                            terminal_id: *terminal_id,
+                            session_id,
+                            step: *step,
+                        },
+                        name: format!("{}: {}", on.name, redact_secrets(path).0),
+                        environment: on.environment,
+                        protected: on.protected,
                     });
                 }
                 _ => targets.push(self.directory.resolve(ctx, target).await?),
@@ -2456,6 +2656,10 @@ impl CommandBus {
             capacity: capacity.map(Box::new),
             standing: None,
             bundle: BundleDetails::of(command),
+            file_op: match command {
+                Command::FileOp { spec, .. } => Some(Box::new(crate::terminal::file_ops::FileOpDetails::of(spec))),
+                _ => None,
+            },
         })
     }
 
@@ -2900,6 +3104,20 @@ mod tests {
                 targets: vec![terminal.clone()],
                 folder: "/tmp".into(),
                 files: vec![],
+                folders: vec![],
+                keep_times: true,
+                as_root: false,
+            },
+            Command::FileOp {
+                targets: vec![],
+                spec: Box::new(crate::terminal::file_ops::FileOpSpec {
+                    terminal_id: Uuid::nil(),
+                    op: crate::terminal::file_ops::FileOp::Delete {
+                        paths: vec!["/srv/old".into()],
+                        recursive: true,
+                    },
+                    as_root: true,
+                }),
             },
             Command::OpenTunnel {
                 targets: vec![terminal],

@@ -3,37 +3,52 @@
 //!
 //! * The "Files here" drawer lists the folder the shell is in ([`super::folder`]), or the home folder
 //!   when the shell does not say, and any folder the user opens from there ([`Terminals::list_folder`]).
+//!   SS-14: with root browsing on ([`super::root_files`]), a listing can be root's ([`FolderListing::as_root`]).
 //! * Downloads ([`Terminals::download`]) are reads: they skip approval, like saving a terminal's
 //!   output (SS-11), and are audited the same way: the file's name, size, host path, where it was
 //!   saved and its SHA-256, never its content. The folder is picked in a dialog the shell opens, or is
-//!   Downloads; a file of the same name there is kept and the new one gets a number.
+//!   Downloads. SS-14: a file of the same name there is kept and the new one gets a number, unless the user
+//!   chose to replace it (always, or only when the host's is newer) or to skip it ([`Existing`]); a folder comes
+//!   down with what is in it, except Git's own data (`.git`, so no download makes a Git working tree whose hooks a
+//!   Git-aware tool would run), links to folders and what isn't a file, each counted as left out; at most
+//!   [`MAX_UPLOAD_FILES`] files and folders in all (A9). Nothing lands in Remotely's own data folder.
 //! * Uploads are changes: [`FileTransfers::upload`] submits a [`Command::FileUpload`] to the command
-//!   bus (Low; Prod raises it; replacing a file is at least Medium), and the job runner carries it out
-//!   here ([`TerminalActions::upload`]). Each uploaded file is audited with its name, size,
+//!   bus (Low; Prod raises it; replacing a file is at least Medium; as root one higher), and the job runner carries
+//!   it out here ([`TerminalActions::upload`]). Each uploaded file is audited with its name, size,
 //!   destination and SHA-256. The files come from a dialog the shell opens or a drop on the terminal
-//!   ([`FileTransfers::stage`]); the UI never names a path on this PC.
-//! * Uploads write as the logged-in user, never with sudo; a protected folder fails with
+//!   ([`FileTransfers::stage`]); the UI never names a path on this PC. SS-14: a folder goes up with what is in it
+//!   (links and junctions left out), its folders made first.
+//! * Uploads write as the logged-in user unless the folder is browsed as root; a protected folder fails with
 //!   [`CoreError::RemotePermissionDenied`]. A new file that fails or is cancelled part way is deleted
-//!   again; a replaced file is left as far as it got, and the message says so.
-//! * Every transfer is in [`Transfers`] while it runs and for a while after: progress, speed, cancel
-//!   and retry for the transfers panel ([`TransferInfo`], sent on [`Terminals::subscribe_transfers`]).
+//!   again; a replaced file stays as it was (H8).
+//! * SS-14, the transfer queue: at most [`TRANSFERS_PER_HOST`] transfers run at a time on a terminal's connection,
+//!   uploads and downloads together; the rest wait. A transfer pauses between two chunks (its slot goes to the next
+//!   one). An upload goes on from the same offset when resumed, into what it wrote before (the new file, or H8's
+//!   temporary file), once the host's file is checked to be exactly what was sent ([`RemoteWrite::resume`]), else from
+//!   the start. A download comes down again from the start: SFTP's whole-second times can't tell a file rewritten in
+//!   place, so its result is never part of each. The audit's SHA-256 is of the bytes sent or saved.
+//!   Modification times are kept both ways; a replaced file on the host keeps its permissions and owner (H8).
+//! * Every transfer is in [`Transfers`] while it runs and for a while after: progress, speed, cancel,
+//!   pause, resume and retry for the transfers panel ([`TransferInfo`], sent on [`Terminals::subscribe_transfers`]).
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::sync::broadcast;
+use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
+use tokio::sync::{broadcast, watch, OwnedSemaphorePermit, Semaphore};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use super::folder::FolderInfo;
 use super::{audit, quoted_name, Control, Terminals};
-use crate::adapters::remote::{EntryKind, RemoteEntry, RemoteFiles, RemoteWrite, Written};
-use crate::command_bus::{human_size, Command, CommandBus, SubmitOutcome, UploadFile, MAX_UPLOAD_FILES};
+use crate::adapters::remote::{EntryKind, RemoteEntry, RemoteFiles, RemoteWrite, Resumed, SetAttrs, Written};
+use crate::command_bus::{
+    human_size, Command, CommandBus, SubmitOutcome, UploadFile, MAX_FOLDER_DEPTH, MAX_UPLOAD_FILES,
+};
 use crate::domain::{Context, Target};
 use crate::error::{CoreError, Result};
 use crate::locks;
@@ -49,6 +64,8 @@ const PROGRESS_EVERY: Duration = Duration::from_millis(200);
 const KEEP_FINISHED: usize = 200;
 /// Files chosen or dropped are kept this long for their upload.
 const STAGED_FOR: Duration = Duration::from_secs(3600);
+/// SS-14: transfers running at a time on one terminal's connection; the rest wait their turn.
+pub const TRANSFERS_PER_HOST: usize = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -60,8 +77,11 @@ pub enum Direction {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum TransferState {
+    /// Waiting for its turn (one of [`TRANSFERS_PER_HOST`]).
     Queued,
     Running,
+    /// SS-14: stopped between two chunks until it is resumed; its slot went to the next transfer.
+    Paused,
     Done,
     Failed,
     Cancelled,
@@ -87,6 +107,7 @@ pub struct TransferInfo {
     /// How the terminal is named: `'web01'`, or `alice@192.0.2.10:22 (not saved)`.
     pub terminal: String,
     pub direction: Direction,
+    /// The file's name; SS-14: with its folders (`site/css/main.css`) for a file of a folder.
     pub name: String,
     /// On the host: where it goes, or where it comes from.
     pub remote_path: String,
@@ -100,20 +121,35 @@ pub struct TransferInfo {
     /// Why it failed or was cancelled.
     pub message: Option<String>,
     pub sha256: Option<String>,
-    /// An upload that replaces a file on the host.
+    /// An upload that replaces a file on the host (SS-14: or a download that replaces one on this PC).
     pub replace: bool,
+    /// SS-14: through root browsing.
+    pub as_root: bool,
 }
 
 /// What a finished transfer needs to run again.
 #[derive(Debug, Clone)]
 enum Again {
-    Upload { local_path: PathBuf, folder: String },
-    Download { dest: PathBuf },
+    Upload {
+        local_path: PathBuf,
+        /// The upload's host folder, and the file's name in it (with its folders).
+        folder: String,
+        name: String,
+        as_root: bool,
+        keep_times: bool,
+    },
+    Download {
+        dest: PathBuf,
+        existing: Existing,
+        as_root: bool,
+    },
 }
 
 struct Entry {
     info: TransferInfo,
     cancel: CancellationToken,
+    /// SS-14: true while a pause is asked for.
+    pause: watch::Sender<bool>,
     again: Again,
     last_emit: Option<Instant>,
     last_done: u64,
@@ -142,6 +178,7 @@ impl Transfers {
             list.push_back(Entry {
                 info: info.clone(),
                 cancel: cancel.clone(),
+                pause: watch::channel(false).0,
                 again,
                 last_emit: None,
                 last_done: 0,
@@ -174,6 +211,13 @@ impl Transfers {
 
     fn start(&self, id: Uuid) {
         self.change(id, |info| info.state = TransferState::Running);
+    }
+
+    fn set_state(&self, id: Uuid, state: TransferState) {
+        self.change(id, |info| {
+            info.state = state;
+            info.bytes_per_sec = 0;
+        });
     }
 
     /// `done` bytes so far; sent on at most every [`PROGRESS_EVERY`], with the speed since the last.
@@ -236,11 +280,51 @@ impl Transfers {
         }
     }
 
+    /// SS-14: root browsing on `terminal` ended: every transfer as root of it that has not finished is cancelled
+    /// (a paused one too), so nothing more is written or read as root. The ids of those cancelled.
+    pub(super) fn cancel_root(&self, terminal: Uuid) -> Vec<Uuid> {
+        let list = locks::lock(&self.list);
+        let mut cancelled = Vec::new();
+        for entry in list.iter() {
+            if entry.info.terminal_id == terminal && entry.info.as_root && !entry.info.state.finished() {
+                entry.cancel.cancel();
+                cancelled.push(entry.info.id);
+            }
+        }
+        cancelled
+    }
+
+    /// Whether every one of `ids` has ended (or is gone from the list).
+    pub(super) fn all_finished(&self, ids: &[Uuid]) -> bool {
+        let list = locks::lock(&self.list);
+        ids.iter().all(|id| {
+            list.iter()
+                .find(|e| e.info.id == *id)
+                .is_none_or(|e| e.info.state.finished())
+        })
+    }
+
+    /// SS-14: asks a transfer that has not finished to pause (`on`) or go on. False when there is none to.
+    fn pause(&self, id: Uuid, on: bool) -> bool {
+        let list = locks::lock(&self.list);
+        match list.iter().find(|e| e.info.id == id) {
+            Some(entry) if !entry.info.state.finished() => entry.pause.send_replace(on) != on,
+            _ => false,
+        }
+    }
+
     fn token(&self, id: Uuid) -> Option<CancellationToken> {
         locks::lock(&self.list)
             .iter()
             .find(|e| e.info.id == id)
             .map(|e| e.cancel.clone())
+    }
+
+    fn pauser(&self, id: Uuid) -> watch::Receiver<bool> {
+        locks::lock(&self.list)
+            .iter()
+            .find(|e| e.info.id == id)
+            .map_or_else(|| watch::channel(false).1, |e| e.pause.subscribe())
     }
 
     fn list(&self) -> Vec<TransferInfo> {
@@ -266,6 +350,10 @@ pub struct FolderListing {
     /// A9: the folder holds more than [`MAX_LISTING`](crate::adapters::remote::MAX_LISTING) entries,
     /// and only that many are listed.
     pub more: bool,
+    /// SS-14: listed as root (root browsing), so the drawer says so.
+    pub as_root: bool,
+    /// SS-14: root browsing is on for the terminal (whether or not this listing is root's).
+    pub root_available: bool,
 }
 
 /// QL-09: a folder the drawer could not open.
@@ -289,6 +377,12 @@ pub struct UploadRun<'a> {
     pub terminal_id: Uuid,
     pub folder: &'a str,
     pub files: &'a [UploadFile],
+    /// SS-14: folders made first, relative to `folder`, parents first.
+    pub folders: &'a [String],
+    /// SS-14: each file gets its time on this PC.
+    pub keep_times: bool,
+    /// SS-14: through root browsing.
+    pub as_root: bool,
 }
 
 /// SS-08: how an upload went, file by file.
@@ -299,14 +393,27 @@ pub struct UploadReport {
     pub cancelled: usize,
     /// "a.txt: why".
     pub failed: Vec<String>,
+    /// SS-14: folders made.
+    pub folders: usize,
 }
 
 impl UploadReport {
     /// For the job's audit entry.
     pub fn summary(&self, folder: &str) -> String {
         let mut parts = Vec::new();
+        if self.folders > 0 {
+            parts.push(match self.folders {
+                1 => "1 folder made".to_owned(),
+                n => format!("{n} folders made"),
+            });
+        }
         if !self.uploaded.is_empty() {
-            parts.push(format!("uploaded to {folder}: {}", self.uploaded.join(", ")));
+            // A folder's thousands of files are counted, not named.
+            if self.uploaded.len() > 50 {
+                parts.push(format!("uploaded {} files to {folder}", self.uploaded.len()));
+            } else {
+                parts.push(format!("uploaded to {folder}: {}", self.uploaded.join(", ")));
+            }
         }
         if self.cancelled > 0 {
             parts.push(format!("{} cancelled", self.cancelled));
@@ -445,19 +552,25 @@ pub(crate) async fn mark_downloaded(path: &Path) -> Option<String> {
     }
 }
 
+/// The name a file of `name` gets when `taken` says it is there: `name (1).ext`, `name (2).ext`...
+fn numbered(name: &str, n: usize) -> String {
+    let (stem, extension) = match name.rsplit_once('.') {
+        Some((stem, ext)) if !stem.is_empty() => (stem.to_owned(), format!(".{ext}")),
+        _ => (name.to_owned(), String::new()),
+    };
+    if n == 0 {
+        name.to_owned()
+    } else {
+        format!("{stem} ({n}){extension}")
+    }
+}
+
 /// Creates a new file in `folder` named `name`, or `name (1)`, `name (2)`... when that is taken, so a
 /// download never overwrites a file on this PC.
 async fn claim_file(folder: &Path, name: &str) -> Result<(PathBuf, tokio::fs::File)> {
     let name = local_name(name);
-    let (stem, extension) = match name.rsplit_once('.') {
-        Some((stem, ext)) if !stem.is_empty() => (stem.to_owned(), format!(".{ext}")),
-        _ => (name.clone(), String::new()),
-    };
     for n in 0..1000 {
-        let candidate = match n {
-            0 => folder.join(&name),
-            n => folder.join(format!("{stem} ({n}){extension}")),
-        };
+        let candidate = folder.join(numbered(&name, n));
         match tokio::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -475,8 +588,167 @@ async fn claim_file(folder: &Path, name: &str) -> Result<(PathBuf, tokio::fs::Fi
     )))
 }
 
+/// SS-14: what to do with a file that is there already (the host's for an upload, this PC's for a download).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Existing {
+    /// Ask first: nothing is submitted (or queued) while any is there.
+    #[default]
+    Ask,
+    Replace,
+    /// Replace it only when the one sent is newer (by modification time); otherwise leave it.
+    ReplaceIfNewer,
+    Skip,
+    /// Keep it, and give the new one a number: `name (1).ext`.
+    KeepBoth,
+}
+
+impl Existing {
+    /// For a file that is there: replace it (`Some(true)`), send it beside it (`Some(false)`, [`Existing::KeepBoth`]),
+    /// or leave it (`None`). `sent` and `there`: modification times, seconds since 1970.
+    fn decide(self, sent: Option<u64>, there: Option<u64>) -> Option<bool> {
+        match self {
+            Existing::Ask | Existing::Replace => Some(true),
+            Existing::ReplaceIfNewer => match (sent, there) {
+                (Some(sent), Some(there)) if sent > there => Some(true),
+                // Unknown times: left alone, as "newer" can't be told.
+                _ => None,
+            },
+            Existing::Skip => None,
+            Existing::KeepBoth => Some(false),
+        }
+    }
+}
+
+/// Seconds since 1970 of a time on this PC.
+fn unix_secs(at: SystemTime) -> Option<u64> {
+    at.duration_since(UNIX_EPOCH).ok().map(|d| d.as_secs())
+}
+
+/// SS-14: what [`Terminals::download_with`] takes.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DownloadOptions {
+    pub existing: Existing,
+    pub as_root: bool,
+}
+
+/// SS-14: how starting a download went.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "status", rename_all = "camelCase", rename_all_fields = "camelCase")]
+pub enum DownloadStart {
+    /// These are in the folder on this PC already (as they would be saved, with their folders); ask, then call again.
+    /// `choice`: the folder, kept by [`FileTransfers::download`] for the answer, so no path of this PC comes back
+    /// from the UI.
+    Conflicts {
+        existing: Vec<String>,
+        dest: String,
+        choice: Option<Uuid>,
+    },
+    /// Queued; `skipped` files were there already and left alone; `left_out`: what a folder held that doesn't come
+    /// down (Git's data, links to folders, devices and the like).
+    Queued {
+        transfers: Vec<TransferInfo>,
+        skipped: usize,
+        left_out: usize,
+    },
+}
+
+/// Where one downloaded file lands on this PC: its folder, its name there, and the modification time it had on the
+/// host, which it keeps.
+struct Landing {
+    dest: PathBuf,
+    name: String,
+    modified: Option<u64>,
+}
+
+/// One file a download brings: where it comes from, where it goes on this PC, its host entry, and whether it
+/// replaces a file there.
+struct DownloadItem {
+    remote: String,
+    /// The folder on this PC it lands in, and its name there.
+    dest: PathBuf,
+    name: String,
+    /// Its name with its folders, for the panel.
+    shown: String,
+    entry: RemoteEntry,
+    replace: bool,
+}
+
+/// SS-14: a name Git takes as its own data on this PC (`.git`, as Windows would save it: `.GIT`, `.git.`). A
+/// folder or file of that name makes the folder around it a Git working tree, whose hooks and `core.fsmonitor` a
+/// Git-aware tool runs when it opens the folder, so none comes down.
+fn is_git_name(name: &str) -> bool {
+    local_name(name).eq_ignore_ascii_case(".git")
+}
+
+/// SS-14: `path` is in one of `protected` (final paths), its parts compared as Windows compares them, without case.
+fn lands_in(path: &Path, protected: &[PathBuf]) -> bool {
+    let parts = |p: &Path| -> Vec<String> {
+        p.components()
+            .map(|c| c.as_os_str().to_string_lossy().to_lowercase())
+            .collect()
+    };
+    let at = parts(path);
+    protected.iter().any(|folder| {
+        let folder = parts(folder);
+        at.len() >= folder.len() && at[..folder.len()] == folder[..]
+    })
+}
+
+/// SS-14: a host folder's files, for a download of the folder: links to folders are left out (they may lead back up),
+/// links to files come down as the files they point to; Git's data ([`is_git_name`]) and what is neither a file nor
+/// a folder are left out too, each counted in `left_out`. At most [`MAX_UPLOAD_FILES`] files and folders (A9: an
+/// endless tree of empty folders is refused as well). Folders first in the list, parents first.
+async fn walk_remote(
+    files: &Arc<dyn RemoteFiles>,
+    root: &str,
+    top: &str,
+    left_out: &mut usize,
+) -> Result<(Vec<String>, Vec<(String, String, RemoteEntry)>)> {
+    let mut folders = vec![top.to_owned()];
+    let mut found = Vec::new();
+    let mut queue = VecDeque::from([(root.to_owned(), top.to_owned(), 1usize)]);
+    while let Some((folder, shown, depth)) = queue.pop_front() {
+        let listing = files.list(&folder).await?;
+        if listing.more {
+            return Err(CoreError::InvalidInput(format!(
+                "{folder} holds more than Remotely lists in one folder, so it can't come down whole. Download what is \
+                 in it by parts, or pack it in the terminal first"
+            )));
+        }
+        for entry in listing.entries {
+            if is_git_name(&entry.name) {
+                *left_out += 1;
+                continue;
+            }
+            let path = join(&folder, &entry.name);
+            let shown_path = format!("{shown}/{}", entry.name);
+            match entry.kind {
+                EntryKind::Folder if entry.link => *left_out += 1,
+                EntryKind::Folder => {
+                    if depth >= MAX_FOLDER_DEPTH {
+                        return Err(CoreError::InvalidInput(format!(
+                            "{root} is more than {MAX_FOLDER_DEPTH} folders deep, so it can't come down whole."
+                        )));
+                    }
+                    folders.push(shown_path.clone());
+                    queue.push_back((path, shown_path, depth + 1));
+                }
+                EntryKind::File => found.push((path, shown_path, entry)),
+                EntryKind::Other => *left_out += 1,
+            }
+            if found.len() + folders.len() > MAX_UPLOAD_FILES {
+                return Err(CoreError::InvalidInput(format!(
+                    "{root} holds more than {MAX_UPLOAD_FILES} files and folders, so it can't come down in one go."
+                )));
+            }
+        }
+    }
+    Ok((folders, found))
+}
+
 impl Terminals {
-    fn live(&self, id: Uuid) -> Result<(Arc<Control>, Arc<dyn RemoteFiles>)> {
+    pub(super) fn live(&self, id: Uuid) -> Result<(Arc<Control>, Arc<dyn RemoteFiles>)> {
         let control = self
             .control(id)
             .ok_or_else(|| CoreError::UnknownTarget(format!("terminal {id} has closed")))?;
@@ -511,6 +783,17 @@ impl Terminals {
     /// its path and the reason ([`FolderListing::error`]) instead of failing, so the drawer can go on
     /// from there. Errors are left for a terminal that can't reach its files at all.
     pub async fn open_folder(&self, id: Uuid, path: Option<&str>, from: Option<&str>) -> Result<FolderListing> {
+        self.open_folder_as(id, path, from, false).await
+    }
+
+    /// SS-14: [`Terminals::open_folder`], as root when `as_root` (root browsing must be on).
+    pub async fn open_folder_as(
+        &self,
+        id: Uuid,
+        path: Option<&str>,
+        from: Option<&str>,
+        as_root: bool,
+    ) -> Result<FolderListing> {
         let (control, files) = self.live(id)?;
         let home = home_of(&control, &files).await?;
         let shell = locks::lock(&control.folder)
@@ -519,13 +802,19 @@ impl Terminals {
             .unwrap_or_else(|| home.clone());
         let base = from.map_or_else(|| shell.clone(), |from| resolve("/", &home, from));
         let path = resolve(&base, &home, path.unwrap_or(&shell));
+        let (_, files) = self.files_for(id, as_root)?;
         Ok(self.listing(&control, &files, path).await)
     }
 
     /// QL-09: the drawer's Back from `from` (the folder it shows): the folder that opened before it,
     /// or, when `from` could not be opened, the last one that did.
     pub async fn folder_back(&self, id: Uuid, from: &str) -> Result<FolderListing> {
-        let (control, files) = self.live(id)?;
+        self.folder_back_as(id, from, false).await
+    }
+
+    /// SS-14: [`Terminals::folder_back`], as root when `as_root`.
+    pub async fn folder_back_as(&self, id: Uuid, from: &str, as_root: bool) -> Result<FolderListing> {
+        let (control, files) = self.files_for(id, as_root)?;
         let target = {
             let mut opened = locks::lock(&control.opened);
             let at = back_index(&opened, from)
@@ -570,6 +859,8 @@ impl Terminals {
             error,
             back,
             more,
+            as_root: files.as_root(),
+            root_available: locks::lock(&control.root).is_some(),
         }
     }
 
@@ -621,14 +912,58 @@ impl Terminals {
         self.inner.transfers.cancel(id)
     }
 
-    /// SS-08: downloads files from the terminal's host into `dest` on this PC, one after another; returns
-    /// them as queued. Each is audited when it is saved: name, size, host path, where it went, SHA-256. Never
-    /// into a Git working tree ([`crate::save_guard`]).
+    /// SS-14: pauses a transfer that has not finished (it stops after its current chunk). False when there is none to
+    /// pause, or it is paused already.
+    pub fn pause_transfer(&self, id: Uuid) -> bool {
+        self.inner.transfers.pause(id, true)
+    }
+
+    /// SS-14: a paused transfer goes on where it stopped (once a slot is free). False when it isn't paused.
+    pub fn resume_transfer(&self, id: Uuid) -> bool {
+        self.inner.transfers.pause(id, false)
+    }
+
+    /// SS-08: downloads files from the terminal's host into `dest` on this PC; returns them as queued. A file of the
+    /// same name there is kept and the new one gets a number. See [`Terminals::download_with`].
     pub async fn download(&self, ctx: &Context, id: Uuid, paths: &[String], dest: &Path) -> Result<Vec<TransferInfo>> {
+        let options = DownloadOptions {
+            existing: Existing::KeepBoth,
+            as_root: false,
+        };
+        match self.download_with(ctx, id, paths, dest, options).await? {
+            DownloadStart::Queued { transfers, .. } => Ok(transfers),
+            DownloadStart::Conflicts { .. } => Ok(Vec::new()),
+        }
+    }
+
+    /// SS-08, SS-14: downloads files and folders (with what is in them) from the terminal's host into `dest` on this
+    /// PC, [`TRANSFERS_PER_HOST`] at a time with the uploads on the same connection. Each is audited when it is saved:
+    /// name, size, host path, where it went, SHA-256. Never into a Git working tree ([`crate::save_guard`]). A file of
+    /// the same name on this PC is handled as `options.existing` says: with [`Existing::Ask`], nothing is queued while
+    /// any is there ([`DownloadStart::Conflicts`]).
+    pub async fn download_with(
+        &self,
+        ctx: &Context,
+        id: Uuid,
+        paths: &[String],
+        dest: &Path,
+        options: DownloadOptions,
+    ) -> Result<DownloadStart> {
         crate::save_guard::refuse_repository_folder(dest, crate::save_guard::Saved::Download)?;
-        let (control, files) = self.live(id)?;
+        let (control, _) = self.live(id)?;
+        let (_, files) = self.files_for(id, options.as_root)?;
         if !dest.is_dir() {
             return Err(CoreError::InvalidInput(format!("{} is not a folder.", dest.display())));
+        }
+        // Remotely's own data (the database, the vault, the logs): a download that replaced a file there would replace
+        // the app's own.
+        let protected = self.protected_folders();
+        let dest_real = crate::toolbox::file_server::final_place(dest).unwrap_or_else(|| dest.to_owned());
+        if lands_in(&dest_real, &protected) {
+            return Err(CoreError::InvalidInput(format!(
+                "{} is Remotely's own data folder, so nothing is downloaded into it. Choose another folder.",
+                dest.display()
+            )));
         }
         if paths.is_empty() {
             return Err(CoreError::InvalidInput("Choose a file to download.".into()));
@@ -643,19 +978,29 @@ impl Terminals {
             .path
             .clone()
             .unwrap_or_else(|| home.clone());
-        let mut found = Vec::new();
+        // What comes down: each file, and each folder's files with their folders (made on this PC first).
+        let mut folders: Vec<String> = Vec::new();
+        let mut found: Vec<(String, String, RemoteEntry)> = Vec::new();
+        let mut left_out = 0;
         for path in paths {
             let full = resolve(&base, &home, path);
             let entry = files
                 .stat(&full)
                 .await?
                 .ok_or_else(|| CoreError::RemoteNotFound { path: full.clone() })?;
+            if is_git_name(&entry.name) {
+                return Err(CoreError::InvalidInput(format!(
+                    "{full} is Git's own data, so it isn't downloaded: on this PC it would make the folder a Git \
+                     working tree, whose hooks Git-aware tools run."
+                )));
+            }
             match entry.kind {
-                EntryKind::File => found.push((full, entry)),
+                EntryKind::File => found.push((full, entry.name.clone(), entry)),
                 EntryKind::Folder => {
-                    return Err(CoreError::InvalidInput(format!(
-                        "{full} is a folder. Remotely downloads files: open the folder and pick the files in it."
-                    )))
+                    let top = local_name(&entry.name);
+                    let (subfolders, inside) = walk_remote(&files, &full, &top, &mut left_out).await?;
+                    folders.extend(subfolders);
+                    found.extend(inside);
                 }
                 EntryKind::Other => {
                     return Err(CoreError::InvalidInput(format!(
@@ -663,51 +1008,131 @@ impl Terminals {
                     )))
                 }
             }
+            if found.len() + folders.len() > MAX_UPLOAD_FILES {
+                return Err(CoreError::InvalidInput(format!(
+                    "One download takes at most {MAX_UPLOAD_FILES} files and folders."
+                )));
+            }
+        }
+        // Where each lands: its folders' names made safe for Windows, part by part.
+        let mut items = Vec::new();
+        let mut conflicts = Vec::new();
+        let mut skipped = 0;
+        for (remote, shown, entry) in found {
+            let mut parts: Vec<String> = shown.split('/').map(local_name).collect();
+            let name = parts.pop().unwrap_or_else(|| "download".into());
+            let folder = parts.iter().fold(dest.to_owned(), |at, part| at.join(part));
+            let lands = parts
+                .iter()
+                .fold(dest_real.clone(), |at, part| at.join(part))
+                .join(&name);
+            if lands_in(&lands, &protected) {
+                return Err(CoreError::InvalidInput(format!(
+                    "{} would land in Remotely's own data folder, so nothing is downloaded. Choose another folder.",
+                    folder.join(&name).display()
+                )));
+            }
+            let there = std::fs::symlink_metadata(folder.join(&name)).ok();
+            let mut replace = false;
+            if let Some(there) = there {
+                if there.is_dir() {
+                    return Err(CoreError::InvalidInput(format!(
+                        "{} is a folder on this PC, so a file can't replace it.",
+                        folder.join(&name).display()
+                    )));
+                }
+                match options.existing {
+                    Existing::Ask => {
+                        conflicts.push(parts.iter().chain([&name]).cloned().collect::<Vec<_>>().join("/"));
+                        continue;
+                    }
+                    existing => match existing.decide(entry.modified, there.modified().ok().and_then(unix_secs)) {
+                        Some(true) => replace = true,
+                        Some(false) => {}
+                        None => {
+                            skipped += 1;
+                            continue;
+                        }
+                    },
+                }
+            }
+            items.push(DownloadItem {
+                remote,
+                dest: folder,
+                name,
+                shown,
+                entry,
+                replace,
+            });
+        }
+        if !conflicts.is_empty() {
+            return Ok(DownloadStart::Conflicts {
+                existing: conflicts,
+                dest: dest.display().to_string(),
+                choice: None,
+            });
+        }
+        for folder in &folders {
+            let at = folder
+                .split('/')
+                .fold(dest.to_owned(), |at, part| at.join(local_name(part)));
+            tokio::fs::create_dir_all(&at).await?;
         }
         let mut queued = Vec::new();
-        for (full, entry) in found {
+        for item in items {
             let info = TransferInfo {
                 id: Uuid::new_v4(),
                 job_id: None,
                 terminal_id: id,
                 terminal: quoted_name(&control),
                 direction: Direction::Download,
-                name: entry.name.clone(),
-                remote_path: full,
+                name: item.shown.clone(),
+                remote_path: item.remote.clone(),
                 local_path: None,
-                size: entry.size,
+                size: item.entry.size,
                 done: 0,
                 bytes_per_sec: 0,
                 state: TransferState::Queued,
                 message: None,
                 sha256: None,
-                replace: false,
+                replace: item.replace,
+                as_root: options.as_root,
             };
-            self.inner
-                .transfers
-                .add(info.clone(), Again::Download { dest: dest.to_owned() });
+            let existing = if item.replace {
+                Existing::Replace
+            } else {
+                Existing::KeepBoth
+            };
+            self.inner.transfers.add(
+                info.clone(),
+                Again::Download {
+                    dest: item.dest.clone(),
+                    existing,
+                    as_root: options.as_root,
+                },
+            );
+            let this = self.clone();
+            let ctx = *ctx;
+            let control = Arc::clone(&control);
+            let landing = Landing {
+                dest: item.dest,
+                name: item.name,
+                modified: item.entry.modified,
+            };
+            let transfer = info.id;
+            tokio::spawn(async move {
+                this.download_one(&ctx, &control, transfer, &landing).await;
+            });
             queued.push(info);
         }
-        let this = self.clone();
-        let ctx = *ctx;
-        let ids: Vec<Uuid> = queued.iter().map(|t| t.id).collect();
-        let dest = dest.to_owned();
-        tokio::spawn(async move {
-            for transfer in ids {
-                this.download_one(&ctx, &control, &files, transfer, &dest).await;
-            }
-        });
-        Ok(queued)
+        Ok(DownloadStart::Queued {
+            transfers: queued,
+            skipped,
+            left_out,
+        })
     }
 
-    async fn download_one(
-        &self,
-        ctx: &Context,
-        control: &Arc<Control>,
-        files: &Arc<dyn RemoteFiles>,
-        transfer: Uuid,
-        dest: &Path,
-    ) {
+    async fn download_one(&self, ctx: &Context, control: &Arc<Control>, transfer: Uuid, landing: &Landing) {
         let transfers = &self.inner.transfers;
         let (Some((info, _)), Some(cancel)) = (transfers.get(transfer), transfers.token(transfer)) else {
             return;
@@ -716,20 +1141,27 @@ impl Terminals {
             transfers.finish(transfer, TransferState::Cancelled, Some("cancelled".into()), None);
             return;
         }
-        transfers.start(transfer);
+        let mut pause = transfers.pauser(transfer);
+        // The slot is held until the transfer shows as ended, so no more than four ever show as running.
+        let mut slot = None;
         let result = tokio::select! {
             biased;
             () = cancel.cancelled() => Err(None),
-            result = self.copy_down(files, &info, dest) => result.map_err(Some),
+            result = self.copy_down(control, &info, landing, &mut pause, &mut slot) => result.map_err(Some),
         };
         match result {
-            Ok((local, sha, note)) => {
+            Ok((local, sha, saved, note)) => {
                 let shown = local.display().to_string();
-                transfers.change(transfer, |i| i.local_path = Some(shown.clone()));
-                let action = format!("Downloaded '{}' from {}", info.name, quoted_name(control));
+                transfers.change(transfer, |i| {
+                    i.local_path = Some(shown.clone());
+                    i.size = saved;
+                });
+                let root = if info.as_root { ", as root" } else { "" };
+                let action = format!("Downloaded '{}' from {}{root}", info.name, quoted_name(control));
+                let replaced = if info.replace { ", replacing the file there" } else { "" };
                 let detail = format!(
-                    "{}, {} bytes, SHA-256 {sha}; saved to {shown}",
-                    info.remote_path, info.size
+                    "{}, {saved} bytes, SHA-256 {sha}; saved to {shown}{replaced}",
+                    info.remote_path
                 );
                 if let Err(err) = audit(
                     &self.inner.store,
@@ -750,23 +1182,108 @@ impl Terminals {
         }
     }
 
-    /// Copies one host file to a new file in `dest`, then marks it as from the internet (A8); returns
-    /// where it went, its SHA-256 and a note when the mark could not be written. A file left half
-    /// written (or not yet marked) is deleted.
+    /// SS-14: waits while the transfer is paused (shown as paused), then for one of the connection's slots (shown as
+    /// queued). A pause asked while it waits for a slot is kept.
+    async fn take_slot(
+        &self,
+        slots: &Arc<Semaphore>,
+        id: Uuid,
+        pause: &mut watch::Receiver<bool>,
+    ) -> Result<OwnedSemaphorePermit> {
+        loop {
+            if *pause.borrow_and_update() {
+                self.inner.transfers.set_state(id, TransferState::Paused);
+                while *pause.borrow_and_update() {
+                    if pause.changed().await.is_err() {
+                        break;
+                    }
+                }
+                self.inner.transfers.set_state(id, TransferState::Queued);
+            }
+            let permit = Arc::clone(slots)
+                .acquire_owned()
+                .await
+                .map_err(|_| CoreError::InvalidInput("The terminal has closed.".into()))?;
+            if *pause.borrow() {
+                drop(permit);
+                continue;
+            }
+            self.inner.transfers.start(id);
+            return Ok(permit);
+        }
+    }
+
+    /// Copies one host file to a new file in `dest` (or over the one there, when it replaces it), keeps its time, then
+    /// marks it as from the internet (A8); returns where it went, the SHA-256 and size of the bytes saved, and a note
+    /// when the mark could not be written. A file left half written (or not yet marked) is deleted; one it would
+    /// replace stays as it was until the last byte arrived. SS-14: a pause stops between two chunks; once it goes on,
+    /// the host's file comes down again from the start (see the module's notes).
     async fn copy_down(
         &self,
-        files: &Arc<dyn RemoteFiles>,
+        control: &Arc<Control>,
         info: &TransferInfo,
-        dest: &Path,
-    ) -> Result<(PathBuf, String, Option<String>)> {
-        let mut reader = files.read(&info.remote_path).await?;
-        let (path, mut file) = claim_file(dest, &info.name).await?;
+        landing: &Landing,
+        pause: &mut watch::Receiver<bool>,
+        slot: &mut Option<OwnedSemaphorePermit>,
+    ) -> Result<(PathBuf, String, u64, Option<String>)> {
+        let (dest, name) = (landing.dest.as_path(), landing.name.as_str());
+        let mut modified = landing.modified;
+        let slots = Arc::clone(&control.slots);
+        *slot = Some(self.take_slot(&slots, info.id, pause).await?);
+        let (_, files) = self.files_for(info.terminal_id, info.as_root)?;
+        let mut reader = Some(files.read(&info.remote_path).await?);
+        // A replacement is written beside the file it replaces, then takes its place.
+        let (path, final_path, mut file) = if info.replace {
+            let final_path = dest.join(name);
+            let temp = dest.join(format!(".{name}.remotely-{}.part", &info.id.simple().to_string()[..12]));
+            let file = tokio::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&temp)
+                .await?;
+            (temp, final_path, file)
+        } else {
+            let (path, file) = claim_file(dest, name).await?;
+            (path.clone(), path, file)
+        };
         let mut cleanup = RemoveOnDrop(Some(path.clone()));
         let mut hasher = Sha256::new();
         let mut buf = vec![0u8; CHUNK];
         let mut done = 0u64;
         loop {
-            let n = reader.read(&mut buf).await?;
+            if *pause.borrow() {
+                drop(reader.take());
+                drop(slot.take());
+                *slot = Some(self.take_slot(&slots, info.id, pause).await?);
+                let (_, files) = self.files_for(info.terminal_id, info.as_root)?;
+                // SFTP's times are whole seconds, or missing, so a file rewritten in place at the same size and time
+                // looks the same, and checking its bytes means reading them again anyway. So it comes down again
+                // from the start: all of it as the host has it now, never part of each.
+                let now = files
+                    .stat(&info.remote_path)
+                    .await?
+                    .ok_or_else(|| CoreError::RemoteNotFound {
+                        path: info.remote_path.clone(),
+                    })?;
+                if now.kind != EntryKind::File {
+                    return Err(CoreError::InvalidInput(format!(
+                        "{} is no longer a file on the host, so it can't come down.",
+                        info.remote_path
+                    )));
+                }
+                modified = now.modified;
+                self.inner.transfers.change(info.id, |i| i.size = now.size);
+                file.set_len(0).await?;
+                file.seek(std::io::SeekFrom::Start(0)).await?;
+                hasher = Sha256::new();
+                done = 0;
+                self.inner.transfers.progress(info.id, 0);
+                reader = Some(files.read(&info.remote_path).await?);
+            }
+            let Some(open) = reader.as_mut() else {
+                break;
+            };
+            let n = open.read(&mut buf).await?;
             if n == 0 {
                 break;
             }
@@ -778,19 +1295,60 @@ impl Terminals {
         file.flush().await?;
         file.sync_all().await?;
         drop(file);
-        // A8: before the download counts as done.
+        drop(reader);
+        // A8: before the download counts as done (a replacement's mark goes with it when it takes the old one's place).
         let note = mark_downloaded(&path).await;
+        // SS-14: the host's modification time, as the file had it there; after the mark, whose stream would move it.
+        if let Some(at) = modified {
+            let kept = std::fs::OpenOptions::new()
+                .write(true)
+                .open(&path)
+                .and_then(|file| file.set_modified(UNIX_EPOCH + Duration::from_secs(at)));
+            if let Err(err) = kept {
+                tracing::warn!(error = %err, "could not keep a download's modification time");
+            }
+        }
+        if path != final_path {
+            tokio::fs::rename(&path, &final_path).await?;
+        }
         cleanup.0 = None;
-        Ok((path, hex::encode(hasher.finalize()), note))
+        Ok((final_path, hex::encode(hasher.finalize()), done, note))
     }
 
-    /// SS-08: the job runner's half of [`Command::FileUpload`]: each file in turn over the terminal's
-    /// SFTP channel, audited as it lands.
+    /// SS-08: the job runner's half of [`Command::FileUpload`]: SS-14: its folders made first, then its files over the
+    /// terminal's SFTP channel, [`TRANSFERS_PER_HOST`] at a time, each audited as it lands.
     pub(crate) async fn run_upload(&self, run: UploadRun<'_>, cancel: &CancellationToken) -> Result<UploadReport> {
-        let (control, files) = self.live(run.terminal_id)?;
+        let (control, files) = self.files_for(run.terminal_id, run.as_root)?;
         let mut report = UploadReport::default();
+        // Folders first, parents before what is in them; one that can't be made fails what goes into it.
+        let mut broken: HashMap<String, String> = HashMap::new();
+        for folder in run.folders {
+            if cancel.is_cancelled() {
+                break;
+            }
+            let above = folder.rsplit_once('/').map(|(above, _)| above.to_owned());
+            if let Some(why) = above.and_then(|a| broken.get(&a).cloned()) {
+                broken.insert(folder.clone(), why);
+                continue;
+            }
+            let path = join(run.folder, folder);
+            let made = match files.lstat(&path).await {
+                Ok(Some(entry)) if entry.kind == EntryKind::Folder && !entry.link => Ok(false),
+                Ok(Some(_)) => Err(format!("{path} is a file on the host, so no folder can go there")),
+                Ok(None) => files.make_folder(&path).await.map(|()| true).map_err(|e| e.to_string()),
+                Err(err) => Err(err.to_string()),
+            };
+            match made {
+                Ok(true) => report.folders += 1,
+                Ok(false) => {}
+                Err(why) => {
+                    report.failed.push(format!("{folder}/: {why}"));
+                    broken.insert(folder.clone(), why);
+                }
+            }
+        }
         // Queued all at once, so the panel shows what is still to come.
-        let mut queue = Vec::new();
+        let mut set = tokio::task::JoinSet::new();
         for file in run.files {
             let info = TransferInfo {
                 id: Uuid::new_v4(),
@@ -808,86 +1366,137 @@ impl Terminals {
                 message: None,
                 sha256: None,
                 replace: file.replace,
+                as_root: run.as_root,
             };
             let token = self.inner.transfers.add(
                 info.clone(),
                 Again::Upload {
                     local_path: PathBuf::from(&file.local_path),
                     folder: run.folder.to_owned(),
+                    name: file.name.clone(),
+                    as_root: run.as_root,
+                    keep_times: run.keep_times,
                 },
             );
-            queue.push((info, token, file));
-        }
-        for (info, token, file) in queue {
-            let transfers = &self.inner.transfers;
-            if cancel.is_cancelled() || token.is_cancelled() {
-                transfers.finish(info.id, TransferState::Cancelled, Some("cancelled".into()), None);
-                report.cancelled += 1;
+            let above = file.name.rsplit_once('/').map(|(above, _)| above);
+            if let Some(why) = above.and_then(|a| broken.get(a)) {
+                let message = format!("its folder could not be made: {why}");
+                self.inner
+                    .transfers
+                    .finish(info.id, TransferState::Failed, Some(message.clone()), None);
+                report.failed.push(format!("{}: {message}", file.name));
                 continue;
             }
-            transfers.start(info.id);
-            match self.copy_up(&files, &info, file, cancel, &token).await {
-                Ok((size, sha, written)) => {
-                    let note = written.note();
-                    let replaced = match (file.replace, note.is_empty()) {
-                        (false, _) => String::new(),
-                        (true, true) => ", replacing the file there".to_owned(),
-                        (true, false) => format!(", replacing the file there: {note}"),
-                    };
-                    let action = format!(
-                        "Uploaded '{}' to {} on {}",
-                        file.name,
-                        run.folder,
-                        quoted_name(&control)
-                    );
-                    let detail = format!("{size} bytes, SHA-256 {sha}; to {}{replaced}", info.remote_path);
-                    run.ctx_audit(&self.inner.store, "file_uploaded", &action, &detail)
-                        .await?;
-                    transfers.change(info.id, |i| i.size = size);
-                    // H8: a kept backup or a write in place is worth a line in the panel.
-                    let shown = match &written {
-                        Written::ReplacedKeepingBackup { .. } | Written::InPlace { .. } => Some(note.clone()),
-                        Written::Created | Written::Replaced => None,
-                    };
-                    transfers.finish(info.id, TransferState::Done, shown.clone(), Some(sha));
-                    report.uploaded.push(match shown {
-                        Some(note) => format!("{} ({}; {note})", file.name, human_size(size)),
-                        None => format!("{} ({})", file.name, human_size(size)),
-                    });
+            let job = UploadJob {
+                ctx: run.ctx,
+                job_id: run.job_id,
+                tier: run.tier,
+                target: run.target.clone(),
+                folder: run.folder.to_owned(),
+                keep_times: run.keep_times,
+                control: Arc::clone(&control),
+                info,
+                token,
+                file: file.clone(),
+            };
+            let this = self.clone();
+            let cancel = cancel.clone();
+            set.spawn(async move { this.upload_one(job, &cancel).await });
+        }
+        while let Some(done) = set.join_next().await {
+            match done {
+                Ok(Ok(Uploaded::Done(line))) => report.uploaded.push(line),
+                Ok(Ok(Uploaded::Cancelled)) => report.cancelled += 1,
+                Ok(Ok(Uploaded::Failed(line))) => report.failed.push(line),
+                // An audit that failed stops the job, as it did before (QL-15 keeps the job's own result).
+                Ok(Err(err)) => {
+                    set.abort_all();
+                    return Err(err);
                 }
-                Err(Stopped::Cancelled { left }) => {
-                    transfers.finish(
-                        info.id,
-                        TransferState::Cancelled,
-                        Some(format!("cancelled; {left}")),
-                        None,
-                    );
-                    report.cancelled += 1;
-                }
-                Err(Stopped::Failed { err, left }) => {
-                    let message = match left {
-                        Some(left) => format!("{err}; {left}"),
-                        None => err.to_string(),
-                    };
-                    transfers.finish(info.id, TransferState::Failed, Some(message.clone()), None);
-                    report.failed.push(format!("{}: {message}", file.name));
-                }
+                Err(err) => report.failed.push(format!("an upload stopped: {err}")),
             }
         }
         Ok(report)
     }
 
-    /// Sends one local file to the host. Returns its size, SHA-256 and how it landed. The writer is
-    /// opened and finished outside the cancel race, so a cancel never cuts a replacement's last step
-    /// short; a cancel or failure while the bytes go up aborts it (H8: the old file stays as it was).
+    /// One file of an upload: its turn, the bytes, the audit entry.
+    async fn upload_one(&self, job: UploadJob, cancel: &CancellationToken) -> Result<Uploaded> {
+        let transfers = &self.inner.transfers;
+        let UploadJob { info, token, file, .. } = &job;
+        if cancel.is_cancelled() || token.is_cancelled() {
+            transfers.finish(info.id, TransferState::Cancelled, Some("cancelled".into()), None);
+            return Ok(Uploaded::Cancelled);
+        }
+        let mut pause = transfers.pauser(info.id);
+        // Held until the transfer shows as ended (see `download_one`).
+        let mut slot = None;
+        match self.copy_up(&job, cancel, &mut pause, &mut slot).await {
+            Ok((size, sha, written, times)) => {
+                let note = written.note();
+                let replaced = match (file.replace, note.is_empty()) {
+                    (false, _) => String::new(),
+                    (true, true) => ", replacing the file there".to_owned(),
+                    (true, false) => format!(", replacing the file there: {note}"),
+                };
+                let root = if info.as_root { ", as root" } else { "" };
+                let action = format!(
+                    "Uploaded '{}' to {} on {}{root}",
+                    file.name,
+                    job.folder,
+                    quoted_name(&job.control)
+                );
+                // What was sent; finishing checked the host's file holds as many bytes.
+                let detail = format!("{size} bytes sent, SHA-256 {sha}; to {}{replaced}", info.remote_path);
+                job.audit("file_uploaded", &action, &detail, &self.inner.store).await?;
+                transfers.change(info.id, |i| i.size = size);
+                // H8: a kept backup or a write in place is worth a line in the panel; SS-14: so is a time not kept.
+                let mut shown = match &written {
+                    Written::ReplacedKeepingBackup { .. } | Written::InPlace { .. } => Some(note.clone()),
+                    Written::Created | Written::Replaced => None,
+                };
+                if let Some(why) = times {
+                    shown = Some(match shown {
+                        Some(note) => format!("{note}; {why}"),
+                        None => why,
+                    });
+                }
+                transfers.finish(info.id, TransferState::Done, shown.clone(), Some(sha));
+                Ok(Uploaded::Done(match shown {
+                    Some(note) => format!("{} ({}; {note})", file.name, human_size(size)),
+                    None => format!("{} ({})", file.name, human_size(size)),
+                }))
+            }
+            Err(Stopped::Cancelled { left }) => {
+                transfers.finish(
+                    info.id,
+                    TransferState::Cancelled,
+                    Some(format!("cancelled; {left}")),
+                    None,
+                );
+                Ok(Uploaded::Cancelled)
+            }
+            Err(Stopped::Failed { err, left }) => {
+                let message = match left {
+                    Some(left) => format!("{err}; {left}"),
+                    None => err.to_string(),
+                };
+                transfers.finish(info.id, TransferState::Failed, Some(message.clone()), None);
+                Ok(Uploaded::Failed(format!("{}: {message}", file.name)))
+            }
+        }
+    }
+
+    /// Sends one local file to the host. Returns its size, SHA-256, how it landed, and why its time wasn't kept (if
+    /// it wasn't). The writer is opened and finished outside the cancel race, so a cancel never cuts a replacement's
+    /// last step short; a cancel or failure while the bytes go up aborts it (H8: the old file stays as it was).
     async fn copy_up(
         &self,
-        files: &Arc<dyn RemoteFiles>,
-        info: &TransferInfo,
-        file: &UploadFile,
+        job: &UploadJob,
         cancel: &CancellationToken,
-        token: &CancellationToken,
-    ) -> std::result::Result<(u64, String, Written), Stopped> {
+        pause: &mut watch::Receiver<bool>,
+        slot: &mut Option<OwnedSemaphorePermit>,
+    ) -> std::result::Result<(u64, String, Written, Option<String>), Stopped> {
+        let UploadJob { info, token, file, .. } = job;
         let mut local = tokio::fs::File::open(&file.local_path).await.map_err(|err| {
             Stopped::failed(CoreError::InvalidInput(format!(
                 "'{}' can't be read on this PC: {err}",
@@ -896,11 +1505,20 @@ impl Terminals {
         })?;
         let size = local.metadata().await.map_err(|err| Stopped::failed(err.into()))?.len();
         self.inner.transfers.change(info.id, |i| i.size = size);
-        if cancel.is_cancelled() || token.is_cancelled() {
-            return Err(Stopped::Cancelled {
-                left: "nothing was left on the host".into(),
-            });
-        }
+        let nothing_left = || Stopped::Cancelled {
+            left: "nothing was left on the host".into(),
+        };
+        let slots = Arc::clone(&job.control.slots);
+        let permit = tokio::select! {
+            biased;
+            () = cancel.cancelled() => return Err(nothing_left()),
+            () = token.cancelled() => return Err(nothing_left()),
+            permit = self.take_slot(&slots, info.id, pause) => permit.map_err(Stopped::failed)?,
+        };
+        *slot = Some(permit);
+        let (_, files) = self
+            .files_for(info.terminal_id, info.as_root)
+            .map_err(Stopped::failed)?;
         let mut writer = files
             .write(&info.remote_path, file.replace)
             .await
@@ -909,34 +1527,74 @@ impl Terminals {
             biased;
             () = cancel.cancelled() => None,
             () = token.cancelled() => None,
-            result = self.pump(&mut local, writer.as_mut(), info) => Some(result),
+            result = self.pump(&mut local, writer.as_mut(), info, pause, &slots, slot) => Some(result),
         };
-        match pumped {
-            None => Err(Stopped::Cancelled {
-                left: writer.abort().await,
-            }),
-            Some(Err(err)) => Err(Stopped::Failed {
-                err,
-                left: Some(writer.abort().await),
-            }),
+        let (done, sha, written) = match pumped {
+            None => {
+                return Err(Stopped::Cancelled {
+                    left: writer.abort().await,
+                })
+            }
+            Some(Err(err)) => {
+                return Err(Stopped::Failed {
+                    err,
+                    left: Some(writer.abort().await),
+                })
+            }
             Some(Ok((done, sha))) => match writer.finish().await {
-                Ok(written) => Ok((done, sha, written)),
-                Err(err) => Err(Stopped::Failed { err, left: None }),
+                Ok(written) => (done, sha, written),
+                Err(err) => return Err(Stopped::Failed { err, left: None }),
             },
-        }
+        };
+        // SS-14: the file's time on this PC.
+        let times = match (job.keep_times, file.modified) {
+            (true, Some(at)) => files
+                .set_attrs(
+                    &info.remote_path,
+                    SetAttrs {
+                        modified: Some(at),
+                        ..SetAttrs::default()
+                    },
+                )
+                .await
+                .err()
+                .map(|err| format!("its modification time was not kept: {err}")),
+            _ => None,
+        };
+        Ok((done, sha, written, times))
     }
 
-    /// The local file's bytes into the writer, with progress. Returns how many and their SHA-256.
+    /// The local file's bytes into the writer, with progress. Returns how many and their SHA-256. SS-14: a pause stops
+    /// between two chunks: the host's file closes, the slot goes to the next transfer, and the writer goes on from
+    /// the same offset once it resumes if the host's file is still exactly what was sent, else from the start.
     async fn pump(
         &self,
         local: &mut tokio::fs::File,
         writer: &mut dyn RemoteWrite,
         info: &TransferInfo,
+        pause: &mut watch::Receiver<bool>,
+        slots: &Arc<Semaphore>,
+        permit: &mut Option<OwnedSemaphorePermit>,
     ) -> Result<(u64, String)> {
         let mut hasher = Sha256::new();
         let mut buf = vec![0u8; CHUNK];
         let mut done = 0u64;
         loop {
+            if *pause.borrow() {
+                writer.pause().await?;
+                drop(permit.take());
+                *permit = Some(self.take_slot(slots, info.id, pause).await?);
+                let sent = hex::encode(hasher.clone().finalize());
+                match writer.resume(done, &sent).await? {
+                    Resumed::GoesOn => {}
+                    Resumed::FromStart => {
+                        local.seek(std::io::SeekFrom::Start(0)).await?;
+                        hasher = Sha256::new();
+                        done = 0;
+                        self.inner.transfers.progress(info.id, 0);
+                    }
+                }
+            }
             let n = local.read(&mut buf).await?;
             if n == 0 {
                 break;
@@ -948,6 +1606,48 @@ impl Terminals {
         }
         Ok((done, hex::encode(hasher.finalize())))
     }
+}
+
+/// What one file of an upload needs, owned, so the files go up side by side.
+struct UploadJob {
+    ctx: Context,
+    job_id: Uuid,
+    tier: Tier,
+    target: Target,
+    folder: String,
+    keep_times: bool,
+    control: Arc<Control>,
+    info: TransferInfo,
+    token: CancellationToken,
+    file: UploadFile,
+}
+
+impl UploadJob {
+    async fn audit(&self, event: &str, action: &str, detail: &str, store: &crate::store::Store) -> Result<()> {
+        store
+            .append_audit(
+                &self.ctx,
+                NewAuditEntry {
+                    event,
+                    action,
+                    tier: Some(self.tier),
+                    job_id: Some(self.job_id),
+                    targets: std::slice::from_ref(&self.target),
+                    approval: None,
+                    result: None,
+                    detail: Some(detail),
+                },
+            )
+            .await
+            .map(drop)
+    }
+}
+
+/// How one file of an upload ended, as the job's report line.
+enum Uploaded {
+    Done(String),
+    Cancelled,
+    Failed(String),
 }
 
 /// Why an upload did not finish, and what it left on the host.
@@ -965,27 +1665,6 @@ enum Stopped {
 impl Stopped {
     fn failed(err: CoreError) -> Self {
         Self::Failed { err, left: None }
-    }
-}
-
-impl UploadRun<'_> {
-    async fn ctx_audit(&self, store: &crate::store::Store, event: &str, action: &str, detail: &str) -> Result<()> {
-        store
-            .append_audit(
-                &self.ctx,
-                NewAuditEntry {
-                    event,
-                    action,
-                    tier: Some(self.tier),
-                    job_id: Some(self.job_id),
-                    targets: std::slice::from_ref(self.target),
-                    approval: None,
-                    result: None,
-                    detail: Some(detail),
-                },
-            )
-            .await
-            .map(drop)
     }
 }
 
@@ -1015,8 +1694,13 @@ impl Drop for RemoveOnDrop {
 #[serde(rename_all = "camelCase")]
 pub struct StagedFiles {
     pub id: Uuid,
+    /// What was picked: files, and SS-14 folders (with what is in them).
     pub files: Vec<StagedFile>,
     pub total: u64,
+    /// SS-14: the files in all, a folder's counted one by one.
+    pub count: usize,
+    /// SS-14: links, junctions and what wasn't a file or folder inside the folders, left out.
+    pub left_out: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1024,22 +1708,92 @@ pub struct StagedFiles {
 pub struct StagedFile {
     pub name: String,
     pub size: u64,
+    /// SS-14: a folder, with `files` files in it.
+    pub folder: bool,
+    pub files: usize,
+}
+
+/// SS-14: one file to upload, by its name with its folders.
+#[derive(Debug, Clone)]
+struct StagedItem {
+    local: PathBuf,
+    name: String,
+    size: u64,
+    modified: Option<u64>,
 }
 
 struct Staged {
+    /// What was picked or dropped, as given (VM-23 takes an ISO this way).
     paths: Vec<PathBuf>,
-    files: Vec<StagedFile>,
+    items: Vec<StagedItem>,
+    /// SS-14: folders to make, parents first.
+    folders: Vec<String>,
     at: Instant,
 }
 
-/// SS-08: what to do with files that are in the host folder already.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum Existing {
-    /// Ask first: nothing is submitted while any is there.
-    Ask,
-    Replace,
-    Skip,
+/// SS-14: a link, a junction or another reparse point: never followed into (it may lead anywhere on this PC).
+fn is_link(meta: &std::fs::Metadata) -> bool {
+    if meta.file_type().is_symlink() {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+        if meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return true;
+        }
+    }
+    false
+}
+
+/// SS-14: a local folder's files and folders, by their names under `top`; links and junctions are left out. Returns
+/// how many were left out.
+fn walk_local(root: &Path, top: &str, items: &mut Vec<StagedItem>, folders: &mut Vec<String>) -> Result<usize> {
+    let mut left_out = 0;
+    folders.push(top.to_owned());
+    let mut queue = VecDeque::from([(root.to_owned(), top.to_owned(), 1usize)]);
+    while let Some((folder, shown, depth)) = queue.pop_front() {
+        let mut entries: Vec<std::fs::DirEntry> = std::fs::read_dir(&folder)
+            .map_err(|err| CoreError::InvalidInput(format!("'{}' can't be read: {err}", folder.display())))?
+            .filter_map(std::result::Result::ok)
+            .collect();
+        entries.sort_by_key(std::fs::DirEntry::file_name);
+        for entry in entries {
+            let Ok(meta) = std::fs::symlink_metadata(entry.path()) else {
+                left_out += 1;
+                continue;
+            };
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let shown_name = format!("{shown}/{name}");
+            if is_link(&meta) {
+                left_out += 1;
+            } else if meta.is_dir() {
+                if depth >= MAX_FOLDER_DEPTH {
+                    return Err(CoreError::InvalidInput(format!(
+                        "'{top}' is more than {MAX_FOLDER_DEPTH} folders deep; upload a part of it."
+                    )));
+                }
+                folders.push(shown_name.clone());
+                queue.push_back((entry.path(), shown_name, depth + 1));
+            } else if meta.is_file() {
+                items.push(StagedItem {
+                    local: entry.path(),
+                    name: shown_name,
+                    size: meta.len(),
+                    modified: meta.modified().ok().and_then(unix_secs),
+                });
+            } else {
+                left_out += 1;
+            }
+            if items.len() > MAX_UPLOAD_FILES {
+                return Err(CoreError::InvalidInput(format!(
+                    "One upload takes at most {MAX_UPLOAD_FILES} files; '{top}' holds more."
+                )));
+            }
+        }
+    }
+    Ok(left_out)
 }
 
 /// SS-08: how starting an upload went.
@@ -1049,7 +1803,7 @@ pub enum Existing {
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "status", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum UploadStart {
-    /// These are in the folder already; ask, then call again with `replace` or `skip`.
+    /// These are in the folder already; ask, then call again with another [`Existing`].
     Conflicts { existing: Vec<String>, folder: String },
     /// On the bus: queued (Low), or waiting for the approval dialog.
     Submitted { outcome: SubmitOutcome },
@@ -1066,14 +1820,31 @@ pub enum Retried {
     Download { transfers: Vec<TransferInfo> },
 }
 
+/// SS-14: what an upload will do, file by file, once [`Existing`] decided about the files that are there.
+struct UploadPlan {
+    files: Vec<UploadFile>,
+    folders: Vec<String>,
+    conflicts: Vec<String>,
+}
+
 /// SS-08: the bus-facing side of file transfers (`Core.files`): files staged for upload, uploads
-/// submitted as commands, retries.
+/// submitted as commands, retries. SS-14: file changes too ([`super::file_ops`]).
 pub struct FileTransfers {
     /// FD-02: the workspace shown, whose terminals the uploads go to.
-    workspace: crate::workspaces::Current,
-    terminals: Terminals,
-    bus: Arc<CommandBus>,
+    pub(super) workspace: crate::workspaces::Current,
+    pub(super) terminals: Terminals,
+    pub(super) bus: Arc<CommandBus>,
     staged: Mutex<HashMap<Uuid, Staged>>,
+    /// SS-14: folders on this PC a download's conflict question is about, by [`DownloadStart::Conflicts`]'s `choice`.
+    chosen: Mutex<HashMap<Uuid, (PathBuf, Instant)>>,
+}
+
+/// SS-14: where a download goes: a folder the shell chose (Downloads or a dialog's), or the one a conflict question
+/// was about.
+#[derive(Debug, Clone)]
+pub enum DownloadDest {
+    Folder(PathBuf),
+    Chosen(Uuid),
 }
 
 impl FileTransfers {
@@ -1083,11 +1854,49 @@ impl FileTransfers {
             terminals,
             bus,
             staged: Mutex::default(),
+            chosen: Mutex::default(),
         }
     }
 
-    /// Keeps files picked in a dialog or dropped on a terminal for their upload. Folders are refused
-    /// (Remotely uploads files), and so are two files of the same name.
+    /// SS-14: [`Terminals::download_with`] into `dest`. A conflict question keeps the folder for its answer
+    /// ([`DownloadDest::Chosen`]), for as long as staged files are kept.
+    pub async fn download(
+        &self,
+        terminal_id: Uuid,
+        paths: &[String],
+        dest: DownloadDest,
+        options: DownloadOptions,
+    ) -> Result<DownloadStart> {
+        let folder = match dest {
+            DownloadDest::Folder(folder) => folder,
+            DownloadDest::Chosen(choice) => {
+                let mut chosen = locks::lock(&self.chosen);
+                chosen.retain(|_, (_, at)| at.elapsed() < STAGED_FOR);
+                chosen.get(&choice).map(|(folder, _)| folder.clone()).ok_or_else(|| {
+                    CoreError::InvalidInput("That download's folder is no longer known; download it again.".into())
+                })?
+            }
+        };
+        let start = self
+            .terminals
+            .download_with(&self.workspace.get(), terminal_id, paths, &folder, options)
+            .await?;
+        Ok(match start {
+            DownloadStart::Conflicts { existing, dest, .. } => {
+                let choice = Uuid::new_v4();
+                locks::lock(&self.chosen).insert(choice, (folder, Instant::now()));
+                DownloadStart::Conflicts {
+                    existing,
+                    dest,
+                    choice: Some(choice),
+                }
+            }
+            queued => queued,
+        })
+    }
+
+    /// Keeps files picked in a dialog or dropped on a terminal for their upload. SS-14: a folder comes with what is
+    /// in it (links and junctions left out, so nothing outside it comes along). Two of the same name are refused.
     pub fn stage(&self, paths: Vec<PathBuf>) -> Result<StagedFiles> {
         if paths.is_empty() {
             return Err(CoreError::InvalidInput("No file was chosen.".into()));
@@ -1097,39 +1906,94 @@ impl FileTransfers {
                 "One upload takes at most {MAX_UPLOAD_FILES} files."
             )));
         }
-        let mut files = Vec::with_capacity(paths.len());
+        let mut shown: Vec<StagedFile> = Vec::with_capacity(paths.len());
+        let mut items = Vec::new();
+        let mut folders = Vec::new();
+        let mut left_out = 0;
         for path in &paths {
-            let meta = std::fs::metadata(path)
+            let meta = std::fs::symlink_metadata(path)
                 .map_err(|err| CoreError::InvalidInput(format!("'{}' can't be read: {err}", path.display())))?;
             let name = path
                 .file_name()
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default();
-            if meta.is_dir() {
-                return Err(CoreError::InvalidInput(format!(
-                    "'{name}' is a folder. Remotely uploads files: zip the folder, or pick the files in it."
-                )));
-            }
-            if files.iter().any(|f: &StagedFile| f.name == name) {
+            if shown.iter().any(|f| f.name == name) {
                 return Err(CoreError::InvalidInput(format!(
                     "Two files are named '{name}'; upload them one at a time."
                 )));
             }
-            files.push(StagedFile { name, size: meta.len() });
+            if is_link(&meta) {
+                // What a link points to, as a file; a link to a folder isn't followed.
+                let target = std::fs::metadata(path)
+                    .map_err(|err| CoreError::InvalidInput(format!("'{}' can't be read: {err}", path.display())))?;
+                if !target.is_file() {
+                    return Err(CoreError::InvalidInput(format!(
+                        "'{name}' is a link to a folder; pick the folder itself."
+                    )));
+                }
+                items.push(StagedItem {
+                    local: path.clone(),
+                    name: name.clone(),
+                    size: target.len(),
+                    modified: target.modified().ok().and_then(unix_secs),
+                });
+                shown.push(StagedFile {
+                    name,
+                    size: target.len(),
+                    folder: false,
+                    files: 1,
+                });
+            } else if meta.is_dir() {
+                let before = items.len();
+                left_out += walk_local(path, &name, &mut items, &mut folders)?;
+                let size = items[before..].iter().map(|i| i.size).sum();
+                shown.push(StagedFile {
+                    name,
+                    size,
+                    folder: true,
+                    files: items.len() - before,
+                });
+            } else {
+                items.push(StagedItem {
+                    local: path.clone(),
+                    name: name.clone(),
+                    size: meta.len(),
+                    modified: meta.modified().ok().and_then(unix_secs),
+                });
+                shown.push(StagedFile {
+                    name,
+                    size: meta.len(),
+                    folder: false,
+                    files: 1,
+                });
+            }
+            if items.len() > MAX_UPLOAD_FILES {
+                return Err(CoreError::InvalidInput(format!(
+                    "One upload takes at most {MAX_UPLOAD_FILES} files."
+                )));
+            }
         }
         let id = Uuid::new_v4();
-        let total = files.iter().map(|f| f.size).sum();
+        let total = items.iter().map(|i| i.size).sum();
+        let count = items.len();
         let mut staged = locks::lock(&self.staged);
         staged.retain(|_, s| s.at.elapsed() < STAGED_FOR);
         staged.insert(
             id,
             Staged {
                 paths,
-                files: files.clone(),
+                items,
+                folders,
                 at: Instant::now(),
             },
         );
-        Ok(StagedFiles { id, files, total })
+        Ok(StagedFiles {
+            id,
+            files: shown,
+            total,
+            count,
+            left_out,
+        })
     }
 
     /// Forgets staged files (the user closed the question about them).
@@ -1156,47 +2020,60 @@ impl FileTransfers {
         folder: &str,
         existing: Existing,
     ) -> Result<UploadStart> {
-        let (paths, staged) = {
+        self.upload_as(terminal_id, staged_id, folder, existing, false).await
+    }
+
+    /// SS-14: [`FileTransfers::upload`], as root when `as_root` (root browsing must be on; one tier higher).
+    pub async fn upload_as(
+        &self,
+        terminal_id: Uuid,
+        staged_id: Uuid,
+        folder: &str,
+        existing: Existing,
+        as_root: bool,
+    ) -> Result<UploadStart> {
+        let (items, folders) = {
             let staged = locks::lock(&self.staged);
             let s = staged.get(&staged_id).ok_or_else(|| {
                 CoreError::InvalidInput("Those files are no longer waiting to upload; choose them again.".into())
             })?;
-            (s.paths.clone(), s.files.clone())
+            (s.items.clone(), s.folders.clone())
         };
         let folder = folder.trim_end_matches('/');
         let folder = if folder.is_empty() { "/" } else { folder };
-        let names: Vec<String> = staged.iter().map(|f| f.name.clone()).collect();
-        let there = self.terminals.upload_conflicts(terminal_id, folder, &names).await?;
-        if existing == Existing::Ask && !there.is_empty() {
+        let (_, files) = self.terminals.files_for(terminal_id, as_root)?;
+        let plan = plan_upload(&files, folder, &items, folders, existing).await?;
+        if existing == Existing::Ask && !plan.conflicts.is_empty() {
             return Ok(UploadStart::Conflicts {
-                existing: there,
+                existing: plan.conflicts,
                 folder: folder.to_owned(),
             });
         }
-        let files: Vec<UploadFile> = paths
-            .iter()
-            .zip(&staged)
-            .filter(|(_, f)| existing != Existing::Skip || !there.contains(&f.name))
-            .map(|(path, f)| UploadFile {
-                local_path: path.display().to_string(),
-                name: f.name.clone(),
-                size: f.size,
-                replace: there.contains(&f.name),
-            })
-            .collect();
         locks::lock(&self.staged).remove(&staged_id);
-        if files.is_empty() {
+        if plan.files.is_empty() && plan.folders.is_empty() {
             return Ok(UploadStart::Nothing);
         }
-        self.submit(terminal_id, folder, files).await
+        self.submit(terminal_id, folder, plan.files, plan.folders, as_root, true)
+            .await
     }
 
-    async fn submit(&self, terminal_id: Uuid, folder: &str, files: Vec<UploadFile>) -> Result<UploadStart> {
+    async fn submit(
+        &self,
+        terminal_id: Uuid,
+        folder: &str,
+        files: Vec<UploadFile>,
+        folders: Vec<String>,
+        as_root: bool,
+        keep_times: bool,
+    ) -> Result<UploadStart> {
         let target = self.terminals.target(&self.workspace.get(), terminal_id).await?;
         let command = Command::FileUpload {
             targets: vec![target.target],
             folder: folder.to_owned(),
             files,
+            folders,
+            keep_times,
+            as_root,
         };
         let outcome = self.bus.submit(&self.workspace.get(), command).await?;
         Ok(UploadStart::Submitted { outcome })
@@ -1215,35 +2092,59 @@ impl FileTransfers {
             return Err(CoreError::InvalidInput("That transfer is still running.".into()));
         }
         match again {
-            Again::Upload { local_path, folder } => {
-                let size = std::fs::metadata(&local_path)
-                    .map_err(|err| {
-                        CoreError::InvalidInput(format!("'{}' can't be read any more: {err}", local_path.display()))
-                    })?
-                    .len();
-                let there = self
-                    .terminals
-                    .upload_conflicts(info.terminal_id, &folder, std::slice::from_ref(&info.name))
-                    .await?;
+            Again::Upload {
+                local_path,
+                folder,
+                name,
+                as_root,
+                keep_times,
+            } => {
+                let meta = std::fs::metadata(&local_path).map_err(|err| {
+                    CoreError::InvalidInput(format!("'{}' can't be read any more: {err}", local_path.display()))
+                })?;
+                let (_, files) = self.terminals.files_for(info.terminal_id, as_root)?;
+                let there = files.stat(&join(&folder, &name)).await?;
+                if there.as_ref().is_some_and(|e| e.kind == EntryKind::Folder) {
+                    return Err(CoreError::InvalidInput(format!(
+                        "{} is a folder on the host, so a file can't replace it.",
+                        join(&folder, &name)
+                    )));
+                }
                 let file = UploadFile {
                     local_path: local_path.display().to_string(),
-                    name: info.name.clone(),
-                    size,
-                    replace: !there.is_empty(),
+                    name: name.clone(),
+                    size: meta.len(),
+                    replace: there.is_some(),
+                    modified: meta.modified().ok().and_then(unix_secs),
                 };
-                let start = self.submit(info.terminal_id, &folder, vec![file]).await?;
+                // The folders it is in, used as they are when they are there.
+                let parts: Vec<&str> = name.split('/').collect();
+                let folders = (1..parts.len()).map(|n| parts[..n].join("/")).collect();
+                let start = self
+                    .submit(info.terminal_id, &folder, vec![file], folders, as_root, keep_times)
+                    .await?;
                 Ok(Retried::Upload { start: Box::new(start) })
             }
-            Again::Download { dest } => {
-                let transfers = self
+            Again::Download {
+                dest,
+                existing,
+                as_root,
+            } => {
+                let options = DownloadOptions { existing, as_root };
+                let start = self
                     .terminals
-                    .download(
+                    .download_with(
                         &self.workspace.get(),
                         info.terminal_id,
                         std::slice::from_ref(&info.remote_path),
                         &dest,
+                        options,
                     )
                     .await?;
+                let transfers = match start {
+                    DownloadStart::Queued { transfers, .. } => transfers,
+                    DownloadStart::Conflicts { .. } => Vec::new(),
+                };
                 Ok(Retried::Download { transfers })
             }
         }
@@ -1256,6 +2157,141 @@ impl FileTransfers {
             .then(|| info.local_path.map(PathBuf::from))
             .flatten()
     }
+}
+
+/// SS-14: decides, for each staged file, whether it goes up as it is, replaces the host's, goes up beside it with a
+/// number, or stays (by `existing`); each host folder is listed once. A folder of the upload where a file is, or a
+/// file where a folder is, is refused.
+async fn plan_upload(
+    files: &Arc<dyn RemoteFiles>,
+    folder: &str,
+    items: &[StagedItem],
+    folders: Vec<String>,
+    existing: Existing,
+) -> Result<UploadPlan> {
+    // Each host folder's names, listed once; `None`: not there (the upload makes it). A folder with more than one
+    // listing holds is asked about name by name.
+    let mut listed: HashMap<String, Option<HashMap<String, RemoteEntry>>> = HashMap::new();
+    let mut by_name: HashSet<String> = HashSet::new();
+    async fn names_in(
+        files: &Arc<dyn RemoteFiles>,
+        listed: &mut HashMap<String, Option<HashMap<String, RemoteEntry>>>,
+        by_name: &mut HashSet<String>,
+        folder: &str,
+    ) -> Result<()> {
+        if listed.contains_key(folder) || by_name.contains(folder) {
+            return Ok(());
+        }
+        match files.list(folder).await {
+            Ok(listing) if listing.more => {
+                by_name.insert(folder.to_owned());
+            }
+            Ok(listing) => {
+                let names = listing.entries.into_iter().map(|e| (e.name.clone(), e)).collect();
+                listed.insert(folder.to_owned(), Some(names));
+            }
+            Err(CoreError::RemoteNotFound { .. }) => {
+                listed.insert(folder.to_owned(), None);
+            }
+            Err(err) => return Err(err),
+        }
+        Ok(())
+    }
+    async fn entry_at(
+        files: &Arc<dyn RemoteFiles>,
+        listed: &mut HashMap<String, Option<HashMap<String, RemoteEntry>>>,
+        by_name: &mut HashSet<String>,
+        folder: &str,
+        name: &str,
+    ) -> Result<Option<RemoteEntry>> {
+        names_in(files, listed, by_name, folder).await?;
+        if by_name.contains(folder) {
+            return files.stat(&join(folder, name)).await;
+        }
+        Ok(listed
+            .get(folder)
+            .and_then(|names| names.as_ref())
+            .and_then(|names| names.get(name).cloned()))
+    }
+    for made in &folders {
+        let (above, name) = match made.rsplit_once('/') {
+            Some((above, name)) => (join(folder, above), name),
+            None => (folder.to_owned(), made.as_str()),
+        };
+        if let Some(entry) = entry_at(files, &mut listed, &mut by_name, &above, name).await? {
+            if entry.kind != EntryKind::Folder {
+                return Err(CoreError::InvalidInput(format!(
+                    "{} is a file on the host, so the folder '{made}' can't go there. Rename it, or upload elsewhere.",
+                    join(&above, name)
+                )));
+            }
+        }
+    }
+    let mut plan = UploadPlan {
+        files: Vec::new(),
+        folders,
+        conflicts: Vec::new(),
+    };
+    // Names this upload gives in each folder, so a kept-both file never takes a number another file of it has or gets.
+    let mut given: HashSet<String> = items.iter().map(|item| join(folder, &item.name)).collect();
+    for item in items {
+        let (sub, name) = match item.name.rsplit_once('/') {
+            Some((sub, name)) => (Some(sub), name),
+            None => (None, item.name.as_str()),
+        };
+        let host_folder = sub.map_or_else(|| folder.to_owned(), |sub| join(folder, sub));
+        let there = entry_at(files, &mut listed, &mut by_name, &host_folder, name).await?;
+        let mut file = UploadFile {
+            local_path: item.local.display().to_string(),
+            name: item.name.clone(),
+            size: item.size,
+            replace: false,
+            modified: item.modified,
+        };
+        if let Some(entry) = there {
+            if entry.kind == EntryKind::Folder {
+                return Err(CoreError::InvalidInput(format!(
+                    "{} is a folder on the host, so a file can't replace it. Rename the file, or upload it elsewhere.",
+                    join(&host_folder, name)
+                )));
+            }
+            if existing == Existing::Ask {
+                plan.conflicts.push(item.name.clone());
+                continue;
+            }
+            match existing.decide(item.modified, entry.modified) {
+                Some(true) => file.replace = true,
+                Some(false) => {
+                    let mut n = 1;
+                    loop {
+                        let candidate = numbered(name, n);
+                        let full = join(&host_folder, &candidate);
+                        let taken = given.contains(&full)
+                            || entry_at(files, &mut listed, &mut by_name, &host_folder, &candidate)
+                                .await?
+                                .is_some();
+                        if !taken {
+                            file.name = match sub {
+                                Some(sub) => format!("{sub}/{candidate}"),
+                                None => candidate,
+                            };
+                            break;
+                        }
+                        n += 1;
+                        if n > 1000 {
+                            return Err(CoreError::InvalidInput(format!(
+                                "{host_folder} holds too many files named like '{name}'."
+                            )));
+                        }
+                    }
+                }
+                None => continue,
+            }
+        }
+        given.insert(join(folder, &file.name));
+        plan.files.push(file);
+    }
+    Ok(plan)
 }
 
 #[cfg(test)]
@@ -1367,10 +2403,56 @@ mod tests {
             uploaded: vec!["a.txt (1.5 KB)".into()],
             cancelled: 1,
             failed: vec!["b.txt: alice can't write to /etc/b.txt on the host (permission denied).".into()],
+            folders: 0,
         };
         let summary = report.summary("/srv");
         assert!(summary.starts_with("uploaded to /srv: a.txt (1.5 KB); 1 cancelled; failed: b.txt"));
         assert!(report.failure().unwrap().starts_with("b.txt: alice can't"));
         assert_eq!(UploadReport::default().summary("/srv"), "nothing uploaded");
+        let folder = UploadReport {
+            uploaded: (0..60).map(|n| format!("f{n}")).collect(),
+            folders: 3,
+            ..UploadReport::default()
+        };
+        assert_eq!(folder.summary("/srv"), "3 folders made; uploaded 60 files to /srv");
+    }
+
+    #[test]
+    fn existing_files_are_replaced_skipped_or_kept_beside_as_asked() {
+        assert_eq!(Existing::Replace.decide(Some(1), Some(2)), Some(true));
+        assert_eq!(Existing::Skip.decide(Some(3), Some(2)), None);
+        assert_eq!(Existing::KeepBoth.decide(None, None), Some(false));
+        assert_eq!(Existing::ReplaceIfNewer.decide(Some(3), Some(2)), Some(true));
+        assert_eq!(
+            Existing::ReplaceIfNewer.decide(Some(2), Some(2)),
+            None,
+            "as new is not newer"
+        );
+        assert_eq!(Existing::ReplaceIfNewer.decide(Some(1), Some(2)), None);
+        assert_eq!(
+            Existing::ReplaceIfNewer.decide(None, Some(2)),
+            None,
+            "unknown is left alone"
+        );
+        assert_eq!(numbered("report.pdf", 2), "report (2).pdf");
+        assert_eq!(numbered(".bashrc", 1), ".bashrc (1)");
+        assert_eq!(numbered("README", 0), "README");
+    }
+
+    #[test]
+    fn a_folder_is_staged_with_what_is_in_it() {
+        let root = std::env::temp_dir().join(format!("remotely-stage-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(root.join("site/css/empty")).unwrap();
+        std::fs::write(root.join("site/index.html"), b"<p>hi</p>").unwrap();
+        std::fs::write(root.join("site/css/main.css"), b"p{}").unwrap();
+        let mut items = Vec::new();
+        let mut folders = Vec::new();
+        let left_out = walk_local(&root.join("site"), "site", &mut items, &mut folders).unwrap();
+        assert_eq!(left_out, 0);
+        assert_eq!(folders, vec!["site", "site/css", "site/css/empty"]);
+        let names: Vec<&str> = items.iter().map(|i| i.name.as_str()).collect();
+        assert_eq!(names, vec!["site/index.html", "site/css/main.css"]);
+        assert!(items.iter().all(|i| i.modified.is_some()));
+        std::fs::remove_dir_all(&root).unwrap();
     }
 }

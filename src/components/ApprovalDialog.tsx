@@ -111,6 +111,7 @@ function targetKey(target: ApprovalRequest["targets"][number]["target"]) {
   if (target.kind === "network") return `${target.hypervisor}:${target.name}`;
   if (target.kind === "newVm") return `new-vm/${target.hypervisor}/${target.name}`;
   if (target.kind === "diskImage") return `disk-image/${target.path}`;
+  if (target.kind === "remotePath") return `remote-path/${target.terminalId}/${target.step}`;
   return "app";
 }
 
@@ -385,6 +386,7 @@ export function ApprovalDialog({
         )}
         {request.bundle && <BundleSummary bundle={request.bundle} />}
         {request.upload && <UploadSummary upload={request.upload} />}
+        {request.fileOp && <FileOpSummary op={request.fileOp} />}
         {request.tunnel && <TunnelSummary tunnel={request.tunnel} />}
         {/* VM-21: the VMs a deploy makes, where, and the disk they may take; its warnings are listed below. */}
         {request.deploy && <DeployPreviewView preview={request.deploy} showWarnings={false} />}
@@ -934,12 +936,16 @@ function BundleSummary({ bundle }: { bundle: NonNullable<ApprovalRequest["bundle
 
 /** SS-08: what an upload writes, and where. */
 function UploadSummary({ upload }: { upload: NonNullable<ApprovalRequest["upload"]> }) {
-  const replacing = upload.files.filter((f) => f.replace).length;
+  const replacing = upload.files.filter((f) => f.replace).length + (upload.moreReplacing ?? 0);
+  const folders = upload.folders ?? 0;
   return (
     <div className="grid gap-2">
       <p className="text-sm text-muted-foreground">
-        Into <code className="font-mono text-xs">{upload.folder}</code> on the host, as the logged-in user.
+        Into <code className="font-mono text-xs">{upload.folder}</code> on the host,{" "}
+        {upload.asRoot ? <span className="text-tier-high">as root</span> : "as the logged-in user"}.
+        {folders > 0 && ` ${plural(folders, "folder")} made first.`}
         {replacing > 0 && ` ${plural(replacing, "file")} there ${replacing === 1 ? "is" : "are"} replaced.`}
+        {(upload.more ?? 0) > 0 && ` ${plural(upload.more ?? 0, "more file")} not listed.`}
       </p>
       <ul className="max-h-40 divide-y overflow-auto rounded-md border text-sm">
         {upload.files.map((f) => (
@@ -954,6 +960,44 @@ function UploadSummary({ upload }: { upload: NonNullable<ApprovalRequest["upload
           </li>
         ))}
       </ul>
+    </div>
+  );
+}
+
+/** SS-14: what a file change does besides its paths (the targets list). */
+function FileOpSummary({ op }: { op: NonNullable<ApprovalRequest["fileOp"]> }) {
+  const where = op.kind === "rename" ? "New name" : op.kind === "move" || op.kind === "copy" ? "Into" : null;
+  return (
+    <div className="grid gap-1.5 rounded-md border p-3 text-sm">
+      <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1">
+        {where && op.into && (
+          <>
+            <dt className="text-muted-foreground">{where}</dt>
+            <dd className="font-mono text-xs break-all">{op.into}</dd>
+          </>
+        )}
+        {op.mode && (
+          <>
+            <dt className="text-muted-foreground">Permissions</dt>
+            <dd className="font-mono text-xs">{op.mode}</dd>
+          </>
+        )}
+        {op.owner && (
+          <>
+            <dt className="text-muted-foreground">Owner</dt>
+            <dd className="font-mono text-xs">{op.owner}</dd>
+          </>
+        )}
+        <dt className="text-muted-foreground">Runs as</dt>
+        <dd className={op.asRoot ? "text-tier-high" : undefined}>{op.asRoot ? "root (sudo)" : "the logged-in user"}</dd>
+      </dl>
+      {op.replace && <p className="text-tier-medium">A file of that name there is replaced.</p>}
+      {op.recursive && <p className="text-tier-high">Folders are deleted with everything in them.</p>}
+      {op.script && (
+        <pre className="max-h-32 overflow-auto rounded bg-muted px-2 py-1 font-mono text-xs whitespace-pre-wrap">
+          {op.script}
+        </pre>
+      )}
     </div>
   );
 }

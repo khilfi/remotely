@@ -262,10 +262,11 @@ fn start(app: &mut App, log_dir: Option<&Path>) -> Result<(), Box<dyn std::error
         }
         Err(err) => return Err(err.into()),
     };
-    // FD-09: the file server never serves the app's data (the core protects its database's folder) or its logs.
-    core.file_server.runner().protect(&data_dir);
+    // FD-09: the file server never serves the app's data (the core protects its database's folder) or its logs;
+    // SS-14: and no download lands in either.
+    core.protect_folder(&data_dir);
     if let Some(logs) = log_dir {
-        core.file_server.runner().protect(logs);
+        core.protect_folder(logs);
     }
     let core = Arc::new(core);
     forward_events(app, &core);
@@ -800,6 +801,13 @@ fn commands() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         files::files_cancel,
         files::files_retry,
         files::files_open_folder,
+        files::files_change,
+        files::files_root_start,
+        files::files_root_stop,
+        files::files_root_status,
+        files::files_pause,
+        files::files_resume,
+        files::files_pick_upload_folder,
         // FD-04 support bundles.
         support_bundle::bundle_presets,
         support_bundle::bundle_limits,

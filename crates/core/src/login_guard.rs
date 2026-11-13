@@ -28,11 +28,21 @@ use crate::vault::SecretId;
 /// Background logins one host takes in an hour, at most.
 pub const DEFAULT_LOGINS_PER_HOUR: usize = 10;
 
-/// What a park stops: every login to the session, or only sudo on it.
+/// What a park stops: every login to the session, or only sudo on it with one password.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ParkScope {
     Login,
-    Sudo,
+    /// SS-14: one slot per sudo password (the vault item; `None` for a password typed for the login), shared by every
+    /// feature that gives sudo a password (CT-01's Containers, SS-14's root browsing), so neither clears the other's.
+    Sudo {
+        secret: Option<SecretId>,
+    },
+}
+
+/// SS-14: the key a sudo park holds for a session: its login as [`login_key`] makes it, so a session edited since
+/// tries again. Every feature that parks sudo uses this one.
+pub fn sudo_key(spec: &SessionSpec) -> String {
+    format!("{} # sudo", login_key(spec))
 }
 
 /// Why background logins to a session stopped.
@@ -336,6 +346,12 @@ impl LoginGuard {
         }
     }
 
+    /// SS-14: lifts one park only (Retry on root browsing's sudo), leaving the session's other parks and its account
+    /// gate as they are.
+    pub fn lift(&self, session: Uuid, scope: ParkScope) {
+        locks::lock(&self.state).parks.remove(&(session, scope));
+    }
+
     /// Stops background logins (or sudo) for `session` until something changes.
     pub fn park(&self, session: Uuid, scope: ParkScope, key: &str, parked: Parked) {
         let mut state = locks::lock(&self.state);
@@ -472,7 +488,7 @@ mod tests {
         assert!(guard.parked(web, ParkScope::Login, "k1").is_some());
         assert!(guard.parked(web, ParkScope::Login, "k1").is_some(), "still parked");
         assert!(
-            guard.parked(web, ParkScope::Sudo, "k1").is_none(),
+            guard.parked(web, ParkScope::Sudo { secret: None }, "k1").is_none(),
             "sudo is its own scope"
         );
 
@@ -484,9 +500,35 @@ mod tests {
         guard.credentials_changed();
         assert!(guard.parked(web, ParkScope::Login, "k1").is_none());
 
-        guard.park(web, ParkScope::Sudo, "k1", parked(ParkReason::SudoRefused));
+        guard.park(
+            web,
+            ParkScope::Sudo { secret: None },
+            "k1",
+            parked(ParkReason::SudoRefused),
+        );
         guard.retry(web);
-        assert!(guard.parked(web, ParkScope::Sudo, "k1").is_none());
+        assert!(guard.parked(web, ParkScope::Sudo { secret: None }, "k1").is_none());
+    }
+
+    #[test]
+    fn each_sudo_password_parks_on_its_own_and_a_lift_takes_only_that_one() {
+        let guard = LoginGuard::new();
+        let web = Uuid::new_v4();
+        let (a, b) = (Some(SecretId(Uuid::new_v4())), Some(SecretId(Uuid::new_v4())));
+        // Containers park password a, root browsing password b: neither clears the other's park.
+        guard.park(web, ParkScope::Sudo { secret: a }, "k", parked(ParkReason::SudoRefused));
+        guard.park(web, ParkScope::Sudo { secret: b }, "k", parked(ParkReason::SudoRefused));
+        assert!(guard.parked(web, ParkScope::Sudo { secret: a }, "k").is_some());
+        assert!(guard.parked(web, ParkScope::Sudo { secret: b }, "k").is_some());
+        guard.park(web, ParkScope::Login, "k", parked(ParkReason::LoginRefused));
+        // Retry on root browsing lifts its own park only.
+        guard.lift(web, ParkScope::Sudo { secret: b });
+        assert!(guard.parked(web, ParkScope::Sudo { secret: b }, "k").is_none());
+        assert!(guard.parked(web, ParkScope::Sudo { secret: a }, "k").is_some());
+        assert!(
+            guard.parked(web, ParkScope::Login, "k").is_some(),
+            "the login park stays"
+        );
     }
 
     #[test]

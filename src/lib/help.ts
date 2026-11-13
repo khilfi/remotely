@@ -631,6 +631,20 @@ export const HELP = {
       "A new workspace starts empty. VMs join it from the VMs page's Unassigned list, or when it deploys them.",
     ],
   },
+  filesRoot: {
+    title: "Browse as root",
+    body: [
+      "Starts the host's SFTP server with sudo, on this terminal's own connection, so listings, transfers and changes here run as root. sudo gets the session's login password from the vault, or one you choose there, unless sudo needs none.",
+      "Every change made as root asks one approval tier more than the same change as the logged-in user. It ends when you stop it, the terminal reconnects or the vault locks. If sudo refuses the password, Remotely doesn't try it again, here or on the Containers page, until the password changes or you try again.",
+    ],
+  },
+  filesChanges: {
+    title: "Changing files",
+    body: [
+      "Renames, moves, copies, deletes, new folders and permission changes go through the approval rules, like uploads: a new folder or a rename is done at once; replacing, copying, changing permissions or deleting asks first; deleting a folder with what is in it asks for the full approval.",
+      "Up to four transfers run at a time on a host; the rest wait. A paused upload goes on from where it stopped if the file on the host is still what was sent; a paused download comes down again from the start. Replace if newer goes by the host's clock. A folder comes down without Git's data (.git) and links to folders.",
+    ],
+  },
 } as const satisfies Record<string, HelpEntry>;
 
 export type HelpKey = keyof typeof HELP;

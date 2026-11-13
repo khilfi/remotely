@@ -232,6 +232,8 @@ impl JobTargetRecord {
             "new_vm" => TargetRef::new_vm_from_key(&self.target_key),
             // CV-03: a conversion's new image.
             "disk_image" => TargetRef::disk_image_from_key(&self.target_key),
+            // SS-14: a path of a file operation, by its step.
+            "remote_path" => TargetRef::remote_path_from_key(&self.target_key),
             _ => None,
         }
     }
