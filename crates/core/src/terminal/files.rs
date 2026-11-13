@@ -959,9 +959,10 @@ impl Terminals {
         dest: &Path,
         options: DownloadOptions,
     ) -> Result<DownloadStart> {
+        // The folder first (a Git working tree, Remotely's own data), whatever the terminal is doing.
+        self.download_dest(dest)?;
         let (control, _) = self.live(id)?;
         let (_, files) = self.files_for(id, options.as_root)?;
-        self.download_dest(dest)?;
         if paths.is_empty() {
             return Err(CoreError::InvalidInput("Choose a file to download.".into()));
         }
