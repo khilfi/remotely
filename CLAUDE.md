@@ -1541,7 +1541,9 @@ VM-18, from 0.4.0 (`docs/plan-0.4.md`, Q5). VirtualBox 7.0 or later: `controlvm 
   [--options=Link] --name --uuid --basefolder --register`; `import <ova|ovf> --vsys 0 --vmname --basefolder --cpus
   --memory`. `unattended detect --iso` says whether VirtualBox can install an ISO; `unattended install <uuid> --iso
   --user --password-file <file> --hostname <name>.localdomain --install-additions` prepares it (VirtualBox wants a
-  domain in the name). The password goes only into a file this Windows user alone can read, deleted at once. A cloud
+  domain in the name). The password goes only into a file this Windows user alone can read, deleted at once; the
+  install prints it back in clear text in its `Using values:` block, so its output is dropped and its errors never
+  quote that block or a line setting a password (`adapters::virtualbox::error_message`). A cloud
   image's first boot reads a NoCloud seed: an ISO labelled `cidata` with `user-data` and `meta-data`, attached as a
   DVD, then ejected (`storageattach --medium emptydrive`) and closed after the first boot. `list systemproperties`
   gives `Default machine folder:`; `list hostonlyifs` and `list bridgedifs` the adapters a network can use. A cancelled
@@ -1553,8 +1555,10 @@ VM-18, from 0.4.0 (`docs/plan-0.4.md`, Q5). VirtualBox 7.0 or later: `controlvm 
   is a child too, but once the golden VM restored an older snapshot it merges the clone's disk away (the clone no longer
   starts), and `unregistervm --delete` of the golden VM unregisters it and deletes its current disk before it fails
   ("Cannot close medium ... because it has 1 child media"); deleting the snapshot's parent is safe (`linked_clones`
-  refuses the other two up front); `unattended detect` on an ISO it doesn't know exits 1 (E_FAIL) after printing `IsInstallSupported="off"`, and
-  Remotely takes any failure as "can't install it by itself"; `import` takes an OVA that ovftool made, and a truncated
+  refuses the other two up front); `unattended detect` on an ISO it doesn't know exits 1 (E_FAIL) after printing
+  `IsInstallSupported="off"`, and on one it knows exits 1 too (E_NOTIMPL, 7.2.22) after `IsInstallSupported="on"`
+  and its `OSTypeId`: Remotely reads a failed run that names the OS type like a successful one, and takes any other
+  failure as "can't install it by itself" (`read_unattended_detect`); `import` takes an OVA that ovftool made, and a truncated
   one fails with VERR_EOF. Windows' own `tar.exe` (libarchive) lists a seed's Joliet names, a check that doesn't use
   Remotely's reader.
 - MO-13: `showvminfo` also gives `firmware` (`BIOS`, `EFI`...), `nictypeN` (the card, e.g. `82540EM`, `virtio`) and

@@ -501,9 +501,15 @@ pub fn guest_ips(props: &GuestProperties) -> Vec<String> {
 }
 
 /// Parses `unattended detect --machine-readable`: whether VirtualBox can install the ISO by itself, and the OS
-/// it found.
+/// it found. VirtualBox 7.2 says `IsInstallSupported="on"`; `yes` and `true` are read alike.
 pub fn parse_unattended_detect(out: &str) -> (bool, Option<String>) {
-    let mut supported = false;
+    let (supported, os) = unattended_detect_fields(out);
+    (supported.unwrap_or(false), os)
+}
+
+/// `IsInstallSupported` (None when the output has no such line) and a non-empty `OSTypeId`.
+fn unattended_detect_fields(out: &str) -> (Option<bool>, Option<String>) {
+    let mut supported = None;
     let mut os = None;
     for line in out.lines() {
         let Some((key, value)) = line.split_once('=') else {
@@ -511,12 +517,31 @@ pub fn parse_unattended_detect(out: &str) -> (bool, Option<String>) {
         };
         let value = value.trim().trim_matches('"');
         match key.trim() {
-            "IsInstallSupported" => supported = value.eq_ignore_ascii_case("yes") || value == "true",
+            "IsInstallSupported" => {
+                supported = Some(["on", "yes", "true"].iter().any(|yes| value.eq_ignore_ascii_case(yes)))
+            }
             "OSTypeId" if !value.is_empty() => os = Some(value.to_owned()),
             _ => {}
         }
     }
     (supported, os)
+}
+
+/// VM-21: what a run of `unattended detect` answers. VirtualBox 7.2.22 exits 1 (`E_NOTIMPL` from `DetectIsoOS()`)
+/// even after it recognised the ISO, so a failed run whose output still says `IsInstallSupported` and names the
+/// OS type is read like a successful one. Any other failure is an error, which the deploy takes as "can't install
+/// it by itself"; so is an ISO it doesn't know (`IsInstallSupported="off"`, exit 1 too).
+pub fn read_unattended_detect(succeeded: bool, stdout: &str, stderr: &str) -> Result<(bool, Option<String>)> {
+    if succeeded {
+        return Ok(parse_unattended_detect(stdout));
+    }
+    match unattended_detect_fields(stdout) {
+        (Some(supported), Some(os)) => Ok((supported, Some(os))),
+        _ => Err(CoreError::VboxManage {
+            command: "unattended detect".into(),
+            message: error_message(stdout, stderr),
+        }),
+    }
 }
 
 /// VM-21: `Default machine folder:` from `list systemproperties`.
@@ -622,6 +647,21 @@ impl VBoxManageCli {
     /// Runs `VBoxManage <args>` without a console window and returns stdout. `label` names the call
     /// in errors (`showvminfo`, `controlvm poweroff`).
     async fn run(&self, label: &str, args: Vec<OsString>, timeout: Duration) -> Result<String> {
+        let output = self.output(label, args, timeout).await?;
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        if output.status.success() {
+            Ok(stdout)
+        } else {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            Err(CoreError::VboxManage {
+                command: label.to_owned(),
+                message: error_message(&stdout, &stderr),
+            })
+        }
+    }
+
+    /// Runs `VBoxManage <args>` without a console window and returns what it wrote and how it ended.
+    async fn output(&self, label: &str, args: Vec<OsString>, timeout: Duration) -> Result<std::process::Output> {
         let mut cmd = tokio::process::Command::new(&self.vboxmanage);
         cmd.args(&args)
             .stdin(Stdio::null())
@@ -633,22 +673,12 @@ impl VBoxManageCli {
             const CREATE_NO_WINDOW: u32 = 0x0800_0000;
             cmd.creation_flags(CREATE_NO_WINDOW);
         }
-        let output = tokio::time::timeout(timeout, cmd.output())
+        Ok(tokio::time::timeout(timeout, cmd.output())
             .await
             .map_err(|_| CoreError::Timeout {
                 command: format!("VBoxManage {label}"),
                 seconds: timeout.as_secs(),
-            })??;
-        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-        if output.status.success() {
-            Ok(stdout)
-        } else {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            Err(CoreError::VboxManage {
-                command: label.to_owned(),
-                message: error_message(&stdout, &stderr),
-            })
-        }
+            })??)
     }
 
     async fn controlvm(&self, uuid: &str, verb: &str, op: PowerOp) -> Result<()> {
@@ -686,24 +716,63 @@ fn no_answer(err: CoreError) -> CoreError {
 }
 
 /// VBoxManage's own words from a failed call: its `error:` lines without the program prefix, leaving
-/// out the `Details:` and `Context:` lines meant for VirtualBox's developers.
+/// out the `Details:` and `Context:` lines meant for VirtualBox's developers; with none, every line.
+///
+/// Rule 7 (VM-21): `unattended install` prints its settings in a `Using values:` block, a `<name> = <value>` line
+/// each, with the guest's passwords (`password`, `user-password`, `admin-password`) in clear text, read from a
+/// password file too. An error never quotes that block, nor a line that sets a password wherever it is, and what
+/// it does quote goes through [`crate::export::redact_secrets`].
 pub fn error_message(stdout: &str, stderr: &str) -> String {
-    let lines: Vec<&str> = stderr
-        .lines()
-        .chain(stdout.lines())
-        .map(str::trim)
-        .filter(|l| !l.is_empty())
-        .collect();
+    let mut lines = quotable_lines(stderr);
+    lines.extend(quotable_lines(stdout));
     let errors: Vec<&str> = lines
         .iter()
         .filter_map(|line| line.split_once("error: ").map(|(_, rest)| rest.trim()))
         .filter(|rest| !rest.starts_with("Details:") && !rest.starts_with("Context:"))
         .collect();
-    if errors.is_empty() {
+    let message = if errors.is_empty() {
         lines.join(" ")
     } else {
         errors.join(" ")
+    };
+    crate::export::redact_secrets(&message).0
+}
+
+/// The lines of VBoxManage's output an error may quote: not empty, not in a `Using values:` block (which ends at
+/// a blank line or VBoxManage's next message, `VBoxManage.exe: info: ...`), and not setting a password.
+fn quotable_lines(text: &str) -> Vec<&str> {
+    let mut in_values = false;
+    let mut kept = Vec::new();
+    for line in text.lines().map(str::trim) {
+        if line.eq_ignore_ascii_case("Using values:") {
+            in_values = true;
+            continue;
+        }
+        if in_values {
+            let program = line
+                .get(..10)
+                .is_some_and(|start| start.eq_ignore_ascii_case("VBoxManage"));
+            if !(line.is_empty() || program) {
+                continue;
+            }
+            in_values = false;
+        }
+        if !line.is_empty() && !sets_password(line) {
+            kept.push(line);
+        }
     }
+    kept
+}
+
+/// `password = x`, `user-password = x`, `error: --admin-password=x`: a line that sets a password, by the last word
+/// before its first `=`.
+fn sets_password(line: &str) -> bool {
+    line.split_once('=').is_some_and(|(key, _)| {
+        key.split_whitespace().last().is_some_and(|word| {
+            let word = word.to_ascii_lowercase();
+            ["password", "passwd", "passphrase"].iter().any(|p| word.contains(p))
+        })
+    })
 }
 
 #[async_trait]
@@ -912,8 +981,12 @@ impl VirtualBoxAdapter for VBoxManageCli {
             iso.as_os_str().to_owned(),
             "--machine-readable".into(),
         ];
-        let out = self.run("unattended detect", args, LIST_TIMEOUT).await?;
-        Ok(parse_unattended_detect(&out))
+        let output = self.output("unattended detect", args, LIST_TIMEOUT).await?;
+        read_unattended_detect(
+            output.status.success(),
+            &String::from_utf8_lossy(&output.stdout),
+            &String::from_utf8_lossy(&output.stderr),
+        )
     }
 
     async fn host_adapters(&self, bridged: bool) -> Result<Vec<String>> {
@@ -1783,6 +1856,150 @@ CurrentSnapshotNode="SnapshotName-1"
         let out = "OSTypeId=\"Ubuntu24_LTS_64\"\nOSVersion=\"24.04\"\nIsInstallSupported=\"yes\"\n";
         assert_eq!(parse_unattended_detect(out), (true, Some("Ubuntu24_LTS_64".into())));
         assert_eq!(parse_unattended_detect("IsInstallSupported=\"no\"\n"), (false, None));
+        assert_eq!(parse_unattended_detect("IsInstallSupported=\"off\"\n"), (false, None));
+        assert!(parse_unattended_detect("IsInstallSupported=\"On\"\r\n").0);
+        assert!(parse_unattended_detect("IsInstallSupported=true\n").0);
+    }
+
+    /// VirtualBox 7.2.22's `unattended detect --machine-readable` on an Ubuntu live server ISO: it recognises it,
+    /// says `on`, and exits 1 all the same.
+    const DETECT_7_2_22: &str = "OSTypeId=\"Ubuntu24_64\"\r\nOSVersion=\"24.04.5\"\r\nOSFlavor=\"\"\r\nOSLanguages=\"en-US\"\r\nOSHints=\"\"\r\nIsInstallSupported=\"on\"\r\n";
+    const DETECT_E_NOTIMPL: &str = "VBoxManage.exe: error: Code E_NOTIMPL (0x80004001) - Not implemented (extended info not available)\r\nVBoxManage.exe: error: Context: \"DetectIsoOS()\" at line 4117 of file VBoxManageUnattended.cpp\r\n";
+
+    #[test]
+    fn unattended_detect_reads_a_failed_run_that_names_the_os() {
+        assert_eq!(
+            read_unattended_detect(false, DETECT_7_2_22, DETECT_E_NOTIMPL).unwrap(),
+            (true, Some("Ubuntu24_64".into()))
+        );
+        let newer = DETECT_7_2_22.replace("Ubuntu24_64", "Ubuntu25_64");
+        assert_eq!(
+            read_unattended_detect(false, &newer, DETECT_E_NOTIMPL).unwrap(),
+            (true, Some("Ubuntu25_64".into()))
+        );
+        assert_eq!(
+            read_unattended_detect(true, DETECT_7_2_22, "").unwrap(),
+            (true, Some("Ubuntu24_64".into()))
+        );
+        // An ISO VirtualBox doesn't know: `off` and exit 1 (E_FAIL), with or without an OS type, is never installable.
+        let unknown_fail = "VBoxManage.exe: error: Code E_FAIL (0x80004005)\r\n";
+        let err =
+            read_unattended_detect(false, "OSTypeId=\"\"\r\nIsInstallSupported=\"off\"\r\n", unknown_fail).unwrap_err();
+        assert_eq!(err.code(), "vboxmanage_failed");
+        assert_eq!(
+            read_unattended_detect(
+                false,
+                "OSTypeId=\"Other\"\r\nIsInstallSupported=\"off\"\r\n",
+                unknown_fail
+            )
+            .unwrap(),
+            (false, Some("Other".into()))
+        );
+        // A failure that says nothing about the ISO stays a failure, in VirtualBox's own words.
+        let err = read_unattended_detect(
+            false,
+            "",
+            "VBoxManage.exe: error: Could not open the ISO file 'C:\\iso\\noble.iso'\r\n",
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("Could not open the ISO file"), "{err}");
+        // `on` without an OS type, from a failed run: not enough to go on.
+        assert!(read_unattended_detect(false, "IsInstallSupported=\"on\"\r\n", DETECT_E_NOTIMPL).is_err());
+    }
+
+    /// The `Using values:` block `unattended install` prints (VirtualBox 7.2, shortened), with the guest's
+    /// password, made up here, in clear text three times; `error: ` in it would look like one of VBoxManage's
+    /// error lines.
+    const INSTALL_VALUES: &str = "VBoxManage.exe: info: Preparing unattended installation of Ubuntu24_64 in machine 'web-1' (3f0c1a2b-1111-4222-8333-444455556666).\r\nUsing values:\r\n                       isoPath = C:\\Users\\alice\\iso\\noble.iso\r\n                          user = alice\r\n                      password = correct horse error: battery\r\n                 user-password = correct horse error: battery\r\n                admin-password = correct horse error: battery\r\n                  fullUserName = alice\r\n                      hostname = web-1.localdomain\r\n  extraInstallKernelParameters = autoinstall ds=nocloud\\;s=/cdrom/\r\n              detectedOSTypeId = Ubuntu24_64\r\n";
+
+    #[test]
+    fn errors_never_quote_an_unattended_install_password() {
+        let leaks = |message: &str| ["correct", "horse", "battery"].iter().any(|w| message.contains(w));
+        // No error line: every other line is quoted, the block left out.
+        let message = error_message(INSTALL_VALUES, "");
+        assert!(!leaks(&message), "{message}");
+        assert!(message.contains("Preparing unattended installation"), "{message}");
+        assert!(!message.contains("isoPath"), "{message}");
+        // The block ends at VBoxManage's next message, which is quoted.
+        let then = format!("{INSTALL_VALUES}VBoxManage.exe: info: VM 'web-1' is ready to be started.\r\n");
+        let message = error_message(&then, "");
+        assert!(
+            !leaks(&message) && message.ends_with("is ready to be started."),
+            "{message}"
+        );
+        // With VirtualBox's error lines, those alone.
+        let message = error_message(
+            INSTALL_VALUES,
+            "VBoxManage.exe: error: The ISO could not be read\r\nVBoxManage.exe: error: Context: \"Prepare()\"\r\n",
+        );
+        assert_eq!(message, "The ISO could not be read");
+        // A translated header: the lines that set a password are still left out.
+        let translated = INSTALL_VALUES.replace("Using values:", "Verwendete Werte:");
+        let message = error_message(&translated, "");
+        assert!(!leaks(&message), "{message}");
+        // A password set on any other line, in an error line too, and what redact_secrets finds.
+        let message = error_message(
+            "",
+            "VBoxManage.exe: error: --password=correct-horse is not allowed\r\nVBoxManage.exe: error: bad password: hunter2\r\n",
+        );
+        assert!(!leaks(&message) && !message.contains("hunter2"), "{message}");
+        // The words of an error about the password file stay.
+        assert_eq!(
+            error_message("", "VBoxManage.exe: error: Could not read the password file\r\n"),
+            "Could not read the password file"
+        );
+    }
+
+    /// VM-21: the real adapter against a stand-in VBoxManage (a batch file made at run time) that answers as
+    /// VirtualBox 7.2.22 does: the ISO is installable though the exit code is 1.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn unattended_detect_takes_virtualbox_7_2_at_its_word() {
+        let dir = std::env::temp_dir().join(format!("remotely-vbox-detect-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let tool = dir.join("VBoxManage.cmd");
+        std::fs::write(
+            &tool,
+            "@echo off\r\necho OSTypeId=\"Ubuntu24_64\"\r\necho IsInstallSupported=\"on\"\r\necho VBoxManage.exe: error: Code E_NOTIMPL (0x80004001) 1>&2\r\nexit /b 1\r\n",
+        )
+        .unwrap();
+        let cli = VBoxManageCli::new(tool);
+        let found = cli.unattended_detect(&dir.join("noble.iso")).await;
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(found.unwrap(), (true, Some("Ubuntu24_64".into())));
+    }
+
+    /// Rule 7: a failed unattended install, through the real adapter, says what VBoxManage said but never the
+    /// password it printed.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn a_failed_unattended_install_never_says_the_password() {
+        let dir = std::env::temp_dir().join(format!("remotely-vbox-install-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let tool = dir.join("VBoxManage.cmd");
+        std::fs::write(
+            &tool,
+            "@echo off\r\necho VBoxManage.exe: info: Preparing unattended installation of Ubuntu24_64 in machine 'web-1'.\r\necho Using values:\r\necho                           user = alice\r\necho                       password = correct horse battery\r\necho                  user-password = correct horse battery\r\necho                       hostname = web-1.localdomain\r\nexit /b 1\r\n",
+        )
+        .unwrap();
+        let cli = VBoxManageCli::new(tool);
+        let uuid = "3f0c1a2b-1111-4222-8333-444455556666";
+        let ran = cli
+            .change(
+                crate::deploy::virtualbox::unattended_args(
+                    uuid,
+                    &dir.join("noble.iso"),
+                    "alice",
+                    &dir.join("password"),
+                    "web-1",
+                ),
+                Duration::from_secs(30),
+            )
+            .await;
+        std::fs::remove_dir_all(&dir).unwrap();
+        let err = ran.unwrap_err().to_string();
+        assert!(err.contains("Preparing unattended installation"), "{err}");
+        assert!(!err.contains("horse") && !err.contains("battery"), "{err}");
     }
 
     /// VM-21: the real adapter against a stand-in VBoxManage (a batch file made at run time) that writes its
