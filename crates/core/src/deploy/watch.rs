@@ -111,6 +111,8 @@ pub struct SerialWatcher {
     resets: u32,
     /// Marks the current (unfinished) line already matched, so a prompt without a line break is reported once.
     partial_matched: bool,
+    /// Windows: a fingerprint line read before Setup's second restart was seen, kept only for this round.
+    early_fingerprint: Option<String>,
 }
 
 /// Text with escapes and controls taken out, as a person reading the console would see its words.
@@ -174,6 +176,7 @@ impl SerialWatcher {
             failed: false,
             resets: 0,
             partial_matched: false,
+            early_fingerprint: None,
         }
     }
 
@@ -275,6 +278,7 @@ impl SerialWatcher {
     /// What `bytes` (the log's next bytes) says.
     pub fn feed(&mut self, bytes: &[u8]) -> Vec<WatchEvent> {
         let mut out = Vec::new();
+        self.early_fingerprint = None;
         for &b in bytes {
             if self.byte(b) == Some(b'\n') {
                 let line = String::from_utf8_lossy(&std::mem::take(&mut self.line)).into_owned();
@@ -305,6 +309,10 @@ impl SerialWatcher {
         self.resets = resets;
         if resets >= 2 {
             self.advance(Stage::Rebooted, "Windows starts for the first time", &mut out);
+            // A fingerprint line read in the same round as the second reset came from the installed system.
+            if let Some(early) = self.early_fingerprint.take() {
+                self.take_fingerprint(early, &mut out);
+            }
         } else {
             self.advance(
                 Stage::Installing,
@@ -511,6 +519,25 @@ impl SerialWatcher {
         }
     }
 
+    /// The installed system's certificate: the first is pinned; another one fails the install, since the VM's own
+    /// serial port then says two things and neither can be trusted.
+    fn take_fingerprint(&mut self, fingerprint: String, out: &mut Vec<WatchEvent>) {
+        match &self.fingerprint {
+            None => {
+                self.fingerprint = Some(fingerprint.clone());
+                self.advance(Stage::Rebooted, "Windows is up and WinRM is on", out);
+                out.push(WatchEvent::Fingerprint(fingerprint));
+            }
+            Some(pinned) if *pinned == fingerprint => {}
+            Some(pinned) => {
+                let why = format!(
+                    "The VM wrote two different WinRM certificates to its serial port ({pinned}, then {fingerprint}): Remotely trusts neither."
+                );
+                self.fail(why, out);
+            }
+        }
+    }
+
     fn windows(&mut self, text: &str, out: &mut Vec<WatchEvent>) {
         if let Some(rest) = text.split(WINRM_FINGERPRINT_MARKER).nth(1) {
             let fingerprint = rest.split_whitespace().next().unwrap_or_default();
@@ -519,10 +546,15 @@ impl SerialWatcher {
                 && digest
                     .bytes()
                     .all(|b| b.is_ascii_alphanumeric() || b == b'+' || b == b'/');
-            if valid && self.fingerprint.is_none() {
-                self.fingerprint = Some(fingerprint.to_owned());
-                self.advance(Stage::Rebooted, "Windows is up and WinRM is on", out);
-                out.push(WatchEvent::Fingerprint(fingerprint.to_owned()));
+            if !valid {
+                return;
+            }
+            if self.resets >= 2 {
+                self.take_fingerprint(fingerprint.to_owned(), out);
+            } else {
+                // Before Setup's second restart only the installer runs: a line now isn't the installed system's,
+                // unless the hypervisor reports that restart in this same round ([`Self::resets`]).
+                self.early_fingerprint = Some(fingerprint.to_owned());
             }
             return;
         }
@@ -665,6 +697,34 @@ mod tests {
         assert_eq!(bad.fingerprint(), None);
         assert_eq!(stages(&w.signing_in("signing in")), [Stage::SigningIn]);
         assert_eq!(stages(&w.done("done")), [Stage::Done]);
+    }
+
+    #[test]
+    fn only_the_installed_systems_fingerprint_is_taken_and_a_second_one_fails() {
+        let fp = "SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU";
+        let other = "SHA256:AAAAQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU";
+        let line = |f: &str| format!("{WINRM_FINGERPRINT_MARKER} {f}\r\n");
+        // At power-on (windowsPE, a boot loader): ignored, and not taken later either.
+        let mut w = SerialWatcher::new(Os::Windows, "win-1");
+        assert!(w.feed(line(other).as_bytes()).is_empty());
+        assert!(w.resets(1).iter().all(|e| !matches!(e, WatchEvent::Fingerprint(_))));
+        assert!(w.feed(b"x\r\n").is_empty());
+        assert!(w.resets(2).iter().all(|e| !matches!(e, WatchEvent::Fingerprint(_))));
+        assert_eq!(w.fingerprint(), None);
+        // Read in the round the second restart shows up in: the installed system's.
+        let mut same_round = SerialWatcher::new(Os::Windows, "win-1");
+        same_round.resets(1);
+        assert!(same_round.feed(line(fp).as_bytes()).is_empty());
+        assert!(same_round.resets(2).contains(&WatchEvent::Fingerprint(fp.into())));
+        // After it: taken; the same again is nothing; another one fails the install.
+        let events = w.feed(line(fp).as_bytes());
+        assert!(events.contains(&WatchEvent::Fingerprint(fp.into())), "{events:?}");
+        assert!(w.feed(line(fp).as_bytes()).is_empty());
+        let events = w.feed(line(other).as_bytes());
+        assert!(
+            matches!(&events[..], [WatchEvent::Failed(why)] if why.contains("two different WinRM certificates")),
+            "{events:?}"
+        );
     }
 
     #[test]

@@ -13,6 +13,15 @@ export const MIN_PREFIX = 8;
 export const MAX_PREFIX = 30;
 export const MAX_NETWORK_NAME = 64;
 export const MAX_VMNET = 19;
+export const MAX_ADAPTER_CHARS = 128;
+
+/**
+ * The networks a pool can be on: the ones this PC has an adapter on. VirtualBox's NAT (each VM's own), NAT networks and
+ * internal networks have none, so Remotely couldn't check which addresses are free there.
+ */
+export function poolNetworkKinds(hypervisor: Hypervisor): TemplateNetwork["kind"][] {
+  return hypervisor === "vmware" ? ["nat", "hostOnly", "bridged", "vmnet"] : ["hostOnly", "bridged"];
+}
 
 export const NETWORK_KIND_LABEL: Record<TemplateNetwork["kind"], string> = {
   nat: "NAT",
@@ -50,11 +59,11 @@ function subnetOf(value: number, prefix: number): number {
   return (value & maskOf(prefix)) >>> 0;
 }
 
-/** Why an address can't be on a network (0.0.0.0, loopback, link-local, multicast, reserved), or null. */
+/** Whether an address can't be on a network: 0.0.0.0/8, loopback, link-local, multicast or reserved. */
 function unusable(value: number): boolean {
   const first = Math.floor(value / 2 ** 24);
   const second = Math.floor(value / 2 ** 16) % 256;
-  return value === 0 || first === 127 || (first === 169 && second === 254) || first >= 224;
+  return first === 0 || first === 127 || (first === 169 && second === 254) || first >= 224;
 }
 
 type Parsed = { value: number } | { error: string };
@@ -76,6 +85,8 @@ export interface PoolForm {
   name: string;
   hypervisor: Hypervisor;
   network: TemplateNetwork;
+  /** VirtualBox host-only: the adapter's name. */
+  hostAdapter: string;
   firstIp: string;
   lastIp: string;
   prefix: string;
@@ -89,6 +100,7 @@ export const EMPTY_POOL_FORM: PoolForm = {
   name: "",
   hypervisor: "vmware",
   network: { kind: "nat" },
+  hostAdapter: "",
   firstIp: "",
   lastIp: "",
   prefix: "24",
@@ -104,6 +116,7 @@ export function poolForm(pool: AddressPoolInput): PoolForm {
     name: pool.name,
     hypervisor: pool.hypervisor,
     network: pool.network,
+    hostAdapter: pool.hostAdapter ?? "",
     firstIp: pool.firstIp,
     lastIp: pool.lastIp,
     prefix: String(pool.prefix),
@@ -111,6 +124,16 @@ export function poolForm(pool: AddressPoolInput): PoolForm {
     dns: [dns[0] ?? "", dns[1] ?? "", dns[2] ?? ""],
     notes: pool.notes ?? "",
   };
+}
+
+function noHostAdapter(network: TemplateNetwork): string {
+  const what =
+    network.kind === "natNetwork"
+      ? `NAT network '${network.name.trim()}'`
+      : network.kind === "internal"
+        ? `internal network '${network.name.trim()}'`
+        : "NAT (each VM's network of its own)";
+  return `This PC has no adapter on VirtualBox's ${what}, so Remotely can't check which addresses are free there (a ping would leave through another network): give the pool a host-only adapter or a bridged network.`;
 }
 
 function checkNetwork(network: TemplateNetwork, hypervisor: Hypervisor): string | null {
@@ -127,7 +150,21 @@ function checkNetwork(network: TemplateNetwork, hypervisor: Hypervisor): string 
     if (!/^[A-Za-z0-9 ._-]+$/.test(name))
       return "A VirtualBox network's name can hold letters, digits, spaces, dots, hyphens and underscores.";
   }
+  if (hypervisor === "virtualbox" && !poolNetworkKinds("virtualbox").includes(network.kind))
+    return noHostAdapter(network);
   return null;
+}
+
+/** VirtualBox host-only: the adapter's name as kept; every other network: none. */
+function checkAdapter(form: PoolForm): { adapter: string | null } | { error: string } {
+  if (form.hypervisor !== "virtualbox" || form.network.kind !== "hostOnly") return { adapter: null };
+  const adapter = form.hostAdapter.trim();
+  if (!adapter) return { error: "Pick VirtualBox's host-only adapter the pool is on." };
+  if ([...adapter].length > MAX_ADAPTER_CHARS)
+    return { error: `An adapter's name can be at most ${MAX_ADAPTER_CHARS} characters.` };
+  if (/[\p{Cc}\p{Cf}]/u.test(adapter))
+    return { error: "An adapter's name can't hold control or invisible characters." };
+  return { adapter };
 }
 
 /** The input the core gets, with the range's size and what it can hand out; or the first problem. */
@@ -145,6 +182,8 @@ export function parsePoolForm(
     return { error: `There is an address pool named '${name}' already.` };
   const networkError = checkNetwork(form.network, form.hypervisor);
   if (networkError) return { error: networkError };
+  const adapter = checkAdapter(form);
+  if ("error" in adapter) return adapter;
   const prefix = Number(form.prefix.trim().replace(/^\//, ""));
   if (!Number.isInteger(prefix) || prefix < MIN_PREFIX || prefix > MAX_PREFIX)
     return { error: `The prefix length is /${MIN_PREFIX} to /${MAX_PREFIX}.` };
@@ -182,6 +221,10 @@ export function parsePoolForm(
   for (const text of form.dns.filter((d) => d.trim())) {
     const parsed = parseAddress("DNS server", text);
     if ("error" in parsed) return parsed;
+    if (parsed.value === subnet || parsed.value === broadcast)
+      return {
+        error: `The DNS server ${formatIpv4(parsed.value)} is the subnet's own or broadcast address, which no server has.`,
+      };
     if (!dns.includes(parsed.value)) dns.push(parsed.value);
   }
   if (dns.length > MAX_DNS) return { error: `A pool gives its VMs at most ${MAX_DNS} DNS servers.` };
@@ -197,6 +240,7 @@ export function parsePoolForm(
       name,
       hypervisor: form.hypervisor,
       network,
+      hostAdapter: adapter.adapter,
       firstIp: firstText,
       lastIp: lastText,
       prefix,
@@ -209,9 +253,22 @@ export function parsePoolForm(
   };
 }
 
-/** "3 of 41 used". */
-export function usedText(pool: Pick<AddressPool, "used" | "usable">): string {
-  return `${pool.used} of ${pool.usable} used`;
+/** "3 of 41 used", and how many more another workspace holds on the same network (nothing more of it). */
+export function usedText(pool: Pick<AddressPool, "used" | "usable" | "heldElsewhere">): string {
+  const used = `${pool.used} of ${pool.usable} used`;
+  return pool.heldElsewhere > 0 ? `${used}, ${pool.heldElsewhere} more held in another workspace` : used;
+}
+
+/** "NAT", "Host-only 'vboxnet0'". */
+export function poolNetworkText(pool: Pick<AddressPoolInput, "network" | "hostAdapter">): string {
+  return pool.network.kind === "hostOnly" && pool.hostAdapter
+    ? `Host-only '${pool.hostAdapter}'`
+    : NETWORK_KIND_LABEL[pool.network.kind] +
+        (pool.network.kind === "vmnet"
+          ? ` (vmnet${pool.network.number})`
+          : "name" in pool.network
+            ? ` '${pool.network.name}'`
+            : "");
 }
 
 /** "41 addresses, 40 to hand out" under the editor's range. */

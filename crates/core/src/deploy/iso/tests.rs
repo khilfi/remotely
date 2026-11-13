@@ -102,24 +102,283 @@ fn grub_texts_remotely_doesnt_know_are_refused() {
         "set timeout=5\nlinux /casper/vmlinuz quiet\n",
         "no `linux /casper/vmlinuz",
     );
-    refuse("linux /casper/vmlinuz ---\n", "no `set timeout=`");
+    refuse(INSTALLER, "no `set timeout=`");
     refuse(
-        "set timeout=5\nlinux /casper/vmlinuz autoinstall ---\n",
+        "set timeout=5\nmenuentry x {\nlinux /casper/vmlinuz autoinstall ---\n}\n",
         "already has autoinstall",
     );
     refuse(
-        "set timeout=x\nlinux /casper/vmlinuz ---\n",
-        "timeout Remotely doesn't read",
+        &format!("set timeout=x\n{INSTALLER}"),
+        "timeout Remotely doesn't read (timeout=x)",
     );
     refuse(
-        "set timeout=5\nset default=1\nlinux /casper/vmlinuz ---\n",
-        "another entry than the first",
+        &format!("set timeout=5\nset default=1\n{INSTALLER}"),
+        "another entry than the first (default=1)",
     );
     refuse(
         "set timeout=5\nlinux /boot/other ---\nlinux /casper/vmlinuz ---\n",
         "first menu entry doesn't boot the casper installer",
     );
-    assert!(ubuntu::patch_grub("set default=0\nset timeout=5\nlinux /casper/vmlinuz ---\n").is_ok());
+    assert!(ubuntu::patch_grub(&format!("set default=0\nset timeout=5\n{INSTALLER}")).is_ok());
+    assert!(ubuntu::patch_grub(&format!("timeout=5\ndefault=\"0\"\n# a comment\n{INSTALLER}")).is_ok());
+}
+
+/// S1's first entry: `set`, the casper `linux` line, `initrd`.
+const INSTALLER: &str =
+    "menuentry \"Try or Install Ubuntu Server\" {\n\tset gfxpayload=keep\n\tlinux\t/casper/vmlinuz  ---\n\
+     \tinitrd\t/casper/initrd\n}\n";
+
+#[test]
+fn the_first_menu_entry_must_be_the_installer() {
+    let first = "first menu entry doesn't boot the casper installer";
+    for (name, text, words) in [
+        (
+            "memtest first",
+            format!("set timeout=30\nmenuentry 'Test memory' {{\n\tlinux16 /boot/memtest86+x64.bin\n}}\n{INSTALLER}"),
+            "first menu entry runs `linux16`",
+        ),
+        (
+            "chainloader first",
+            format!("set timeout=30\nmenuentry 'Disk' {{\n\tchainloader /efi/boot/bootx64.efi\n}}\n{INSTALLER}"),
+            "first menu entry runs `chainloader`",
+        ),
+        (
+            "linuxefi first",
+            format!("set timeout=30\nmenuentry 'a' {{\n\tlinuxefi /casper/vmlinuz ---\n}}\n{INSTALLER}"),
+            "first menu entry runs `linuxefi`",
+        ),
+        (
+            "another kernel first",
+            format!("set timeout=30\nmenuentry 'a' {{\n\tlinux /boot/vmlinuz ---\n}}\n{INSTALLER}"),
+            first,
+        ),
+        (
+            "two kernels in the first",
+            "set timeout=30\nmenuentry 'a' {\n\tlinux /casper/vmlinuz ---\n\tlinux /casper/hwe-vmlinuz ---\n}\n"
+                .to_owned(),
+            first,
+        ),
+        (
+            "a submenu first",
+            format!("set timeout=30\nsubmenu 'More' {{\n{INSTALLER}}}\n{INSTALLER}"),
+            first,
+        ),
+        (
+            "an entry inside the first",
+            format!("set timeout=30\nmenuentry 'a' {{\n{INSTALLER}}}\n"),
+            first,
+        ),
+        (
+            "a conditional first entry",
+            format!("set timeout=30\nif [ \"$grub_platform\" = \"efi\" ]; then\n{INSTALLER}fi\n{INSTALLER}"),
+            first,
+        ),
+        (
+            "an if inside the first entry",
+            "set timeout=30\nmenuentry 'a' {\n\tif true; then\n\tlinux /casper/vmlinuz ---\n\tfi\n}\n".to_owned(),
+            "first menu entry runs `if`",
+        ),
+        (
+            "no entry at all",
+            "set timeout=30\nlinux /casper/vmlinuz ---\n".to_owned(),
+            first,
+        ),
+        (
+            "default=1 without set",
+            format!("set timeout=30\ndefault=1\n{INSTALLER}{INSTALLER}"),
+            "another entry than the first (default=1)",
+        ),
+        (
+            "a quoted default",
+            format!("set timeout=30\nset default=\"1\"\n{INSTALLER}"),
+            "another entry than the first (default=\"1\")",
+        ),
+        (
+            "a saved default",
+            format!("set timeout=30\nset default=\"${{saved_entry}}\"\n{INSTALLER}"),
+            "another entry than the first",
+        ),
+        (
+            "load_env",
+            format!("set timeout=30\nload_env\n{INSTALLER}"),
+            "loads other settings or menus (`load_env`)",
+        ),
+        (
+            "configfile",
+            format!("set timeout=30\nconfigfile /boot/grub/other.cfg\n{INSTALLER}"),
+            "loads other settings or menus (`configfile`)",
+        ),
+        (
+            "an entry left open",
+            format!("set timeout=30\n{INSTALLER}menuentry 'x' {{\n"),
+            "braces don't match",
+        ),
+        (
+            "a brace too many",
+            format!("set timeout=30\n{INSTALLER}}}\n"),
+            "braces don't match",
+        ),
+        (
+            "an entry's brace on its own line",
+            format!("set timeout=30\nmenuentry 'x'\n{{\n}}\n{INSTALLER}"),
+            "doesn't end in `{`",
+        ),
+    ] {
+        let err = ubuntu::patch_grub(&text).unwrap_err().to_string();
+        assert!(err.contains(words), "{name}: {err}");
+    }
+    // Entries after the first may be anything: S1's own have memtest and fwsetup.
+    let fine = format!(
+        "set timeout=30\n{INSTALLER}if [ x = y ]; then\nmenuentry 'Test memory' {{\n\tlinux16 /boot/memtest86+x64.bin\n}}\n\
+         fi\nsubmenu 'More' {{\n\tmenuentry 'x' {{\n\t\tchainloader /x.efi\n\t}}\n}}\n"
+    );
+    let patched = ubuntu::patch_grub(&fine).unwrap();
+    assert_eq!(patched.entries, 1);
+}
+
+#[test]
+fn words_quoted_from_grub_cfg_are_printable_and_short() {
+    let clean = |err: String| {
+        assert!(
+            !err.chars()
+                .any(|c| c.is_control() || crate::untrusted::is_format_char(c)),
+            "{err:?}"
+        );
+        assert!(err.chars().count() < 300, "{} characters", err.chars().count());
+        err
+    };
+    let err = clean(
+        ubuntu::patch_grub(&format!("set timeout=\u{1b}[2J\u{202E}fdp.exe\n{INSTALLER}"))
+            .unwrap_err()
+            .to_string(),
+    );
+    assert!(err.contains("(timeout= [2Jfdp.exe)"), "{err}");
+    let err = clean(
+        ubuntu::patch_grub(&format!(
+            "set timeout=30\nset default=\u{202E}1\u{1b}]0;title\u{7}\n{INSTALLER}"
+        ))
+        .unwrap_err()
+        .to_string(),
+    );
+    assert!(err.contains("(default=1 ]0;title)"), "{err}");
+    let err = clean(
+        ubuntu::patch_grub(&format!(
+            "set timeout=30\nmenuentry 'a' {{\n\t\u{1b}[31mboom\n}}\n{INSTALLER}"
+        ))
+        .unwrap_err()
+        .to_string(),
+    );
+    assert!(err.contains("runs `[31mboom`"), "{err}");
+    // Through plan(): a 60,000-character word in a grub.cfg under its cap.
+    let long = format!("set timeout={}\n{INSTALLER}", "A".repeat(60_000));
+    let image = fake::ubuntu_24_04_iso().with_file("/boot/grub/grub.cfg", long).build();
+    let err = clean(refusal(&image, Flavor::Ubuntu));
+    assert!(err.contains("AAA…)"), "{err}");
+}
+
+fn both(value: u32) -> [u8; 8] {
+    let mut out = [0u8; 8];
+    out[..4].copy_from_slice(&value.to_le_bytes());
+    out[4..].copy_from_slice(&value.to_be_bytes());
+    out
+}
+
+fn record_of(image: &[u8], path: &str, tree: Tree) -> iso9660::Record {
+    let mut cursor = Cursor::new(image);
+    let mut img = Image::new(&mut cursor).unwrap();
+    let volume = iso9660::Volume::read(&mut img).unwrap();
+    volume.lookup(&mut img, path, tree).unwrap().unwrap()
+}
+
+/// `path`'s records in `trees` get `extent` (and `size`, when given).
+fn point(image: &mut [u8], path: &str, trees: &[Tree], extent: u32, size: Option<u32>) {
+    for &tree in trees {
+        let at = record_of(image, path, tree).offset as usize;
+        image[at + 2..at + 10].copy_from_slice(&both(extent));
+        if let Some(size) = size {
+            image[at + 10..at + 18].copy_from_slice(&both(size));
+        }
+    }
+}
+
+#[test]
+fn sectors_the_copy_rewrites_must_be_the_files_alone() {
+    let both_trees = [Tree::RockRidge, Tree::Joliet];
+    let base = fake::ubuntu_24_04_iso()
+        .with_file("/boot/grub/loopback.cfg", fake::UBUNTU_24_04_GRUB)
+        .build();
+    assert!(plan_of(&base, Flavor::Ubuntu).is_ok());
+    let grub = record_of(&base, "/boot/grub/grub.cfg", Tree::RockRidge);
+    // An identical file stored once (as mkisofs and xorriso do), in both trees or in one.
+    for (trees, name) in [
+        (&both_trees[..], "the file LOOPBACK.CFG"),
+        (&both_trees[1..], "the file loopback.cfg"),
+    ] {
+        let mut image = base.clone();
+        point(&mut image, "/boot/grub/loopback.cfg", trees, grub.extent, None);
+        let err = refusal(&image, Flavor::Ubuntu);
+        assert!(
+            err.contains(&format!("/boot/grub/grub.cfg shares its sectors with {name}")),
+            "{err}"
+        );
+    }
+    // A file in another folder whose data starts in grub.cfg's sector.
+    let mut image = base.clone();
+    point(&mut image, "/casper/initrd", &both_trees[..1], grub.extent, None);
+    let err = refusal(&image, Flavor::Ubuntu);
+    assert!(err.contains("shares its sectors with the file INITRD"), "{err}");
+    // One that ends in it.
+    let mut image = base.clone();
+    point(&mut image, "/.disk/info", &both_trees, grub.extent - 1, Some(2049));
+    let err = refusal(&image, Flavor::Ubuntu);
+    assert!(err.contains("shares its sectors with the file INFO"), "{err}");
+    // A folder.
+    let mut image = base.clone();
+    point(&mut image, "/EFI/boot", &both_trees[..1], grub.extent, Some(2048));
+    let err = refusal(&image, Flavor::Ubuntu);
+    assert!(err.contains("shares its sectors with the folder BOOT"), "{err}");
+    // The volume descriptors (grub.cfg's records moved there, both trees, so they still agree).
+    let mut image = base.clone();
+    point(&mut image, "/boot/grub/grub.cfg", &both_trees, 16, None);
+    let err = refusal(&image, Flavor::Ubuntu);
+    assert!(
+        err.contains("shares its sectors with the system area and volume descriptors"),
+        "{err}"
+    );
+    // A root folder.
+    let mut cursor = Cursor::new(&base);
+    let mut img = Image::new(&mut cursor).unwrap();
+    let joliet_root = iso9660::Volume::read(&mut img).unwrap().joliet_root.unwrap();
+    let mut image = base.clone();
+    point(&mut image, "/boot/grub/grub.cfg", &both_trees, joliet_root.extent, None);
+    let err = refusal(&image, Flavor::Ubuntu);
+    assert!(err.contains("shares its sectors with a root folder"), "{err}");
+    // Debian: isolinux.cfg and txt.cfg stored once.
+    let debian = fake::debian();
+    let isolinux = record_of(&debian, "/isolinux/isolinux.cfg", Tree::RockRidge);
+    let mut image = debian.clone();
+    point(&mut image, "/isolinux/txt.cfg", &both_trees, isolinux.extent, None);
+    let err = refusal(&image, Flavor::Debian);
+    assert!(
+        err.contains("/isolinux/isolinux.cfg shares its sectors with the file TXT.CFG"),
+        "{err}"
+    );
+    // A folder elsewhere that points back at the root is walked once, and changes nothing.
+    let primary_root = {
+        let mut cursor = Cursor::new(&base);
+        let mut img = Image::new(&mut cursor).unwrap();
+        iso9660::Volume::read(&mut img).unwrap().primary_root
+    };
+    let mut image = base.clone();
+    point(
+        &mut image,
+        "/EFI",
+        &both_trees[..1],
+        primary_root.extent,
+        Some(primary_root.size),
+    );
+    let plan = plan_of(&image, Flavor::Ubuntu).unwrap();
+    assert_eq!(plan.writes.len(), 4);
 }
 
 #[test]

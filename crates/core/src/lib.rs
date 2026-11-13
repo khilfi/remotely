@@ -793,11 +793,12 @@ impl Core {
         // FD-04: a support bundle is a job; the job runner writes its zip through the bundle runner.
         jobs.set_bundles(Arc::new(support_bundle::BundleRunner::new(store.clone())));
         let bundles = support_bundle::SupportBundles::new(store.clone(), Arc::clone(&bus));
-        // VM-32: a free address is one nothing answers on, asked with the toolbox's ping.
-        let address_pools = Arc::new(address_pools::AddressPools::new(
-            store.clone(),
-            Arc::clone(&adapters.network_tools),
-        ));
+        // VM-32: a free address is one nothing answers on (the toolbox's ping and ARP), on the network of this PC that
+        // VM-11's host network report says a pool is on.
+        let address_pools = Arc::new(
+            address_pools::AddressPools::new(store.clone(), Arc::clone(&adapters.network_tools))
+                .with_networks(networks.clone()),
+        );
         // VM-29: unattended installs render from the catalogue's configs, take their addresses from the pools, and
         // sign in to a new Windows VM over WinRM with the certificate it wrote to its serial port.
         deployer.set_install_tools(deploy::runner::InstallTools {

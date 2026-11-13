@@ -95,6 +95,7 @@ export function InstallValuesCard({
     const parsed = parseRows(
       pasteText,
       variables.map((v) => v.name),
+      names,
     );
     if (parsed.error) {
       setPasteError(parsed.error);

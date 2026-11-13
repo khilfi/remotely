@@ -2,10 +2,12 @@
 //! menu file is changed the same way: found in both trees, whose records must point at the same data; the new
 //! text written over the file's own sectors, the rest of them zeroed; the new size in both records (bytes 10..18,
 //! both byte orders); its line in `/md5sum.txt` given the new MD5 in place. `/.disk/info` names the release.
+//! Before that, [`LinuxIso::check_alone`] makes sure no other file, folder or structure uses those sectors.
 
 use std::io::{Read, Seek};
 
-use super::iso9660::{read_record, Record, Volume};
+use super::eltorito::Catalog;
+use super::iso9660::{overlap, read_record, Record, Volume};
 use super::md5::md5_hex;
 use super::{printable, unexpected, Flavor, Image, IsoWrite, Tree, SECTOR};
 use crate::error::Result;
@@ -48,6 +50,62 @@ impl LinuxIso {
             return Err(unexpected(flavor, "it has no Joliet tree"));
         }
         Ok(LinuxIso { volume, flavor })
+    }
+
+    /// Refuses when anything else uses a sector of `files`, which [`TextFile::rewrite`] writes over whole:
+    /// another record in either tree (a file or folder anywhere, such as an identical file mkisofs or xorriso
+    /// stored once), the system area, the volume descriptors, a path table, a root folder, El Torito's boot catalog
+    /// or a boot image it names. The whole of both trees is walked (bounded: [`super::iso9660::MAX_WALK_FOLDERS`]).
+    pub fn check_alone<R: Read + Seek>(&self, image: &mut Image<R>, files: &[&TextFile]) -> Result<()> {
+        let flavor = self.flavor;
+        let shared = |file: &TextFile, what: &str| {
+            unexpected(
+                flavor,
+                format!(
+                    "{} shares its sectors with {what}, so changing it would change that too",
+                    file.path
+                ),
+            )
+        };
+        let mut others: Vec<((u64, u64), String)> = self
+            .volume
+            .reserved
+            .iter()
+            .map(|r| ((r.start, r.end), r.what.to_owned()))
+            .collect();
+        if let Some(sector) = self.volume.boot_catalog {
+            let catalog = Catalog::read(image, sector)?;
+            others.push((
+                (u64::from(sector), u64::from(sector) + 1),
+                "El Torito's boot catalog".to_owned(),
+            ));
+            for entry in std::iter::once(&catalog.default).chain(&catalog.sections) {
+                // Virtual 512-byte sectors; at least the one sector the firmware reads.
+                let sectors = (u64::from(entry.sector_count) * 512).div_ceil(SECTOR).max(1);
+                let start = u64::from(entry.load_rba);
+                others.push(((start, start + sectors), "an El Torito boot image".to_owned()));
+            }
+        }
+        for file in files {
+            let sectors = file.rock_ridge.sectors();
+            if let Some((_, what)) = others.iter().find(|(range, _)| overlap(sectors, *range)) {
+                return Err(shared(file, what));
+            }
+        }
+        for tree in [Tree::RockRidge, Tree::Joliet] {
+            self.volume.walk(image, tree, |record| {
+                for file in files {
+                    let own = record.offset == file.rock_ridge.offset || record.offset == file.joliet.offset;
+                    if !own && overlap(file.rock_ridge.sectors(), record.sectors()) {
+                        let name = printable(record.name.as_bytes(), 60);
+                        let kind = if record.is_dir() { "the folder" } else { "the file" };
+                        return Err(shared(file, &format!("{kind} {name}")));
+                    }
+                }
+                Ok(())
+            })?;
+        }
+        Ok(())
     }
 
     /// A non-empty plain file at `path`, by its Rock Ridge name.

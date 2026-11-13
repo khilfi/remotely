@@ -728,7 +728,9 @@ impl Deploys {
                 let Some(pools) = &self.pools else {
                     return Err(CoreError::NotImplemented("address pools"));
                 };
-                let fitting = pools.pools_for(ctx, plan.hypervisor, &plan.network).await?;
+                let fitting = pools
+                    .pools_for_adapter(ctx, plan.hypervisor, &plan.network, spec.host_adapter.as_deref())
+                    .await?;
                 match fitting.iter().find(|p| p.id == pool_id) {
                     None => problems.push(install_problem(format!(
                         "That address pool isn't for {} on {}.",
@@ -778,7 +780,16 @@ impl Deploys {
                     pool_values(&config.spec, address, &mut values);
                     Some(address.ip.to_string())
                 }
-                None => row.ip.map(|ip| ip.trim().to_owned()).filter(|ip| !ip.is_empty()),
+                None => {
+                    let typed = row.ip.map(|ip| ip.trim().to_owned()).filter(|ip| !ip.is_empty());
+                    if typed.is_some() && !uses_ip {
+                        problems.push(install_problem(format!(
+                            "{}: the install config doesn't use {{{{ip}}}}, so a typed address would go nowhere.",
+                            vm.name
+                        )));
+                    }
+                    typed
+                }
             };
             let check = render::VmValues {
                 hostname: vm.hostname.clone(),
@@ -832,6 +843,7 @@ impl Deploys {
             key_id,
             time_limit_minutes: minutes,
             pool: pool_ref,
+            iso_seen: super::spec::IsoSeen::of(Path::new(&path)).await,
         });
         if key_id.is_some() {
             spec.ssh_key_id = key_id;

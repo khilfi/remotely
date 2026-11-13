@@ -29,24 +29,26 @@ import { EmptyState } from "@/components/EmptyState";
 import { HelpTip } from "@/components/HelpTip";
 import { RowMenu } from "@/components/RowMenu";
 import { WhyDisabled } from "@/components/WhyDisabled";
-import { errorMessage, type Hypervisor, type TemplateNetwork } from "@/lib/api";
+import { api, errorMessage, type Hypervisor, type TemplateNetwork } from "@/lib/api";
 import { addressPoolsApi, type AddressLease, type AddressPool } from "@/lib/address-pools-api";
 import {
   deletePoolReason,
   EMPTY_POOL_FORM,
   freeReason,
   leaseStateLabel,
+  MAX_ADAPTER_CHARS,
   MAX_NAME_CHARS,
-  MAX_NETWORK_NAME,
   MAX_NOTES,
   NETWORK_KIND_LABEL,
   parsePoolForm,
   poolForm,
+  poolNetworkKinds,
+  poolNetworkText,
   sizeText,
   usedText,
   type PoolForm,
 } from "@/lib/address-pools";
-import { HYPERVISOR_LABEL, networkKinds, networkLabel, networkOfKind } from "@/lib/catalog";
+import { HYPERVISOR_LABEL, networkOfKind } from "@/lib/catalog";
 
 interface Props {
   /** True while the tab shows: it reads the pools again when it comes back. */
@@ -146,7 +148,7 @@ export function AddressPoolsTab({ active, readOnly, createRequest, onCount }: Pr
                         )}
                       </TableCell>
                       <TableCell className="whitespace-nowrap">
-                        {networkLabel(p.network)}
+                        {poolNetworkText(p)}
                         <div className="text-xs text-muted-foreground">{HYPERVISOR_LABEL[p.hypervisor]}</div>
                       </TableCell>
                       <TableCell className="whitespace-nowrap">
@@ -269,6 +271,13 @@ function PoolDialog({
       return { ...f, dns };
     });
   const network = form.network;
+  // VirtualBox host-only: the pool names its adapter, picked from VirtualBox's own list.
+  const needsAdapter = form.hypervisor === "virtualbox" && network.kind === "hostOnly";
+  const [adapters, setAdapters] = useState<string[] | null>(null);
+  useEffect(() => {
+    if (!needsAdapter || adapters) return;
+    api.deployHostAdapters(false).then(setAdapters, () => setAdapters([]));
+  }, [needsAdapter, adapters]);
 
   async function save() {
     if (!("input" in parsed)) return;
@@ -324,7 +333,9 @@ function PoolDialog({
                 value={form.hypervisor}
                 onValueChange={(v) => {
                   const h = v as Hypervisor;
-                  set({ hypervisor: h, network: networkKinds(h).includes(network.kind) ? network : { kind: "nat" } });
+                  // Host-only is on both hypervisors' lists; a network the other one lacks becomes it.
+                  const kept = poolNetworkKinds(h).includes(network.kind);
+                  set({ hypervisor: h, network: kept ? network : { kind: "hostOnly" } });
                 }}
               >
                 <SelectTrigger id="pool-hypervisor" className="w-full">
@@ -350,7 +361,7 @@ function PoolDialog({
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    {networkKinds(form.hypervisor).map((k) => (
+                    {poolNetworkKinds(form.hypervisor).map((k) => (
                       <SelectItem key={k} value={k}>
                         {NETWORK_KIND_LABEL[k]}
                       </SelectItem>
@@ -369,21 +380,34 @@ function PoolDialog({
                     }}
                   />
                 )}
-                {(network.kind === "natNetwork" || network.kind === "internal") && (
-                  <Input
-                    aria-label="Network name"
-                    placeholder="Name"
-                    value={network.name}
-                    maxLength={MAX_NETWORK_NAME}
-                    onChange={(e) => {
-                      const kind = network.kind as "natNetwork" | "internal";
-                      set({ network: { kind, name: e.currentTarget.value } });
-                    }}
-                  />
-                )}
               </div>
             </div>
           </div>
+          {needsAdapter && (
+            <div className="grid gap-2">
+              <Label htmlFor="pool-adapter">Host-only adapter</Label>
+              {adapters && adapters.length === 0 && !form.hostAdapter ? (
+                <p className="text-sm text-muted-foreground">
+                  VirtualBox has no host-only adapter yet: add one in VirtualBox&apos;s Network Manager.
+                </p>
+              ) : (
+                <Select value={form.hostAdapter} onValueChange={(v) => set({ hostAdapter: v })}>
+                  <SelectTrigger id="pool-adapter" className="w-full">
+                    <SelectValue placeholder={adapters ? "Pick an adapter" : "Reading VirtualBox's adapters…"} />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {[...new Set([...(adapters ?? []), ...(form.hostAdapter ? [form.hostAdapter] : [])])]
+                      .filter((a) => a.length <= MAX_ADAPTER_CHARS)
+                      .map((a) => (
+                        <SelectItem key={a} value={a}>
+                          {a}
+                        </SelectItem>
+                      ))}
+                  </SelectContent>
+                </Select>
+              )}
+            </div>
+          )}
           <div className="grid grid-cols-[1fr_1fr_5rem] gap-3">
             <div className="grid gap-2">
               <Label htmlFor="pool-first">First address</Label>

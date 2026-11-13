@@ -10,7 +10,7 @@ use windows::Win32::NetworkManagement::Dns::{
     DNS_QUERY_WIRE_ONLY, DNS_RECORDW,
 };
 use windows::Win32::NetworkManagement::IpHelper::{
-    GetAdaptersAddresses, Icmp6CreateFile, Icmp6SendEcho2, IcmpCloseHandle, IcmpCreateFile, IcmpSendEcho2,
+    GetAdaptersAddresses, Icmp6CreateFile, Icmp6SendEcho2, IcmpCloseHandle, IcmpCreateFile, IcmpSendEcho2, SendARP,
     GAA_FLAG_SKIP_ANYCAST, GAA_FLAG_SKIP_MULTICAST, ICMPV6_ECHO_REPLY_LH, ICMP_ECHO_REPLY, IF_TYPE_SOFTWARE_LOOPBACK,
     IP_ADAPTER_ADDRESSES_LH, IP_OPTION_INFORMATION,
 };
@@ -70,6 +70,31 @@ fn reply_words(header: usize, size: u16) -> usize {
 /// A request's data: `abcdefghijklmnopqrstuvw` again and again, as Windows' ping sends.
 fn payload(size: u16) -> Vec<u8> {
     (0..usize::from(size)).map(|i| b'a' + (i % 23) as u8).collect()
+}
+
+// SendARP's answers when nothing replied (winerror.h): ERROR_BAD_NET_NAME since Vista, ERROR_GEN_FAILURE before.
+const ERROR_BAD_NET_NAME: u32 = 67;
+const ERROR_GEN_FAILURE: u32 = 31;
+
+/// VM-32: whether something on this PC's subnet answers ARP for `to` (SendARP; Windows waits a few seconds for a reply
+/// and may answer from its neighbour cache).
+pub(super) fn arp(to: Ipv4Addr) -> Result<Option<bool>> {
+    // Room for any hardware address SendARP returns (it wants at least 6 bytes; ULONG[2] in Microsoft's sample).
+    let mut mac = [0u8; 8];
+    let mut length: u32 = 6;
+    // SAFETY: `mac` is 8 writable bytes and `length` says 6 of them may be written; both live through the call. A source
+    // address of 0 lets Windows pick the adapter.
+    let status = unsafe { SendARP(u32::from_ne_bytes(to.octets()), 0, mac.as_mut_ptr().cast(), &mut length) };
+    match status {
+        0 => Ok(Some(length > 0)),
+        ERROR_BAD_NET_NAME | ERROR_GEN_FAILURE => Ok(Some(false)),
+        other => {
+            let message = windows::core::Error::from_hresult(windows::core::HRESULT::from_win32(other)).message();
+            Err(CoreError::Network(format!(
+                "Windows couldn't ask ARP for {to}: {message}"
+            )))
+        }
+    }
 }
 
 /// One echo request.

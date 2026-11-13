@@ -247,6 +247,29 @@ pub struct InstallSpec {
     /// VM-32: the address pool the VMs' addresses come from.
     #[serde(default)]
     pub pool: Option<PoolRef>,
+    /// The install ISO as it was when the deploy was approved: the job refuses one changed since (as VM-31's attach).
+    #[serde(default)]
+    pub iso_seen: Option<IsoSeen>,
+}
+
+/// A file's size and last write time (milliseconds since 1970), to tell it changed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IsoSeen {
+    pub bytes: u64,
+    pub modified_ms: i64,
+}
+
+impl IsoSeen {
+    /// What `path` is now.
+    pub async fn of(path: &std::path::Path) -> Option<Self> {
+        let meta = tokio::fs::metadata(path).await.ok()?;
+        let modified = meta.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?;
+        Some(Self {
+            bytes: meta.len(),
+            modified_ms: i64::try_from(modified.as_millis()).ok()?,
+        })
+    }
 }
 
 /// VM-32: an address pool, by id and name (for the audit log).

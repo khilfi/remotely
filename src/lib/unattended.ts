@@ -37,15 +37,24 @@ export function deliveryProblem(config: InstallConfig): string | null {
   }
 }
 
-/** The pools that fit the deploy: its hypervisor and its network, as the template names it. */
+/**
+ * The pools that may fit the deploy: its hypervisor, its network as the template names it, and (VirtualBox host-only)
+ * its adapter. The core decides in the end: it knows which vmnet each network is on this PC.
+ */
 export function poolsFor(
   pools: AddressPool[],
   hypervisor: Hypervisor | undefined,
   network: TemplateNetwork | undefined,
+  hostAdapter: string | null = null,
 ): AddressPool[] {
   if (!hypervisor || !network) return [];
   const key = JSON.stringify(network);
-  return pools.filter((p) => p.hypervisor === hypervisor && JSON.stringify(p.network) === key);
+  return pools.filter(
+    (p) =>
+      p.hypervisor === hypervisor &&
+      JSON.stringify(p.network) === key &&
+      (!p.hostAdapter || !hostAdapter || p.hostAdapter === hostAdapter),
+  );
 }
 
 /** One CSV line's cells: commas split, double quotes quote (`""` is a quote). */
@@ -78,15 +87,17 @@ export function csvCells(line: string): string[] {
 }
 
 export interface ParsedRows {
-  rows: VmInstall[];
+  /** By position, or by name (`null`: a VM the paste has no line for, which keeps its row). */
+  rows: (VmInstall | null)[];
   error: string | null;
 }
 
 /**
- * Rows pasted from a spreadsheet: a header line naming the columns (`ip` and the config's own variables; a `name` or
- * `hostname` column is read past, since the pattern names the VMs), then a line per VM in the order they're named.
+ * Rows pasted from a spreadsheet: a header line naming the columns (`ip` and the config's own variables), then a line
+ * per VM. With a `name` (or `hostname`) column, each line goes to the VM of that name (`names`); without one, to the
+ * VMs in the order they're named.
  */
-export function parseRows(text: string, variables: string[]): ParsedRows {
+export function parseRows(text: string, variables: string[], names?: string[]): ParsedRows {
   const lines = text
     .replace(/\r\n?/g, "\n")
     .split("\n")
@@ -102,7 +113,8 @@ export function parseRows(text: string, variables: string[]): ParsedRows {
     }
   }
   if (lines.length - 1 > MAX_ROWS) return { rows: [], error: `A deploy makes at most ${MAX_ROWS} VMs.` };
-  const rows = lines.slice(1).map((line) => {
+  const nameColumn = header.findIndex((c) => c === "name" || c === "hostname");
+  const parsed = lines.slice(1).map((line) => {
     const cells = csvCells(line);
     const row: VmInstall = { ip: null, values: {} };
     header.forEach((column, i) => {
@@ -111,9 +123,18 @@ export function parseRows(text: string, variables: string[]): ParsedRows {
       if (column === "ip") row.ip = value;
       else row.values[column] = value;
     });
-    return row;
+    return { name: nameColumn >= 0 ? (cells[nameColumn] ?? "").trim() : null, row };
   });
-  return { rows, error: null };
+  if (nameColumn < 0 || !names) return { rows: parsed.map((p) => p.row), error: null };
+  // By name: each VM gets its own line, whatever the order; a name the deploy doesn't make is an error.
+  const byName = new Map<string, VmInstall>();
+  for (const { name, row } of parsed) {
+    const vm = names.find((n) => n.toLowerCase() === (name ?? "").toLowerCase());
+    if (!vm) return { rows: [], error: `The deploy makes no VM named "${name ?? ""}".` };
+    if (byName.has(vm)) return { rows: [], error: `${vm} has two lines.` };
+    byName.set(vm, row);
+  }
+  return { rows: names.map((n) => byName.get(n) ?? null), error: null };
 }
 
 /** The request's rows: one per VM, empty values left out (they take the config's defaults). */

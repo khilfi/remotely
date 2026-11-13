@@ -9,7 +9,7 @@
 use std::io::{Read, Seek};
 
 use super::linux::{md5_words, LinuxIso};
-use super::{unexpected, Flavor, Image, IsoWrite};
+use super::{printable, unexpected, Flavor, Image, IsoWrite};
 use crate::error::Result;
 
 pub const GRUB_CFG: &str = "/boot/grub/grub.cfg";
@@ -56,12 +56,30 @@ fn words(line: &str) -> Vec<(usize, &str)> {
     out
 }
 
-/// Changes grub.cfg's text as S1 did. Refused (naming why) when no casper `linux` line has a `---`, when the
-/// first `linux` line isn't one (the first entry is the one GRUB starts), when a line already has `autoinstall`
-/// (a copy of a copy: start from the original ISO instead), when another entry is made the default, and when there
-/// is no `set timeout=` line (GRUB would wait for a key).
+/// Changes grub.cfg's text as S1 did. GRUB starts the first top-level menu entry after the timeout, so that entry
+/// must be a `menuentry` outside any `if`, holding only `set`, one `linux` line this changes, and `initrd` (as S1's
+/// both did). Refused, naming why: no casper `linux` line with a `---`; a first entry that is anything else (a
+/// `submenu`, memtest's `linux16`, a `chainloader`, `linuxefi`, a conditional entry); a `default=` other than 0,
+/// with or without `set`; `load_env`, `configfile` or `source` outside an entry; braces that don't match; a line
+/// that already has `autoinstall` (a copy of a copy: start from the original ISO); and no `set timeout=` (GRUB would
+/// wait for a key). Words quoted from the file are made printable and cut short.
 pub fn patch_grub(text: &str) -> Result<PatchedGrub> {
     patch(text).map_err(|problem| unexpected(Flavor::Ubuntu, problem))
+}
+
+const FIRST_ENTRY: &str = "its grub.cfg's first menu entry doesn't boot the casper installer";
+
+/// The first top-level menu entry, as the lines go by.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum First {
+    NotYet,
+    Inside { linux: usize, changed: usize },
+    Done { linux: usize, changed: usize },
+}
+
+/// A word of grub.cfg, fit to quote in a refusal.
+fn quoted(word: &str) -> String {
+    printable(word.as_bytes(), 60)
 }
 
 fn patch(text: &str) -> std::result::Result<PatchedGrub, String> {
@@ -69,16 +87,77 @@ fn patch(text: &str) -> std::result::Result<PatchedGrub, String> {
     let mut entries = 0usize;
     let mut kernels: Vec<String> = Vec::new();
     let mut old_timeout = None;
-    let mut first_linux_changed = None;
+    // Menu entries' braces, `if` blocks, and the first entry.
+    let mut depth = 0usize;
+    let mut ifs = 0i64;
+    let mut first = First::NotYet;
     for line in text.split_inclusive('\n') {
         let body_len = line.trim_end_matches(['\r', '\n']).len();
         let (body, ending) = line.split_at(body_len);
         let tokens = words(body);
-        let first = tokens.first().map(|t| t.1);
-        if first == Some("linux") {
+        let Some(&(_, command)) = tokens.first() else {
+            out.push_str(line);
+            continue;
+        };
+        if command.starts_with('#') {
+            out.push_str(line);
+            continue;
+        }
+        let in_first = matches!(first, First::Inside { .. });
+        match command {
+            "menuentry" | "submenu" => {
+                if tokens.last().map(|t| t.1) != Some("{") {
+                    return Err("its grub.cfg has a menu entry whose line doesn't end in `{`".into());
+                }
+                if in_first {
+                    return Err(FIRST_ENTRY.into());
+                }
+                if depth == 0 && first == First::NotYet {
+                    if command == "submenu" || ifs != 0 {
+                        return Err(FIRST_ENTRY.into());
+                    }
+                    first = First::Inside { linux: 0, changed: 0 };
+                }
+                depth += 1;
+                out.push_str(line);
+                continue;
+            }
+            "}" => {
+                if tokens.len() != 1 || depth == 0 {
+                    return Err("its grub.cfg's braces don't match".into());
+                }
+                depth -= 1;
+                if let (0, First::Inside { linux, changed }) = (depth, first) {
+                    first = First::Done { linux, changed };
+                }
+                out.push_str(line);
+                continue;
+            }
+            "if" => {
+                ifs += 1;
+                if tokens.iter().any(|t| t.1 == "fi") {
+                    ifs -= 1;
+                }
+            }
+            "fi" => ifs -= 1,
+            "load_env" | "configfile" | "source" | "." if depth == 0 => {
+                return Err(format!(
+                    "its grub.cfg loads other settings or menus (`{}`)",
+                    quoted(command)
+                ));
+            }
+            _ => {}
+        }
+        if in_first && !matches!(command, "set" | "linux" | "initrd") {
+            return Err(format!(
+                "its grub.cfg's first menu entry runs `{}`, which the ISOs Remotely knows don't",
+                quoted(command)
+            ));
+        }
+        if command == "linux" {
             let kernel = tokens.get(1).map(|t| t.1).filter(|k| KERNELS.contains(k));
             let dashes = tokens.iter().find(|t| t.1 == "---");
-            if let (Some(kernel), Some(&(at, _))) = (kernel, dashes) {
+            let changed = if let (Some(kernel), Some(&(at, _))) = (kernel, dashes) {
                 if tokens.iter().any(|t| t.1 == "autoinstall") {
                     return Err(
                         "its grub.cfg already has autoinstall, so it looks like a copy Remotely made; pick the \
@@ -96,16 +175,31 @@ fn patch(text: &str) -> std::result::Result<PatchedGrub, String> {
                 if !kernels.iter().any(|k| k == kernel) {
                     kernels.push(kernel.to_owned());
                 }
-                first_linux_changed.get_or_insert(true);
+                1
+            } else {
+                0
+            };
+            if let First::Inside { linux, changed: done } = &mut first {
+                *linux += 1;
+                *done += changed;
+            }
+            if changed == 1 {
                 continue;
             }
-            first_linux_changed.get_or_insert(false);
         }
-        if first == Some("set") && tokens.len() == 2 {
-            let (at, setting) = tokens[1];
+        // `set name=value`, or `name=value` alone (GRUB takes both).
+        let assignment = match (command, tokens.len()) {
+            ("set", 2) => Some(tokens[1]),
+            (_, 1) if command.contains('=') => Some(tokens[0]),
+            _ => None,
+        };
+        if let Some((at, setting)) = assignment {
             if let Some(value) = setting.strip_prefix("timeout=") {
                 if value.is_empty() || !value.bytes().all(|b| b.is_ascii_digit()) {
-                    return Err(format!("its grub.cfg sets a timeout Remotely doesn't read ({setting})"));
+                    return Err(format!(
+                        "its grub.cfg sets a timeout Remotely doesn't read ({})",
+                        quoted(setting)
+                    ));
                 }
                 old_timeout.get_or_insert_with(|| value.to_owned());
                 out.push_str(&body[..at]);
@@ -115,19 +209,28 @@ fn patch(text: &str) -> std::result::Result<PatchedGrub, String> {
                 out.push_str(ending);
                 continue;
             }
-            if let Some(value) = setting.strip_prefix("default=") {
-                if value != "0" && value != "\"0\"" {
-                    return Err(format!("its grub.cfg starts another entry than the first ({setting})"));
+        }
+        // Any `default=` but 0, wherever it is and however it is written, starts another entry.
+        for &(_, word) in &tokens {
+            if let Some(value) = word.strip_prefix("default=") {
+                if !matches!(value, "0" | "\"0\"" | "'0'") {
+                    return Err(format!(
+                        "its grub.cfg starts another entry than the first ({})",
+                        quoted(word)
+                    ));
                 }
             }
         }
         out.push_str(line);
     }
+    if depth != 0 {
+        return Err("its grub.cfg's braces don't match".into());
+    }
     if entries == 0 {
         return Err("its grub.cfg has no `linux /casper/vmlinuz ... ---` line".into());
     }
-    if first_linux_changed != Some(true) {
-        return Err("its grub.cfg's first menu entry doesn't boot the casper installer".into());
+    if first != (First::Done { linux: 1, changed: 1 }) {
+        return Err(FIRST_ENTRY.into());
     }
     let Some(old_timeout) = old_timeout else {
         return Err("its grub.cfg has no `set timeout=` line, so the menu would wait for a key".into());
@@ -144,6 +247,7 @@ pub(crate) fn plan<R: Read + Seek>(image: &mut Image<R>) -> Result<(Vec<IsoWrite
     let flavor = Flavor::Ubuntu;
     let iso = LinuxIso::open(image, flavor)?;
     let grub = iso.text_file(image, GRUB_CFG, MAX_GRUB_BYTES)?;
+    iso.check_alone(image, &[&grub])?;
     let text = std::str::from_utf8(&grub.content)
         .map_err(|_| unexpected(flavor, "its /boot/grub/grub.cfg isn't UTF-8 text"))?;
     let patched = patch_grub(text)?;

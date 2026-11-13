@@ -227,7 +227,7 @@ export function DeployDialog({ templateId, onSubmitted, onClose }: Props) {
   // VM-29: the template's install config, which installs the VMs unattended.
   const installConfigId = mode === "template" ? template?.installConfigId : customInput?.installConfigId;
   const installConfig = configs.find((c) => c.id === installConfigId) ?? null;
-  const fittingPools = installConfig ? poolsFor(pools, hypervisor, network) : [];
+  const fittingPools = installConfig ? poolsFor(pools, hypervisor, network, needsAdapter ? adapter : null) : [];
   const pool = fittingPools.some((p) => p.id === poolId) ? poolId : null;
   const minutes = parseMinutes(minutesText);
 

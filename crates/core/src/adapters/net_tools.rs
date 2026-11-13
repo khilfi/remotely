@@ -11,7 +11,7 @@
 //!
 //! F2's health checks (MO-08) schedule these same probes through [`crate::toolbox::Toolbox`].
 
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -263,6 +263,13 @@ pub trait NetworkTools: Send + Sync {
 
     /// Sends one UDP datagram from `from` (an address of this PC, or any), to a broadcast address when `broadcast`.
     async fn send_datagram(&self, from: Option<IpAddr>, to: SocketAddr, broadcast: bool, payload: &[u8]) -> Result<()>;
+
+    /// VM-32: whether something answers ARP for `ip`, an address on a subnet this PC has an adapter on (Windows'
+    /// `SendARP`, which may answer from the neighbour cache): `Some(true)` it does, `Some(false)` nothing did, `None`
+    /// when this PC can't tell. A host that drops pings still answers ARP.
+    async fn arp(&self, _ip: Ipv4Addr) -> Result<Option<bool>> {
+        Ok(None)
+    }
 }
 
 /// Windows' ICMP, DNS, certificate and adapter APIs, and tokio's sockets.
@@ -272,6 +279,10 @@ pub struct SystemNetworkTools;
 impl NetworkTools for SystemNetworkTools {
     async fn echo(&self, request: EchoRequest) -> Result<Echo> {
         blocking(move || system_echo(request)).await
+    }
+
+    async fn arp(&self, ip: Ipv4Addr) -> Result<Option<bool>> {
+        blocking(move || system_arp(ip)).await
     }
 
     async fn dns(&self, query: &DnsQuery) -> Result<std::result::Result<Vec<DnsRecord>, DnsFailure>> {
@@ -388,6 +399,16 @@ fn system_adapters() -> Result<Vec<LocalAdapter>> {
 #[cfg(not(windows))]
 fn system_adapters() -> Result<Vec<LocalAdapter>> {
     Ok(Vec::new())
+}
+
+#[cfg(windows)]
+fn system_arp(ip: Ipv4Addr) -> Result<Option<bool>> {
+    win::arp(ip)
+}
+
+#[cfg(not(windows))]
+fn system_arp(_ip: Ipv4Addr) -> Result<Option<bool>> {
+    Ok(None)
 }
 
 #[cfg(test)]

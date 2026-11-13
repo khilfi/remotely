@@ -1,5 +1,6 @@
 /// <reference types="node" />
 // VM-32: the address pool editor's checks (the core's, said before saving) and the tab's wording. Run with `npm test`.
+// Addresses from 192.0.2.0/24, 198.51.100.0/24, 203.0.113.0/24 and 198.18.0.0/15 only.
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
@@ -11,6 +12,8 @@ import {
   parseIpv4,
   parsePoolForm,
   poolForm,
+  poolNetworkKinds,
+  poolNetworkText,
   sizeText,
   usedText,
   type PoolForm,
@@ -41,12 +44,13 @@ test("dotted IPv4 addresses read as the core reads them", () => {
 });
 
 test("a pool is tidied into what the core gets", () => {
-  const parsed = parsePoolForm(LAB);
+  const parsed = parsePoolForm({ ...LAB, hostAdapter: "ignored" });
   assert.ok("input" in parsed);
   assert.deepEqual(parsed.input, {
     name: "lab",
     hypervisor: "vmware",
     network: { kind: "nat" },
+    hostAdapter: null,
     firstIp: "192.0.2.10",
     lastIp: "192.0.2.50",
     prefix: 24,
@@ -69,7 +73,10 @@ test("ranges are one IPv4 subnet without its own or its broadcast address", () =
   assert.match(error({ firstIp: "2001:db8::1" }), /IPv4 only/);
   assert.match(error({ lastIp: "" }), /^Give the last address/);
   assert.match(error({ firstIp: "192.0.2.60" }), /comes after/);
-  assert.match(error({ lastIp: "192.0.3.20" }), /different \/24 subnets/);
+  assert.match(
+    error({ prefix: "25", firstIp: "192.0.2.100", lastIp: "192.0.2.200", gateway: "" }),
+    /different \/25 subnets/,
+  );
   assert.match(error({ firstIp: "192.0.2.0" }), /subnet's own address .* start at 192\.0\.2\.1 /);
   assert.match(error({ lastIp: "192.0.2.255" }), /broadcast address: end at 192\.0\.2\.254 /);
   assert.match(
@@ -84,11 +91,12 @@ test("ranges are one IPv4 subnet without its own or its broadcast address", () =
   assert.match(error({ prefix: "7" }), /\/8 to \/30/);
   assert.match(error({ firstIp: "127.0.0.1" }), /can't be used/);
   assert.match(error({ firstIp: "169.254.0.10" }), /can't be used/);
+  assert.match(error({ prefix: "8", firstIp: "0.0.0.5", lastIp: "0.0.0.9", gateway: "" }), /can't be used/);
   assert.match(
-    error({ prefix: "16", firstIp: "198.51.0.1", lastIp: "198.51.16.1", gateway: "" }),
-    /at most 4096 addresses; 198\.51\.0\.1 to 198\.51\.16\.1 is 4097/,
+    error({ prefix: "16", firstIp: "198.18.0.1", lastIp: "198.18.16.1", gateway: "" }),
+    /at most 4096 addresses; 198\.18\.0\.1 to 198\.18\.16\.1 is 4097/,
   );
-  const exactly = parsePoolForm({ ...LAB, prefix: "/16", firstIp: "198.51.0.1", lastIp: "198.51.16.0", gateway: "" });
+  const exactly = parsePoolForm({ ...LAB, prefix: "/16", firstIp: "198.18.0.1", lastIp: "198.18.16.0", gateway: "" });
   assert.ok("input" in exactly);
   assert.equal(exactly.size, 4096);
   const tiny = parsePoolForm({ ...LAB, prefix: "30", firstIp: "203.0.113.5", lastIp: "203.0.113.6", gateway: "" });
@@ -99,22 +107,44 @@ test("ranges are one IPv4 subnet without its own or its broadcast address", () =
 test("the gateway, DNS servers, names and networks are checked", () => {
   assert.match(error({ gateway: "198.51.100.1" }), /isn't an address of 192\.0\.2\.0\/24/);
   assert.match(error({ dns: ["224.0.0.1", "", ""] }), /can't be used/);
+  assert.match(error({ dns: ["192.0.2.255", "", ""] }), /own or broadcast address/);
+  assert.match(error({ dns: ["192.0.2.0", "", ""] }), /own or broadcast address/);
   assert.match(error({ name: "  " }), /^Give the address pool a name/);
   assert.match(error({ name: "a\tb" }), /invisible/);
   assert.match(error({ name: "lab\u202e" }), /invisible/);
   assert.match(error({ name: "x".repeat(61) }), /at most 60/);
   assert.match(error({}, ["LAB"]), /named 'lab' already/);
+  // Letter case beyond ASCII folds as the core folds it.
+  assert.match(error({ name: "LÄB" }, ["Läb"]), /named 'LÄB' already/);
   assert.match(error({ network: { kind: "vmnet", number: 20 } }), /vmnet0 to vmnet19/);
   assert.match(error({ network: { kind: "natNetwork", name: "lab" } }), /VirtualBox's/);
   assert.match(error({ hypervisor: "virtualbox", network: { kind: "vmnet", number: 2 } }), /Workstation's/);
   assert.match(error({ hypervisor: "virtualbox", network: { kind: "internal", name: "lab;x" } }), /letters, digits/);
-  const named = parsePoolForm({ ...LAB, hypervisor: "virtualbox", network: { kind: "natNetwork", name: " lab net " } });
+});
+
+test("VirtualBox pools name their host-only adapter, and never sit where this PC has no adapter", () => {
+  assert.deepEqual(poolNetworkKinds("virtualbox"), ["hostOnly", "bridged"]);
+  assert.deepEqual(poolNetworkKinds("vmware"), ["nat", "hostOnly", "bridged", "vmnet"]);
+  const vbox: Partial<PoolForm> = { hypervisor: "virtualbox", network: { kind: "hostOnly" } };
+  assert.match(error(vbox), /^Pick VirtualBox's host-only adapter/);
+  const named = parsePoolForm({ ...LAB, ...vbox, hostAdapter: "  vboxnet0 " });
   assert.ok("input" in named);
-  assert.deepEqual(named.input.network, { kind: "natNetwork", name: "lab net" });
+  assert.equal(named.input.hostAdapter, "vboxnet0");
+  for (const [network, says] of [
+    [{ kind: "nat" }, /VirtualBox's NAT \(each VM's network of its own\)/],
+    [{ kind: "natNetwork", name: " lab net " }, /VirtualBox's NAT network 'lab net'/],
+    [{ kind: "internal", name: "lab" }, /VirtualBox's internal network 'lab'/],
+  ] as const) {
+    assert.match(error({ hypervisor: "virtualbox", network }), says);
+  }
+  assert.equal(poolNetworkText({ network: { kind: "hostOnly" }, hostAdapter: "vboxnet0" }), "Host-only 'vboxnet0'");
+  assert.equal(poolNetworkText({ network: { kind: "nat" }, hostAdapter: null }), "NAT");
+  assert.equal(poolNetworkText({ network: { kind: "vmnet", number: 2 }, hostAdapter: null }), "Custom vmnet (vmnet2)");
 });
 
 test("the tab's words", () => {
-  assert.equal(usedText({ used: 3, usable: 41 }), "3 of 41 used");
+  assert.equal(usedText({ used: 3, usable: 41, heldElsewhere: 0 }), "3 of 41 used");
+  assert.equal(usedText({ used: 3, usable: 41, heldElsewhere: 2 }), "3 of 41 used, 2 more held in another workspace");
   assert.equal(sizeText(41, 41), "41 addresses");
   assert.equal(sizeText(41, 40), "41 addresses, 40 to hand out");
   assert.equal(deletePoolReason(null, { used: 0 }), null);

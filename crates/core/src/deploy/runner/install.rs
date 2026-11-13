@@ -97,7 +97,7 @@ pub(super) struct InstallMade {
 }
 
 /// The ISO copies of the deploys running now, by job: the files holding the copy (each VM's hard link), so the next
-/// VM links one instead of copying again, and links that couldn't be emptied yet because another VM still reads them.
+/// VM links one instead of copying again, and links a file system wouldn't delete yet, tried again as each VM ends.
 #[derive(Default)]
 pub(super) struct IsoCopies {
     jobs: std::sync::Mutex<HashMap<Uuid, Arc<tokio::sync::Mutex<JobIsos>>>>,
@@ -122,7 +122,8 @@ impl IsoCopies {
     }
 
     /// A VM's step ends: the links waiting to be emptied are tried again; the job's entry goes with its last VM.
-    pub(super) async fn leave(&self, job_id: Uuid) {
+    /// True when it was the job's last VM step running.
+    pub(super) async fn leave(&self, job_id: Uuid) -> bool {
         let job = self.job(job_id);
         let mut state = job.lock().await;
         state.active = state.active.saturating_sub(1);
@@ -142,7 +143,10 @@ impl IsoCopies {
             }
             drop(state);
             crate::locks::lock(&self.jobs).remove(&job_id);
+        } else {
+            return false;
         }
+        true
     }
 
     /// The VM no longer offers its link to the next VM (it is emptied, or its VM failed and is kept).
@@ -163,7 +167,8 @@ fn empty_disc() -> Result<Vec<u8>> {
     seed::write_seed(&[], time::OffsetDateTime::now_utc())
 }
 
-/// The link out of the way, and on Workstation an empty disc in its place. Fails while another VM reads the copy.
+/// The link out of the way, and on Workstation an empty disc in its place. NTFS deletes a link while another VM still
+/// reads the copy through its own link; a file system that refuses that leaves the link to [`IsoCopies::later`].
 async fn empty_link(path: &Path, empty_disc_after: bool) -> Result<()> {
     match tokio::fs::remove_file(path).await {
         Ok(()) => {}
@@ -176,9 +181,24 @@ async fn empty_link(path: &Path, empty_disc_after: bool) -> Result<()> {
     Ok(())
 }
 
-/// Trusts only the certificate the VM wrote to its own serial port.
+/// Trusts only the certificate the VM wrote to its own serial port, and remembers any other it was shown.
 struct PinnedCertificate {
     fingerprint: String,
+    other: std::sync::Mutex<Option<String>>,
+}
+
+impl PinnedCertificate {
+    fn new(fingerprint: &str) -> Self {
+        Self {
+            fingerprint: fingerprint.to_owned(),
+            other: std::sync::Mutex::new(None),
+        }
+    }
+
+    /// The certificate WinRM showed instead of the pinned one, if it did.
+    fn mismatch(&self) -> Option<String> {
+        crate::locks::lock(&self.other).clone()
+    }
 }
 
 #[async_trait::async_trait]
@@ -187,11 +207,47 @@ impl HostKeyVerifier for PinnedCertificate {
         if key.key_type == CERT_KEY_TYPE && key.fingerprint == self.fingerprint {
             Ok(())
         } else {
+            *crate::locks::lock(&self.other) = Some(key.fingerprint.clone());
             Err(CoreError::Winrm(format!(
                 "the VM's WinRM certificate ({}) isn't the one it wrote to its serial port",
                 key.fingerprint
             )))
         }
+    }
+}
+
+/// Windows' first sign-in, as far as it got: which accounts have the vault's password already (D3: from then on the
+/// deploy signs in with it, and only what is left is tried again), and when to try next.
+#[derive(Debug, Default)]
+pub(super) struct WindowsSignIn {
+    swapped: Vec<String>,
+    next_try: Option<tokio::time::Instant>,
+    backoff: Duration,
+    /// The vault was locked at the last try: the step waits for it.
+    vault_locked: bool,
+}
+
+/// Why a try at Windows' first sign-in didn't finish.
+enum SignInStop {
+    /// The vault is locked: nothing was sent; the step waits for it to be unlocked.
+    VaultLocked,
+    /// Windows refused the password, or showed another certificate: the install fails with this.
+    Fatal(String),
+    /// WinRM isn't ready yet, or the connection broke: tried again later.
+    NotYet(CoreError),
+}
+
+/// What a step that waits for the vault shows (the UI's notification picks it out).
+pub const VAULT_WAIT: &str = "waiting for the vault to be unlocked";
+/// The longest wait between two sign-in tries.
+const MAX_SIGN_IN_BACKOFF: Duration = Duration::from_secs(60);
+
+/// D7: sets its flag when dropped, so a copy on a blocking thread stops when the step that started it does.
+struct CancelOnDrop(Arc<AtomicBool>);
+
+impl Drop for CancelOnDrop {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Relaxed);
     }
 }
 
@@ -287,6 +343,14 @@ impl Deployer {
                 "The install config '{}' changed since the deploy was approved: deploy again.",
                 install.config_name
             )));
+        }
+        // The ISO approved is the ISO used: one replaced or changed since refuses (its copy is planned from it again).
+        if let Some(seen) = install.iso_seen {
+            if crate::deploy::spec::IsoSeen::of(Path::new(source)).await != Some(seen) {
+                return Err(CoreError::InvalidInput(format!(
+                    "The ISO {source} changed since the deploy was approved: deploy again."
+                )));
+            }
         }
         // VM-32: the address is the VM's from now on; one taken or answering since the approval refuses.
         if let (Some(pool), Some(ip)) = (&install.pool, &values.ip) {
@@ -446,14 +510,17 @@ impl Deployer {
             .map_err(|err| CoreError::InvalidInput(format!("the ISO couldn't be read: {err}")))??;
         let done = Arc::new(AtomicU64::new(0));
         let total = Arc::new(AtomicU64::new(planned.iso_bytes.max(1)));
-        let cancel = Arc::new(AtomicBool::new(false));
+        // D7: the copy stops whenever this step does, also when its future is dropped by the step's cancel.
+        let cancel = CancelOnDrop(Arc::new(AtomicBool::new(false)));
+        // Written under another name and renamed once whole, so a crash never leaves a short copy under the real one.
+        let partial = target.with_extension("iso.partial");
         let copy = {
-            let (source, target) = (PathBuf::from(source), target.to_path_buf());
-            let (done, total, cancel) = (Arc::clone(&done), Arc::clone(&total), Arc::clone(&cancel));
+            let (source, partial) = (PathBuf::from(source), partial.clone());
+            let (done, total, cancel) = (Arc::clone(&done), Arc::clone(&total), Arc::clone(&cancel.0));
             tokio::task::spawn_blocking(move || {
                 iso::make_copy(
                     &source,
-                    &target,
+                    &partial,
                     &planned,
                     &|d, t| {
                         done.store(d, Ordering::Relaxed);
@@ -464,10 +531,14 @@ impl Deployer {
             })
         };
         tokio::pin!(copy);
+        let mut cancelled = false;
         let made = loop {
             tokio::select! {
                 finished = &mut copy => break finished,
-                _ = token.cancelled() => cancel.store(true, Ordering::Relaxed),
+                _ = token.cancelled(), if !cancelled => {
+                    cancel.0.store(true, Ordering::Relaxed);
+                    cancelled = true;
+                }
                 _ = tokio::time::sleep(Duration::from_millis(500)) => {
                     let pct = done.load(Ordering::Relaxed) as f64 / total.load(Ordering::Relaxed) as f64;
                     progress(1.0 + pct * 8.0, &format!("copying the install ISO ({:.0}%)", pct * 100.0));
@@ -475,6 +546,10 @@ impl Deployer {
             }
         };
         made.map_err(|err| CoreError::InvalidInput(format!("the ISO copy stopped: {err}")))??;
+        if let Err(err) = tokio::fs::rename(&partial, target).await {
+            let _ = tokio::fs::remove_file(&partial).await;
+            return Err(err.into());
+        }
         state.living.push(target.to_path_buf());
         progress(9.0, "the install ISO is copied");
         Ok(())
@@ -627,6 +702,7 @@ impl Deployer {
         let mut last_growth = tokio::time::Instant::now();
         let mut hang_resets = 0u32;
         let mut login_at: Option<tokio::time::Instant> = None;
+        let mut windows = WindowsSignIn::default();
         loop {
             if token.is_cancelled() {
                 return Err(CoreError::Cancelled);
@@ -637,7 +713,7 @@ impl Deployer {
             }
             let events = watcher.feed(&bytes);
             if let Some(why) = report(events, &watcher, &mut detail) {
-                return Err(self.install_failed(spec, vm, key, m, watcher.stage(), &why).await);
+                return Err(self.install_failed(spec, vm, key, watcher.stage(), &why).await);
             }
             if m.flavor.windows() {
                 let count = self.resets(spec, key, &folder, &mut log_at, &mut reset_seen).await;
@@ -669,7 +745,8 @@ impl Deployer {
             } else {
                 watcher.login_seen()
             };
-            if ready {
+            let due = windows.next_try.is_none_or(|at| tokio::time::Instant::now() >= at);
+            if ready && due {
                 match self.install_address(spec, vm, key, m).await {
                     Some((host, port)) if m.flavor.windows() => {
                         let fingerprint = watcher.fingerprint().unwrap_or_default().to_owned();
@@ -679,28 +756,41 @@ impl Deployer {
                             None => (host.clone(), port),
                         };
                         match self
-                            .windows_first_sign_in(ctx, spec, vm, m, &probe_host, probe_port, &fingerprint)
+                            .windows_first_sign_in(
+                                ctx,
+                                spec,
+                                vm,
+                                m,
+                                (&probe_host, probe_port),
+                                &fingerprint,
+                                &mut windows,
+                            )
                             .await
                         {
-                            Err(err @ CoreError::InstallFailed { .. }) => return Err(err),
                             Ok(note) => {
                                 notes.push(note);
                                 report(watcher.done("installed"), &watcher, &mut detail);
                                 return Ok(Some((host, port)));
                             }
-                            Err(CoreError::AuthFailed(why)) => {
-                                return Err(self
-                                    .install_failed(
-                                        spec,
-                                        vm,
-                                        key,
-                                        m,
-                                        watcher.stage(),
-                                        &format!("Windows refused the sign-in: {why}"),
-                                    )
-                                    .await)
+                            Err(SignInStop::Fatal(why)) => {
+                                return Err(self.install_failed(spec, vm, key, watcher.stage(), &why).await)
                             }
-                            Err(err) => tracing::debug!(error = %err, "WinRM isn't ready yet"),
+                            Err(SignInStop::VaultLocked) => {
+                                // D2: nothing goes to Windows until the vault is unlocked; the step says so.
+                                windows.vault_locked = true;
+                                windows.next_try = Some(tokio::time::Instant::now() + tuning.install_poll);
+                                progress(
+                                    10.0 + Stage::SigningIn.percent() * 0.85,
+                                    &format!("{VAULT_WAIT} to set the new VM's password"),
+                                );
+                            }
+                            Err(SignInStop::NotYet(err)) => {
+                                windows.vault_locked = false;
+                                tracing::debug!(error = %err, "WinRM isn't ready yet");
+                                windows.backoff =
+                                    (windows.backoff * 2).max(tuning.install_poll).min(MAX_SIGN_IN_BACKOFF);
+                                windows.next_try = Some(tokio::time::Instant::now() + windows.backoff);
+                            }
                         }
                     }
                     Some((host, port)) => {
@@ -730,13 +820,18 @@ impl Deployer {
                 }
             }
             if tokio::time::Instant::now() >= deadline {
-                let why = format!(
+                let mut why = format!(
                     "not done within {} minutes (it was at: {}, {})",
                     limit.as_secs().div_ceil(60),
                     watcher.stage().label(),
                     detail
                 );
-                return Err(self.install_failed(spec, vm, key, m, watcher.stage(), &why).await);
+                if windows.vault_locked {
+                    why.push_str(
+                        "; the vault was locked, so its password couldn't be set: Windows is installed and still has the one-time password",
+                    );
+                }
+                return Err(self.install_failed(spec, vm, key, watcher.stage(), &why).await);
             }
             tokio::select! {
                 _ = token.cancelled() => return Err(CoreError::Cancelled),
@@ -745,17 +840,9 @@ impl Deployer {
         }
     }
 
-    /// The install failed: a screenshot where the hypervisor takes one (VirtualBox), and the error, which says the
-    /// VM is kept for a look.
-    async fn install_failed(
-        &self,
-        spec: &DeploySpec,
-        vm: &DeployVm,
-        key: &str,
-        m: &InstallMade,
-        stage: Stage,
-        why: &str,
-    ) -> CoreError {
+    /// The install failed: a screenshot where the hypervisor takes one (VirtualBox), and the error. The step then takes
+    /// the seed out and says what the VM keeps ([`Self::abandon_install`]).
+    async fn install_failed(&self, spec: &DeploySpec, vm: &DeployVm, key: &str, stage: Stage, why: &str) -> CoreError {
         let mut message = format!("the install failed ({}): {why}", stage.label());
         if spec.hypervisor == Hypervisor::VirtualBox {
             if let Ok(png) = self.hypervisors.virtualbox().screenshot(key).await {
@@ -765,19 +852,104 @@ impl Deployer {
                 }
             }
         }
-        message.push_str(&format!(
-            "; the VM is kept as it is for a look (its serial log is {}): delete it from the VMs page when done",
-            m.serial.display()
-        ));
         CoreError::InstallFailed {
             vm: vm.name.clone(),
             message,
         }
     }
 
-    /// Windows (S3): WinRM over HTTPS with the certificate the VM wrote to COM1 and the one-time password; each
-    /// account's password set to the vault's (the script on stdin); then, signed in with the vault's, the autologon
-    /// session signed out and Setup's copy of the answer file deleted.
+    /// D4: an install that failed, ran out of time or was cancelled: its seed (the answer file's hashes, or Windows'
+    /// one-time password) is taken out and deleted, and VirtualBox's NAT rule removed. The VM, its ISO copy and its
+    /// serial log stay for a look (and its pool address with it, until the VM is deleted). Says what it did.
+    pub(super) async fn abandon_install(
+        &self,
+        job_id: Uuid,
+        spec: &DeploySpec,
+        key: &str,
+        m: &InstallMade,
+    ) -> Vec<String> {
+        let mut out = Vec::new();
+        self.isos.forget(job_id, &m.iso).await;
+        let workstation = spec.hypervisor == Hypervisor::Vmware;
+        let ejected = match &m.seed_drive {
+            Some(drive) => self.eject(key, drive, &m.seed).await,
+            None => Ok(()),
+        };
+        match ejected.and(empty_link(&m.seed, workstation).await) {
+            Ok(()) => {
+                if !workstation {
+                    let _ = tokio::fs::remove_dir(&m.seed_folder).await;
+                }
+                out.push(if workstation {
+                    "its seed (the answer file) is taken out, and its drive keeps an empty disc".to_owned()
+                } else {
+                    "its seed (the answer file) is ejected and deleted".to_owned()
+                });
+            }
+            Err(err) => out.push(format!(
+                "its seed {} couldn't be taken out ({err}): delete it with the VM",
+                m.seed.display()
+            )),
+        }
+        if m.nat_port.is_some() {
+            out.push(self.remove_nat_rule(key).await);
+        }
+        out.push(format!(
+            "the VM is kept for a look, with its install ISO copy and its serial log {}: delete it from the VMs page when done",
+            m.serial.display()
+        ));
+        out
+    }
+
+    /// A CD drive emptied: Workstation's disconnected (its .vmx keeps the drive), VirtualBox's ejected and its image
+    /// closed in the media list.
+    async fn eject(&self, key: &str, drive: &Drive, file: &Path) -> Result<()> {
+        match drive {
+            Drive::Workstation(slot) => self
+                .hypervisors
+                .vmware()
+                .vmrun_change(vec!["disconnectNamedDevice".into(), key.into(), slot.into()], SHORT)
+                .await
+                .map(drop),
+            Drive::VirtualBox(controller, port) => {
+                let out = self
+                    .vbox(vb::attach_named(key, controller, *port, 0, true, "emptydrive"), SHORT)
+                    .await;
+                let _ = self
+                    .vbox(
+                        vec!["closemedium".into(), "dvd".into(), file.display().to_string()],
+                        SHORT,
+                    )
+                    .await;
+                out.map(drop)
+            }
+        }
+    }
+
+    async fn remove_nat_rule(&self, key: &str) -> String {
+        match self
+            .vbox(
+                vec![
+                    "controlvm".into(),
+                    key.into(),
+                    "natpf1".into(),
+                    "delete".into(),
+                    plan::NAT_RULE.into(),
+                ],
+                SHORT,
+            )
+            .await
+        {
+            Ok(_) => "the NAT rule to its port is gone".into(),
+            Err(err) => format!("its NAT rule {} stays ({err})", plan::NAT_RULE),
+        }
+    }
+
+    /// Windows (S3): WinRM over HTTPS with only the certificate the VM wrote to COM1. Each account still on its
+    /// one-time password is set to the vault's (the script on stdin), and noted in `state` as soon as it is, so a try
+    /// that breaks after that signs in with the vault's next time (D3). Then, signed in with the vault's, the autologon
+    /// session is signed out and Setup's copy of the answer file deleted. The vault's passwords are read before
+    /// anything is sent, so a locked vault stops the try with nothing half done (D2).
     #[allow(clippy::too_many_arguments)]
     async fn windows_first_sign_in(
         &self,
@@ -785,15 +957,27 @@ impl Deployer {
         spec: &DeploySpec,
         vm: &DeployVm,
         m: &InstallMade,
-        host: &str,
-        port: u16,
+        (host, port): (&str, u16),
         fingerprint: &str,
-    ) -> Result<String> {
-        let tools = self.install_tools()?;
-        let first = m
-            .one_time
-            .first()
-            .ok_or_else(|| CoreError::InvalidInput("The answer file gives no account a password.".into()))?;
+        state: &mut WindowsSignIn,
+    ) -> std::result::Result<String, SignInStop> {
+        let tools = self.install_tools().map_err(SignInStop::NotYet)?;
+        let Some(first) = m.one_time.first() else {
+            return Err(SignInStop::Fatal("the answer file gives no account a password".into()));
+        };
+        let mut vault_passwords = Vec::with_capacity(m.one_time.len());
+        for one in &m.one_time {
+            match self.vault.get(ctx, one.vault).await {
+                Ok(password) => vault_passwords.push(password),
+                Err(CoreError::VaultLocked) => return Err(SignInStop::VaultLocked),
+                Err(err) => {
+                    return Err(SignInStop::Fatal(format!(
+                        "{}'s vault password couldn't be read ({err})",
+                        one.account
+                    )))
+                }
+            }
+        }
         let connect = |account: &str, password: SecretString| {
             let winrm_spec = WinrmSpec {
                 id: Uuid::new_v4(),
@@ -810,11 +994,10 @@ impl Deployer {
                 environment: spec.environment,
             };
             let tools = tools.clone();
-            let verifier: Arc<dyn HostKeyVerifier> = Arc::new(PinnedCertificate {
-                fingerprint: fingerprint.to_owned(),
-            });
+            let pinned = Arc::new(PinnedCertificate::new(fingerprint));
+            let verifier: Arc<dyn HostKeyVerifier> = pinned.clone();
             async move {
-                tools
+                let connected = tools
                     .winrm
                     .connect(WinrmConnect {
                         spec: &winrm_spec,
@@ -822,57 +1005,84 @@ impl Deployer {
                         verifier,
                         tuning: WinrmTuning::default(),
                     })
-                    .await
+                    .await;
+                (connected, pinned.mismatch())
             }
         };
-        let session = connect(&first.account, first.password.clone()).await?;
-        for one in &m.one_time {
-            let password = self.vault.get(ctx, one.vault).await?;
-            let script = Zeroizing::new(plan::set_password_script(&one.account, password.expose()));
-            drop(password);
-            let ran = session.run(&script, MAX_SCRIPT_OUTPUT).await;
-            drop(script);
-            match ran {
-                Ok(result) if result.exit_code == Some(0) => {}
-                Ok(_) | Err(_) => {
-                    session.close().await;
-                    return Err(CoreError::InstallFailed {
-                        vm: vm.name.clone(),
-                        message: format!(
+        // Why a sign-in didn't work: another certificate and a refused password end the install, the rest waits.
+        let stop = |err: CoreError, mismatch: Option<String>, with: &str| {
+            match (err, mismatch) {
+            (_, Some(other)) => SignInStop::Fatal(format!(
+                "WinRM showed the certificate {other}, not the one the VM wrote to its serial port ({fingerprint}): Remotely didn't sign in"
+            )),
+            (CoreError::AuthFailed(why), None) => SignInStop::Fatal(format!("Windows refused {with}: {why}")),
+            (err, None) => SignInStop::NotYet(err),
+        }
+        };
+        let first_swapped = state.swapped.contains(&first.account);
+        let pending: Vec<usize> = (0..m.one_time.len())
+            .filter(|&i| !state.swapped.contains(&m.one_time[i].account))
+            .collect();
+        if !pending.is_empty() {
+            let (password, with) = if first_swapped {
+                (vault_passwords[0].clone(), "the vault's password")
+            } else {
+                (first.password.clone(), "the one-time password")
+            };
+            let (connected, mismatch) = connect(&first.account, password).await;
+            let session = connected.map_err(|err| stop(err, mismatch, with))?;
+            for i in pending {
+                let one = &m.one_time[i];
+                let script = Zeroizing::new(plan::set_password_script(&one.account, vault_passwords[i].expose()));
+                let ran = session.run(&script, MAX_SCRIPT_OUTPUT).await;
+                drop(script);
+                match ran {
+                    Ok(result) if result.exit_code == Some(0) => state.swapped.push(one.account.clone()),
+                    Ok(_) => {
+                        session.close().await;
+                        return Err(SignInStop::Fatal(format!(
                             "{}'s password couldn't be set to the vault's over WinRM; it is still the one-time password only this deploy knew, so deploy the VM again",
                             one.account
-                        ),
-                    });
+                        )));
+                    }
+                    Err(err) => {
+                        session.close().await;
+                        return Err(SignInStop::NotYet(err));
+                    }
                 }
             }
+            session.close().await;
         }
-        session.close().await;
-        let vault_password = self.vault.get(ctx, first.vault).await?;
-        let session = connect(&first.account, vault_password).await?;
+        let (connected, mismatch) = connect(&first.account, vault_passwords[0].clone()).await;
+        drop(vault_passwords);
+        let session = connected.map_err(|err| stop(err, mismatch, "the vault's password"))?;
         let after = session.run(plan::AFTER_INSTALL_SCRIPT, MAX_SCRIPT_OUTPUT).await;
         session.close().await;
+        let out = match after {
+            Ok(result) => result.output.stdout,
+            // The passwords are the vault's now: only this part goes again.
+            Err(err) => return Err(SignInStop::NotYet(err)),
+        };
         let mut note = format!(
             "WinRM over HTTPS answers with the certificate it wrote to its serial port ({fingerprint}); {} password{} set to the vault's",
             m.one_time.iter().map(|o| o.account.as_str()).collect::<Vec<_>>().join(", "),
             if m.one_time.len() == 1 { "" } else { "s" }
         );
-        match after {
-            Ok(result) => {
-                let out = result.output.stdout;
-                if let Some(hash) = out.lines().find_map(|l| l.trim().strip_prefix("answer-file ")) {
-                    if hash.trim().eq_ignore_ascii_case(&m.sha256) {
-                        note.push_str("; Setup read this deploy's answer file, and its copy in Panther is deleted");
-                    } else {
-                        note.push_str(
-                            "; Setup's copy of an answer file in Panther is deleted (not this deploy's file)",
-                        );
-                    }
-                }
-                if out.lines().any(|l| l.trim().starts_with("signed-out ")) {
-                    note.push_str("; the autologon session is signed out");
-                }
-            }
-            Err(err) => note.push_str(&format!("; the after-install script didn't run ({err})")),
+        let line = |prefix: &str| out.lines().find_map(|l| l.trim().strip_prefix(prefix).map(str::trim));
+        if let Some(hash) = line("answer-file ") {
+            note.push_str(if hash.eq_ignore_ascii_case(&m.sha256) {
+                "; Setup read this deploy's answer file"
+            } else {
+                "; Setup's copy of an answer file in Panther isn't this deploy's"
+            });
+            note.push_str(if line("removed-original").is_some() {
+                ", and its copy in Panther is deleted"
+            } else {
+                ", and its copy in Panther (with the one-time password) couldn't be deleted: delete C:\\Windows\\Panther\\unattend-original.xml"
+            });
+        }
+        if line("signed-out").is_some() {
+            note.push_str("; the autologon session is signed out");
         }
         Ok(note)
     }
@@ -893,72 +1103,48 @@ impl Deployer {
     ) {
         let mut out: Vec<String> = Vec::new();
         self.isos.forget(job_id, &m.iso).await;
-        let mut cds_out = true;
-        for (drive, file) in [(&m.iso_drive, &m.iso), (&m.seed_drive, &m.seed)] {
-            let Some(drive) = drive else { continue };
-            let ejected = match drive {
-                Drive::Workstation(slot) => self
-                    .hypervisors
-                    .vmware()
-                    .vmrun_change(vec!["disconnectNamedDevice".into(), key.into(), slot.into()], SHORT)
-                    .await
-                    .map(drop),
-                Drive::VirtualBox(controller, port) => {
-                    let out = self
-                        .vbox(vb::attach_named(key, controller, *port, 0, true, "emptydrive"), SHORT)
-                        .await;
-                    let _ = self
-                        .vbox(
-                            vec!["closemedium".into(), "dvd".into(), file.display().to_string()],
-                            SHORT,
-                        )
-                        .await;
-                    out.map(drop)
-                }
-            };
-            if let Err(err) = ejected {
-                cds_out = false;
-                out.push(format!("{} is still in its drive ({err})", file.display()));
-            }
-        }
         let workstation = spec.hypervisor == Hypervisor::Vmware;
-        // The seed (with the answer file's hashes) goes now; Workstation's drive keeps an empty disc.
-        if let Err(err) = empty_link(&m.seed, workstation).await {
-            out.push(format!(
-                "the seed {} couldn't be emptied ({err}): delete it",
+        let disc = if workstation {
+            " (its drive keeps an empty disc: remove the drive in Settings when the VM is off)"
+        } else {
+            ""
+        };
+        // The seed first (it holds the answer file's hashes, or Windows' one-time password), then the ISO copy.
+        let seed_ejected = match &m.seed_drive {
+            Some(drive) => self.eject(key, drive, &m.seed).await,
+            None => Ok(()),
+        };
+        match seed_ejected.and(empty_link(&m.seed, workstation).await) {
+            Ok(()) => {
+                if !workstation {
+                    let _ = tokio::fs::remove_dir(&m.seed_folder).await;
+                }
+                out.push(format!("the seed is taken out and deleted{disc}"));
+            }
+            Err(err) => out.push(format!(
+                "the seed {} couldn't be taken out ({err}): delete it once the VM is off",
                 m.seed.display()
-            ));
-        } else if !workstation {
-            let _ = tokio::fs::remove_dir(&m.seed_folder).await;
+            )),
         }
-        if cds_out {
-            if empty_link(&m.iso, workstation).await.is_err() {
-                // Another VM of the deploy still installs from the same copy: emptied once it is done.
-                self.isos.later(job_id, m.iso.clone(), workstation).await;
-            }
-            out.push(if workstation {
-                "the install ISO and the seed are out (their drives keep empty discs: remove them in Settings when the VM is off)".into()
-            } else {
-                "the install ISO and the seed are ejected and deleted".into()
-            });
+        let iso_ejected = match &m.iso_drive {
+            Some(drive) => self.eject(key, drive, &m.iso).await,
+            None => Ok(()),
+        };
+        match iso_ejected {
+            Err(err) => out.push(format!("the install ISO's copy is still in its drive ({err})")),
+            Ok(()) => match empty_link(&m.iso, workstation).await {
+                Ok(()) => out.push(format!("the install ISO's copy is taken out and deleted{disc}")),
+                Err(_) => {
+                    // Another VM of the deploy still reads the same copy: emptied once it lets go.
+                    self.isos.later(job_id, m.iso.clone(), workstation).await;
+                    out.push(format!(
+                        "the install ISO's copy is taken out; its file is emptied once the deploy's other VMs let go of it{disc}"
+                    ));
+                }
+            },
         }
-        if let Some(_port) = m.nat_port {
-            match self
-                .vbox(
-                    vec![
-                        "controlvm".into(),
-                        key.into(),
-                        "natpf1".into(),
-                        "delete".into(),
-                        plan::NAT_RULE.into(),
-                    ],
-                    SHORT,
-                )
-                .await
-            {
-                Ok(_) => out.push("the NAT rule to its port is gone".into()),
-                Err(err) => out.push(format!("its NAT rule {} stays ({err})", plan::NAT_RULE)),
-            }
+        if m.nat_port.is_some() {
+            out.push(self.remove_nat_rule(key).await);
         }
         if spec.after_deploy.clean_snapshot {
             match self
@@ -1112,24 +1298,71 @@ impl Deployer {
     }
 
     /// A step that failed before its VM was made gives its address back.
-    pub(super) async fn release_claim(&self, ctx: &Context, made: &Made) {
+    pub(super) async fn release_claim(&self, ctx: &Context, job_id: Uuid, made: &Made) {
         if let (Some((pool, ip)), Ok(tools)) = (made.pool_claim, self.install_tools()) {
             if let Some(pools) = tools.pools {
-                if let Err(err) = pools.release(ctx, pool, ip).await {
+                if let Err(err) = pools.release(ctx, pool, ip, job_id).await {
                     tracing::warn!(error = %err, "deploy cleanup: an address couldn't go back to its pool");
                 }
             }
         }
     }
 
+    /// The job's claims no VM took (a cancel while a claim pinged, a step that failed early) go back to their pools.
+    pub(super) async fn release_job_claims(&self, ctx: &Context, job_id: Uuid) {
+        if let Ok(InstallTools { pools: Some(pools), .. }) = self.install_tools() {
+            if let Err(err) = pools.release_job_claims(ctx, job_id).await {
+                tracing::warn!(error = %err, "a deploy's addresses couldn't go back to their pools");
+            }
+        }
+    }
+
     /// The VM keeps its address once it is made.
-    pub(super) async fn assign_claim(&self, ctx: &Context, made: &Made, key: &str) {
+    pub(super) async fn assign_claim(&self, ctx: &Context, job_id: Uuid, made: &Made, key: &str) {
         if let (Some((pool, ip)), Ok(tools)) = (made.pool_claim, self.install_tools()) {
             if let Some(pools) = tools.pools {
-                if let Err(err) = pools.assign(ctx, pool, ip, key).await {
+                if let Err(err) = pools.assign(ctx, pool, ip, job_id, key).await {
                     tracing::warn!(error = %err, "an address couldn't be recorded as the new VM's");
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+
+    use super::*;
+
+    #[tokio::test]
+    async fn a_dropped_copy_step_stops_its_copy() {
+        // D7 of PR 98's review: the step's future dropped by a cancel sets the flag the copy reads.
+        let flag = Arc::new(AtomicBool::new(false));
+        let step = {
+            let guard = CancelOnDrop(Arc::clone(&flag));
+            async move {
+                let _guard = guard;
+                std::future::pending::<()>().await;
+            }
+        };
+        let dropped = tokio::time::timeout(Duration::from_millis(20), step).await;
+        assert!(dropped.is_err());
+        assert!(flag.load(Ordering::Relaxed), "the copy is told to stop");
+    }
+
+    #[tokio::test]
+    async fn a_pinned_certificate_remembers_what_else_was_shown() {
+        let pinned = PinnedCertificate::new("SHA256:aaaa");
+        let key = |fingerprint: &str| HostKey {
+            host: "192.0.2.31".into(),
+            port: 5986,
+            key_type: CERT_KEY_TYPE.into(),
+            fingerprint: fingerprint.into(),
+        };
+        assert!(pinned.verify(&key("SHA256:aaaa"), None).await.is_ok());
+        assert_eq!(pinned.mismatch(), None);
+        assert!(pinned.verify(&key("SHA256:bbbb"), None).await.is_err());
+        assert_eq!(pinned.mismatch().as_deref(), Some("SHA256:bbbb"));
     }
 }

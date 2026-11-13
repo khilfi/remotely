@@ -11,6 +11,8 @@ export interface AddressPoolInput {
   name: string;
   hypervisor: Hypervisor;
   network: TemplateNetwork;
+  /** VirtualBox host-only: the adapter's name; null for every other network. */
+  hostAdapter: string | null;
   firstIp: string;
   lastIp: string;
   prefix: number;
@@ -25,8 +27,10 @@ export interface AddressPool extends AddressPoolInput {
   size: number;
   /** Addresses it can hand out: the range without the gateway and DNS servers. */
   usable: number;
-  /** Assigned to a VM, or claimed by a deploy now. */
+  /** Held by this pool: assigned to a VM, or claimed by a running deploy. */
   used: number;
+  /** Addresses of the range another workspace holds on the same network of this PC. */
+  heldElsewhere: number;
   free: number;
   createdAt: string;
   updatedAt: string;

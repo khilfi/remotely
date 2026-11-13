@@ -1543,6 +1543,8 @@ impl JobRunner {
                 }
             }
             Err(Stop::Cancelled | Stop::Error(CoreError::Cancelled)) => Finished::cancelled(None),
+            // VM-29: an install cancelled while it was watched says what it kept.
+            Err(Stop::Error(err @ CoreError::InstallCancelled { .. })) => Finished::cancelled(Some(&err)),
             Err(Stop::Halted) => Finished::skipped(
                 tally
                     .halted
@@ -2994,10 +2996,15 @@ impl JobRunner {
             | Command::FileServer { .. } => 1,
             // VM-21: each VM copies or writes whole disks, so two at a time keep this PC's disk usable.
             // VM-29: an unattended install writes a blank disk, then waits for its installer.
-            Command::Deploy { spec, .. } if spec.install.is_some() => crate::deploy::PARALLEL_INSTALLS,
+            Command::Deploy { spec, .. } if spec.install.is_some() => {
+                limits.vm_ops.min(crate::deploy::PARALLEL_INSTALLS)
+            }
             Command::Deploy { .. } => limits.vm_ops.min(crate::deploy::PARALLEL_VMS),
             // VM-08: within a step, as the commands it stands for.
             Command::Stack { op, .. } => match op {
+                crate::stacks::StackOp::Deploy { spec } if spec.steps.iter().any(|s| s.spec.install.is_some()) => {
+                    limits.vm_ops.min(crate::deploy::PARALLEL_INSTALLS)
+                }
                 crate::stacks::StackOp::Deploy { .. } => limits.vm_ops.min(crate::deploy::PARALLEL_VMS),
                 crate::stacks::StackOp::Power { spec } if spec.starts() => limits.power_on,
                 crate::stacks::StackOp::Power { .. } | crate::stacks::StackOp::Teardown { .. } => limits.vm_ops,

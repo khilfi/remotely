@@ -386,7 +386,7 @@ pub async fn preview(spec: &DeploySpec, hypervisors: &Hypervisors, host: &dyn Ho
                     }
                 ));
                 notes.push(
-                    "An install that fails or runs out of time keeps its VM, its serial log and (VirtualBox) a screenshot, for a look at why."
+                    "An install that fails, runs out of time or is cancelled keeps its VM, its ISO copy, its serial log and (VirtualBox) a screenshot, for a look at why; its seed is taken out. The serial port stays on the VM, so its log grows a little on every boot."
                         .into(),
                 );
             }
@@ -401,6 +401,18 @@ pub async fn preview(spec: &DeploySpec, hypervisors: &Hypervisors, host: &dyn Ho
         }),
         DeploySource::BulkClone => {
             notes.push("Each clone is a full copy of its VM as it is now, with its CPU, memory, disks and network, and stays off like it.".into())
+        }
+    }
+    // S2: a Workstation BIOS VM boots its disk first; a disk an interrupted install already partitioned doesn't fall
+    // through to the ISO.
+    if let (Hypervisor::Vmware, DeploySource::Iso { .. }, Some(profile)) =
+        (spec.hypervisor, &spec.source, &spec.profile)
+    {
+        if profile.firmware == crate::catalog::profiles::Firmware::Bios {
+            notes.push(
+                "The VM boots its disk first, then the ISO: if an install stops after it has partitioned the disk, try again with a new VM."
+                    .into(),
+            );
         }
     }
     if let (Some(profile), None) = (&spec.profile, &spec.first_boot) {

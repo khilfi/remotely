@@ -72,6 +72,7 @@ pub(crate) fn plan<R: Read + Seek>(image: &mut Image<R>) -> Result<(Vec<IsoWrite
     iso.require_file(image, INITRD)?;
     let isolinux = iso.text_file(image, ISOLINUX_CFG, MAX_MENU_BYTES)?;
     let grub = iso.text_file(image, GRUB_CFG, MAX_MENU_BYTES)?;
+    iso.check_alone(image, &[&isolinux, &grub])?;
     let new_isolinux = isolinux_cfg();
     let new_grub = grub_cfg();
     if !std::str::from_utf8(&grub.content).is_ok_and(|text| text.contains(KERNEL)) {

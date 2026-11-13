@@ -21,6 +21,10 @@ const MAX_CE_READS: usize = 512;
 const MAX_CE_BYTES: u32 = 2048;
 const MAX_NAME_BYTES: usize = 1024;
 const EL_TORITO: &[u8] = b"EL TORITO SPECIFICATION";
+/// The most folders [`Volume::walk`] reads (Debian's DVD-1 has a few thousand).
+pub const MAX_WALK_FOLDERS: usize = 100_000;
+/// The most folder bytes [`Volume::walk`] reads.
+pub const MAX_WALK_BYTES: u64 = 256 * 1024 * 1024;
 
 /// A directory's extent and size.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,6 +46,17 @@ pub struct Volume {
     rr_skip: usize,
     /// El Torito's boot catalog sector, from the boot record.
     pub boot_catalog: Option<u32>,
+    /// Sectors the volume's own structures take, `[start, end)` with what they are: the system area and the
+    /// volume descriptors, each descriptor's path tables, and the roots' folders (no record names those).
+    pub reserved: Vec<Reserved>,
+}
+
+/// Sectors `[start, end)` of the volume's own structures, and what they are, in words.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Reserved {
+    pub start: u64,
+    pub end: u64,
+    pub what: &'static str,
 }
 
 /// One directory record, where it is in the image, and the name it was found by.
@@ -102,6 +117,43 @@ impl Record {
     pub fn data_offset(&self) -> u64 {
         u64::from(self.extent) * SECTOR
     }
+
+    /// The sectors its data takes, `[start, end)`; empty for an empty file.
+    pub fn sectors(&self) -> (u64, u64) {
+        let start = u64::from(self.extent);
+        (start, start + u64::from(self.size).div_ceil(SECTOR))
+    }
+}
+
+/// `[start, end)` sector ranges that share at least one sector.
+pub fn overlap(a: (u64, u64), b: (u64, u64)) -> bool {
+    a.0 < a.1 && b.0 < b.1 && a.0 < b.1 && b.0 < a.1
+}
+
+/// A descriptor's path tables: type L at 140 (and 144), type M at 148 (and 152), each the size at 132.
+fn path_tables(descriptor: &[u8], tree: &'static str) -> Vec<Reserved> {
+    let sectors = u64::from(le32(descriptor, 132)).div_ceil(SECTOR);
+    [
+        le32(descriptor, 140),
+        le32(descriptor, 144),
+        be32(descriptor, 148),
+        be32(descriptor, 152),
+    ]
+    .into_iter()
+    .filter(|&at| at != 0 && sectors > 0)
+    .map(|at| Reserved {
+        start: u64::from(at),
+        end: u64::from(at) + sectors,
+        what: tree,
+    })
+    .collect()
+}
+
+fn be32(d: &[u8], at: usize) -> u32 {
+    match d.get(at..at + 4) {
+        Some(b) => u32::from_be_bytes([b[0], b[1], b[2], b[3]]),
+        None => 0,
+    }
 }
 
 fn halves_agree(field: &[u8; 8]) -> bool {
@@ -117,6 +169,7 @@ impl Volume {
         let mut primary: Option<Vec<u8>> = None;
         let mut joliet: Option<Vec<u8>> = None;
         let mut boot_catalog = None;
+        let mut descriptors_end = FIRST_DESCRIPTOR;
         for n in FIRST_DESCRIPTOR..FIRST_DESCRIPTOR + MAX_DESCRIPTORS {
             if !image.has_sector(n) {
                 break;
@@ -125,6 +178,7 @@ impl Volume {
             if &d[1..6] != b"CD001" {
                 break;
             }
+            descriptors_end = n + 1;
             match d[0] {
                 0 if boot_catalog.is_none() && d[7..7 + EL_TORITO.len()] == *EL_TORITO => {
                     boot_catalog = Some(le32(&d, 71));
@@ -141,6 +195,22 @@ impl Volume {
             Some(d) => Some(root_of(d)?),
             None => None,
         };
+        let mut reserved = vec![Reserved {
+            start: 0,
+            end: descriptors_end,
+            what: "the system area and volume descriptors",
+        }];
+        reserved.extend(path_tables(&primary, "a path table"));
+        if let Some(d) = &joliet {
+            reserved.extend(path_tables(d, "a Joliet path table"));
+        }
+        for root in std::iter::once(primary_root).chain(joliet_root) {
+            reserved.push(Reserved {
+                start: u64::from(root.extent),
+                end: u64::from(root.extent) + u64::from(root.size).div_ceil(SECTOR),
+                what: "a root folder",
+            });
+        }
         let mut volume = Volume {
             primary_root,
             joliet_root,
@@ -148,6 +218,7 @@ impl Volume {
             rock_ridge: false,
             rr_skip: 0,
             boot_catalog,
+            reserved,
         };
         // SUSP: `SP` (with check bytes BE EF) opens the system use area of the root's first record, `.`.
         let first = image.sector(u64::from(primary_root.extent), "the root folder")?;
@@ -201,6 +272,52 @@ impl Volume {
 
     /// Every record of `dir` but `.` and `..`, in order.
     pub fn list<R: Read + Seek>(&self, image: &mut Image<R>, dir: Dir, tree: Tree) -> Result<Vec<Record>> {
+        self.list_named(image, dir, tree, true)
+    }
+
+    /// Every record of every folder of `tree` but `.` and `..`, folders included, each folder read once (a folder
+    /// whose record points back up isn't read again), at most [`MAX_WALK_FOLDERS`] folders and
+    /// [`MAX_WALK_BYTES`] of them; names are the plain or Joliet ones (no Rock Ridge continuation is followed).
+    /// `visit` sees each record; its error ends the walk.
+    pub fn walk<R: Read + Seek>(
+        &self,
+        image: &mut Image<R>,
+        tree: Tree,
+        mut visit: impl FnMut(&Record) -> Result<()>,
+    ) -> Result<()> {
+        let root = match tree {
+            Tree::Joliet => self.joliet_root.ok_or_else(|| damaged("it has no Joliet tree"))?,
+            _ => self.primary_root,
+        };
+        let mut queue = std::collections::VecDeque::from([root]);
+        let mut seen = std::collections::HashSet::from([root.extent]);
+        let (mut folders, mut bytes) = (0usize, 0u64);
+        while let Some(dir) = queue.pop_front() {
+            folders += 1;
+            bytes += u64::from(dir.size);
+            if folders > MAX_WALK_FOLDERS || bytes > MAX_WALK_BYTES {
+                return Err(damaged("it has more folders than Remotely checks"));
+            }
+            for record in self.list_named(image, dir, tree, false)? {
+                visit(&record)?;
+                if record.is_dir() && seen.insert(record.extent) {
+                    queue.push_back(Dir {
+                        extent: record.extent,
+                        size: record.size,
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn list_named<R: Read + Seek>(
+        &self,
+        image: &mut Image<R>,
+        dir: Dir,
+        tree: Tree,
+        rock_ridge_names: bool,
+    ) -> Result<Vec<Record>> {
         let size = u64::from(dir.size);
         if size > MAX_DIR_BYTES {
             return Err(damaged(format!(
@@ -239,10 +356,12 @@ impl Volume {
             let su_start = (33 + name_len + usize::from(name_len.is_multiple_of(2))).min(len);
             let (name, by_rock_ridge) = match tree {
                 Tree::Joliet => (joliet_name(id), false),
-                _ if self.rock_ridge => match rr_name(image, &rec[su_start..], self.rr_skip, &mut ce_reads)? {
-                    Some(name) => (name, true),
-                    None => (plain_name(id), false),
-                },
+                _ if self.rock_ridge && rock_ridge_names => {
+                    match rr_name(image, &rec[su_start..], self.rr_skip, &mut ce_reads)? {
+                        Some(name) => (name, true),
+                        None => (plain_name(id), false),
+                    }
+                }
                 _ => (plain_name(id), false),
             };
             let mut extent_field = [0u8; 8];

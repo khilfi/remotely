@@ -64,17 +64,30 @@ export function DeployPreviewView({ preview, showWarnings = true }: Props) {
                 : ""}
               ; watched for up to {preview.install.timeLimitMinutes} minutes
             </dd>
-            {preview.install.vms.some((vm) => vm.ip) && (
+            {preview.install.vms.some((vm) => vm.ip || Object.keys(vm.values).length > 0) && (
               <>
-                <dt className="text-muted-foreground">Addresses</dt>
-                <dd>
-                  {preview.install.vms.map((vm, i) => (
-                    <span key={vm.name}>
-                      {i > 0 && ", "}
-                      {vm.name} <span data-mask="ip">{vm.ip ?? "DHCP"}</span>
+                <dt className="text-muted-foreground">Values</dt>
+                <dd className="grid gap-0.5">
+                  {/* Everything that goes into each VM's file besides its name and the vault's secrets. */}
+                  {preview.install.vms.map((vm) => (
+                    <span key={vm.name} className="break-words">
+                      <span className="font-medium">{vm.name}</span>
+                      {vm.ip && (
+                        <>
+                          {" "}
+                          ip <span data-mask="ip">{vm.ip}</span>
+                        </>
+                      )}
+                      {Object.entries(vm.values).map(([name, value]) => (
+                        <span key={name}>
+                          , {name} <span className="font-mono">{value}</span>
+                        </span>
+                      ))}
                     </span>
                   ))}
-                  {preview.install.pool ? ` (from the pool ${preview.install.pool})` : ""}
+                  {preview.install.pool && (
+                    <span className="text-muted-foreground">Addresses from the pool {preview.install.pool}</span>
+                  )}
                 </dd>
               </>
             )}

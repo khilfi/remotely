@@ -197,7 +197,7 @@ pub fn set_password_script(account: &str, password: &str) -> String {
 /// After the password is the vault's (S3): the autologon session signed out, and the copy of the answer file Windows
 /// Server 2025 keeps (`unattend-original.xml`, with the one-time password, readable by Users) deleted. It prints the
 /// copy's SHA-256 first, so the job can say Setup read this deploy's file.
-pub const AFTER_INSTALL_SCRIPT: &str = "$f = 'C:\\Windows\\Panther\\unattend-original.xml'; if (Test-Path -LiteralPath $f) { 'answer-file ' + (Get-FileHash -LiteralPath $f -Algorithm SHA256).Hash; Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue }; $p = Get-Process explorer -ErrorAction SilentlyContinue | Where-Object { $_.SessionId -gt 0 } | Select-Object -First 1; if ($p) { logoff $p.SessionId; 'signed-out ' + $p.SessionId }";
+pub const AFTER_INSTALL_SCRIPT: &str = "$f = 'C:\\Windows\\Panther\\unattend-original.xml'; if (Test-Path -LiteralPath $f) { 'answer-file ' + (Get-FileHash -LiteralPath $f -Algorithm SHA256).Hash; try { Remove-Item -LiteralPath $f -Force -ErrorAction Stop; 'removed-original' } catch { } }; $p = Get-Process explorer -ErrorAction SilentlyContinue | Where-Object { $_.SessionId -gt 0 } | Select-Object -First 1; if ($p) { logoff $p.SessionId; if ($LASTEXITCODE -eq 0) { 'signed-out ' + $p.SessionId } }";
 
 #[cfg(test)]
 mod tests {

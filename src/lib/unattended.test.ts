@@ -65,6 +65,15 @@ test("CSV rows map to ip and the config's variables", () => {
   assert.deepEqual(tabbed.rows, [{ ip: "192.0.2.9", values: { role: "db" } }]);
 });
 
+test("a name column puts each line on its VM, whatever the order", () => {
+  const names = ["web-1", "web-2", "web-3"];
+  const parsed = parseRows("name,ip\nWEB-3,192.0.2.23\nweb-1,192.0.2.21", [], names);
+  assert.equal(parsed.error, null);
+  assert.deepEqual(parsed.rows, [{ ip: "192.0.2.21", values: {} }, null, { ip: "192.0.2.23", values: {} }]);
+  assert.match(parseRows("name,ip\ndb-1,192.0.2.1", [], names).error ?? "", /no VM named "db-1"/);
+  assert.match(parseRows("name\nweb-1\nweb-1", [], names).error ?? "", /two lines/);
+});
+
 test("the request has a row per VM, and a pool's VMs type no address", () => {
   const rows = [{ ip: " 192.0.2.21 ", values: { role: " web ", gateway: "" } }];
   assert.deepEqual(requestRows(rows, 2, false), [

@@ -297,7 +297,7 @@ impl Deployer {
             }
         };
         self.list(ctx, spec, &key, made).await?;
-        self.assign_claim(ctx, made, &key).await;
+        self.assign_claim(ctx, job_id, made, &key).await;
         if let Some(tag) = spec.stack {
             // VM-08: in its stack instance as soon as it is made, so teardown finds it even if the job stops here.
             let listed = self
@@ -1343,74 +1343,26 @@ impl Deployer {
             });
         }
         // VM-21: VirtualBox's own unattended install leaves its files (one with the password's hash) beside the .vbox
-        // and its virtual ISO in the media list; both go once it has ejected that ISO, at the install's end.
+        // and its virtual ISO in the media list. They go in the background once VirtualBox ejects that ISO or the VM
+        // is shut down (S3: Windows never ejects it; S2: Debian on UEFI waits at GRUB), so the job isn't held.
         if spec.unattended.is_some() && spec.hypervisor == Hypervisor::VirtualBox {
-            notes.push(self.clean_vbox_unattended(spec, vm, key, token).await);
+            let hypervisors = self.hypervisors.clone();
+            let (key, folder) = (key.to_owned(), spec.vm_folder(vm));
+            let poll = self.tuning().install_poll * 12;
+            tokio::spawn(async move {
+                let left = clean_vbox_unattended(&hypervisors, &key, &folder, poll, VBOX_UNATTENDED_WATCH).await;
+                if !left.is_empty() {
+                    tracing::warn!(
+                        files = left.len(),
+                        "VirtualBox's unattended install files stay beside the VM's settings"
+                    );
+                }
+            });
+            notes.push(
+                "VirtualBox's install files (one with the password's hash) are deleted once it ejects its install ISO or the VM is shut down, while Remotely runs".into(),
+            );
         }
         notes.join("; ")
-    }
-
-    /// VM-21: waits (at most the install watcher's time limit) for VirtualBox to eject its unattended install's
-    /// `.viso`, then closes it in the media list and deletes the `Unattended-<uuid>-*` files beside the `.vbox`.
-    async fn clean_vbox_unattended(
-        &self,
-        spec: &DeploySpec,
-        vm: &DeployVm,
-        key: &str,
-        token: &CancellationToken,
-    ) -> String {
-        let tuning = self.tuning();
-        let limit = Duration::from_secs(u64::from(super::spec::DEFAULT_INSTALL_MINUTES) * 60);
-        let deadline = tokio::time::Instant::now() + tuning.install_cap.map_or(limit, |cap| limit.min(cap));
-        let vbox = self.hypervisors.virtualbox();
-        let is_viso = |p: &Path| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("viso"));
-        let ejected = loop {
-            match vbox.vm_info(key).await {
-                Ok(info) if !info.dvds.iter().any(|d| d.image.as_deref().is_some_and(is_viso)) => break true,
-                _ => {}
-            }
-            if tokio::time::Instant::now() >= deadline || token.is_cancelled() {
-                break false;
-            }
-            tokio::select! {
-                _ = token.cancelled() => {}
-                _ = tokio::time::sleep(tuning.install_poll * 6) => {}
-            }
-        };
-        if !ejected {
-            return "VirtualBox's install files (one with the password's hash) stay beside the VM's settings until its install ejects them: delete the Unattended-* files there once it is installed".into();
-        }
-        let folder = spec.vm_folder(vm);
-        let prefix = format!("Unattended-{}-", key.to_ascii_lowercase());
-        let mut left = Vec::new();
-        if let Ok(mut entries) = tokio::fs::read_dir(&folder).await {
-            while let Ok(Some(entry)) = entries.next_entry().await {
-                let name = entry.file_name().to_string_lossy().into_owned();
-                if !name.to_ascii_lowercase().starts_with(&prefix) {
-                    continue;
-                }
-                let path = entry.path();
-                if is_viso(&path) {
-                    let _ = self
-                        .vbox(
-                            vec!["closemedium".into(), "dvd".into(), path.display().to_string()],
-                            SHORT,
-                        )
-                        .await;
-                }
-                if tokio::fs::remove_file(&path).await.is_err() {
-                    left.push(name);
-                }
-            }
-        }
-        if left.is_empty() {
-            "VirtualBox's install files are deleted and its virtual ISO closed".into()
-        } else {
-            format!(
-                "these install files of VirtualBox's couldn't be deleted: {}",
-                left.join(", ")
-            )
-        }
     }
 
     /// The SSH session to the guest, linked to the VM by hand (QL-01) when the deploy says so.
@@ -1487,7 +1439,10 @@ impl DeployActions for Deployer {
         // VM-29: the deploy's copy of the install ISO is shared by its VMs while any of them runs.
         self.isos.enter(job_id).await;
         let result = self.deploy_one(ctx, job_id, spec, vm, progress, token).await;
-        self.isos.leave(job_id).await;
+        if self.isos.leave(job_id).await {
+            // P3 of PR 98's review: whatever the job claimed of a pool and didn't give a VM goes back.
+            self.release_job_claims(ctx, job_id).await;
+        }
         result
     }
 }
@@ -1530,15 +1485,31 @@ impl Deployer {
                             Ok(notes.join("; "))
                         }
                         Err(err) => {
-                            self.isos_forget(job_id, &m).await;
-                            Err(err)
+                            // D4: the seed goes; the VM, its ISO copy and its serial log stay for a look. The step's
+                            // notes go with the error, the answer file's SHA-256 among them.
+                            let stage = match &err {
+                                CoreError::InstallFailed { message, .. } => message.clone(),
+                                CoreError::Cancelled => {
+                                    "the install was cancelled while it was watched; the VM goes on installing".into()
+                                }
+                                other => format!("the install stopped: {other}"),
+                            };
+                            notes.push(stage);
+                            notes.extend(self.abandon_install(job_id, spec, &key, &m).await);
+                            let message = notes.join("; ");
+                            let vm = vm.name.clone();
+                            Err(if matches!(err, CoreError::Cancelled) {
+                                CoreError::InstallCancelled { vm, message }
+                            } else {
+                                CoreError::InstallFailed { vm, message }
+                            })
                         }
                     }
                 }
                 _ => Ok(self.after_deploy(ctx, spec, vm, &key, &mut made, token).await),
             },
             Err(err) => {
-                self.release_claim(ctx, &made).await;
+                self.release_claim(ctx, job_id, &made).await;
                 if let Some(m) = &made.install {
                     self.isos_forget(job_id, m).await;
                 }
@@ -1564,4 +1535,71 @@ impl Deployer {
             }
         }
     }
+}
+
+/// VM-21: how long the background cleanup of VirtualBox's unattended install waits for its `.viso` to go.
+const VBOX_UNATTENDED_WATCH: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// VM-21 (D5 of PR 98's review): once VirtualBox has ejected its unattended install's `.viso`, or the VM is off (then
+/// it is ejected here), closes it in the media list and deletes the `Unattended-<uuid>-*` files beside the `.vbox`.
+/// Gives up after `limit`, or when the VM is gone. Returns the files left.
+pub async fn clean_vbox_unattended(
+    hypervisors: &Hypervisors,
+    key: &str,
+    folder: &Path,
+    poll: Duration,
+    limit: Duration,
+) -> Vec<String> {
+    let vbox = hypervisors.virtualbox();
+    let is_viso = |p: &Path| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("viso"));
+    let deadline = tokio::time::Instant::now() + limit;
+    loop {
+        let Ok(info) = vbox.vm_info(key).await else {
+            return Vec::new();
+        };
+        let attached = info
+            .dvds
+            .iter()
+            .find(|d| d.image.as_deref().is_some_and(is_viso))
+            .map(|d| d.slot.clone());
+        let off = !info.power_state().is_on();
+        match attached {
+            None => break,
+            Some(slot) if off => {
+                if let Some((controller, port, device)) = vb::parse_slot(&slot) {
+                    let _ = vbox
+                        .change(
+                            vb::attach_named(key, &controller, port, device, true, "emptydrive"),
+                            SHORT,
+                        )
+                        .await;
+                }
+                break;
+            }
+            Some(_) => {}
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return vec!["the install ISO is still in its drive".into()];
+        }
+        tokio::time::sleep(poll.max(Duration::from_millis(10))).await;
+    }
+    let prefix = format!("unattended-{}-", key.to_ascii_lowercase());
+    let mut left = Vec::new();
+    if let Ok(mut entries) = tokio::fs::read_dir(folder).await {
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if !name.to_ascii_lowercase().starts_with(&prefix) {
+                continue;
+            }
+            let path = entry.path();
+            if is_viso(&path) {
+                let close = vec!["closemedium".into(), "dvd".into(), path.display().to_string()];
+                let _ = vbox.change(close, SHORT).await;
+            }
+            if tokio::fs::remove_file(&path).await.is_err() {
+                left.push(name);
+            }
+        }
+    }
+    left
 }
