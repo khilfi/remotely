@@ -36,24 +36,91 @@ pub struct PatchedGrub {
     pub old_timeout: String,
 }
 
-/// A line's words and where each starts.
-fn words(line: &str) -> Vec<(usize, &str)> {
-    let mut out = Vec::new();
-    let mut start = None;
-    for (i, c) in line.char_indices() {
-        match (c.is_ascii_whitespace(), start) {
-            (true, Some(s)) => {
-                out.push((s, &line[s..i]));
-                start = None;
-            }
-            (false, None) => start = Some(i),
-            _ => {}
+/// One word of a grub.cfg line: where it starts, its text as written, and its text as GRUB reads it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Word<'a> {
+    start: usize,
+    raw: &'a str,
+    text: String,
+}
+
+/// A line's words as GRUB's lexer splits and unquotes them: white space and `;` outside quotes end a word (`;` is
+/// a word of its own), `'...'` is literal, `"..."` takes `\` before `"`, `\` and `$`, `\x` outside quotes is `x`,
+/// and `#` at the start of a word starts a comment. So `set "default=1"`, `set 'default=1'` and `set default\=1`
+/// all read as `default=1`. A line that ends inside a quote or with a `\` (GRUB would read on into the next line)
+/// is refused rather than followed.
+fn words(line: &str) -> std::result::Result<Vec<Word<'_>>, String> {
+    #[derive(PartialEq)]
+    enum Quote {
+        None,
+        Single,
+        Double,
+    }
+    fn end_word<'a>(line: &'a str, out: &mut Vec<Word<'a>>, current: &mut Option<(usize, String)>, end: usize) {
+        if let Some((start, text)) = current.take() {
+            out.push(Word {
+                start,
+                raw: &line[start..end],
+                text,
+            });
         }
     }
-    if let Some(s) = start {
-        out.push((s, &line[s..]));
+    let mut out = Vec::new();
+    let mut quote = Quote::None;
+    let mut current: Option<(usize, String)> = None;
+    let mut chars = line.char_indices().peekable();
+    let continued = || "its grub.cfg continues a line into the next, which Remotely doesn't read".to_owned();
+    while let Some((i, c)) = chars.next() {
+        match quote {
+            Quote::Single => match c {
+                '\'' => quote = Quote::None,
+                _ => current.get_or_insert((i, String::new())).1.push(c),
+            },
+            Quote::Double => match c {
+                '"' => quote = Quote::None,
+                '\\' => match chars.peek() {
+                    Some(&(_, next @ ('"' | '\\' | '$'))) => {
+                        chars.next();
+                        current.get_or_insert((i, String::new())).1.push(next);
+                    }
+                    Some(_) => current.get_or_insert((i, String::new())).1.push('\\'),
+                    None => return Err(continued()),
+                },
+                _ => current.get_or_insert((i, String::new())).1.push(c),
+            },
+            Quote::None => match c {
+                c if c.is_ascii_whitespace() => end_word(line, &mut out, &mut current, i),
+                ';' => {
+                    end_word(line, &mut out, &mut current, i);
+                    out.push(Word {
+                        start: i,
+                        raw: &line[i..i + 1],
+                        text: ";".to_owned(),
+                    });
+                }
+                '#' if current.is_none() => break,
+                '\'' => {
+                    current.get_or_insert((i, String::new()));
+                    quote = Quote::Single;
+                }
+                '"' => {
+                    current.get_or_insert((i, String::new()));
+                    quote = Quote::Double;
+                }
+                '\\' => match chars.next() {
+                    Some((_, next)) => current.get_or_insert((i, String::new())).1.push(next),
+                    None => return Err(continued()),
+                },
+                _ => current.get_or_insert((i, String::new())).1.push(c),
+            },
+        }
     }
-    out
+    if quote != Quote::None {
+        return Err("its grub.cfg has a quote that runs past its line, which Remotely doesn't read".into());
+    }
+    // (A comment ends the loop only between words, so nothing is open then.)
+    end_word(line, &mut out, &mut current, line.len());
+    Ok(out)
 }
 
 /// Changes grub.cfg's text as S1 did. GRUB starts the first top-level menu entry after the timeout, so that entry
@@ -62,7 +129,9 @@ fn words(line: &str) -> Vec<(usize, &str)> {
 /// `submenu`, memtest's `linux16`, a `chainloader`, `linuxefi`, a conditional entry); a `default=` other than 0,
 /// with or without `set`; `load_env`, `configfile` or `source` outside an entry; braces that don't match; a line
 /// that already has `autoinstall` (a copy of a copy: start from the original ISO); and no `set timeout=` (GRUB would
-/// wait for a key). Words quoted from the file are made printable and cut short.
+/// wait for a key). Words are read as GRUB's lexer reads them ([`words`]: `set "default=1"` is `default=1`), a line
+/// GRUB would continue into the next is refused, and so is a line of the first entry with more than one command.
+/// Words quoted from the file are made printable and cut short.
 pub fn patch_grub(text: &str) -> Result<PatchedGrub> {
     patch(text).map_err(|problem| unexpected(Flavor::Ubuntu, problem))
 }
@@ -94,19 +163,19 @@ fn patch(text: &str) -> std::result::Result<PatchedGrub, String> {
     for line in text.split_inclusive('\n') {
         let body_len = line.trim_end_matches(['\r', '\n']).len();
         let (body, ending) = line.split_at(body_len);
-        let tokens = words(body);
-        let Some(&(_, command)) = tokens.first() else {
+        let tokens = words(body)?;
+        let Some(command) = tokens.first().map(|w| w.text.as_str()) else {
+            // Empty, or a comment.
             out.push_str(line);
             continue;
         };
-        if command.starts_with('#') {
-            out.push_str(line);
-            continue;
-        }
         let in_first = matches!(first, First::Inside { .. });
+        if in_first && tokens.iter().any(|w| w.raw == ";") {
+            return Err("its grub.cfg's first menu entry runs more than one command on a line".into());
+        }
         match command {
             "menuentry" | "submenu" => {
-                if tokens.last().map(|t| t.1) != Some("{") {
+                if tokens.last().map(|w| w.raw) != Some("{") {
                     return Err("its grub.cfg has a menu entry whose line doesn't end in `{`".into());
                 }
                 if in_first {
@@ -123,7 +192,7 @@ fn patch(text: &str) -> std::result::Result<PatchedGrub, String> {
                 continue;
             }
             "}" => {
-                if tokens.len() != 1 || depth == 0 {
+                if tokens.len() != 1 || tokens[0].raw != "}" || depth == 0 {
                     return Err("its grub.cfg's braces don't match".into());
                 }
                 depth -= 1;
@@ -135,7 +204,7 @@ fn patch(text: &str) -> std::result::Result<PatchedGrub, String> {
             }
             "if" => {
                 ifs += 1;
-                if tokens.iter().any(|t| t.1 == "fi") {
+                if tokens.iter().any(|w| w.text == "fi") {
                     ifs -= 1;
                 }
             }
@@ -155,21 +224,21 @@ fn patch(text: &str) -> std::result::Result<PatchedGrub, String> {
             ));
         }
         if command == "linux" {
-            let kernel = tokens.get(1).map(|t| t.1).filter(|k| KERNELS.contains(k));
-            let dashes = tokens.iter().find(|t| t.1 == "---");
-            let changed = if let (Some(kernel), Some(&(at, _))) = (kernel, dashes) {
-                if tokens.iter().any(|t| t.1 == "autoinstall") {
+            let kernel = tokens.get(1).map(|w| w.text.as_str()).filter(|k| KERNELS.contains(k));
+            let dashes = tokens.iter().find(|w| w.text == "---");
+            let changed = if let (Some(kernel), Some(dashes)) = (kernel, dashes) {
+                if tokens.iter().any(|w| w.text == "autoinstall") {
                     return Err(
                         "its grub.cfg already has autoinstall, so it looks like a copy Remotely made; pick the \
                          original ISO"
                             .into(),
                     );
                 }
-                out.push_str(&body[..at]);
+                out.push_str(&body[..dashes.start]);
                 out.push_str(BEFORE_DASHES);
                 out.push_str(" --- ");
                 out.push_str(AFTER_DASHES);
-                out.push_str(&body[at + 3..]);
+                out.push_str(&body[dashes.start + dashes.raw.len()..]);
                 out.push_str(ending);
                 entries += 1;
                 if !kernels.iter().any(|k| k == kernel) {
@@ -187,38 +256,45 @@ fn patch(text: &str) -> std::result::Result<PatchedGrub, String> {
                 continue;
             }
         }
-        // `set name=value`, or `name=value` alone (GRUB takes both).
+        // `set name=value`, or `name=value` alone (GRUB takes both), matched as GRUB reads the word.
         let assignment = match (command, tokens.len()) {
-            ("set", 2) => Some(tokens[1]),
-            (_, 1) if command.contains('=') => Some(tokens[0]),
+            ("set", 2) => tokens.get(1),
+            (_, 1) if command.contains('=') => tokens.first(),
             _ => None,
         };
-        if let Some((at, setting)) = assignment {
-            if let Some(value) = setting.strip_prefix("timeout=") {
+        if let Some(word) = assignment {
+            if let Some(value) = word.text.strip_prefix("timeout=") {
                 if value.is_empty() || !value.bytes().all(|b| b.is_ascii_digit()) {
                     return Err(format!(
                         "its grub.cfg sets a timeout Remotely doesn't read ({})",
-                        quoted(setting)
+                        quoted(&word.text)
                     ));
                 }
                 old_timeout.get_or_insert_with(|| value.to_owned());
-                out.push_str(&body[..at]);
+                out.push_str(&body[..word.start]);
                 out.push_str("timeout=");
                 out.push_str(MENU_TIMEOUT);
-                out.push_str(&body[at + setting.len()..]);
+                out.push_str(&body[word.start + word.raw.len()..]);
                 out.push_str(ending);
                 continue;
             }
         }
-        // Any `default=` but 0, wherever it is and however it is written, starts another entry.
-        for &(_, word) in &tokens {
-            if let Some(value) = word.strip_prefix("default=") {
-                if !matches!(value, "0" | "\"0\"" | "'0'") {
+        // Any `default=` but 0, wherever it is and however it is quoted, starts another entry; so does a timeout
+        // set any other way than the line above takes.
+        for word in &tokens {
+            if let Some(value) = word.text.strip_prefix("default=") {
+                if value != "0" {
                     return Err(format!(
                         "its grub.cfg starts another entry than the first ({})",
-                        quoted(word)
+                        quoted(&word.text)
                     ));
                 }
+            }
+            if word.text.starts_with("timeout=") {
+                return Err(format!(
+                    "its grub.cfg sets a timeout Remotely doesn't read ({})",
+                    quoted(&word.text)
+                ));
             }
         }
         out.push_str(line);
@@ -247,7 +323,10 @@ pub(crate) fn plan<R: Read + Seek>(image: &mut Image<R>) -> Result<(Vec<IsoWrite
     let flavor = Flavor::Ubuntu;
     let iso = LinuxIso::open(image, flavor)?;
     let grub = iso.text_file(image, GRUB_CFG, MAX_GRUB_BYTES)?;
-    iso.check_alone(image, &[&grub])?;
+    let md5_lines = iso.md5_lines(image, &["./boot/grub/grub.cfg"])?;
+    let mut changed = vec![grub.rewritten()];
+    changed.extend(md5_lines.rewritten.clone());
+    iso.check_alone(image, &changed)?;
     let text = std::str::from_utf8(&grub.content)
         .map_err(|_| unexpected(flavor, "its /boot/grub/grub.cfg isn't UTF-8 text"))?;
     let patched = patch_grub(text)?;
@@ -255,7 +334,7 @@ pub(crate) fn plan<R: Read + Seek>(image: &mut Image<R>) -> Result<(Vec<IsoWrite
         iso.require_file(image, kernel)?;
     }
     let mut writes = grub.rewrite(image, patched.text.as_bytes(), flavor)?;
-    let md5 = iso.md5_update(image, &[("./boot/grub/grub.cfg", patched.text.as_bytes())])?;
+    let md5 = md5_lines.update(&[patched.text.as_bytes()]);
     writes.extend(md5.writes.iter().cloned());
     let release = iso.release(image)?;
     let summary = vec![
@@ -282,14 +361,38 @@ mod tests {
 
     #[test]
     fn words_keep_their_offsets() {
+        let plain = |line: &str| -> Vec<(usize, String)> {
+            words(line).unwrap().into_iter().map(|w| (w.start, w.text)).collect()
+        };
+        let owned = |list: &[(usize, &str)]| -> Vec<(usize, String)> {
+            list.iter().map(|(at, text)| (*at, (*text).to_owned())).collect()
+        };
         assert_eq!(
-            words("\tlinux\t/casper/vmlinuz  ---"),
-            [(1, "linux"), (7, "/casper/vmlinuz"), (24, "---")]
+            plain("\tlinux\t/casper/vmlinuz  ---"),
+            owned(&[(1, "linux"), (7, "/casper/vmlinuz"), (24, "---")])
         );
         assert_eq!(
-            words("    linux  /casper/vmlinuz  --- "),
-            [(4, "linux"), (11, "/casper/vmlinuz"), (28, "---")]
+            plain("    linux  /casper/vmlinuz  --- "),
+            owned(&[(4, "linux"), (11, "/casper/vmlinuz"), (28, "---")])
         );
-        assert!(words(" \t ").is_empty());
+        assert!(plain(" \t ").is_empty());
+        assert!(plain("  # set default=1").is_empty(), "a comment");
+    }
+
+    #[test]
+    fn words_are_unquoted_as_grub_reads_them() {
+        let texts = |line: &str| -> Vec<String> { words(line).unwrap().into_iter().map(|w| w.text).collect() };
+        assert_eq!(texts("set \"default=1\""), ["set", "default=1"]);
+        assert_eq!(texts("set 'default=1'"), ["set", "default=1"]);
+        assert_eq!(texts("set de'fault'=\"1\""), ["set", "default=1"]);
+        assert_eq!(texts("set default\\=1"), ["set", "default=1"]);
+        assert_eq!(texts("echo \"a \\\"b\\\" \\x\" 'c d'"), ["echo", "a \"b\" \\x", "c d"]);
+        assert_eq!(texts("if true; then"), ["if", "true", ";", "then"]);
+        assert_eq!(texts("a#b # c"), ["a#b"], "`#` starts a comment only at a word's start");
+        let quoted = words("set \"timeout=30\" ").unwrap();
+        assert_eq!((quoted[1].start, quoted[1].raw), (4, "\"timeout=30\""));
+        for line in ["set default=\\", "set \"default=1", "set 'default=1", "echo \"a\\"] {
+            assert!(words(line).is_err(), "{line}");
+        }
     }
 }

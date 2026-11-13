@@ -175,7 +175,7 @@ fn the_first_menu_entry_must_be_the_installer() {
         ),
         (
             "an if inside the first entry",
-            "set timeout=30\nmenuentry 'a' {\n\tif true; then\n\tlinux /casper/vmlinuz ---\n\tfi\n}\n".to_owned(),
+            "set timeout=30\nmenuentry 'a' {\n\tif true\n\tthen\n\tlinux /casper/vmlinuz ---\n\tfi\n}\n".to_owned(),
             "first menu entry runs `if`",
         ),
         (
@@ -191,7 +191,7 @@ fn the_first_menu_entry_must_be_the_installer() {
         (
             "a quoted default",
             format!("set timeout=30\nset default=\"1\"\n{INSTALLER}"),
-            "another entry than the first (default=\"1\")",
+            "another entry than the first (default=1)",
         ),
         (
             "a saved default",
@@ -260,7 +260,8 @@ fn words_quoted_from_grub_cfg_are_printable_and_short() {
         .unwrap_err()
         .to_string(),
     );
-    assert!(err.contains("(default=1 ]0;title)"), "{err}");
+    // GRUB ends the word at the `;`.
+    assert!(err.contains("(default=1 ]0)"), "{err}");
     let err = clean(
         ubuntu::patch_grub(&format!(
             "set timeout=30\nmenuentry 'a' {{\n\t\u{1b}[31mboom\n}}\n{INSTALLER}"
@@ -298,6 +299,131 @@ fn point(image: &mut [u8], path: &str, trees: &[Tree], extent: u32, size: Option
         if let Some(size) = size {
             image[at + 10..at + 18].copy_from_slice(&both(size));
         }
+    }
+}
+
+#[test]
+fn quoted_and_escaped_words_are_read_as_grub_reads_them() {
+    let memtest = "menuentry 'Test memory' {\n\tlinux16 /boot/memtest86+x64.bin\n}\n";
+    for (text, words) in [
+        (
+            format!("set timeout=30\nset \"default=1\"\n{INSTALLER}{memtest}"),
+            "another entry than the first (default=1)",
+        ),
+        (
+            format!("set timeout=30\nset 'default=1'\n{INSTALLER}{memtest}"),
+            "another entry than the first (default=1)",
+        ),
+        (
+            format!("set timeout=30\nset default\\=1\n{INSTALLER}{memtest}"),
+            "another entry than the first (default=1)",
+        ),
+        (
+            format!("set timeout=30\nset de'fault'=\"1\"\n{INSTALLER}{memtest}"),
+            "another entry than the first (default=1)",
+        ),
+        (
+            format!("set timeout=30\n\"default=1\"\n{INSTALLER}{memtest}"),
+            "another entry than the first (default=1)",
+        ),
+        (
+            format!("set \"timeout=x\"\n{INSTALLER}"),
+            "timeout Remotely doesn't read (timeout=x)",
+        ),
+        (
+            format!("set timeout=30; set default=0\n{INSTALLER}"),
+            "timeout Remotely doesn't read (timeout=30)",
+        ),
+        (
+            format!("set timeout=30\nset default=\\\n1\n{INSTALLER}"),
+            "continues a line into the next",
+        ),
+        (
+            format!("set timeout=30\nset \"default=\n1\"\n{INSTALLER}"),
+            "quote that runs past its line",
+        ),
+        (
+            format!("set timeout=30\n\"menuentry\" 'Test memory' {{\n\tlinux16 /boot/memtest86+x64.bin\n}}\n{INSTALLER}"),
+            "first menu entry runs `linux16`",
+        ),
+        (
+            "set timeout=30\nmenuentry 'a' {\n\tset gfxpayload=keep; linux16 /memtest\n\tlinux /casper/vmlinuz ---\n}\n"
+                .to_owned(),
+            "more than one command on a line",
+        ),
+    ] {
+        let err = ubuntu::patch_grub(&text).unwrap_err().to_string();
+        assert!(err.contains(words), "{text:?}: {err}");
+    }
+    // What GRUB reads as 0 and as a number is taken; the timeout's word is rewritten whole.
+    let patched = ubuntu::patch_grub(&format!("set \"timeout=30\" # wait\nset 'default=0'\n{INSTALLER}")).unwrap();
+    assert!(
+        patched.text.starts_with("set timeout=1 # wait\nset 'default=0'\n"),
+        "{}",
+        patched.text
+    );
+    assert_eq!(patched.old_timeout, "30");
+}
+
+#[test]
+fn md5sum_txt_and_continuation_areas_are_checked_too() {
+    let both_trees = [Tree::RockRidge, Tree::Joliet];
+    // md5sum.txt is edited in place: a file stored on its sectors would change with it.
+    let base = fake::ubuntu_24_04_iso()
+        .with_file("/boot/grub/loopback.cfg", "x")
+        .build();
+    let md5sum = record_of(&base, "/md5sum.txt", Tree::RockRidge);
+    let mut image = base.clone();
+    point(&mut image, "/boot/grub/loopback.cfg", &both_trees, md5sum.extent, None);
+    let err = refusal(&image, Flavor::Ubuntu);
+    assert!(
+        err.contains("/md5sum.txt shares its sectors with the file LOOPBACK.CFG"),
+        "{err}"
+    );
+    // Not when it lists nothing the copy changes: then it isn't touched.
+    let unlisted = fake::ubuntu_24_04_iso()
+        .with_file("/boot/grub/loopback.cfg", "x")
+        .with_file(
+            "/md5sum.txt",
+            fake::md5sum_txt(&[("./casper/vmlinuz", b"kernel stand-in")]),
+        )
+        .build();
+    let md5sum = record_of(&unlisted, "/md5sum.txt", Tree::RockRidge);
+    let mut image = unlisted.clone();
+    point(&mut image, "/boot/grub/loopback.cfg", &both_trees, md5sum.extent, None);
+    assert_eq!(plan_of(&image, Flavor::Ubuntu).unwrap().writes.len(), 3);
+    // Debian's too.
+    let debian = fake::debian();
+    let md5sum = record_of(&debian, "/md5sum.txt", Tree::RockRidge);
+    let mut image = debian.clone();
+    point(&mut image, "/isolinux/txt.cfg", &both_trees, md5sum.extent, None);
+    let err = refusal(&image, Flavor::Debian);
+    assert!(
+        err.contains("/md5sum.txt shares its sectors with the file TXT.CFG"),
+        "{err}"
+    );
+    // A Rock Ridge continuation area (another record's name and attributes) in a sector the copy changes.
+    let continued = LinuxIso {
+        nm_in_continuation: Some("/EFI/boot/bootx64.efi".into()),
+        ..fake::ubuntu_24_04_iso()
+    }
+    .build();
+    assert!(plan_of(&continued, Flavor::Ubuntu).is_ok());
+    let entry = continued.windows(4).position(|w| w == [b'C', b'E', 28, 1]).unwrap();
+    for (path, target) in [
+        ("/boot/grub/grub.cfg", "/boot/grub/grub.cfg"),
+        ("/md5sum.txt", "/md5sum.txt"),
+    ] {
+        let extent = record_of(&continued, path, Tree::RockRidge).extent;
+        let mut image = continued.clone();
+        image[entry + 4..entry + 12].copy_from_slice(&both(extent));
+        let err = refusal(&image, Flavor::Ubuntu);
+        assert!(
+            err.contains(&format!(
+                "{target} shares its sectors with a Rock Ridge continuation area"
+            )),
+            "{err}"
+        );
     }
 }
 

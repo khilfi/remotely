@@ -418,15 +418,43 @@ impl Store {
         Ok(done.rows_affected() > 0)
     }
 
-    /// The address is free again, whatever held it (a hand free). False when it wasn't leased.
-    pub(crate) async fn delete_address_lease(&self, ctx: &Context, pool_id: Uuid, ip: Ipv4Addr) -> Result<bool> {
-        let done = sqlx::query("DELETE FROM address_leases WHERE workspace_id = ? AND pool_id = ? AND ip = ?")
-            .bind(ctx.workspace_id.to_string())
-            .bind(pool_id.to_string())
-            .bind(ip.to_string())
-            .execute(&self.pool)
-            .await?;
+    /// A hand free: the address is free again, when it is still what `can_free` said (one statement, so a live claim that
+    /// replaced a stale one since, or a VM listed again, stays). False when nothing went.
+    pub(crate) async fn delete_freeable_lease(&self, ctx: &Context, pool_id: Uuid, ip: Ipv4Addr) -> Result<bool> {
+        let done = sqlx::query(
+            "DELETE FROM address_leases
+             WHERE workspace_id = ? AND pool_id = ? AND ip = ?
+               AND ((state = 'claimed' AND vm_key IS NULL
+                     AND (job_id IS NULL
+                          OR NOT EXISTS (SELECT 1 FROM jobs j WHERE j.id = address_leases.job_id
+                                           AND j.status IN ('queued', 'countdown', 'running'))))
+                    OR (state = 'assigned'
+                        AND NOT EXISTS (SELECT 1 FROM vms v WHERE v.vmx_path = address_leases.vm_key
+                                          AND v.missing = 0)))",
+        )
+        .bind(ctx.workspace_id.to_string())
+        .bind(pool_id.to_string())
+        .bind(ip.to_string())
+        .execute(&self.pool)
+        .await?;
         Ok(done.rows_affected() > 0)
+    }
+
+    /// The pool's claims that hold nothing (no VM, and their job isn't open), in one statement: a pool edit or delete
+    /// takes them, never a claim that replaced one since the edit read them. How many went.
+    pub(crate) async fn release_stale_pool_claims(&self, ctx: &Context, pool_id: Uuid) -> Result<u64> {
+        let done = sqlx::query(
+            "DELETE FROM address_leases
+             WHERE workspace_id = ? AND pool_id = ? AND state = 'claimed' AND vm_key IS NULL
+               AND (job_id IS NULL
+                    OR NOT EXISTS (SELECT 1 FROM jobs j WHERE j.id = address_leases.job_id
+                                     AND j.status IN ('queued', 'countdown', 'running')))",
+        )
+        .bind(ctx.workspace_id.to_string())
+        .bind(pool_id.to_string())
+        .execute(&self.pool)
+        .await?;
+        Ok(done.rows_affected())
     }
 
     /// The claims `job_id` made that have no VM yet. How many went.

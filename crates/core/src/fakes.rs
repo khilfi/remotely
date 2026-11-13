@@ -934,6 +934,10 @@ impl VmwareAdapter for FakeVmware {
                 if !self.is_running(&vmx) {
                     return Err(failed(&args[0], "The virtual machine is not powered on"));
                 }
+                // VM-29: a drive that won't let go (`set_failing("disconnectNamedDevice", true)`).
+                if self.fails(&args[0]) {
+                    return Err(failed(&args[0], "The device is busy"));
+                }
             }
             Some("clone") => {
                 let target = PathBuf::from(args.get(2).cloned().unwrap_or_default());

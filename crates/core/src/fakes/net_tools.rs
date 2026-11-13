@@ -56,12 +56,13 @@ pub struct FakeNetworkTools {
     connects: Mutex<Vec<SocketAddr>>,
     checked: Mutex<Vec<(usize, TrustUse)>>,
     /// VM-32: addresses whose host answers ARP, the ARP requests asked, echoes that fail to send, echoes the address
-    /// itself answers with "unreachable", and how long each echo takes.
+    /// itself answers with "unreachable", and how long each echo and each ARP request takes.
     arp_hosts: Mutex<Vec<Ipv4Addr>>,
     arps: Mutex<Vec<Ipv4Addr>>,
     echo_errors: Mutex<Vec<IpAddr>>,
     refusing: Mutex<Vec<IpAddr>>,
     echo_delay: Mutex<Duration>,
+    arp_delay: Mutex<Duration>,
 }
 
 impl FakeNetworkTools {
@@ -110,6 +111,11 @@ impl FakeNetworkTools {
     /// VM-32: each echo takes this long before its answer.
     pub fn set_echo_delay(&self, delay: Duration) {
         *locks::lock(&self.echo_delay) = delay;
+    }
+
+    /// VM-32: each ARP request takes this long (SendARP waits for its retries when nothing answers).
+    pub fn set_arp_delay(&self, delay: Duration) {
+        *locks::lock(&self.arp_delay) = delay;
     }
 
     /// Echoes to `to` answer from it, after passing these routers (`None`: one that doesn't answer).
@@ -328,6 +334,10 @@ impl NetworkTools for FakeNetworkTools {
 
     async fn arp(&self, ip: Ipv4Addr) -> Result<Option<bool>> {
         locks::lock(&self.arps).push(ip);
+        let delay = *locks::lock(&self.arp_delay);
+        if !delay.is_zero() {
+            tokio::time::sleep(delay).await;
+        }
         Ok(Some(locks::lock(&self.arp_hosts).contains(&ip)))
     }
 }

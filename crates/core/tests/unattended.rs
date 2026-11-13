@@ -605,11 +605,14 @@ struct FakeWinrm {
     /// Connections (counted from 0) that fail as a broken connection would.
     blips: Vec<usize>,
     connects: Mutex<usize>,
+    /// The first Set-LocalUser applies, then its connection breaks before the answer.
+    break_after_swap: Arc<std::sync::atomic::AtomicBool>,
 }
 
 struct FakeWinrmSession {
     scripts: Arc<Mutex<Vec<String>>>,
     password: Arc<Mutex<Option<String>>>,
+    break_after_swap: Arc<std::sync::atomic::AtomicBool>,
 }
 
 #[async_trait]
@@ -652,6 +655,7 @@ impl WinrmAdapter for FakeWinrm {
         Ok(Arc::new(FakeWinrmSession {
             scripts: Arc::clone(&self.scripts),
             password: Arc::clone(&self.password),
+            break_after_swap: Arc::clone(&self.break_after_swap),
         }))
     }
 }
@@ -663,6 +667,10 @@ impl ExecSession for FakeWinrmSession {
         if let Some(rest) = script.strip_prefix("$p = ConvertTo-SecureString '") {
             let quoted = rest.split("' -AsPlainText").next().unwrap_or_default();
             *self.password.lock().unwrap() = Some(quoted.replace("''", "'"));
+            // N4: the swap applied, its answer lost once.
+            if self.break_after_swap.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                return Err(CoreError::Winrm("the connection was reset".into()));
+            }
         }
         let stdout = if script.contains("unattend-original.xml") {
             "answer-file 00\r\nsigned-out 1\r\n"
@@ -999,6 +1007,13 @@ async fn windows_lab(label: &str, winrm: Arc<FakeWinrm>) -> (Core, PathBuf, Path
 
 /// Setup: two restarts in Workstation's log, then `lines` on the serial port.
 fn windows_setup(folder: &Path, lines: Vec<String>) -> tokio::task::JoinHandle<()> {
+    windows_setup_with(folder, Vec::new(), lines)
+}
+
+/// Setup as [`windows_setup`], with `before` written to the serial port before the restarts (windowsPE, a boot
+/// loader). The installed system's `lines` come a good while after the second restart, as they do on a real VM
+/// (minutes there), so the watcher has counted it first.
+fn windows_setup_with(folder: &Path, before: Vec<String>, lines: Vec<String>) -> tokio::task::JoinHandle<()> {
     let log = folder.join("vmware.log");
     let serial = folder.join("win-1-serial.log");
     tokio::spawn(async move {
@@ -1009,24 +1024,28 @@ fn windows_setup(folder: &Path, lines: Vec<String>) -> tokio::task::JoinHandle<(
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         use std::io::Write;
+        let append = |path: &Path, text: &[u8]| {
+            let mut file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+                .unwrap();
+            file.write_all(text).unwrap();
+        };
+        for line in before {
+            append(&serial, line.as_bytes());
+        }
         for _ in 0..2 {
             tokio::time::sleep(Duration::from_millis(40)).await;
-            let mut file = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&log)
-                .unwrap();
-            file.write_all(b"In(05) vcpu-0 Chipset: The guest has requested that the virtual machine be hard reset.\n")
-                .unwrap();
+            append(
+                &log,
+                b"In(05) vcpu-0 Chipset: The guest has requested that the virtual machine be hard reset.\n",
+            );
         }
+        tokio::time::sleep(Duration::from_millis(400)).await;
         for line in lines {
             tokio::time::sleep(Duration::from_millis(60)).await;
-            let mut file = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&serial)
-                .unwrap();
-            file.write_all(line.as_bytes()).unwrap();
+            append(&serial, line.as_bytes());
         }
     })
 }
@@ -1125,27 +1144,14 @@ async fn another_certificate_fails_the_install_loudly() {
         ..FakeWinrm::default()
     });
     let (core, dir, folder, _secret, approval) = windows_lab("unattended-win-cert", winrm.clone()).await;
-    let early = tokio::spawn({
-        let serial = folder.join("win-1-serial.log");
-        async move {
-            for _ in 0..2000 {
-                if serial.with_file_name("install-seed").exists() {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            }
-            // windowsPE writes a fingerprint before any restart: never taken.
-            std::fs::write(
-                &serial,
-                "remotely-winrm SHA256:BBBBQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU\r\n",
-            )
-            .unwrap();
-        }
-    });
-    let play = windows_setup(&folder, vec![format!("remotely-winrm {FINGERPRINT}\r\n")]);
+    // windowsPE writes a fingerprint before any restart: never taken.
+    let play = windows_setup_with(
+        &folder,
+        vec!["remotely-winrm SHA256:BBBBQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU\r\n".into()],
+        vec![format!("remotely-winrm {FINGERPRINT}\r\n")],
+    );
     let job = approve(&core, &approval).await;
     let status = wait(&core, job).await;
-    early.await.unwrap();
     play.await.unwrap();
     let notes = notes_of(&core, job).await;
     assert_eq!(status, JobStatus::Failed, "{notes}");
@@ -1344,6 +1350,19 @@ async fn virtualboxs_own_unattended_files_go_once_its_iso_is_out_or_the_vm_is_of
     .await;
     assert_eq!(left.len(), 1, "{left:?}");
     assert!(viso.exists() && data.exists());
+    // N2: saved mid-install (suspended) isn't off: the install goes on when it is resumed, so nothing goes.
+    vb.power(uuid, PowerOp::Suspend).await.unwrap();
+    let left = clean_vbox_unattended(
+        &hypervisors,
+        uuid,
+        &dir,
+        Duration::from_millis(10),
+        Duration::from_millis(80),
+    )
+    .await;
+    assert_eq!(left.len(), 1, "{left:?}");
+    assert!(viso.exists() && data.exists(), "a saved VM keeps its install files");
+    vb.power(uuid, PowerOp::Start { gui: false }).await.unwrap();
     // Shut down with it still in (Windows never ejects it): ejected, closed and deleted; other files stay.
     vb.power(uuid, PowerOp::Stop { mode: StopMode::Hard }).await.unwrap();
     let left = clean_vbox_unattended(
@@ -1360,5 +1379,141 @@ async fn virtualboxs_own_unattended_files_go_once_its_iso_is_out_or_the_vm_is_of
     let calls = vb.calls().join("\n");
     assert!(calls.contains("--medium emptydrive"), "{calls}");
     assert!(calls.contains("closemedium dvd"), "{calls}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn a_swap_whose_answer_was_lost_signs_in_with_the_vaults_password_next() {
+    // N4 of PR 98's re-check: Set-LocalUser applied, then the connection broke before its answer.
+    let winrm = Arc::new(FakeWinrm {
+        fingerprint: FINGERPRINT.into(),
+        break_after_swap: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+        ..FakeWinrm::default()
+    });
+    let (core, dir, folder, secret, approval) = windows_lab("unattended-win-lost", winrm.clone()).await;
+    let play = windows_setup(&folder, vec![format!("remotely-winrm {FINGERPRINT}\r\n")]);
+    let job = approve(&core, &approval).await;
+    let status = wait(&core, job).await;
+    play.await.unwrap();
+    let notes = notes_of(&core, job).await;
+    assert_eq!(status, JobStatus::Succeeded, "{notes}");
+    let signins = winrm.signins.lock().unwrap().clone();
+    assert!(signins.len() >= 2, "{signins:?}");
+    assert!(
+        signins[1..].iter().all(|(_, p)| *p == secret),
+        "after the lost answer, the vault's password: {signins:?}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn a_fingerprint_line_written_before_the_restarts_is_never_taken_however_late_it_is_read() {
+    // N5: a long log before the restarts, ending in a forged line; then the restarts and the real one.
+    let winrm = Arc::new(FakeWinrm {
+        fingerprint: FINGERPRINT.into(),
+        ..FakeWinrm::default()
+    });
+    let (core, dir, folder, _secret, approval) = windows_lab("unattended-win-late", winrm.clone()).await;
+    // More log than one read takes, written before the restarts, the forged line last.
+    let mut before = "x".repeat(900 * 1024);
+    before.push_str("\r\nremotely-winrm SHA256:BBBBQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU\r\n");
+    let play = windows_setup_with(&folder, vec![before], vec![format!("remotely-winrm {FINGERPRINT}\r\n")]);
+    let job = approve(&core, &approval).await;
+    let status = wait(&core, job).await;
+    play.await.unwrap();
+    let notes = notes_of(&core, job).await;
+    assert_eq!(status, JobStatus::Succeeded, "the real certificate was pinned: {notes}");
+    assert!(notes.contains(FINGERPRINT), "{notes}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn the_wait_for_the_vault_doesnt_count_against_the_time_limit() {
+    // N9: locked past the install's own time limit, then unlocked: the install still finishes.
+    let winrm = Arc::new(FakeWinrm {
+        fingerprint: FINGERPRINT.into(),
+        ..FakeWinrm::default()
+    });
+    let (core, dir, folder, secret, approval) = windows_lab("unattended-win-limit", winrm.clone()).await;
+    core.set_deploy_tuning(DeployTuning {
+        install_poll: Duration::from_millis(20),
+        install_cap: Some(Duration::from_millis(1500)),
+        connect_wait: Duration::from_millis(500),
+        leases_file: None,
+        probe: Some(("127.0.0.1".into(), 1, 1)),
+        ..DeployTuning::default()
+    });
+    let job = approve(&core, &approval).await;
+    for _ in 0..2000 {
+        if folder.join("install-seed").exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    core.vault.lock(&core.ctx()).await.unwrap();
+    let play = windows_setup(&folder, vec![format!("remotely-winrm {FINGERPRINT}\r\n")]);
+    tokio::time::sleep(Duration::from_millis(2500)).await;
+    core.vault
+        .unlock(
+            &core.ctx(),
+            UnlockMethod::MasterPassword(SecretString::new(VAULT_PASSWORD)),
+        )
+        .await
+        .unwrap();
+    let status = wait(&core, job).await;
+    play.await.unwrap();
+    let notes = notes_of(&core, job).await;
+    assert_eq!(status, JobStatus::Succeeded, "{notes}");
+    assert_eq!(winrm.signins.lock().unwrap()[1].1, secret);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn a_seed_that_wont_leave_its_drive_is_said_so_and_kept() {
+    // N10: the eject failed, so the seed isn't emptied, and the note says it is still in its drive.
+    let dir = temp_folder("unattended-stuck-seed");
+    let setup = Setup::new(FakeVmware::default()).with_real_vault();
+    let vmware = Arc::clone(&setup.vmware);
+    let core = setup.build().await;
+    core.set_deploy_tuning(DeployTuning {
+        install_poll: Duration::from_millis(20),
+        install_cap: Some(Duration::from_millis(600)),
+        leases_file: None,
+        probe: Some(("127.0.0.1".into(), 1, 1)),
+        ..DeployTuning::default()
+    });
+    vmware.set_failing("disconnectNamedDevice", true);
+    let ctx = &core.ctx();
+    let pw = vault_password(&core, &password()).await;
+    let config = config_from(
+        &core,
+        "starter.debian-12-minimal",
+        pw,
+        Some(deploy_key(&core).await),
+        |_| {},
+    )
+    .await;
+    let (image, _) = iso_image(&core, &dir, "bookworm.iso", &install_isos::debian(), "debian").await;
+    let vms = dir.join("vms");
+    let id = template(
+        &core,
+        "db",
+        &image,
+        Hypervisor::Vmware,
+        &vms,
+        Network::Nat,
+        config,
+        "gp.medium",
+    )
+    .await;
+    let approval = needs_approval(core.deploy.submit(ctx, &request(id, 1, vec![])).await.unwrap());
+    let job = approve(&core, &approval).await;
+    assert_eq!(wait(&core, job).await, JobStatus::Failed);
+    let notes = notes_of(&core, job).await;
+    assert!(notes.contains("is still in its drive"), "{notes}");
+    assert!(!notes.contains("its seed (the answer file) is taken out"), "{notes}");
+    let seed =
+        read_joliet(&std::fs::read(vms.join("db-1").join("install-seed").join("db-1-seed.iso")).unwrap()).unwrap();
+    assert_eq!(seed.files.len(), 1, "a seed still in its drive isn't emptied under it");
     let _ = std::fs::remove_dir_all(&dir);
 }

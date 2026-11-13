@@ -602,6 +602,42 @@ async fn pick_skips_held_reserved_excluded_and_answering_addresses_and_counts_un
 }
 
 #[tokio::test]
+async fn a_pick_checks_as_many_addresses_at_once_as_it_may_need() {
+    let tools = tools();
+    let core = core_with(&tools, FakeVmware::default()).await;
+    let ctx = core.ctx();
+    let lab = core
+        .address_pools
+        .add(&ctx, pool("lab", "192.0.2.10", "192.0.2.49"))
+        .await
+        .unwrap();
+    silent(&tools, 10, 49);
+    // A ping times out after a while, and SendARP waits for its retries when nothing answers.
+    tools.set_echo_delay(Duration::from_millis(300));
+    tools.set_arp_delay(Duration::from_millis(600));
+    let started = std::time::Instant::now();
+    let picked = core.address_pools.pick(&ctx, lab.id, 20, &[]).await.unwrap();
+    let took = started.elapsed();
+    assert_eq!(picked.len(), 20);
+    assert_eq!((picked[0].ip, picked[19].ip), (ip("192.0.2.10"), ip("192.0.2.29")));
+    assert!(
+        took < Duration::from_millis(1500),
+        "about one check's time (600 ms), not one per batch of addresses: {took:?}"
+    );
+    assert_eq!(tools.arps().len(), 20, "no more checks than it needed");
+    assert_eq!(tools.echoes().len(), 20);
+
+    // Addresses in use make it check the next ones as their answers come back; the lowest free ones are still taken.
+    tools.set_silent("192.0.2.12", false);
+    tools.set_arp_host("192.0.2.15", true);
+    let picked = core.address_pools.pick(&ctx, lab.id, 5, &[]).await.unwrap();
+    assert_eq!(
+        ips(&picked),
+        ["192.0.2.10", "192.0.2.11", "192.0.2.13", "192.0.2.14", "192.0.2.16"].map(ip)
+    );
+}
+
+#[tokio::test]
 async fn nothing_is_picked_or_claimed_on_a_subnet_this_pc_has_no_adapter_on() {
     // This PC has an adapter on 198.51.100.0/24 only: a ping to 192.0.2.x would leave through another network.
     let tools = Arc::new(FakeNetworkTools::new().with_adapter("Ethernet", "198.51.100.7", 24, &[]));

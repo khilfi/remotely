@@ -754,7 +754,7 @@ impl Deployer {
                 if let Some(unattended) = &spec.unattended {
                     self.unattended(ctx, &uuid, path, vm, unattended).await?;
                     made.notes.push(format!(
-                        "VirtualBox installs the OS by itself as {}: the job waits for it, then deletes its install files",
+                        "VirtualBox installs the OS by itself as {}: it goes on after the job ends, and its install files are deleted once it ejects its ISO or the VM is shut down, while Remotely runs",
                         unattended.user
                     ));
                 }
@@ -1358,9 +1358,6 @@ impl Deployer {
                     );
                 }
             });
-            notes.push(
-                "VirtualBox's install files (one with the password's hash) are deleted once it ejects its install ISO or the VM is shut down, while Remotely runs".into(),
-            );
         }
         notes.join("; ")
     }
@@ -1562,7 +1559,8 @@ pub async fn clean_vbox_unattended(
             .iter()
             .find(|d| d.image.as_deref().is_some_and(is_viso))
             .map(|d| d.slot.clone());
-        let off = !info.power_state().is_on();
+        // Powered off or aborted only: a saved (suspended) VM is still mid-install, its .viso still needed.
+        let off = info.power_state() == crate::domain::PowerState::NotRunning;
         match attached {
             None => break,
             Some(slot) if off => {

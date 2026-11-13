@@ -393,7 +393,7 @@ pub async fn preview(spec: &DeploySpec, hypervisors: &Hypervisors, host: &dyn Ho
         }
         DeploySource::Iso { .. } => notes.push(match &spec.unattended {
             Some(unattended) => format!(
-                "VirtualBox installs the OS by itself, as user {} with the vault password chosen; the job waits for it (10 to 30 minutes, an hour at most), then deletes VirtualBox's install files beside the VM. Steps that need the guest's IP are left out: make the session once it is installed.",
+                "VirtualBox installs the OS by itself, as user {} with the vault password chosen; that goes on for 10 to 30 minutes after the job ends. VirtualBox's install files beside the VM (one with the password's hash) are deleted once it ejects its install ISO or the VM is shut down, while Remotely runs. Steps that need the guest's IP are left out: make the session once it is installed.",
                 unattended.user
             ),
             None => "An ISO install starts with no OS: install it from the console. Steps that need the guest's IP wait for an OS, so they are left out."

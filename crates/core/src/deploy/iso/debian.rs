@@ -72,7 +72,10 @@ pub(crate) fn plan<R: Read + Seek>(image: &mut Image<R>) -> Result<(Vec<IsoWrite
     iso.require_file(image, INITRD)?;
     let isolinux = iso.text_file(image, ISOLINUX_CFG, MAX_MENU_BYTES)?;
     let grub = iso.text_file(image, GRUB_CFG, MAX_MENU_BYTES)?;
-    iso.check_alone(image, &[&isolinux, &grub])?;
+    let md5_lines = iso.md5_lines(image, &["./boot/grub/grub.cfg", "./isolinux/isolinux.cfg"])?;
+    let mut changed = vec![isolinux.rewritten(), grub.rewritten()];
+    changed.extend(md5_lines.rewritten.clone());
+    iso.check_alone(image, &changed)?;
     let new_isolinux = isolinux_cfg();
     let new_grub = grub_cfg();
     if !std::str::from_utf8(&grub.content).is_ok_and(|text| text.contains(KERNEL)) {
@@ -81,13 +84,7 @@ pub(crate) fn plan<R: Read + Seek>(image: &mut Image<R>) -> Result<(Vec<IsoWrite
     let already = isolinux.content == new_isolinux.as_bytes() && grub.content == new_grub.as_bytes();
     let mut writes = isolinux.rewrite(image, new_isolinux.as_bytes(), flavor)?;
     writes.extend(grub.rewrite(image, new_grub.as_bytes(), flavor)?);
-    let md5 = iso.md5_update(
-        image,
-        &[
-            ("./boot/grub/grub.cfg", new_grub.as_bytes()),
-            ("./isolinux/isolinux.cfg", new_isolinux.as_bytes()),
-        ],
-    )?;
+    let md5 = md5_lines.update(&[new_grub.as_bytes(), new_isolinux.as_bytes()]);
     writes.extend(md5.writes.iter().cloned());
     let release = iso.release(image)?;
     let mut summary = vec![

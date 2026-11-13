@@ -221,6 +221,10 @@ impl HostKeyVerifier for PinnedCertificate {
 #[derive(Debug, Default)]
 pub(super) struct WindowsSignIn {
     swapped: Vec<String>,
+    /// Accounts whose swap ran but whose answer was lost: their password may be the vault's already (N4).
+    maybe_swapped: Vec<String>,
+    /// How long the step waited for the vault, which the time limit doesn't count (N9).
+    vault_waited: Duration,
     next_try: Option<tokio::time::Instant>,
     backoff: Duration,
     /// The vault was locked at the last try: the step waits for it.
@@ -241,6 +245,8 @@ enum SignInStop {
 pub const VAULT_WAIT: &str = "waiting for the vault to be unlocked";
 /// The longest wait between two sign-in tries.
 const MAX_SIGN_IN_BACKOFF: Duration = Duration::from_secs(60);
+/// N9: how long, at most, a step waits for the vault beyond the install's time limit.
+const MAX_VAULT_WAIT: Duration = Duration::from_secs(4 * 60 * 60);
 
 /// D7: sets its flag when dropped, so a copy on a blocking thread stops when the step that started it does.
 struct CancelOnDrop(Arc<AtomicBool>);
@@ -264,6 +270,22 @@ async fn ssh_answers(host: &str, port: u16, wait: Duration) -> bool {
     };
     let mut banner = [0u8; 255];
     matches!(tokio::time::timeout(wait, stream.read(&mut banner)).await, Ok(Ok(n)) if n >= 4 && banner.starts_with(b"SSH-"))
+}
+
+/// The most of the serial log one round reads: far more than an install writes between two rounds.
+const MAX_SERIAL_ROUND: usize = 64 * 1024 * 1024;
+
+/// What `path` grew by since `offset`, to its end (at most [`MAX_SERIAL_ROUND`]).
+async fn read_to_end_now(path: &Path, offset: &mut u64) -> Vec<u8> {
+    let mut out = Vec::new();
+    loop {
+        let chunk = read_new(path, offset).await;
+        let full = chunk.len() >= MAX_SERIAL_READ;
+        out.extend(chunk);
+        if !full || out.len() >= MAX_SERIAL_ROUND {
+            return out;
+        }
+    }
 }
 
 /// What `path` grew by since `offset` (at most [`MAX_SERIAL_READ`]); a file that shrank was replaced: from its start.
@@ -703,11 +725,13 @@ impl Deployer {
         let mut hang_resets = 0u32;
         let mut login_at: Option<tokio::time::Instant> = None;
         let mut windows = WindowsSignIn::default();
+        let mut last_round = tokio::time::Instant::now();
         loop {
             if token.is_cancelled() {
                 return Err(CoreError::Cancelled);
             }
-            let bytes = read_new(&m.serial, &mut serial_at).await;
+            // N5: the whole log so far, before the restarts are counted: a line written before them is never read late.
+            let bytes = read_to_end_now(&m.serial, &mut serial_at).await;
             if !bytes.is_empty() {
                 last_growth = tokio::time::Instant::now();
             }
@@ -819,7 +843,14 @@ impl Deployer {
                     None => {}
                 }
             }
-            if tokio::time::Instant::now() >= deadline {
+            // N9: the time the step waited for the vault (the install was done; only the swap waited) isn't counted,
+            // up to MAX_VAULT_WAIT.
+            let now = tokio::time::Instant::now();
+            if windows.vault_locked {
+                windows.vault_waited = (windows.vault_waited + now.duration_since(last_round)).min(MAX_VAULT_WAIT);
+            }
+            last_round = now;
+            if now >= deadline + windows.vault_waited {
                 let mut why = format!(
                     "not done within {} minutes (it was at: {}, {})",
                     limit.as_secs().div_ceil(60),
@@ -827,8 +858,9 @@ impl Deployer {
                     detail
                 );
                 if windows.vault_locked {
-                    why.push_str(
-                        "; the vault was locked, so its password couldn't be set: Windows is installed and still has the one-time password",
+                    why = format!(
+                        "Windows is installed, but the vault stayed locked for {} hours, so its password couldn't be set: it is still the one-time password, which only the seed held, and the seed is deleted now. Deploy the VM again",
+                        MAX_VAULT_WAIT.as_secs() / 3600
                     );
                 }
                 return Err(self.install_failed(spec, vm, key, watcher.stage(), &why).await);
@@ -875,21 +907,28 @@ impl Deployer {
             Some(drive) => self.eject(key, drive, &m.seed).await,
             None => Ok(()),
         };
-        match ejected.and(empty_link(&m.seed, workstation).await) {
-            Ok(()) => {
-                if !workstation {
-                    let _ = tokio::fs::remove_dir(&m.seed_folder).await;
-                }
-                out.push(if workstation {
-                    "its seed (the answer file) is taken out, and its drive keeps an empty disc".to_owned()
-                } else {
-                    "its seed (the answer file) is ejected and deleted".to_owned()
-                });
-            }
+        // N10: emptied only once it is out of its drive; the note says which of the two happened.
+        match ejected {
             Err(err) => out.push(format!(
-                "its seed {} couldn't be taken out ({err}): delete it with the VM",
+                "its seed {} is still in its drive ({err}): delete it with the VM",
                 m.seed.display()
             )),
+            Ok(()) => match empty_link(&m.seed, workstation).await {
+                Ok(()) => {
+                    if !workstation {
+                        let _ = tokio::fs::remove_dir(&m.seed_folder).await;
+                    }
+                    out.push(if workstation {
+                        "its seed (the answer file) is taken out, and its drive keeps an empty disc".to_owned()
+                    } else {
+                        "its seed (the answer file) is ejected and deleted".to_owned()
+                    });
+                }
+                Err(err) => out.push(format!(
+                    "its seed is out of its drive, but the file {} couldn't be deleted ({err}): delete it",
+                    m.seed.display()
+                )),
+            },
         }
         if m.nat_port.is_some() {
             out.push(self.remove_nat_rule(key).await);
@@ -1024,13 +1063,30 @@ impl Deployer {
             .filter(|&i| !state.swapped.contains(&m.one_time[i].account))
             .collect();
         if !pending.is_empty() {
-            let (password, with) = if first_swapped {
-                (vault_passwords[0].clone(), "the vault's password")
+            let session = if first_swapped {
+                let (connected, mismatch) = connect(&first.account, vault_passwords[0].clone()).await;
+                connected.map_err(|err| stop(err, mismatch, "the vault's password"))?
             } else {
-                (first.password.clone(), "the one-time password")
+                let (connected, mismatch) = connect(&first.account, first.password.clone()).await;
+                match connected {
+                    Ok(session) => session,
+                    // N4: a swap whose run broke may have been applied: the vault's password then signs in.
+                    Err(CoreError::AuthFailed(_))
+                        if mismatch.is_none() && state.maybe_swapped.contains(&first.account) =>
+                    {
+                        let (connected, mismatch) = connect(&first.account, vault_passwords[0].clone()).await;
+                        let session =
+                            connected.map_err(|err| stop(err, mismatch, "the one-time and the vault's password"))?;
+                        state.swapped.push(first.account.clone());
+                        session
+                    }
+                    Err(err) => return Err(stop(err, mismatch, "the one-time password")),
+                }
             };
-            let (connected, mismatch) = connect(&first.account, password).await;
-            let session = connected.map_err(|err| stop(err, mismatch, with))?;
+            let pending: Vec<usize> = pending
+                .into_iter()
+                .filter(|&i| !state.swapped.contains(&m.one_time[i].account))
+                .collect();
             for i in pending {
                 let one = &m.one_time[i];
                 let script = Zeroizing::new(plan::set_password_script(&one.account, vault_passwords[i].expose()));
@@ -1046,6 +1102,10 @@ impl Deployer {
                         )));
                     }
                     Err(err) => {
+                        // Windows may have applied it before the connection broke.
+                        if !state.maybe_swapped.contains(&one.account) {
+                            state.maybe_swapped.push(one.account.clone());
+                        }
                         session.close().await;
                         return Err(SignInStop::NotYet(err));
                     }
@@ -1114,17 +1174,23 @@ impl Deployer {
             Some(drive) => self.eject(key, drive, &m.seed).await,
             None => Ok(()),
         };
-        match seed_ejected.and(empty_link(&m.seed, workstation).await) {
-            Ok(()) => {
-                if !workstation {
-                    let _ = tokio::fs::remove_dir(&m.seed_folder).await;
-                }
-                out.push(format!("the seed is taken out and deleted{disc}"));
-            }
+        match seed_ejected {
             Err(err) => out.push(format!(
-                "the seed {} couldn't be taken out ({err}): delete it once the VM is off",
+                "the seed {} is still in its drive ({err}): eject and delete it once the VM is off",
                 m.seed.display()
             )),
+            Ok(()) => match empty_link(&m.seed, workstation).await {
+                Ok(()) => {
+                    if !workstation {
+                        let _ = tokio::fs::remove_dir(&m.seed_folder).await;
+                    }
+                    out.push(format!("the seed is taken out and deleted{disc}"));
+                }
+                Err(err) => out.push(format!(
+                    "the seed is out of its drive, but the file {} couldn't be deleted ({err}): delete it",
+                    m.seed.display()
+                )),
+            },
         }
         let iso_ejected = match &m.iso_drive {
             Some(drive) => self.eject(key, drive, &m.iso).await,

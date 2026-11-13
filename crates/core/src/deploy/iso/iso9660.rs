@@ -15,7 +15,9 @@ pub const MAX_DIR_BYTES: u64 = 4 * 1024 * 1024;
 const FIRST_DESCRIPTOR: u64 = 16;
 const MAX_DESCRIPTORS: u64 = 64;
 /// Continuation areas followed for one record's name.
-const MAX_CE_HOPS: usize = 8;
+pub const MAX_CE_HOPS: usize = 8;
+/// The most continuation areas [`Volume::walk`] collects.
+pub const MAX_WALK_CE_AREAS: usize = 65_536;
 /// Continuation areas read for one directory listing.
 const MAX_CE_READS: usize = 512;
 const MAX_CE_BYTES: u32 = 2048;
@@ -272,23 +274,26 @@ impl Volume {
 
     /// Every record of `dir` but `.` and `..`, in order.
     pub fn list<R: Read + Seek>(&self, image: &mut Image<R>, dir: Dir, tree: Tree) -> Result<Vec<Record>> {
-        self.list_named(image, dir, tree, true)
+        self.list_named(image, dir, tree, true, None)
     }
 
     /// Every record of every folder of `tree` but `.` and `..`, folders included, each folder read once (a folder
     /// whose record points back up isn't read again), at most [`MAX_WALK_FOLDERS`] folders and
-    /// [`MAX_WALK_BYTES`] of them; names are the plain or Joliet ones (no Rock Ridge continuation is followed).
-    /// `visit` sees each record; its error ends the walk.
+    /// [`MAX_WALK_BYTES`] of them; names are the plain or Joliet ones. `visit` sees each record; its error ends
+    /// the walk. Returns the byte ranges `[start, end)` of every Rock Ridge continuation area (`CE`) the primary
+    /// tree's records point at, `.` and `..` included, each chain followed [`MAX_CE_HOPS`] deep and at most
+    /// [`MAX_WALK_CE_AREAS`] in all.
     pub fn walk<R: Read + Seek>(
         &self,
         image: &mut Image<R>,
         tree: Tree,
         mut visit: impl FnMut(&Record) -> Result<()>,
-    ) -> Result<()> {
+    ) -> Result<Vec<(u64, u64)>> {
         let root = match tree {
             Tree::Joliet => self.joliet_root.ok_or_else(|| damaged("it has no Joliet tree"))?,
             _ => self.primary_root,
         };
+        let mut areas = Vec::new();
         let mut queue = std::collections::VecDeque::from([root]);
         let mut seen = std::collections::HashSet::from([root.extent]);
         let (mut folders, mut bytes) = (0usize, 0u64);
@@ -298,7 +303,7 @@ impl Volume {
             if folders > MAX_WALK_FOLDERS || bytes > MAX_WALK_BYTES {
                 return Err(damaged("it has more folders than Remotely checks"));
             }
-            for record in self.list_named(image, dir, tree, false)? {
+            for record in self.list_named(image, dir, tree, false, Some(&mut areas))? {
                 visit(&record)?;
                 if record.is_dir() && seen.insert(record.extent) {
                     queue.push_back(Dir {
@@ -307,6 +312,33 @@ impl Volume {
                     });
                 }
             }
+        }
+        Ok(areas)
+    }
+
+    /// Adds the continuation areas `su` (a record's system use area) points at to `areas`, following each chain.
+    fn continuation_areas<R: Read + Seek>(
+        &self,
+        image: &mut Image<R>,
+        su: &[u8],
+        areas: &mut Vec<(u64, u64)>,
+    ) -> Result<()> {
+        let mut area: Vec<u8> = su.get(self.rr_skip..).unwrap_or_default().to_vec();
+        for _ in 0..MAX_CE_HOPS {
+            let Some((block, offset, length)) = first_continuation(&area) else {
+                return Ok(());
+            };
+            if areas.len() >= MAX_WALK_CE_AREAS {
+                return Err(damaged(
+                    "it has more Rock Ridge continuation areas than Remotely checks",
+                ));
+            }
+            if length > MAX_CE_BYTES {
+                return Err(damaged("a Rock Ridge continuation area is larger than a sector"));
+            }
+            let at = u64::from(block) * SECTOR + u64::from(offset);
+            areas.push((at, at + u64::from(length)));
+            area = image.read_at(at, u64::from(length), "a Rock Ridge continuation area")?;
         }
         Ok(())
     }
@@ -317,6 +349,7 @@ impl Volume {
         dir: Dir,
         tree: Tree,
         rock_ridge_names: bool,
+        mut areas: Option<&mut Vec<(u64, u64)>>,
     ) -> Result<Vec<Record>> {
         let size = u64::from(dir.size);
         if size > MAX_DIR_BYTES {
@@ -350,10 +383,15 @@ impl Volume {
             let id = &rec[33..33 + name_len];
             let offset = base + pos as u64;
             pos += len;
+            let su_start = (33 + name_len + usize::from(name_len.is_multiple_of(2))).min(len);
+            if let Some(areas) = areas.as_deref_mut() {
+                if self.rock_ridge && tree == Tree::RockRidge {
+                    self.continuation_areas(image, &rec[su_start..], areas)?;
+                }
+            }
             if name_len == 1 && (id[0] == 0 || id[0] == 1) {
                 continue;
             }
-            let su_start = (33 + name_len + usize::from(name_len.is_multiple_of(2))).min(len);
             let (name, by_rock_ridge) = match tree {
                 Tree::Joliet => (joliet_name(id), false),
                 _ if self.rock_ridge && rock_ridge_names => {
@@ -485,6 +523,25 @@ fn rr_name<R: Read + Seek>(
         return Ok(None);
     }
     Ok(Some(String::from_utf8_lossy(&name).into_owned()))
+}
+
+/// The first `CE` entry of a system use area (block, offset, length), before any `ST`.
+fn first_continuation(area: &[u8]) -> Option<(u32, u32, u32)> {
+    let mut i = 0usize;
+    while i + 4 <= area.len() {
+        let len = usize::from(area[i + 2]);
+        if len < 4 || i + len > area.len() {
+            return None;
+        }
+        let entry = &area[i..i + len];
+        match &entry[..2] {
+            b"CE" if len >= 28 => return Some((le32(entry, 4), le32(entry, 12), le32(entry, 20))),
+            b"ST" => return None,
+            _ => {}
+        }
+        i += len;
+    }
+    None
 }
 
 /// `NAME.EXT;1` -> `NAME.EXT`; `NAME.;1` -> `NAME`.

@@ -2095,7 +2095,7 @@ VM-29 and VM-32, from 0.8.0 (`docs/plan-0.8.md`, G6), built only on what S1 to S
 - **Delivery, one way on both hypervisors** (`install::Flavor`): Ubuntu autoinstall, Debian preseed ("a2") and Windows
   unattend. `deploy::iso` plans the copy from the original read as untrusted input (refusing any layout S1 to S3 didn't
   see: Ubuntu's first menu entry must be the casper installer it changes and the default entry 0, and the sectors it
-  rewrites must belong to that file alone in both trees) when the dialog checks and again in the job. The job copies it
+  rewrites, md5sum.txt's too, must belong to that file alone in both trees, with no Rock Ridge continuation area in them; grub.cfg's words are read as GRUB reads them, quotes and escapes included) when the dialog checks and again in the job. The job copies it
   once per deploy as `<name>.iso.partial`, renamed when whole (a cancel stops the copy, `CancelOnDrop`), and gives every
   VM a hard link (`<vm>-install.iso` in its folder; a copy of its own where links don't work). The preview counts the
   copy's size against the drive's free space. Each VM's file is rendered with `render::render` into memory and written
@@ -2114,7 +2114,7 @@ VM-29 and VM-32, from 0.8.0 (`docs/plan-0.8.md`, G6), built only on what S1 to S
   escapes stripped (`watch::strip_escapes`), then S1's and S2's markers; any Debian `[!!] ` title, Subiquity's
   `install_fail` or `An error occurred`, and `Continue with autoinstall?` fail it. Windows: Workstation's `vmware.log`
   reset lines or VirtualBox's `/VirtualBox/VMInfo/ResetCounter`, the starters' `remotely-stage specialize` line, and the
-  fingerprint line, taken only after Setup's two restarts (or in the round the second shows up); a second, different
+  fingerprint line, taken only after Setup's two restarts (the serial log is read to its end before they are counted, so an earlier line is never read late); a second, different
   one fails the install. On VirtualBox a log silent for 3 minutes at a known hang point (Ubuntu's RAID6 benchmark,
   Debian's partitioner) gets `controlvm reset`, at most 5 times; Windows' restart hang isn't detected (the time limit
   catches it). Done: Linux at `<hostname> login:` and an SSH banner on the guest; Windows at WinRM over HTTPS signing in.
@@ -2129,10 +2129,10 @@ VM-29 and VM-32, from 0.8.0 (`docs/plan-0.8.md`, G6), built only on what S1 to S
   internal network) is refused without a pool.
 - **Windows' first sign-in** (`WindowsSignIn`, tried again with a backoff up to a minute): the vault's passwords are
   read first, so a locked vault sends nothing and the step waits ("waiting for the vault to be unlocked", which the
-  window turns into a notification; the time-limit error names the vault). NTLM over HTTPS with only the certificate
+  window turns into a notification). That wait isn't counted against the time limit, for up to 4 hours; after that the error says to deploy the VM again (its password is still the one-time one, and the seed is gone). NTLM over HTTPS with only the certificate
   the VM wrote to COM1 (`PinnedCertificate`; another certificate, or a refused password, fails the install at once),
   the one-time password; each account's password set to the vault's with `Set-LocalUser` (the script on stdin, never
-  logged) and noted as soon as it is, so a retry signs in with the vault's and does only what is left; then, signed in
+  logged) and noted as soon as it is, so a retry signs in with the vault's and does only what is left (a swap whose answer was lost is retried with the vault's password when the one-time one is refused); then, signed in
   with the vault's, `install::AFTER_INSTALL_SCRIPT` signs the autologon session out and deletes
   `Panther\unattend-original.xml` (its SHA-256 compared with the rendered file's; the note says so only when the delete
   worked). The WinRM session is saved with that certificate trusted, with the vault password when no new approval is
@@ -2148,14 +2148,14 @@ VM-29 and VM-32, from 0.8.0 (`docs/plan-0.8.md`, G6), built only on what S1 to S
   hypervisors; a VirtualBox host-only pool names its adapter), and a lease is unique per PC network and address across
   workspaces ("held in another workspace", naming nothing of it). VirtualBox NAT, NAT network and internal pools are
   refused, and a pick or claim refuses a pool whose subnet no adapter of this PC is on. An address is free when it
-  answers neither a ping (nor sends its own "unreachable") nor ARP; one that can't be checked is skipped and counted.
+  answers neither a ping (nor sends its own "unreachable") nor ARP, both asked at once for up to 32 addresses; one that can't be checked is skipped and counted. An adapter list VirtualBox or Workstation couldn't give hides no pool (saving a pool on that network is refused, saying why), and pool edits and hand frees delete only leases that hold nothing now.
   The dialog's check picks (cached 5 s); the job claims each address (a unique row, checked again; dropped if the claim
   is cancelled), assigns it to the VM once made, and releases a step's claim when it fails before then and the job's
   leftover claims when its last step ends; a claim whose job isn't open counts as free; a deleted VM frees its
   addresses. A pool's gateway, DNS servers, prefix and netmask fill own variables of those names.
 - **VM-21's own `unattended install`** stays for ISOs without a config: its detected OS type must be the profile's
   family. The step ends as before; in the background (while Remotely runs, up to a day) its `.viso` is closed and
-  `Unattended-<uuid>-*` deleted once VirtualBox has ejected it or the VM is off (then it is ejected first): S3 saw
+  `Unattended-<uuid>-*` deleted once VirtualBox has ejected it or the VM is powered off or aborted, never while it is saved (then it is ejected first): S3 saw
   Windows never eject it, S2 Debian on UEFI wait at GRUB.
 - G5 fixes: `debian-12-minimal` turns the mirror on and the CD's apt entries off; `preseed::check` errors on a missing
   locale, keymap, user full name, `grub-installer/only_debian` and `bootdev`, and `finish-install/reboot_in_progress`;

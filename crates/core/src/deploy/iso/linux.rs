@@ -40,6 +40,51 @@ pub(crate) struct Md5Update {
     pub lines: Vec<usize>,
 }
 
+/// `md5sum.txt`'s lines for the files a copy changes, found before their new content is known.
+pub(crate) struct Md5Lines {
+    /// Its sectors and records, when it lists any of the files (so it will be edited).
+    pub rewritten: Option<Rewritten>,
+    present: bool,
+    /// Per file asked about: each line's digest, its offset in the image and the bytes it has there.
+    found: Vec<Vec<(u64, Vec<u8>)>>,
+}
+
+impl Md5Lines {
+    /// The edits that give each line its file's new digest (`contents` in the order the files were asked about),
+    /// in the letter case the line had.
+    pub fn update(&self, contents: &[&[u8]]) -> Md5Update {
+        let mut writes = Vec::new();
+        for (lines, content) in self.found.iter().zip(contents) {
+            let digest = md5_hex(content);
+            for (offset, old) in lines {
+                let new = if old.iter().any(u8::is_ascii_uppercase) {
+                    digest.to_ascii_uppercase()
+                } else {
+                    digest.clone()
+                };
+                writes.push(IsoWrite {
+                    offset: *offset,
+                    bytes: new.into_bytes(),
+                    replaces: old.clone(),
+                });
+            }
+        }
+        Md5Update {
+            present: self.present,
+            writes,
+            lines: self.found.iter().map(Vec::len).collect(),
+        }
+    }
+}
+
+/// A file whose bytes the copy changes: its sectors `[start, end)` and the offsets of its own directory records.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Rewritten {
+    pub path: &'static str,
+    pub sectors: (u64, u64),
+    pub own: Vec<u64>,
+}
+
 impl LinuxIso {
     pub fn open<R: Read + Seek>(image: &mut Image<R>, flavor: Flavor) -> Result<LinuxIso> {
         let volume = Volume::read(image)?;
@@ -52,13 +97,15 @@ impl LinuxIso {
         Ok(LinuxIso { volume, flavor })
     }
 
-    /// Refuses when anything else uses a sector of `files`, which [`TextFile::rewrite`] writes over whole:
-    /// another record in either tree (a file or folder anywhere, such as an identical file mkisofs or xorriso
-    /// stored once), the system area, the volume descriptors, a path table, a root folder, El Torito's boot catalog
-    /// or a boot image it names. The whole of both trees is walked (bounded: [`super::iso9660::MAX_WALK_FOLDERS`]).
-    pub fn check_alone<R: Read + Seek>(&self, image: &mut Image<R>, files: &[&TextFile]) -> Result<()> {
+    /// Refuses when anything else uses a sector of `files`, whose bytes the copy changes (a menu file written over
+    /// whole, `md5sum.txt` edited in place): another record in either tree (a file or folder anywhere, such as an
+    /// identical file mkisofs or xorriso stored once), a Rock Ridge continuation area (names and attributes of
+    /// other records), the system area, the volume descriptors, a path table, a root folder, El Torito's boot
+    /// catalog or a boot image it names. The whole of both trees is walked (bounded:
+    /// [`super::iso9660::MAX_WALK_FOLDERS`]).
+    pub fn check_alone<R: Read + Seek>(&self, image: &mut Image<R>, files: &[Rewritten]) -> Result<()> {
         let flavor = self.flavor;
-        let shared = |file: &TextFile, what: &str| {
+        let shared = |file: &Rewritten, what: &str| {
             unexpected(
                 flavor,
                 format!(
@@ -87,16 +134,14 @@ impl LinuxIso {
             }
         }
         for file in files {
-            let sectors = file.rock_ridge.sectors();
-            if let Some((_, what)) = others.iter().find(|(range, _)| overlap(sectors, *range)) {
+            if let Some((_, what)) = others.iter().find(|(range, _)| overlap(file.sectors, *range)) {
                 return Err(shared(file, what));
             }
         }
         for tree in [Tree::RockRidge, Tree::Joliet] {
-            self.volume.walk(image, tree, |record| {
+            let areas = self.volume.walk(image, tree, |record| {
                 for file in files {
-                    let own = record.offset == file.rock_ridge.offset || record.offset == file.joliet.offset;
-                    if !own && overlap(file.rock_ridge.sectors(), record.sectors()) {
+                    if !file.own.contains(&record.offset) && overlap(file.sectors, record.sectors()) {
                         let name = printable(record.name.as_bytes(), 60);
                         let kind = if record.is_dir() { "the folder" } else { "the file" };
                         return Err(shared(file, &format!("{kind} {name}")));
@@ -104,6 +149,12 @@ impl LinuxIso {
                 }
                 Ok(())
             })?;
+            for (start, end) in areas {
+                let sectors = (start / SECTOR, end.div_ceil(SECTOR));
+                if let Some(file) = files.iter().find(|f| overlap(f.sectors, sectors)) {
+                    return Err(shared(file, "a Rock Ridge continuation area"));
+                }
+            }
         }
         Ok(())
     }
@@ -168,14 +219,14 @@ impl LinuxIso {
         Ok((!text.is_empty()).then_some(text))
     }
 
-    /// `md5sum.txt`'s lines for `changed` (each `./path` as md5sum.txt lists it, with the file's new content):
-    /// each `<32 hex digits>  ./path` line gets the new digest in place, in the letter case it had.
-    pub fn md5_update<R: Read + Seek>(&self, image: &mut Image<R>, changed: &[(&str, &[u8])]) -> Result<Md5Update> {
+    /// `md5sum.txt`'s `<32 hex digits>  ./path` lines for `paths` (each `./path` as md5sum.txt lists it), to be
+    /// given new digests by [`Md5Lines::update`] once the new contents are known.
+    pub fn md5_lines<R: Read + Seek>(&self, image: &mut Image<R>, paths: &[&str]) -> Result<Md5Lines> {
         let Some(record) = self.volume.lookup(image, "/md5sum.txt", Tree::RockRidge)? else {
-            return Ok(Md5Update {
+            return Ok(Md5Lines {
+                rewritten: None,
                 present: false,
-                writes: Vec::new(),
-                lines: vec![0; changed.len()],
+                found: vec![Vec::new(); paths.len()],
             });
         };
         if let Some(problem) = record.plain_file_problem() {
@@ -189,11 +240,9 @@ impl LinuxIso {
         }
         let text = read_record(image, &record, MAX_MD5SUM_BYTES)?;
         let base = record.data_offset();
-        let mut writes = Vec::new();
-        let mut lines = Vec::new();
-        for (path, content) in changed {
-            let digest = md5_hex(content);
-            let mut found = 0usize;
+        let mut found = Vec::new();
+        for path in paths {
+            let mut lines = Vec::new();
             let mut start = 0usize;
             while start < text.len() {
                 let end = text[start..]
@@ -202,27 +251,30 @@ impl LinuxIso {
                     .map_or(text.len(), |p| start + p);
                 let line = text[start..end].strip_suffix(b"\r").unwrap_or(&text[start..end]);
                 if is_line_for(line, path) {
-                    let old = &line[..32];
-                    let new = if old.iter().any(u8::is_ascii_uppercase) {
-                        digest.to_ascii_uppercase()
-                    } else {
-                        digest.clone()
-                    };
-                    writes.push(IsoWrite {
-                        offset: base + start as u64,
-                        bytes: new.into_bytes(),
-                        replaces: old.to_vec(),
-                    });
-                    found += 1;
+                    lines.push((base + start as u64, line[..32].to_vec()));
                 }
                 start = end + 1;
             }
-            lines.push(found);
+            found.push(lines);
         }
-        Ok(Md5Update {
+        let rewritten = if found.iter().all(Vec::is_empty) {
+            None
+        } else {
+            // Its Joliet record is its own when it names the same data.
+            let joliet = self
+                .volume
+                .lookup(image, "/md5sum.txt", Tree::Joliet)?
+                .filter(|j| j.extent == record.extent);
+            Some(Rewritten {
+                path: "/md5sum.txt",
+                sectors: record.sectors(),
+                own: std::iter::once(record.offset).chain(joliet.map(|j| j.offset)).collect(),
+            })
+        };
+        Ok(Md5Lines {
+            rewritten,
             present: true,
-            writes,
-            lines,
+            found,
         })
     }
 }
@@ -264,6 +316,15 @@ impl TextFile {
             self.rock_ridge.size_write(size),
             self.joliet.size_write(size),
         ])
+    }
+
+    /// Its sectors and its two records, for [`LinuxIso::check_alone`].
+    pub fn rewritten(&self) -> Rewritten {
+        Rewritten {
+            path: self.path,
+            sectors: self.rock_ridge.sectors(),
+            own: vec![self.rock_ridge.offset, self.joliet.offset],
+        }
     }
 
     /// The file's name alone (`grub.cfg`).

@@ -17,10 +17,14 @@
 //!   and address across workspaces, so an address one workspace holds is never handed out by another ("held in another
 //!   workspace", saying nothing more of it).
 //! * An address is handed out only when nothing is there: one ICMP echo ([`PING_TIMEOUT`]) and one ARP request through
-//!   the toolbox's [`NetworkTools`], [`PINGS_AT_ONCE`] addresses at a time. A reply, or "unreachable" from the address
-//!   itself, or an ARP answer (a Windows guest drops pings but answers ARP) means in use; an address that couldn't be
-//!   checked is skipped and counted. Both only mean something on a subnet this PC has an adapter on, so pick and claim
-//!   refuse a pool whose subnet no adapter of this PC is on: a ping would leave through another network.
+//!   the toolbox's [`NetworkTools`], at the same time. A reply, or "unreachable" from the address itself, or an ARP
+//!   answer (a Windows guest drops pings but answers ARP) means in use; an address that couldn't be checked is skipped
+//!   and counted. A pick checks as many addresses at once as it may still need ([`CHECKS_AT_ONCE`] at most), so it
+//!   takes about one check's time (SendARP's retries, some 3 s) when the first addresses are free. Both only mean
+//!   something on a subnet this PC has an adapter on, so pick and claim refuse a pool whose subnet no adapter of this PC
+//!   is on: a ping would leave through another network.
+//! * VM-11's lists can fail (a busy VBoxSVC, a vmrun timeout). Then nothing is refused for not being listed, a pool
+//!   keeps the network it was on, and only saving a pool on a network that can't be checked now is refused, saying so.
 //! * The deploy (G6) asks [`AddressPools::pick`] for a preview (kept [`PICK_FRESH`], so the dialog's checks don't ping
 //!   the range each time), then at each VM's step [`AddressPools::claim`]s the address (a row of its own: of two claims
 //!   of one address, one wins; a claim dropped mid-check, a cancel, takes its row away), [`AddressPools::assign`]s it to
@@ -66,13 +70,15 @@ pub const MIN_PREFIX: u8 = 8;
 pub const MAX_PREFIX: u8 = 30;
 /// How long one ping waits for its answer.
 pub const PING_TIMEOUT: Duration = Duration::from_secs(1);
-/// Addresses checked at once while looking for free ones.
-pub const PINGS_AT_ONCE: usize = 8;
+/// The most addresses checked at once (a ping and an ARP request each) while looking for free ones.
+pub const CHECKS_AT_ONCE: usize = 32;
 /// How long a pick's answer is given again for the same pool, count and exclusions (the Deploy dialog checks after each
 /// change; a claim checks the address again anyway). Any change to a pool or a lease forgets them.
 pub const PICK_FRESH: Duration = Duration::from_secs(5);
 /// How long VM-11's networks are trusted before they are read again (vmrun takes seconds).
 pub const FACTS_FRESH: Duration = Duration::from_secs(60);
+/// How long a read of them that failed in part is used before trying again.
+pub const FACTS_RETRY: Duration = Duration::from_secs(5);
 /// A claim without a VM older than this was left by a deploy that never ended (the app stopped mid-deploy).
 pub const STALE_CLAIM_DAYS: i64 = 1;
 
@@ -309,6 +315,11 @@ pub struct NetworkFacts {
     pub virtualbox: bool,
     /// VirtualBox's host-only adapters with their subnets when known.
     pub host_only: Vec<(String, Option<(Ipv4Addr, u8)>)>,
+    /// Why Workstation's vmnets couldn't be listed (vmrun failed or timed out), when they couldn't.
+    pub vmware_unread: Option<String>,
+    /// Why VirtualBox's host-only adapters couldn't be listed (VBoxSVC busy, a timeout), when they couldn't: then no
+    /// adapter name is refused for not being listed.
+    pub host_only_unread: Option<String>,
 }
 
 /// A subnet from an address and a dotted mask (contiguous only).
@@ -352,13 +363,63 @@ impl NetworkFacts {
                 )
             })
             .collect();
+        // A list that failed leaves its side's problem and nothing listed (a busy VBoxSVC, a vmrun timeout).
+        let unread =
+            |available: bool, problem: &Option<String>, empty: bool| problem.clone().filter(|_| available && empty);
         Self {
             vmware_nat,
             vmnets,
             virtualbox: report.virtualbox.available,
             host_only,
+            vmware_unread: unread(
+                report.vmware.available,
+                &report.vmware.problem,
+                report.vmware.networks.is_empty(),
+            ),
+            host_only_unread: unread(
+                report.virtualbox.available,
+                &report.virtualbox.problem,
+                report.virtualbox.host_only.is_empty(),
+            ),
         }
     }
+
+    /// Everything a pool resolves through was read.
+    pub fn complete(&self) -> bool {
+        self.vmware_unread.is_none() && self.host_only_unread.is_none()
+    }
+
+    /// Why the list a pool on `network` of `hypervisor` resolves through couldn't be read, when it couldn't:
+    /// Workstation's vmnets (which one is NAT, their subnets) or VirtualBox's host-only adapters.
+    pub fn unread_for(&self, hypervisor: Hypervisor, network: &Network) -> Option<&str> {
+        match (hypervisor, network) {
+            (Hypervisor::Vmware, Network::Nat | Network::Vmnet { .. }) => self.vmware_unread.as_deref(),
+            (Hypervisor::VirtualBox, Network::HostOnly) => self.host_only_unread.as_deref(),
+            _ => None,
+        }
+    }
+}
+
+/// Refuses saving a pool on a network whose list couldn't be read now, unless the pool was on that network already
+/// (`before`): its network can't be checked, but nothing about it changed. Pure.
+pub fn check_readable(spec: &PoolSpec, before: Option<&PoolSpec>, facts: &NetworkFacts) -> Result<()> {
+    let unchanged = before.is_some_and(|b| {
+        b.hypervisor == spec.hypervisor && b.network == spec.network && b.host_adapter == spec.host_adapter
+    });
+    let Some(why) = facts.unread_for(spec.hypervisor, &spec.network).filter(|_| !unchanged) else {
+        return Ok(());
+    };
+    invalid(match (&spec.network, &spec.host_adapter) {
+        (Network::HostOnly, Some(adapter)) => format!(
+            "VirtualBox's host-only adapters couldn't be read now ({why}), so Remotely can't check that '{adapter}' \
+             is one: try again in a moment."
+        ),
+        (network, _) => format!(
+            "Workstation's networks couldn't be read now ({why}), so Remotely can't tell which network {} is: try \
+             again in a moment.",
+            network.describe()
+        ),
+    })
 }
 
 /// The network of this PC a pool's network is.
@@ -434,7 +495,8 @@ pub fn resolve_network(
                 return invalid("Pick VirtualBox's host-only adapter the pool is on.");
             };
             let listed = facts.host_only.iter().find(|(n, _)| n.eq_ignore_ascii_case(adapter));
-            if facts.virtualbox && listed.is_none() {
+            // Only a list that was read says an adapter isn't there; one that failed hides nothing.
+            if facts.virtualbox && facts.host_only_unread.is_none() && listed.is_none() {
                 return invalid(format!("VirtualBox has no host-only adapter named '{adapter}'."));
             }
             Ok(ResolvedNetwork {
@@ -774,7 +836,7 @@ pub struct AddressPools {
     /// VM-11's networks, for which network of this PC a pool is on. Without them, Workstation's NAT is vmnet8 and
     /// VirtualBox's adapters aren't checked.
     networks: Option<HostNetworks>,
-    facts: Arc<tokio::sync::Mutex<Option<(Instant, NetworkFacts)>>>,
+    facts: Arc<Mutex<Option<(Instant, NetworkFacts)>>>,
     picks: Arc<Mutex<HashMap<PickKey, (Instant, Picked)>>>,
 }
 
@@ -784,7 +846,7 @@ impl AddressPools {
             store,
             tools,
             networks: None,
-            facts: Arc::new(tokio::sync::Mutex::new(None)),
+            facts: Arc::new(Mutex::new(None)),
             picks: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -795,19 +857,22 @@ impl AddressPools {
         self
     }
 
-    /// VM-11's networks, read again when `fresh` or older than [`FACTS_FRESH`].
+    /// VM-11's networks, read again when `fresh`, or older than [`FACTS_FRESH`] ([`FACTS_RETRY`] when a list failed).
+    /// No lock is held while they are read, so a hung VBoxManage holds up only the call that waits for it.
     async fn facts(&self, fresh: bool) -> NetworkFacts {
         let Some(networks) = &self.networks else {
             return NetworkFacts::default();
         };
-        let mut cached = self.facts.lock().await;
-        if let (false, Some((at, facts))) = (fresh, cached.as_ref()) {
-            if at.elapsed() < FACTS_FRESH {
-                return facts.clone();
+        if !fresh {
+            if let Some((at, facts)) = locks::lock(&self.facts).as_ref() {
+                let keep = if facts.complete() { FACTS_FRESH } else { FACTS_RETRY };
+                if at.elapsed() < keep {
+                    return facts.clone();
+                }
             }
         }
         let facts = NetworkFacts::of(&networks.networks_only().await);
-        *cached = Some((Instant::now(), facts.clone()));
+        *locks::lock(&self.facts) = Some((Instant::now(), facts.clone()));
         facts
     }
 
@@ -839,9 +904,14 @@ impl AddressPools {
     async fn resolve_row(&self, ctx: &Context, row: &PoolRow) -> Result<ResolvedNetwork> {
         let facts = self.facts(false).await;
         let spec = &row.spec;
-        let resolved = resolve_network(spec.hypervisor, &spec.network, spec.host_adapter.as_deref(), &facts)?;
+        let mut resolved = resolve_network(spec.hypervisor, &spec.network, spec.host_adapter.as_deref(), &facts)?;
         if !resolved.key.eq_ignore_ascii_case(&row.network_key) {
-            self.store.set_address_pool_key(ctx, row.id, &resolved.key).await?;
+            if facts.unread_for(spec.hypervisor, &spec.network).is_some() {
+                // The list behind it couldn't be read now: the pool stays on the network it was on.
+                resolved.key = row.network_key.clone();
+            } else {
+                self.store.set_address_pool_key(ctx, row.id, &resolved.key).await?;
+            }
         }
         Ok(resolved)
     }
@@ -990,12 +1060,18 @@ impl AddressPools {
     }
 
     /// Checks a pool against this PC's networks: the network of this PC it is, the subnet the hypervisor gives it,
-    /// and the workspace's other pools.
-    async fn place(&self, ctx: &Context, spec: &PoolSpec, except: Option<Uuid>) -> Result<ResolvedNetwork> {
+    /// and the workspace's other pools. A network whose list couldn't be read now is refused unless the pool was on it
+    /// already (`before`), which then keeps the network it was on.
+    async fn place(&self, ctx: &Context, spec: &PoolSpec, before: Option<&PoolRow>) -> Result<ResolvedNetwork> {
         let facts = self.facts(true).await;
-        let resolved = resolve_network(spec.hypervisor, &spec.network, spec.host_adapter.as_deref(), &facts)?;
+        check_readable(spec, before.map(|b| &b.spec), &facts)?;
+        let mut resolved = resolve_network(spec.hypervisor, &spec.network, spec.host_adapter.as_deref(), &facts)?;
+        if let (Some(before), Some(_)) = (before, facts.unread_for(spec.hypervisor, &spec.network)) {
+            resolved.key = before.network_key.clone();
+        }
         check_in_subnet(spec, &resolved)?;
-        self.check_overlap(ctx, spec, &resolved.key, &facts, except).await?;
+        self.check_overlap(ctx, spec, &resolved.key, &facts, before.map(|b| b.id))
+            .await?;
         Ok(resolved)
     }
 
@@ -1020,9 +1096,9 @@ impl AddressPools {
         if before.spec == spec {
             return self.get(ctx, id).await;
         }
-        let resolved = self.place(ctx, &spec, Some(id)).await?;
+        let resolved = self.place(ctx, &spec, Some(&before)).await?;
         let leases = self.store.address_leases(ctx, Some(id)).await?;
-        let (gone, held): (Vec<AddressLease>, Vec<AddressLease>) = leases.into_iter().partition(stale);
+        let held: Vec<AddressLease> = leases.into_iter().filter(|l| !stale(l)).collect();
         let moved = before.spec.hypervisor != spec.hypervisor
             || before.spec.network != spec.network
             || before.spec.host_adapter != spec.host_adapter;
@@ -1053,10 +1129,9 @@ impl AddressPools {
                 taken.ip, taken.vm_name
             ));
         }
-        // Claims of deploys that ended hold nothing; they go with the change.
-        for lease in &gone {
-            self.store.delete_address_lease(ctx, id, lease.ip).await?;
-        }
+        // Claims of deploys that ended hold nothing; they go with the change, in one statement that takes only those (a
+        // claim that replaced one since the leases were read stays).
+        self.store.release_stale_pool_claims(ctx, id).await?;
         self.store.update_address_pool(ctx, id, &spec, &resolved.key).await?;
         let detail = if before.spec.describe() == spec.describe() {
             spec.describe()
@@ -1078,7 +1153,7 @@ impl AddressPools {
         self.store.read_only().check(Change::AddressPools)?;
         let row = self.row(ctx, id).await?;
         let leases = self.store.address_leases(ctx, Some(id)).await?;
-        let (gone, held): (Vec<AddressLease>, Vec<AddressLease>) = leases.into_iter().partition(stale);
+        let held: Vec<AddressLease> = leases.into_iter().filter(|l| !stale(l)).collect();
         if !held.is_empty() {
             let assigned: Vec<AddressLease> = held
                 .iter()
@@ -1099,10 +1174,15 @@ impl AddressPools {
                 )
             });
         }
-        for lease in &gone {
-            self.store.delete_address_lease(ctx, id, lease.ip).await?;
-        }
+        // Only claims that hold nothing go; the pool goes only with no lease left (one statement each).
+        self.store.release_stale_pool_claims(ctx, id).await?;
         if !self.store.delete_address_pool(ctx, id).await? {
+            if self.store.get_address_pool(ctx, id).await?.is_some() {
+                return invalid(format!(
+                    "A deploy took an address from '{}' just now; delete it once the deploy ended.",
+                    row.spec.name
+                ));
+            }
             return Err(CoreError::UnknownTarget(format!("address pool {id}")));
         }
         self.forget_picks();
@@ -1132,7 +1212,14 @@ impl AddressPools {
                 LeaseState::Claimed => format!("A deploy is making {} with {ip} now.", lease.vm_name),
             });
         }
-        self.store.delete_address_lease(ctx, pool_id, ip).await?;
+        // One statement, with what `can_free` says as its condition: a claim that replaced this one since, or a VM listed
+        // again, stays.
+        if !self.store.delete_freeable_lease(ctx, pool_id, ip).await? {
+            return invalid(format!(
+                "{ip} of '{}' changed since it was listed: look at its addresses again.",
+                row.spec.name
+            ));
+        }
         self.forget_picks();
         self.audit(
             ctx,
@@ -1200,39 +1287,11 @@ impl AddressPools {
             self.remember_pick(key, Picked::TooFew(message.clone()));
             return invalid(message);
         }
-        let mut free: Vec<Ipv4Addr> = Vec::with_capacity(count);
-        let (mut answering, mut unchecked) = (0usize, 0usize);
-        for batch in candidates.chunks(PINGS_AT_ONCE) {
-            let mut checks = tokio::task::JoinSet::new();
-            for ip in batch.iter().copied() {
-                let tools = Arc::clone(&self.tools);
-                checks.spawn(async move { (ip, probe(&tools, ip).await) });
-            }
-            let mut found: Vec<(Ipv4Addr, Probe)> = Vec::with_capacity(batch.len());
-            while let Some(done) = checks.join_next().await {
-                match done {
-                    Ok(result) => found.push(result),
-                    Err(err) => tracing::warn!(error = %err, "an address check stopped"),
-                }
-            }
-            found.sort_by_key(|(ip, _)| u32::from(*ip));
-            unchecked += batch.len() - found.len();
-            for (ip, result) in found {
-                match result {
-                    Probe::Free if free.len() < count => free.push(ip),
-                    Probe::Free => {}
-                    Probe::InUse => answering += 1,
-                    Probe::Unknown(why) => {
-                        tracing::warn!(%why, "an address of a pool couldn't be checked; it is skipped");
-                        unchecked += 1;
-                    }
-                }
-            }
-            if free.len() >= count {
-                let found: Vec<PoolAddress> = free.into_iter().map(|ip| PoolAddress::of(&pool, ip)).collect();
-                self.remember_pick(key, Picked::Found(found.clone()));
-                return Ok(found);
-            }
+        let (free, answering, unchecked) = self.check_lowest(&candidates, count).await;
+        if free.len() >= count {
+            let found: Vec<PoolAddress> = free.into_iter().map(|ip| PoolAddress::of(&pool, ip)).collect();
+            self.remember_pick(key, Picked::Found(found.clone()));
+            return Ok(found);
         }
         let message = format!(
             "Only {} of the {count} addresses asked for are free in '{name}' now: {} of its {} addresses are \
@@ -1247,6 +1306,45 @@ impl AddressPools {
         );
         self.remember_pick(key, Picked::TooFew(message.clone()));
         invalid(message)
+    }
+
+    /// The lowest `count` of `candidates` (in address order) nothing is on, checked as many at once as could still be
+    /// needed ([`CHECKS_AT_ONCE`] at most): when the first ones are free, every check runs at the same time, so a pick
+    /// takes about one check's time. Every address checked is lower than every one not checked yet, and the checks under
+    /// way finish before the answer, so the free ones returned are the lowest there are. Also how many were in use and
+    /// how many couldn't be checked.
+    async fn check_lowest(&self, candidates: &[Ipv4Addr], count: usize) -> (Vec<Ipv4Addr>, usize, usize) {
+        let mut free: Vec<Ipv4Addr> = Vec::with_capacity(count);
+        let (mut answering, mut unchecked) = (0usize, 0usize);
+        let mut checks = tokio::task::JoinSet::new();
+        let (mut next, mut running) = (0usize, 0usize);
+        loop {
+            while running < CHECKS_AT_ONCE && next < candidates.len() && free.len() + running < count {
+                let (ip, tools) = (candidates[next], Arc::clone(&self.tools));
+                checks.spawn(async move { (ip, probe(&tools, ip).await) });
+                next += 1;
+                running += 1;
+            }
+            let Some(done) = checks.join_next().await else {
+                break;
+            };
+            running -= 1;
+            match done {
+                Ok((ip, Probe::Free)) => free.push(ip),
+                Ok((_, Probe::InUse)) => answering += 1,
+                Ok((_, Probe::Unknown(why))) => {
+                    tracing::warn!(%why, "an address of a pool couldn't be checked; it is skipped");
+                    unchecked += 1;
+                }
+                Err(err) => {
+                    tracing::warn!(error = %err, "an address check stopped");
+                    unchecked += 1;
+                }
+            }
+        }
+        free.sort_by_key(|ip| u32::from(*ip));
+        free.truncate(count);
+        (free, answering, unchecked)
     }
 
     /// At a deploy job's run: records `ip` as `vm_name`'s (claimed, by `job_id`), refusing an address that isn't the
@@ -1623,6 +1721,7 @@ mod tests {
             ],
             virtualbox: true,
             host_only: vec![("vboxnet0".into(), Some((Ipv4Addr::new(203, 0, 113, 0), 24)))],
+            ..NetworkFacts::default()
         }
     }
 
@@ -1706,5 +1805,190 @@ mod tests {
         b.first = Ipv4Addr::new(192, 0, 2, 51);
         b.last = Ipv4Addr::new(192, 0, 2, 60);
         assert!(!overlaps(&a, &b));
+    }
+
+    /// A report whose lists failed as `list hostonlyifs` and `vmrun listHostNetworks` fail: the side's problem, and
+    /// nothing listed.
+    fn failed_report(
+        vmware: Option<&str>,
+        virtualbox: Option<&str>,
+        host_only: Vec<crate::host_networks::HostOnlyView>,
+    ) -> HostNetworksReport {
+        HostNetworksReport {
+            vmware: crate::host_networks::VmwareNetworks {
+                available: true,
+                problem: vmware.map(str::to_owned),
+                ..Default::default()
+            },
+            virtualbox: crate::host_networks::VirtualBoxNetworks {
+                available: true,
+                problem: virtualbox.map(str::to_owned),
+                host_only,
+                ..Default::default()
+            },
+            stale_vms: Vec::new(),
+            read_at: "2026-11-14T00:00:00Z".into(),
+        }
+    }
+
+    fn vbox_spec(adapter: &str) -> PoolSpec {
+        let mut i = input();
+        i.hypervisor = Hypervisor::VirtualBox;
+        i.network = Network::HostOnly;
+        i.host_adapter = Some(adapter.into());
+        check_pool(&i).unwrap()
+    }
+
+    #[test]
+    fn a_list_that_couldnt_be_read_hides_no_pool_and_saving_on_it_says_why() {
+        let facts = NetworkFacts::of(&failed_report(
+            Some("vmrun timed out"),
+            Some("VBoxManage timed out"),
+            Vec::new(),
+        ));
+        assert!(!facts.complete());
+        assert_eq!(facts.host_only_unread.as_deref(), Some("VBoxManage timed out"));
+        // In use (pools_for, pick, claim), nothing is refused for not being listed.
+        let resolved = resolve_network(Hypervisor::VirtualBox, &Network::HostOnly, Some("vboxnet0"), &facts).unwrap();
+        assert_eq!(resolved.key, "virtualbox:hostonly:vboxnet0");
+        assert_eq!(resolved.subnet, None);
+        assert_eq!(
+            resolve_network(Hypervisor::Vmware, &Network::Nat, None, &facts)
+                .unwrap()
+                .key,
+            "vmware:vmnet8"
+        );
+        // Saving a pool on such a network says the list couldn't be read, unless the pool was on it already.
+        let spec = vbox_spec("vboxnet0");
+        let err = check_readable(&spec, None, &facts).unwrap_err().to_string();
+        assert!(
+            err.contains("VirtualBox's host-only adapters couldn't be read now (VBoxManage timed out)"),
+            "{err}"
+        );
+        assert!(
+            check_readable(&spec, Some(&spec), &facts).is_ok(),
+            "a rename goes through"
+        );
+        assert!(check_readable(&spec, Some(&vbox_spec("vboxnet1")), &facts).is_err());
+        let nat = check_pool(&input()).unwrap();
+        let err = check_readable(&nat, None, &facts).unwrap_err().to_string();
+        assert!(
+            err.contains("Workstation's networks couldn't be read now (vmrun timed out)"),
+            "{err}"
+        );
+        let mut bridged = nat.clone();
+        bridged.network = Network::Bridged;
+        assert!(
+            check_readable(&bridged, None, &facts).is_ok(),
+            "nothing is read for a bridged network"
+        );
+        // A list that was read still refuses an adapter it doesn't have (another list failing doesn't hide that).
+        let listed = crate::host_networks::HostOnlyView {
+            iface: crate::adapters::host_networks::VboxHostOnlyIf {
+                name: "vboxnet1".into(),
+                ip: Some("203.0.113.1".into()),
+                mask: Some("255.255.255.0".into()),
+                dhcp: None,
+                status: None,
+            },
+            vms: Vec::new(),
+        };
+        let facts = NetworkFacts::of(&failed_report(None, Some("natnets failed"), vec![listed]));
+        assert!(facts.complete());
+        assert!(
+            resolve_network(Hypervisor::VirtualBox, &Network::HostOnly, Some("vboxnet0"), &facts)
+                .unwrap_err()
+                .to_string()
+                .contains("no host-only adapter named 'vboxnet0'")
+        );
+    }
+
+    async fn job(store: &Store, ctx: &Context, status: &str) -> Uuid {
+        let id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO jobs (id, workspace_id, user_id, summary, action, tier, command_json, status, created_at)
+             VALUES (?, ?, ?, 'Deploy', 'vm_deploy', 'medium', '{}', ?, '2026-11-14T00:00:00Z')",
+        )
+        .bind(id.to_string())
+        .bind(ctx.workspace_id.to_string())
+        .bind(ctx.user_id.to_string())
+        .bind(status)
+        .execute(store.pool())
+        .await
+        .unwrap();
+        id
+    }
+
+    #[tokio::test]
+    async fn pool_edits_and_hand_frees_take_only_leases_that_hold_nothing_now() {
+        let store = Store::open_in_memory().await.unwrap();
+        let ctx = store.ensure_identity(r"LAB\alice", "Alice").await.unwrap();
+        let key = "vmware:vmnet8";
+        let pool = store
+            .insert_address_pool(&ctx, &check_pool(&input()).unwrap(), key)
+            .await
+            .unwrap();
+        let (live, ended) = (job(&store, &ctx, "running").await, job(&store, &ctx, "cancelled").await);
+        let ip = |n: u8| Ipv4Addr::new(192, 0, 2, n);
+        assert!(store
+            .insert_address_claim(&ctx, pool.id, key, ip(10), "web-1", live)
+            .await
+            .unwrap());
+        assert!(store
+            .insert_address_claim(&ctx, pool.id, key, ip(11), "web-2", ended)
+            .await
+            .unwrap());
+        // An edit reads .12 as a claim that holds nothing; then a deploy clears it and claims .12 itself.
+        assert!(store
+            .insert_address_claim(&ctx, pool.id, key, ip(12), "web-3", ended)
+            .await
+            .unwrap());
+        let read = store.address_leases(&ctx, Some(pool.id)).await.unwrap();
+        assert!(read.iter().any(|l| l.ip == ip(12) && l.can_free));
+        assert_eq!(store.clear_stale_claims(key, pool.id, ip(12)).await.unwrap(), 1);
+        assert!(store
+            .insert_address_claim(&ctx, pool.id, key, ip(12), "web-3", live)
+            .await
+            .unwrap());
+        // The edit's delete and a hand free take only what holds nothing now: .11.
+        assert!(!store.delete_freeable_lease(&ctx, pool.id, ip(12)).await.unwrap());
+        assert!(!store.delete_freeable_lease(&ctx, pool.id, ip(10)).await.unwrap());
+        assert_eq!(store.release_stale_pool_claims(&ctx, pool.id).await.unwrap(), 1);
+        let left: Vec<Ipv4Addr> = store
+            .address_leases(&ctx, Some(pool.id))
+            .await
+            .unwrap()
+            .iter()
+            .map(|l| l.ip)
+            .collect();
+        assert_eq!(left, [ip(10), ip(12)]);
+        // An assigned address goes by hand only while no workspace lists its VM.
+        let vm = r"C:\VMs\web-1\web-1.vmx";
+        assert!(store
+            .assign_address_lease(&ctx, pool.id, ip(10), live, vm)
+            .await
+            .unwrap());
+        sqlx::query(
+            "INSERT INTO vms (id, workspace_id, user_id, vmx_path, display_name, created_at, updated_at)
+             VALUES (?, ?, ?, ?, 'web-1', '2026-11-14T00:00:00Z', '2026-11-14T00:00:00Z')",
+        )
+        .bind(Uuid::new_v4().to_string())
+        .bind(ctx.workspace_id.to_string())
+        .bind(ctx.user_id.to_string())
+        .bind(vm)
+        .execute(store.pool())
+        .await
+        .unwrap();
+        assert!(!store.delete_freeable_lease(&ctx, pool.id, ip(10)).await.unwrap());
+        sqlx::query("UPDATE vms SET missing = 1")
+            .execute(store.pool())
+            .await
+            .unwrap();
+        assert!(store.delete_freeable_lease(&ctx, pool.id, ip(10)).await.unwrap());
+        assert_eq!(
+            store.release_stale_pool_claims(&ctx, pool.id).await.unwrap(),
+            0,
+            "the live claim stays"
+        );
     }
 }
