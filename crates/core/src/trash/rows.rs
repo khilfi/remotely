@@ -16,7 +16,7 @@ use crate::error::{CoreError, Result};
 pub type RowValues = Map<String, Value>;
 
 /// The tables the trash snapshots and restores.
-pub const TABLES: [&str; 13] = [
+pub const TABLES: [&str; 14] = [
     "sessions",
     "port_forwards",
     "container_hosts",
@@ -29,6 +29,7 @@ pub const TABLES: [&str; 13] = [
     "catalog_images",
     "catalog_templates",
     "stacks",
+    "install_configs",
     "notes",
 ];
 

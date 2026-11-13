@@ -179,6 +179,11 @@ export const GLOSSARY = {
     term: "Stack",
     definition: "Several launch templates deployed, started and stopped together, in boot order.",
   },
+  installConfig: {
+    term: "Install config",
+    definition: "An answer file an installer reads to install a system by itself, with each VM's own values.",
+    aliases: ["autoinstall", "kickstart", "preseed", "unattend", "answer file"],
+  },
   instance: {
     term: "Instance",
     definition: "One deployed copy of a stack: its VMs, which start, stop and tear down together.",

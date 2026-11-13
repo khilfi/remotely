@@ -161,6 +161,7 @@ async fn template_on(lab: &Lab, name: &str, hypervisor: Hypervisor, network: Net
                 guest_user: None,
                 packages: vec![],
                 clone_mode: CloneMode::Full,
+                install_config_id: None,
             },
         )
         .await

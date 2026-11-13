@@ -2179,7 +2179,7 @@ export interface ExportReport {
   /** MO-08 health check definitions. */
   checks: number;
   /** VM-19 to VM-21: own sizes, images and launch templates. */
-  catalog: { sizes: number; images: number; templates: number; stacks: number };
+  catalog: { sizes: number; images: number; templates: number; stacks: number; installConfigs?: number };
 }
 
 export type TransferStatus = "new" | "same" | "conflict";
@@ -2225,7 +2225,14 @@ export interface TransferPreview {
   /** MO-08 health checks; files from before 0.7.0 have none. */
   checks?: TransferItem[];
   /** VM-19 to VM-21: own sizes, images (by path) and launch templates. */
-  catalog: { sizes: TransferItem[]; images: TransferItem[]; templates: TransferItem[]; stacks: TransferItem[] };
+  catalog: {
+    sizes: TransferItem[];
+    images: TransferItem[];
+    templates: TransferItem[];
+    stacks: TransferItem[];
+    /** VM-28; files from before 0.8.0 have none. */
+    installConfigs?: TransferItem[];
+  };
   warnings: string[];
 }
 
@@ -2257,6 +2264,8 @@ export interface TransferReport {
     templates: TransferCounts;
     /** VM-08. */
     stacks: TransferCounts;
+    /** VM-28. */
+    installConfigs?: TransferCounts;
     imagesMissingHere: number;
   };
   /** SS-07: port forwards saved with the imported sessions. */
@@ -2427,6 +2436,8 @@ export interface TemplateInput {
   packages: string[];
   /** VM-21: how a golden VM image is cloned. */
   cloneMode: CloneMode;
+  /** VM-28: the install config its deploys use (an own one), or null. */
+  installConfigId?: string | null;
 }
 
 export type CloneMode = "full" | "linked";

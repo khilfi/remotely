@@ -174,10 +174,18 @@ Notes, stars and recents, the trash and bulk edit (0.7.0, `docs/plan-0.7.md` "Ap
 | Action | Tier |
 | --- | --- |
 | Write, change, mark for the handover pack or delete a note (FD-06) | No tier; audited without the note's text, refused by the read-only lock |
-| Delete a session, favourite command, size, image, launch template or stack (it moves to the trash); restore one, delete one for good, or empty the trash (QL-27) | No tier; audited, refused by the read-only lock; a restored session that would send a vault password somewhere it didn't go before asks for the vault password again (AP-06) |
+| Delete a session, favourite command, size, image, launch template, stack or install config (it moves to the trash); restore one, delete one for good, or empty the trash (QL-27) | No tier; audited, refused by the read-only lock; a restored session that would send a vault password somewhere it didn't go before asks for the vault password again (AP-06) |
 | The trash's daily purge of items deleted more than 30 days ago | No tier; audited when it removed something; the read-only lock doesn't stop it |
 | Bulk edit sessions: folder, port, user, login, jump host, environment, tags (QL-28) | No tier; one audit entry naming every session, refused by the read-only lock; asks for the vault password once when a login would send one somewhere new (AP-06) |
 | Star a session, VM or command; the items opened last (QL-26) | Not audited, not locked (like the notification centre) |
+
+Install configs (0.8.0, VM-28, `docs/plan-0.8.md` "Approval tiers"). An install config is an answer file (Ubuntu autoinstall, Kickstart, Debian preseed, cloud-init user data, Windows unattend) in the catalogue; it never holds a secret, and changing one touches no VM:
+
+| Action | Tier |
+| --- | --- |
+| Add, edit or delete an install config (deleting moves it to the trash); a launch template naming one | No tier; audited (`catalog_changed`, the file named by its SHA-256, never its text), refused by the read-only lock |
+| Check a config, read its form, preview one VM's file with every secret masked | Reads: not audited, allowed by the read-only lock |
+| Deploy with an install config (G6) | As a VM deploy: Medium, High from 5 VMs or for Prod |
 
 Support bundles (0.7.0, FD-04, `docs/plan-0.7.md` "Approval tiers"). The hosts are saved SSH sessions and (BX-13) WinRM sessions, each kind with its own presets and custom items (SS-12: an RDP, VNC, Telnet or serial session is refused); a Prod-labelled one moves the bundle up one tier, and protected ones are skipped:
 

@@ -92,6 +92,13 @@ httparse = "1"
 hyper = { version = "1", default-features = false, features = ["client", "http1"] }
 hyper-util = { version = "0.1", default-features = false, features = ["tokio"] }
 http-body-util = "0.1"
+# VM-28: install configs' YAML (Ubuntu autoinstall, cloud-init user data) checked with its line numbers. The event
+# parser alone (spans per event; two small dependencies), from the maintainers of yaml-rust2; it passes the YAML test
+# suite. Remotely builds its own tree from the events and reads scalars as PyYAML (YAML 1.1) does, as the installers do.
+saphyr-parser = "0.3"
+# VM-28: a user's password goes into a rendered answer file only as a SHA-512 crypt hash (`$6$`), salted afresh each
+# render. RustCrypto's, on the sha2 0.11 above; the salt comes from getrandom, so its own getrandom feature stays off.
+sha-crypt = { version = "0.6", default-features = false, features = ["alloc", "password-hash"] }
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.56"

@@ -284,8 +284,50 @@ crates/core/          remotely-core: all app logic
                       progress and cancel; untrusted::path_refusal first; IMAGE_SITES and checked_site, the cloud
                       image pages allow-list), templates.rs (check_template, problems, naming {n} {template} {date},
                       resolve: a template and a count into a DeployPlan per VM, pure; VM-22 the guest user,
-                      packages and full or linked clone, migration 0023); mod.rs the Catalog service (Core.catalog;
-                      `plan`, and `plan_input` for the Deploy dialog's Custom, are the deploy's entry)
+                      packages and full or linked clone, migration 0023; VM-28 install_config_id and
+                      install_problems: a config of another image kind or OS, with errors, gone, or a disk layout past
+                      the size's boot disk); mod.rs the Catalog service (Core.catalog; `plan`, and `plan_input` for the
+                      Deploy dialog's Custom, are the deploy's entry; Facts::resolve adds the install config's problems);
+                      install_configs.rs VM-28 the catalogue's install configs (starters first, own ones checked; the
+                      editor's check, masked preview, add/update/delete to the trash, FD-07's import; audited with the
+                      file's SHA-256, never its text; a password or hash in the file refuses saving);
+                      install/ VM-28 install configs (migration 0035, per workspace; G6 delivers them): mod.rs kinds
+                      (autoinstall, kickstart, preseed, cloud_init, unattend), InstallConfigInput (the file with
+                      placeholders, own variables with defaults, SecretRef: `{{password.<name>}}` / `{{ssh_key.<name>}}`
+                      to a vault id), check (placeholders, then the kind's syntax, schema and lint on a sample render:
+                      SAMPLE_HASH, SAMPLE_ONE_TIME, SAMPLE_KEY), check_input, read_form/apply_form (only changed fields,
+                      only their lines), protect/restore (placeholders as private-use tokens for the YAML reader);
+                      hidden_break: a line break only Python reads (U+0085, U+2028, U+2029, a lone CR, VT, FF...) in a
+                      file of any kind but unattend refuses saving and render, as the installer would see lines the
+                      checks don't; every kind scans for secrets whatever other errors it has, in every YAML document,
+                      and YAML or XML that doesn't read refuses saving (it can't be checked for one); the service runs
+                      the checks on spawn_blocking;
+                      vars.rs `{{hostname}}` `{{ip}}` `{{n}}` `{{template}}` `{{date}}`, `\{{` escapes, split (linear, at
+                      most MAX_ERRORS, 50), check_value (one line, no white space but a plain space; text kinds refuse
+                      quotes, `$`, `;`, `#`, braces...; YAML kinds a leading `-` `!` `*` `[` and the like; XML
+                      escaped); form.rs InstallForm
+                      (the common parts) and FieldState per kind; render.rs the pure per-VM render (Random: salts and
+                      one-time passwords; SHA-512 crypt through sha-crypt, a fresh 12-byte salt each render; Windows: a
+                      24-character one-time password returned in Rendered.one_time for G6 to replace over WinRM; the
+                      rendered file a SecretString checked again as its kind; only the config's name and SHA-256 are
+                      loggable) and preview (`$6$••••••••`); yaml.rs saphyr-parser events into a tree with lines,
+                      PyYAML's YAML 1.1 scalars, caps (50,000 nodes, 64 deep), `<<` merge keys and tags recorded
+                      (cloud_init::unread_shapes refuses both: PyYAML reads them, the tree doesn't), an emitter, and
+                      `set` (one key changed in
+                      place, verified by parsing again); autoinstall.rs Ubuntu's schema as code (SCHEMA), lint (no user,
+                      no SSH server, password logins off with no key, interactive sections, secrets), the form;
+                      cloud_init.rs `#cloud-config`, known modules, users (lock_passwd's default), secrets (write_files'
+                      b64 content decoded, gzip refused), the form;
+                      kickstart.rs pykickstart's words, COMMANDS and REMOVED, sections, autopart vs part, sources, rootpw
+                      and user passwords (--iscrypted; a locked rootpw's too), option prefixes read as argparse does
+                      (full_option: `--pa` is `--password`), RHEL 9's root SSH rule, the form by lines; preseed.rs
+                      `owner question type value` lines with continuations, plain and crypted passwords, what the
+                      installer would ask; unattend.rs passes, components, passwords (PlainText), what Setup would ask,
+                      WinRM over HTTPS, the form by element; xml.rs a strict XML reader (one root, matching tags, five
+                      entities, no DOCTYPE; 64 deep, 20,000 elements, 256 attributes) with byte spans and set_text;
+                      starters.rs the
+                      read-only library (Ubuntu 24.04 minimal and with Docker, Rocky 9, Alma 9, Debian 12, Windows Server
+                      2022 and 2025 with WinRM over HTTPS, a cloud image's first boot) from starters/*
     deploy/           VM-21, VM-22, VM-10 deploy. spec.rs DeploySpec: what is approved is what runs (Command::Deploy,
                       built only by Core.deploy, never from the UI: check_from_ui); one job step per new VM
                       (TargetRef::NewVm, `new-vm/<hypervisor>/<name>`, target kind `new_vm`, migration 0023);
@@ -447,8 +489,8 @@ crates/core/          remotely-core: all app logic
                       marks, saved group places, secret grants, its own QL-17 highlight rules (reloaded on restore),
                       its MO-08 health checks (without their results; Checks reloaded on delete and restore, under
                       MAX_CHECKS), tags, note, where it went and what it sent, SentThen, and the sessions and folders
-                      whose jump host it was, named on restore), a favourite command, size, image, launch template or
-                      stack
+                      whose jump host it was, named on restore), a favourite command, size, image, launch template,
+                      stack or VM-28 install config
                       (SessionLibrary, Snippets, Catalog and Stacks call it); restore under the item's own id (a new one
                       if taken), " (restored)" for a taken name, gone folders, jump hosts (or one that is no longer an
                       SSH session), VMs, vault items and groups left out with notes, AP-06 confirm when a restored
@@ -808,7 +850,9 @@ crates/core/          remotely-core: all app logic
                       so older 64 MiB files still import), preview with conflicts (skip, replace, keep both), commit;
                       audited; an export refuses the vault password as its passphrase; catalog.rs VM-19 to VM-21 own
                       sizes, images by path (a note when the file isn't here; a refused path can only be skipped) and
-                      templates mapped to this laptop's images, sizes and keys; QL-16 sessions travel with what they
+                      templates mapped to this laptop's images, sizes, keys and VM-28 install configs (each config by id, then
+                      name; its vault picks mapped through the export's vault items or left unpicked, never a secret in
+                      the file); QL-16 sessions travel with what they
                       set themselves and folders with their defaults (a folder here with other defaults: keep or
                       replace); groups.rs QL-19 MultiExec groups by name with their sessions' ids (members become the
                       sessions imported or matched here, the rest left out with a note); stacks.rs VM-08 stacks with
@@ -840,7 +884,9 @@ crates/core/          remotely-core: all app logic
                       zxcvbn-style score of at least 3 of 4: common passwords and words, repeats, sequences,
                       keyboard rows, years and dates; hints never quote it), passphrase.rs (Generate: six words from
                       a built-in list of 1327, the OS CSPRNG)
-    store/            jobs.rs: the journal stores Command::for_journal (scripts and lines redacted), command_type
+    store/            install_configs.rs (VM-28 rows, migration 0035; install_configs_upgrade_tests.rs a database at
+                      0033 with trash rows of every kind, opened by 0035's trash rebuild); jobs.rs: the journal stores
+                      Command::for_journal (scripts and lines redacted), command_type
                       (migration 0017) for the lists, which pick a page of ids on an index first (AP-03, BX-03);
                       purge_job_bodies and redact_old_commands; audit.rs redacts every entry's text before hashing it,
                       and verifies and exports with row streams; multiexec_groups.rs (QL-19, migration 0021);
@@ -940,7 +986,9 @@ src-tauri/            Tauri 2 shell: window, IPC commands (ipc.rs), terminal bri
                       transfer (files.rs: upload and folder dialogs, drops caught in Rust, Explorer for "Open folder";
                       SS-14 files_change, files_root_start/stop/status, files_pause/resume, a folder's upload dialog,
                       downloads with the existing-file choice and its `choice` id),
-                      SS-07 port forwards and tunnels (tunnels.rs), VM-19 to VM-21 the Templates page (catalog.rs:
+                      SS-07 port forwards and tunnels (tunnels.rs), VM-19 to VM-21 the Templates page (catalog.rs: VM-28
+                      install_configs, install_config_check, install_config_apply_form (pure), install_config_preview
+                      (masked), add, update, delete;
                       image and folder dialogs, `catalog://hash` progress, cloud image pages after checked_site),
                       CT-01 the Containers page's reads, marks and
                       container shells (containers.rs), MO-13 to MO-15 host details and this PC's memory
@@ -1012,7 +1060,10 @@ src/                  React + TypeScript UI
                       VM-21, VM-22, VM-10: TemplateFields (the template editor's fields, also the Deploy dialog's
                       Custom), DeployDialog (a template or Custom, count, names, the preview, then the job's step per
                       VM: DeployProgressView, useDeployProgress), DeployPreviewView (also in the approval dialog),
-                      CloneDialog; VM-08, VM-26: StacksTab (the Templates page's Stacks tab: stacks and instances),
+                      CloneDialog; VM-28: InstallConfigsTab (the Templates page's Install configs tab: own configs, then the
+                      starters with Make a copy) and InstallConfigDialog (the form beside the file, vault picks and
+                      variables, problems that jump to their line, a size to check the disk against, the masked preview;
+                      TemplateFields picks a fitting own config); VM-08, VM-26: StacksTab (the Templates page's Stacks tab: stacks and instances),
                       StackDialog, StackDeployDialog, StackDetailsView (also in the approval dialog), StackGroupRow
                       (an instance's header row on the VMs page), CapacityPlanView (the Deploy, Clone, Import and stack
                       deploy dialogs and the approval; Suspend what it suggests); CV-01 VmImportDialog (a file analysed,
@@ -1129,7 +1180,9 @@ src/                  React + TypeScript UI
                       to VM-21 texts, the size form), deploy.ts (VM-21, VM-10 the dialogs' reasons, counts and
                       packages, a job's steps from its events and targets), vm-insight-api.ts and vm-insight.ts (R4
                       wrappers; a followed log, search, timeline groups, the forward form and its command, the waste
-                      rows' QL-08 reasons), stacks.ts and stacks-api.ts (VM-08, VM-26 texts, QL-08 reasons, the VMs
+                      rows' QL-08 reasons), install-configs.ts and install-configs-api.ts (VM-28 kinds, blank files, copy
+                      names, vault picks and variables a file needs, fitsImage; types and IPC wrappers), stacks.ts and
+                      stacks-api.ts (VM-08, VM-26 texts, QL-08 reasons, the VMs
                       page's grouping by instance; types and IPC wrappers), convert.ts and convert-api.ts (CV-01 to
                       CV-03, VM-17 texts, QL-08 reasons, the Verify verdict; the conversion IPC's types and wrappers),
                       vm-snapshots.ts (QL-14 snapshot reasons, picks, tier hints), vm-settings.ts

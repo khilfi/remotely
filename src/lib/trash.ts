@@ -10,6 +10,7 @@ const KIND_LABELS: Record<TrashKind, string> = {
   image: "Image",
   template: "Launch template",
   stack: "Stack",
+  installConfig: "Install config",
 };
 
 export function trashKindLabel(kind: TrashKind): string {

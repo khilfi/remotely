@@ -1,0 +1,33 @@
+#cloud-config
+# Ubuntu Server 24.04 LTS, minimal: one admin user with sudo and your SSH key, OpenSSH, LVM over the whole disk, DHCP.
+# A starter from Remotely: copy it to change it. The admin password, picked from the vault, goes in as a SHA-512
+# hash when a VM is deployed.
+autoinstall:
+  version: 1
+  source:
+    id: ubuntu-server-minimal
+  locale: en_US.UTF-8
+  keyboard:
+    layout: us
+  timezone: Etc/UTC
+  network:
+    version: 2
+    ethernets:
+      any:
+        match:
+          name: "e*"
+        dhcp4: true
+  storage:
+    layout:
+      name: lvm
+  identity:
+    hostname: "{{hostname}}"
+    username: sysadmin
+    password: "{{password.admin}}"
+  ssh:
+    install-server: true
+    allow-pw: false
+    authorized-keys:
+      - "{{ssh_key.admin}}"
+  updates: security
+  shutdown: reboot
