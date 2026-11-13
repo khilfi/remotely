@@ -1770,6 +1770,131 @@ on a seed from `deploy::seed::write_seed` (`user-data` the rendered file, `meta-
   `--machine-readable` (`Unattended installation supported = yes` without it): `Ubuntu24_64` for 24.04.5,
   `Ubuntu25_64` for 26.04.1.
 
+## Unattended installs (S3, Windows Server)
+
+S3 for G6, from 0.8.0 (`docs/plan-0.8.md`, VM-29). Checked by hand on 13 Nov 2026 with Microsoft's evaluation ISOs
+`26100.1742.240906-0331.ge_release_svc_refresh_SERVER_EVAL_x64FRE_en-us.iso` (Windows Server 2025, 6,014,152,704
+bytes) and `SERVER_EVAL_x64FRE_en-us.iso` (2022, build 20348.587, 5,044,094,976 bytes), Workstation 26 and VirtualBox
+7.2.22 on the PC of S1 (Hyper-V on). New VMs of 2 vCPUs, 4 GB and a 40 GB thin disk on NAT (Workstation `e1000e`,
+`guestOS = "windows2019srvNext-64"`; VirtualBox `82540EM`, `Windows2022_64` or `Windows2025_64`, a NAT forward from
+127.0.0.1 to the guest's 5986); G5's `windows-server-2022` and `-2025` starters rendered by
+`catalog::install::render::render` (the vault password made at run time, `image_index` 2), the file alone as
+`autounattend.xml` on a seed from `deploy::seed::write_seed`. Times are from power-on, with 5 to 11 VMs running on the
+PC.
+
+- **The ISO** (both releases): sector 16 the primary descriptor (volume `SSS_X64FREE_EN-US_DV9`), 17 El Torito's boot
+  record, 18 the terminator, 19 to 21 `BEA01` `NSR02` `TEA01`. The ISO 9660 tree holds only `README.TXT`: every file is
+  in UDF (`NSR02`; anchor at sector 256, the partition from sector 304), so finding one takes a UDF reader (file
+  identifiers, file entries' allocation descriptors). The boot catalog (sector 22): the validation entry (`Microsoft
+  Corporation`), the default entry, no emulation, 8 × 512 bytes at RBA 546 (2025) or 521 (2022), a copy of
+  `boot/etfsboot.com`; then a final section header (0x91) for platform 0xEF with one no-emulation entry, sector count
+  1, at RBA 548 or 523: a copy of `efi/microsoft/boot/efisys.bin` (1,474,560 bytes, FAT12, `MSDOS5.0`) apart from the
+  UDF file's own extent. UDF has `efisys.bin` and `efisys_noprompt.bin` of the same size (2025: sectors 2917630 and
+  2918350; 2022: 2445973 and 2446693), `cdboot.efi` and `cdboot_noprompt.efi`. `sources/install.wim` spans several
+  UDF extents; its XML (resource header at WIM offset 0x48, UTF-16LE) lists four images on both: 1
+  `SERVERSTANDARDCORE`, 2 `SERVERSTANDARD` (Desktop Experience), 3 `SERVERDATACENTERCORE`, 4 `SERVERDATACENTER`,
+  editions `ServerStandardEval` and `ServerDatacenterEval`; so the starters' `/IMAGE/INDEX` 2 is Standard with the
+  Desktop Experience.
+- **"Press any key to boot from CD or DVD"**: UEFI with the original ISO and no key, VirtualBox shows the prompt, then
+  `BdsDxe: No bootable option or device was found.`; Workstation's vmware.log `Guest: Status upon boot failure: No
+  Media` (the blank disk), `Guest: About to do EFI boot: EFI VMware Virtual SATA CDROM Drive (0.0)`, `Guest: Status
+  upon boot failure: Time out`, `No Media`: nothing boots. **The change that worked**, on a copy (the original
+  untouched): the EFI section entry's load RBA (catalog bytes 104 to 107, little-endian) set to `efisys_noprompt.bin`'s
+  UDF extent, the sector count left at 1 as Microsoft's entry has it; 3 bytes differ. It boots Setup with no key on
+  both hypervisors, Secure Boot on (vmware.log `SECUREBOOT: Image APPROVED.`). BIOS needs no change: `etfsboot.com`
+  starts Setup at once on a blank disk, and on a disk with a boot sector shows `Press any key to boot from CD or DVD..`
+  for about 5 s, then boots the disk. Not needed, but seen: VirtualBox's `controlvm keyboardputscancode 39 b9` once a
+  second gets past the prompt and then leaves Windows Boot Manager at its menu (`Windows Setup [EMS Enabled]`) waiting
+  for Enter; vmrun can't send keys, but Workstation's VNC server (below) takes RFB key events (spaces every 0.5 s for
+  12 s, then two Enters, started Setup). Both depend on timing.
+- **The seed**: `autounattend.xml` at the root of seed.rs's ISO (its Joliet name) in a second CD/DVD drive was found
+  every time, 2022 and 2025, BIOS and UEFI: Workstation `sata0:1` after the ISO's `sata0:0` (`sata0:2` with a SATA
+  disk), VirtualBox SATA port 2 after the ISO's port 1. No floppy needed. The label (`cidata`) doesn't matter.
+- **Disks**: WinPE sees, with no driver added, Workstation NVMe, SATA, LSI SAS (`lsisas1068`) and PVSCSI (2022 and
+  2025: `Win32_SCSIController` `VMware PVSCSI Controller`, driver `pvscsi`; disk `BusType` SAS), and VirtualBox SATA
+  (IntelAhci). The starters' GPT layout (EFI 260 MB FAT32, MSR 16 MB, Windows extended, `InstallTo` partition 3)
+  installs on UEFI. On BIOS Setup makes the same partitions and stops at `Select location to install Windows Server`
+  with `Windows Server can't be installed on disk 0 partition 3.` BIOS needs MBR: partition 1 Primary 500 MB, NTFS,
+  `Active`, label `System Reserved`; partition 2 Primary `Extend`, NTFS, `C`; `InstallTo` partition 2 (installed on both
+  hypervisors and releases). `WillWipeDisk` with no `CreatePartitions` and `InstallToAvailablePartition` picks no
+  layout: Setup stops on `Disk 0 Unallocated Space`. 2025 adds a 674 MB recovery partition after Windows (GPT and MBR);
+  2022 doesn't.
+- **What Setup still asks**, with the starter on evaluation media: nothing. The edition by `/IMAGE/INDEX`, no product
+  key (evaluation media asks for none; retail and volume media were not tried, and their Setup asks for one without
+  `UserData/ProductKey`), the licence by `AcceptEula`, the disk by `DiskConfiguration` and `InstallTo`, OOBE's pages by
+  `OOBE` (`HideEULAPage`, `HideOEMRegistrationScreen`, `HideOnlineAccountScreens`, `HideWirelessSetupInOOBE`,
+  `ProtectYourPC` 3), the account by `AdministratorPassword` and `AutoLogon`. After the autologon the desktop shows
+  Server Manager with its Windows Admin Center pop-up, and on 2022 the `Networks` pane (`Do you want to allow your PC to
+  be discoverable`); neither blocks anything, and the network profile stays Public.
+- **Commands in windowsPE**: a `RunSynchronousCommand` there that exits non-zero stops Setup with `Windows installation
+  encountered an unexpected error. Error code: 0x80070001 - 0x40030` (seen with `cmd /c echo ...>COM1`: WinPE has no
+  COM1). `cmd /c (echo ...>COM1) 2>nul & exit 0` passes, and writes nothing.
+- **Reboots with the ISO still attached**: Setup restarts twice (the image applied, then specialize done) and never
+  ejects a disc. UEFI: Setup adds a `Windows Boot Manager` entry that the firmware boots before the disc (vmware.log
+  `Guest: About to do EFI boot: Windows Boot Manager` after each reset), so the noprompt copy can't start Setup again:
+  a power-off and on with it still connected boots Windows on Workstation (WinRM at 20 s) and on VirtualBox with
+  `--boot1 dvd` (the lock screen, WinRM at 40 s). VirtualBox EFI with `--boot1 disk --boot2 dvd` falls through a blank
+  disk to the DVD. BIOS: Workstation `bios.bootOrder = "cdrom,hdd"` (what `deploy::vmx` writes for an ISO install) and
+  VirtualBox `--boot1 dvd` go back through `etfsboot.com`'s prompt and boot the disk when no key comes; `hdd,cdrom` and
+  `--boot1 disk` (both fall through a blank disk to the ISO) skip the prompt.
+- **Times** (first reset, second reset, WinRM over HTTPS answering): Workstation 2025 UEFI NVMe 256 / 341 / 431 s,
+  PVSCSI 362 / 467 / 568 s, BIOS LSI SAS 402 / 528 / 658 s; 2022 UEFI SATA 350 / 426 / 519 s, PVSCSI 271 / 360 /
+  452 s, BIOS SATA 358 / 426 / 528 s. VirtualBox 2025 EFI 488 / 638 / 799 s; 2022 EFI 690 / 775 / 897 s, BIOS 654 /
+  786 / 890 s. The thin disk grows from the first minutes of windowsPE; one still at its empty size means Setup waits on
+  a page.
+- **Watching an install** (Windows writes nothing to a serial port by itself): Workstation's vmware.log `Chipset: The
+  guest has requested that the virtual machine be hard reset.` at each of Setup's two restarts (BIOS logs nothing else);
+  VirtualBox's VBox.log `Changing the VM state from 'RUNNING' to 'RESETTING'`, and the guest property
+  `/VirtualBox/VMInfo/ResetCounter` (no Guest Additions needed; `No value set!` before the first reset). The DHCP lease
+  (Workstation's `vmnetdhcp.leases` by `ethernet0.generatedAddress`) comes during specialize, 30 to 90 s after the
+  first reset, and is the installed system's. The answer file can write stages to COM1 from the installed system:
+  `cmd /c (echo <stage> %TIME%>COM1) 2>nul & exit 0` as a specialize `Microsoft-Windows-Deployment` `RunSynchronous`
+  command (it runs just before the second reset), in `C:\Windows\Setup\Scripts\SetupComplete.cmd` (written by a
+  specialize command; it ran after the second restart, before the first sign-in) and as `FirstLogonCommands`; each
+  line reached the serial file on both hypervisors (Workstation `serial0.fileType = "file"`; VirtualBox `--uart1 0x3F8
+  4 --uartmode1 file`, after its EFI firmware's console escapes). The same channel carries the WinRM certificate's
+  SHA-256: `[Convert]::ToBase64String([Security.Cryptography.SHA256]::Create().ComputeHash($cert.RawData)).TrimEnd('=')`
+  written through `System.IO.Ports.SerialPort` COM1 equals the `SHA256:` fingerprint `adapters::winrm` computes for the
+  HTTPS leaf, so it can be trusted from the VM's own serial port instead of on first use. WinRM: VirtualBox's NAT
+  forward accepts a TCP connection whatever the guest does, so only an HTTPS answer counts (405 for a GET of `/wsman`).
+  Screens: VirtualBox's `screenshotpng` (`Unsupported resolution for screen shot: 0x0` before the firmware sets a
+  mode); Workstation's `vmrun captureScreen` refuses without a guest sign-in (`Anonymous guest operations are not
+  allowed on this virtual machine`), but `RemoteDisplay.vnc.enabled = "TRUE"`, `RemoteDisplay.vnc.port`,
+  `RemoteDisplay.vnc.ip = "127.0.0.1"` (it listens on loopback only) serves RFB 3.8 with no password, and a raw
+  framebuffer read gives the screen.
+- **WinRM and the one-time password**: Remotely's client (`adapters::winrm::HttpWinrm`, NTLM over HTTPS,
+  `WinrmCertificate::Fingerprint`, user `Administrator`) signs in with the one-time password as soon as 5986 answers;
+  `$p = ConvertTo-SecureString '<new>' -AsPlainText -Force; Set-LocalUser -Name Administrator -Password $p` sent as the
+  run's script (stdin, never a command line) sets the vault's; the new password signs in and the one-time one is
+  refused. Seen on both releases and hypervisors, BIOS and UEFI (2 to 10 s a run).
+- **The installed system**: WinRM listeners on HTTPS and HTTP (`Enable-PSRemoting` adds HTTP), service auth Basic off,
+  Negotiate and Kerberos on, `AllowUnencrypted` false, `CbtHardeningLevel` Relaxed; firewall `WinRM-HTTPS-In` any
+  profile and address, `WINRM-HTTP-In-TCP` Domain and Private, `WINRM-HTTP-In-TCP-PUBLIC` Public from `LocalSubnet`;
+  the certificate `CN=<COMPUTERNAME>` in upper case, RSA 2048, valid one year. The Administrator stays signed in on the
+  console (the autologon) until a restart or `logoff <session id>` over WinRM (seen: back to the lock screen); Winlogon
+  keeps `AutoAdminLogon` 1 with `AutoLogonCount` 0 and no `DefaultPassword`. `C:\Windows\Panther\unattend.xml` keeps the
+  file with `*SENSITIVE*DATA*DELETED*` for both passwords; 2025 also keeps `C:\Windows\Panther\unattend-original.xml`,
+  the delivered file byte for byte (its SHA-256 is `Rendered.sha256`) with the one-time password, readable by
+  `BUILTIN\Users`; 2022 has no such copy. No VMware Tools (`getGuestIPAddress` fails). Evaluation licensing:
+  2022 activated at once (`LicenseStatus` 1, 180 days); 2025 in its 10-day grace (`LicenseStatus` 2) when checked.
+- **VirtualBox on a PC with Hyper-V on** (NEM, as in S1): 2 of the 5 VirtualBox installs that ran to the end (2 of
+  their 10 restarts) hung for good at a guest restart (one after specialize, one at the end of windowsPE): a black
+  screen, vCPU 0's `/TM/CPU/00/cNsTotal` (`debugvm <vm> statistics`) no longer moving while vCPU 1 runs, once VBox.log
+  `TM: Giving up catch-up attempt at a 60 ... ns lag`. `controlvm reset` went on into the next stage, and both installs
+  finished. Workstation never hung.
+- **`VBoxManage unattended install --script-template=<rendered autounattend.xml>`** works for 2025 (EFI; the VM made
+  first with a disk on SATA; its hang reset as above): with no `@@VBOX_...@@` placeholder the template is copied byte
+  for byte. `unattended detect` exits 0 here and reads the WIM: `OSTypeId="Windows2022_64"` for 2025,
+  `OSVersion="10.0.26100.1742"`, `OSFlavor="ServerStandardEval"`, `ImageIndex1` to `4` with their names,
+  `IsInstallSupported="on"`. It writes `Unattended-<uuid>-autounattend.xml`, `-VBOXPOST.CMD` and `-aux-iso.viso`
+  beside the .vbox and attaches the .viso to `SATA-1-0` (`--boot1 disk --boot2 dvd --boot3 floppy`); the .viso imports
+  the ISO without its El Torito (`--import-iso-skip-eltorito`), replaces UDF's `/efi/microsoft/boot/cdboot.efi` with
+  `cdboot_noprompt.efi`, builds a new catalog (`etfsboot.com`, load size 8, for x86; `efisys_noprompt.bin`, load size
+  0, for EFI) and adds `/autounattend.xml` and `/VBOXPOST.CMD`: the same noprompt answer. Windows doesn't eject it. It
+  prints the passwords in clear text in its `Using values:` block (`password`, `user-password`, `admin-password`) and
+  takes the country and time zone from this PC; a template without placeholders uses none of them, and its user is not
+  made.
+
 ## Development safety
 
 - Unit and integration tests must never stop, reset, suspend, revert or delete snapshots on real VMs. Use the fake VMware adapter, and `fakes::FakeVirtualBox` for VirtualBox.
