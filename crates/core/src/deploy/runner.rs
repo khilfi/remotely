@@ -958,8 +958,10 @@ impl Deployer {
     /// VirtualBox installs the OS by itself. The guest password goes from the vault into a file only this
     /// Windows user can read (their own temp folder), which VBoxManage reads (`--password-file`) and which is
     /// deleted as soon as it returns, whatever it says. Rule 7: VBoxManage prints the password back in clear text
-    /// (its `Using values:` block), so its output is dropped unread and never logged, and an error from it never
-    /// quotes that block ([`crate::adapters::virtualbox::error_message`]).
+    /// in its `Using values:` block, which VirtualBox 7.2.22 prints only once the install is prepared and, with
+    /// these arguments (no `--start-vm`), only on a run that succeeded. That run's output is dropped here unread
+    /// and never logged, which is what keeps the password out. The backstop: an error from a failed run never
+    /// quotes the block, nor a line that sets a password ([`crate::adapters::virtualbox::error_message`]).
     async fn unattended(
         &self,
         ctx: &Context,

@@ -1542,8 +1542,13 @@ VM-18, from 0.4.0 (`docs/plan-0.4.md`, Q5). VirtualBox 7.0 or later: `controlvm 
   --memory`. `unattended detect --iso` says whether VirtualBox can install an ISO; `unattended install <uuid> --iso
   --user --password-file <file> --hostname <name>.localdomain --install-additions` prepares it (VirtualBox wants a
   domain in the name). The password goes only into a file this Windows user alone can read, deleted at once; the
-  install prints it back in clear text in its `Using values:` block, so its output is dropped and its errors never
-  quote that block or a line setting a password (`adapters::virtualbox::error_message`). A cloud
+  install prints it back in clear text after `VBoxManage.exe: info: Using values:` (`  %32s = %ls` lines:
+  `password`, `user-password`, `admin-password`, with the ISO's path, the user and the hostname), which VirtualBox
+  7.2.22's source prints only once Prepare, ConstructMedia and ReconfigureVM have worked; without `--start-vm`
+  nothing after it can fail, so only a run that succeeded prints it, and the deploy runner drops that output
+  unread. That is the guard; the backstop is `adapters::virtualbox::error_message`, whose errors never quote the
+  block nor a line setting a password, and say "VBoxManage's output was withheld" when nothing else is left
+  (`redact_secrets` replaces only a value's first word, so it isn't enough for a password of several words). A cloud
   image's first boot reads a NoCloud seed: an ISO labelled `cidata` with `user-data` and `meta-data`, attached as a
   DVD, then ejected (`storageattach --medium emptydrive`) and closed after the first boot. `list systemproperties`
   gives `Default machine folder:`; `list hostonlyifs` and `list bridgedifs` the adapters a network can use. A cancelled
@@ -1556,9 +1561,11 @@ VM-18, from 0.4.0 (`docs/plan-0.4.md`, Q5). VirtualBox 7.0 or later: `controlvm 
   starts), and `unregistervm --delete` of the golden VM unregisters it and deletes its current disk before it fails
   ("Cannot close medium ... because it has 1 child media"); deleting the snapshot's parent is safe (`linked_clones`
   refuses the other two up front); `unattended detect` on an ISO it doesn't know exits 1 (E_FAIL) after printing
-  `IsInstallSupported="off"`, and on one it knows exits 1 too (E_NOTIMPL, 7.2.22) after `IsInstallSupported="on"`
-  and its `OSTypeId`: Remotely reads a failed run that names the OS type like a successful one, and takes any other
-  failure as "can't install it by itself" (`read_unattended_detect`); `import` takes an OVA that ovftool made, and a truncated
+  `IsInstallSupported="off"`, and on Ubuntu and Debian ISOs it knows exits 1 too (spikes S1, S2) after
+  `IsInstallSupported="on"` and its `OSTypeId`: `DetectIsoOS()` turns a detection it calls incomplete (`S_FALSE`;
+  its source: only OS/2's is complete) into E_NOTIMPL, and an ISO it can't open is E_NOTIMPL with the fields reset,
+  while a Windows Server 2025 ISO, whose WIM it reads, exits 0 (S3). Remotely reads a failed run that names the OS
+  type like a successful one, and takes any other failure as "can't install it by itself" (`read_unattended_detect`); `import` takes an OVA that ovftool made, and a truncated
   one fails with VERR_EOF. Windows' own `tar.exe` (libarchive) lists a seed's Joliet names, a check that doesn't use
   Remotely's reader.
 - MO-13: `showvminfo` also gives `firmware` (`BIOS`, `EFI`...), `nictypeN` (the card, e.g. `82540EM`, `virtio`) and
