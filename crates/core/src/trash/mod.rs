@@ -148,6 +148,8 @@ impl TrashKind {
                 ("multiexec_group_members", "session_id"),
                 ("session_secret_grants", "session_id"),
                 ("terminal_rules", "session_id"),
+                // SS-14 (0.8.0 G3): its Files page bookmarks.
+                ("file_bookmarks", "session_id"),
             ],
             _ => &[],
         }
@@ -320,6 +322,10 @@ pub(crate) async fn move_to_trash(store: &Store, ctx: &Context, item: TrashItem<
     match count("health_checks") {
         0 => {}
         n => came.push(plural(n, "health check")),
+    }
+    match count("file_bookmarks") {
+        0 => {}
+        n => came.push(plural(n, "bookmark")),
     }
     if note.is_some() {
         came.push("its note".to_owned());
@@ -1004,6 +1010,18 @@ impl Trash {
                     }
                     checks_here += 1;
                     restored_checks = true;
+                }
+                "file_bookmarks" => {
+                    // SS-14 (0.8.0 G3): back on the session, under its own id if free.
+                    if let Some(bookmark_id) = rows::text(r, "id").map(str::to_owned) {
+                        let taken: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM file_bookmarks WHERE id = ?")
+                            .bind(&bookmark_id)
+                            .fetch_one(self.store.pool())
+                            .await?;
+                        if taken > 0 {
+                            r.insert("id".into(), Value::String(Uuid::new_v4().to_string()));
+                        }
+                    }
                 }
                 "session_secret_grants" => {
                     let Some(secret) = uuid_in(r, "secret_id") else {

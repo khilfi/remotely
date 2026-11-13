@@ -136,11 +136,13 @@ pub enum Change {
     Trash,
     /// MO-08: adding, changing, pausing and deleting health checks. (Their runs only read, so they go on.)
     HealthChecks,
+    /// SS-14 (0.8.0 G3): adding, renaming and removing the Files page's bookmarks.
+    FileBookmarks,
 }
 
 impl Change {
     /// Every kind of edit, for tests.
-    pub const ALL: [Change; 25] = [
+    pub const ALL: [Change; 26] = [
         Change::Sessions,
         Change::VmLabels,
         Change::VmLinks,
@@ -166,6 +168,7 @@ impl Change {
         Change::Notes,
         Change::Trash,
         Change::HealthChecks,
+        Change::FileBookmarks,
     ];
 
     pub fn label(self) -> &'static str {
@@ -195,6 +198,7 @@ impl Change {
             Change::Notes => "Edit notes",
             Change::Trash => "Restore or delete items in the trash",
             Change::HealthChecks => "Add, change, pause or delete health checks",
+            Change::FileBookmarks => "Edit file bookmarks",
         }
     }
 }

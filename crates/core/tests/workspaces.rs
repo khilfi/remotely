@@ -455,6 +455,71 @@ async fn install_configs_are_per_workspace() {
 }
 
 #[tokio::test]
+async fn file_bookmarks_are_per_workspace() {
+    let core = Setup::new(FakeVmware::default()).build().await;
+    let acme = core.ctx();
+    let input = remotely_core::sessions::SessionInput {
+        name: "web01".into(),
+        folder_id: None,
+        host: "web01.example.com".into(),
+        port: 22,
+        username: Some("alice".into()),
+        auth: remotely_core::sessions::SessionAuth::Password { password_id: None },
+        jump_session_id: None,
+        jump_direct: false,
+        startup_command: None,
+        startup_on_reconnect: false,
+        prompt_hook: None,
+        environment: Environment::Lab,
+        color: None,
+        tags: vec![],
+        vm_id: None,
+        kind: Default::default(),
+    };
+    let web = core.sessions.create(&acme, input.clone()).await.unwrap().id;
+    let mark = core.bookmarks.add(&acme, web, "Web root", "/srv/www").await.unwrap();
+    assert_eq!(core.bookmarks.all(&acme).await.unwrap().len(), 1);
+
+    let globex = create(&core, "Globex").await;
+    switch(&core, &globex).await;
+    let b = core.ctx();
+    assert!(core.bookmarks.all(&b).await.unwrap().is_empty());
+    assert!(core.bookmarks.list(&b, web).await.unwrap().is_empty());
+    // Another workspace's session takes none, and its bookmarks can't be renamed or removed from here.
+    assert!(core.bookmarks.add(&b, web, "", "/etc").await.is_err());
+    assert!(core.bookmarks.rename(&b, mark.id, "Mine").await.is_err());
+    assert!(!core.bookmarks.remove(&b, mark.id).await.unwrap());
+    let own = core.sessions.create(&b, input).await.unwrap().id;
+    core.bookmarks.add(&b, own, "Web root", "/srv/www").await.unwrap();
+    assert!(audit_of(&core, &b)
+        .await
+        .iter()
+        .any(|e| e.event == "file_bookmark_changed"));
+
+    let home = core
+        .workspaces
+        .list()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|w| !w.current)
+        .unwrap();
+    switch(&core, &home).await;
+    let back = core.bookmarks.list(&acme, web).await.unwrap();
+    assert_eq!(back.len(), 1);
+    assert_eq!(back[0].name, "Web root");
+    assert_eq!(
+        audit_of(&core, &acme)
+            .await
+            .iter()
+            .filter(|e| e.event == "file_bookmark_changed")
+            .count(),
+        1,
+        "each workspace audits its own"
+    );
+}
+
+#[tokio::test]
 async fn notes_stars_recents_and_the_trash_are_per_workspace() {
     let core = Setup::new(FakeVmware::default()).build().await;
     let acme = core.ctx();

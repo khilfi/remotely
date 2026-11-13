@@ -260,6 +260,18 @@ struct SessionEntry {
     /// SS-12: what it opens, with that kind's fields. Files from before 0.7.0 have none: SSH.
     #[serde(default, skip_serializing_if = "SessionKind::is_ssh")]
     kind: SessionKind,
+    /// SS-14 (0.8.0 G3): its Files page bookmarks, in order. Files from before 0.8.0 have none, and a session without
+    /// bookmarks writes no field, so older versions read the file as before.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    bookmarks: Vec<BookmarkEntry>,
+}
+
+/// SS-14 (0.8.0 G3): a bookmark that travels with its session: a name and a host folder.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BookmarkEntry {
+    name: String,
+    path: String,
 }
 
 impl Payload {
@@ -681,6 +693,8 @@ pub struct TransferReport {
     pub without_credentials: usize,
     /// FD-06: notes saved with the imported sessions, folders and VMs.
     pub notes: usize,
+    /// SS-14 (0.8.0 G3): bookmarks added to the imported sessions.
+    pub bookmarks: usize,
     pub problems: Vec<ItemProblem>,
 }
 
@@ -1476,6 +1490,14 @@ impl Transfer {
         }
         let mut forwards = self.store.all_forwards(ctx).await?;
         let mut container_marks = self.store.container_marks_by_session(ctx).await?;
+        // SS-14 (0.8.0 G3): each session's bookmarks go with it.
+        let mut bookmarks: HashMap<Uuid, Vec<BookmarkEntry>> = HashMap::new();
+        for mark in self.store.list_bookmarks(ctx, None).await? {
+            bookmarks.entry(mark.session_id).or_default().push(BookmarkEntry {
+                name: mark.name,
+                path: mark.path,
+            });
+        }
         // FD-06: each note goes with its session, folder or VM.
         let mut notes: HashMap<(NoteKind, String), (String, bool)> = self
             .store
@@ -1502,6 +1524,7 @@ impl Transfer {
             let note = take_note(NoteKind::Session, &s.id.to_string());
             entries.push(SessionEntry {
                 note,
+                bookmarks: bookmarks.remove(&s.id).unwrap_or_default(),
                 id: s.id,
                 folder_id: s.folder_id,
                 name: s.name,
@@ -2180,6 +2203,7 @@ impl Transfer {
         let forwards = Forwards::new(self.store.clone());
         let marks = ContainerMarks::new(self.store.clone());
         let notes = Notes::new(self.store.clone());
+        let bookmarks = crate::bookmarks::Bookmarks::new(self.store.clone());
         // FD-06: a folder's note, where the folder landed here and has none yet.
         for f in &payload.folders {
             let (Some(note), Some(target)) = (&f.note, folder_map.get(&f.id)) else {
@@ -2321,6 +2345,21 @@ impl Transfer {
                             Ok(saved_note) => report.notes += usize::from(saved_note),
                             Err(err) => report.problems.push(ItemProblem {
                                 name: format!("{} (note)", entry.name),
+                                reason: err.to_string(),
+                            }),
+                        }
+                    }
+                    // SS-14 (0.8.0 G3): its bookmarks, those whose folder isn't bookmarked here yet.
+                    if !entry.bookmarks.is_empty() {
+                        let marks: Vec<(String, String)> = entry
+                            .bookmarks
+                            .iter()
+                            .map(|b| (b.name.clone(), b.path.clone()))
+                            .collect();
+                        match bookmarks.import(ctx, saved.id, &marks, SOURCE).await {
+                            Ok(added) => report.bookmarks += added,
+                            Err(err) => report.problems.push(ItemProblem {
+                                name: format!("{} (bookmarks)", entry.name),
                                 reason: err.to_string(),
                             }),
                         }
@@ -2938,6 +2977,7 @@ mod tests {
             containers: vec![],
             note: None,
             kind: SessionKind::Ssh,
+            bookmarks: vec![],
         }
     }
 
@@ -3030,9 +3070,11 @@ mod tests {
         assert!(entry.note.is_none());
         let payload: Payload = serde_json::from_str(r#"{"exportedAt":"2026-10-01T00:00:00Z"}"#).unwrap();
         assert!(payload.vm_notes.is_empty());
-        // A session without a note writes no `note` field, so 0.6.x reads the file as before.
+        // A session without a note writes no `note` field, so 0.6.x reads the file as before; SS-14: nor bookmarks.
         let written = serde_json::to_string(&entry).unwrap();
         assert!(!written.contains("\"note\""));
+        assert!(!written.contains("\"bookmarks\""));
+        assert!(entry.bookmarks.is_empty());
         let with_note = SessionEntry {
             note: Some(NoteEntry {
                 body: "Restart nginx after deploys.".into(),

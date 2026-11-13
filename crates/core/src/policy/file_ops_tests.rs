@@ -342,6 +342,7 @@ fn uploading_as_root_is_one_tier_higher() {
         folders: vec![],
         keep_times: true,
         as_root: true,
+        delete: vec![],
     };
     let targets = std::slice::from_ref(&target);
     let d = engine().evaluate(&upload(false), targets);

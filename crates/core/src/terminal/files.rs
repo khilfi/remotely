@@ -44,7 +44,7 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use super::folder::FolderInfo;
-use super::{audit, quoted_name, Control, Terminals};
+use super::{audit, audit_entry, quoted_name, Control, Terminals};
 use crate::adapters::remote::{EntryKind, RemoteEntry, RemoteFiles, RemoteWrite, Resumed, SetAttrs, Written};
 use crate::command_bus::{
     human_size, Command, CommandBus, SubmitOutcome, UploadFile, MAX_FOLDER_DEPTH, MAX_UPLOAD_FILES,
@@ -383,6 +383,8 @@ pub struct UploadRun<'a> {
     pub keep_times: bool,
     /// SS-14: through root browsing.
     pub as_root: bool,
+    /// SS-14 (0.8.0 G3): a sync's deletes, relative to `folder`, done after the uploads.
+    pub delete: &'a [String],
 }
 
 /// SS-08: how an upload went, file by file.
@@ -395,6 +397,8 @@ pub struct UploadReport {
     pub failed: Vec<String>,
     /// SS-14: folders made.
     pub folders: usize,
+    /// SS-14 (0.8.0 G3): a sync's deletes done (one gone already counts too).
+    pub deleted: usize,
 }
 
 impl UploadReport {
@@ -414,6 +418,12 @@ impl UploadReport {
             } else {
                 parts.push(format!("uploaded to {folder}: {}", self.uploaded.join(", ")));
             }
+        }
+        if self.deleted > 0 {
+            parts.push(match self.deleted {
+                1 => format!("1 item deleted in {folder}"),
+                n => format!("{n} items deleted in {folder}"),
+            });
         }
         if self.cancelled > 0 {
             parts.push(format!("{} cancelled", self.cancelled));
@@ -500,7 +510,7 @@ pub fn resolve(base: &str, home: &str, path: &str) -> String {
 /// A8: Unicode format characters (Cf: U+202E RIGHT-TO-LEFT OVERRIDE, zero-width spaces and joiners,
 /// bidi isolates, U+FEFF, the soft hyphen...) and the line and paragraph separators become `_` too, so
 /// `invoice\u{202E}fdp.exe` is saved as `invoice_fdp.exe`, not shown as `invoiceexe.pdf`.
-fn local_name(name: &str) -> String {
+pub(crate) fn local_name(name: &str) -> String {
     let cleaned: String = name
         .chars()
         .map(|c| match c {
@@ -567,7 +577,7 @@ fn numbered(name: &str, n: usize) -> String {
 
 /// Creates a new file in `folder` named `name`, or `name (1)`, `name (2)`... when that is taken, so a
 /// download never overwrites a file on this PC.
-async fn claim_file(folder: &Path, name: &str) -> Result<(PathBuf, tokio::fs::File)> {
+pub(crate) async fn claim_file(folder: &Path, name: &str) -> Result<(PathBuf, tokio::fs::File)> {
     let name = local_name(name);
     for n in 0..1000 {
         let candidate = folder.join(numbered(&name, n));
@@ -949,22 +959,9 @@ impl Terminals {
         dest: &Path,
         options: DownloadOptions,
     ) -> Result<DownloadStart> {
-        crate::save_guard::refuse_repository_folder(dest, crate::save_guard::Saved::Download)?;
         let (control, _) = self.live(id)?;
         let (_, files) = self.files_for(id, options.as_root)?;
-        if !dest.is_dir() {
-            return Err(CoreError::InvalidInput(format!("{} is not a folder.", dest.display())));
-        }
-        // Remotely's own data (the database, the vault, the logs): a download that replaced a file there would replace
-        // the app's own.
-        let protected = self.protected_folders();
-        let dest_real = crate::toolbox::file_server::final_place(dest).unwrap_or_else(|| dest.to_owned());
-        if lands_in(&dest_real, &protected) {
-            return Err(CoreError::InvalidInput(format!(
-                "{} is Remotely's own data folder, so nothing is downloaded into it. Choose another folder.",
-                dest.display()
-            )));
-        }
+        self.download_dest(dest)?;
         if paths.is_empty() {
             return Err(CoreError::InvalidInput("Choose a file to download.".into()));
         }
@@ -1014,6 +1011,47 @@ impl Terminals {
                 )));
             }
         }
+        self.land_downloads(ctx, &control, dest, found, folders, left_out, options)
+            .await
+    }
+
+    /// SS-14: a folder of this PC a download may go into: never a Git working tree ([`crate::save_guard`]), never
+    /// Remotely's own data (the database, the vault, the logs: a download that replaced a file there would replace the
+    /// app's own). Its final path.
+    pub(super) fn download_dest(&self, dest: &Path) -> Result<PathBuf> {
+        crate::save_guard::refuse_repository_folder(dest, crate::save_guard::Saved::Download)?;
+        if !dest.is_dir() {
+            return Err(CoreError::InvalidInput(format!("{} is not a folder.", dest.display())));
+        }
+        let protected = self.protected_folders();
+        let dest_real = crate::toolbox::file_server::final_place(dest).unwrap_or_else(|| dest.to_owned());
+        if lands_in(&dest_real, &protected) {
+            return Err(CoreError::InvalidInput(format!(
+                "{} is Remotely's own data folder, so nothing is downloaded into it. Choose another folder.",
+                dest.display()
+            )));
+        }
+        Ok(dest_real)
+    }
+
+    /// SS-14: queues what a download brings: `found` as (host path, its name with its folders under `dest`, its entry),
+    /// `folders` made first (as names under `dest`). Each lands under `dest` with its folders' names made safe for
+    /// Windows, part by part, never in Remotely's own data; a file there is handled as `options.existing` says. G3's
+    /// sync to this PC lands its files this way too.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) async fn land_downloads(
+        &self,
+        ctx: &Context,
+        control: &Arc<Control>,
+        dest: &Path,
+        found: Vec<(String, String, RemoteEntry)>,
+        folders: Vec<String>,
+        left_out: usize,
+        options: DownloadOptions,
+    ) -> Result<DownloadStart> {
+        let id = control.id;
+        let dest_real = self.download_dest(dest)?;
+        let protected = self.protected_folders();
         // Where each lands: its folders' names made safe for Windows, part by part.
         let mut items = Vec::new();
         let mut conflicts = Vec::new();
@@ -1084,7 +1122,7 @@ impl Terminals {
                 id: Uuid::new_v4(),
                 job_id: None,
                 terminal_id: id,
-                terminal: quoted_name(&control),
+                terminal: quoted_name(control),
                 direction: Direction::Download,
                 name: item.shown.clone(),
                 remote_path: item.remote.clone(),
@@ -1113,7 +1151,7 @@ impl Terminals {
             );
             let this = self.clone();
             let ctx = *ctx;
-            let control = Arc::clone(&control);
+            let control = Arc::clone(control);
             let landing = Landing {
                 dest: item.dest,
                 name: item.name,
@@ -1416,7 +1454,80 @@ impl Terminals {
                 Err(err) => report.failed.push(format!("an upload stopped: {err}")),
             }
         }
+        // SS-14 (0.8.0 G3): a sync's deletes, once everything it sends has landed; none after a cancel, and none when an
+        // upload failed (the host's folder would lose what this PC's couldn't replace).
+        if !run.delete.is_empty() {
+            if cancel.is_cancelled() || report.cancelled > 0 {
+                report.failed.push("nothing was deleted: the sync was cancelled".into());
+            } else if !report.failed.is_empty() {
+                report
+                    .failed
+                    .push("nothing was deleted, since not everything was sent".into());
+            } else {
+                for name in run.delete {
+                    match self.delete_synced(&run, &control, &files, name, cancel).await {
+                        Ok(()) => report.deleted += 1,
+                        Err(CoreError::Cancelled | CoreError::CancelledRemote) => {
+                            report.cancelled += 1;
+                            break;
+                        }
+                        Err(err) => report.failed.push(format!("{name}: {err}")),
+                    }
+                }
+            }
+        }
         Ok(report)
+    }
+
+    /// SS-14 (0.8.0 G3): one of a sync's deletes: a file or a link over SFTP, a folder with what is in it as G2's
+    /// recursive delete does it (GNU `rm -rf --one-file-system` on the host, never through a link). Something gone
+    /// already counts as deleted. Audited `file_changed`.
+    async fn delete_synced(
+        &self,
+        run: &UploadRun<'_>,
+        control: &Arc<Control>,
+        files: &Arc<dyn RemoteFiles>,
+        name: &str,
+        cancel: &CancellationToken,
+    ) -> Result<()> {
+        if cancel.is_cancelled() {
+            return Err(CoreError::Cancelled);
+        }
+        let path = join(run.folder, name);
+        super::file_ops::check_path(&path)?;
+        let what = match files.lstat(&path).await? {
+            None => return Ok(()),
+            Some(entry) if entry.kind == EntryKind::Folder && !entry.link => {
+                // A top-level folder is never deleted with what is in it (G2's rule).
+                if !path[1..].contains('/') {
+                    return Err(CoreError::InvalidInput(format!(
+                        "{path} is a top-level folder, so Remotely won't delete it with what is in it"
+                    )));
+                }
+                self.delete_tree(control, &path, run.as_root, cancel).await?;
+                "the folder, with everything in it"
+            }
+            Some(entry) => {
+                files.remove(&path).await?;
+                if entry.link {
+                    "the link"
+                } else {
+                    "the file"
+                }
+            }
+        };
+        let root = if run.as_root { " as root" } else { "" };
+        audit_entry(
+            &self.inner.store,
+            &run.ctx,
+            "file_changed",
+            &format!("Deleted {path} on {}{root} (folder sync)", quoted_name(control)),
+            Some(run.tier),
+            Some(run.job_id),
+            std::slice::from_ref(run.target),
+            &format!("deleted {what}: this PC's folder doesn't have it"),
+        )
+        .await
     }
 
     /// One file of an upload: its turn, the bytes, the audit entry.
@@ -1732,7 +1843,7 @@ struct Staged {
 }
 
 /// SS-14: a link, a junction or another reparse point: never followed into (it may lead anywhere on this PC).
-fn is_link(meta: &std::fs::Metadata) -> bool {
+pub(crate) fn is_link(meta: &std::fs::Metadata) -> bool {
     if meta.file_type().is_symlink() {
         return true;
     }
@@ -2074,6 +2185,7 @@ impl FileTransfers {
             folders,
             keep_times,
             as_root,
+            delete: Vec::new(),
         };
         let outcome = self.bus.submit(&self.workspace.get(), command).await?;
         Ok(UploadStart::Submitted { outcome })
@@ -2404,6 +2516,7 @@ mod tests {
             cancelled: 1,
             failed: vec!["b.txt: alice can't write to /etc/b.txt on the host (permission denied).".into()],
             folders: 0,
+            deleted: 0,
         };
         let summary = report.summary("/srv");
         assert!(summary.starts_with("uploaded to /srv: a.txt (1.5 KB); 1 cancelled; failed: b.txt"));

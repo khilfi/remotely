@@ -16,7 +16,7 @@ use crate::error::{CoreError, Result};
 pub type RowValues = Map<String, Value>;
 
 /// The tables the trash snapshots and restores.
-pub const TABLES: [&str; 14] = [
+pub const TABLES: [&str; 15] = [
     "sessions",
     "port_forwards",
     "container_hosts",
@@ -31,6 +31,8 @@ pub const TABLES: [&str; 14] = [
     "stacks",
     "install_configs",
     "notes",
+    // SS-14 (0.8.0 G3): a session's Files page bookmarks.
+    "file_bookmarks",
 ];
 
 fn known(table: &str) -> Result<&'static str> {

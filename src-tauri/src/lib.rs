@@ -15,6 +15,7 @@ mod deploy;
 pub mod diagnostics;
 mod file_server;
 mod files;
+mod files_page;
 mod groups;
 mod host_details;
 mod ipc;
@@ -808,6 +809,23 @@ fn commands() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         files::files_pause,
         files::files_resume,
         files::files_pick_upload_folder,
+        // SS-14, BX-10 (0.8.0 G3): the Files page.
+        files_page::files_local_list,
+        files_page::files_local_checksum,
+        files_page::files_local_upload,
+        files_page::files_download_here,
+        files_page::files_find,
+        files_page::files_preview,
+        files_page::files_checksum,
+        files_page::files_bookmarks,
+        files_page::files_bookmark_add,
+        files_page::files_bookmark_rename,
+        files_page::files_bookmark_remove,
+        files_page::files_compare,
+        files_page::files_sync,
+        files_page::files_push,
+        files_page::files_fetch,
+        files_page::files_pick_push,
         // FD-04 support bundles.
         support_bundle::bundle_presets,
         support_bundle::bundle_limits,

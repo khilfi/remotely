@@ -62,7 +62,9 @@
 
 pub mod adapters;
 pub mod alerts;
+pub mod bookmarks;
 pub mod bulk;
+pub mod bulk_files;
 pub mod capacity;
 pub mod capacity_plan;
 pub mod catalog;
@@ -86,6 +88,7 @@ pub mod inventory;
 pub mod jobs;
 pub mod known_hosts;
 pub mod linked_clones;
+pub mod local_files;
 pub mod locks;
 pub mod login_guard;
 pub mod metrics;
@@ -310,6 +313,14 @@ pub struct Core {
     pub groups: MultiExecGroups,
     /// SS-08: uploads (commands on the bus) and retries; listing and downloads are on [`Core::terminals`].
     pub files: FileTransfers,
+    /// SS-14 (0.8.0 G3): the Files page's bookmarks, per session (audited, refused by the read-only lock).
+    pub bookmarks: bookmarks::Bookmarks,
+    /// SS-14 (0.8.0 G3): this PC's folders for the Files page's left pane. Reads only.
+    pub local_files: local_files::LocalFiles,
+    /// SS-14 (0.8.0 G3): a folder of this PC compared with a host's, and synced one way (an upload job, or downloads).
+    pub sync: terminal::sync::FolderSyncs,
+    /// BX-10: files pushed to or fetched from many hosts, a job on [`Core::bus`].
+    pub bulk_files: bulk_files::BulkFiles,
     /// BX-08: favourite commands and the built-in library for the Terminal page's command panel,
     /// classified by the bus's policy engine.
     pub snippets: Snippets,
@@ -704,6 +715,25 @@ impl Core {
         let snippets = Snippets::new(store.clone(), bus.policy());
         let multiexec = MultiExec::new(current.clone(), terminals.clone(), Arc::clone(&bus), Arc::clone(&jobs));
         let files = FileTransfers::new(current.clone(), terminals.clone(), Arc::clone(&bus));
+        // SS-14 (0.8.0 G3): the Files page. Remotely's own data folder (which no download lands in) is never opened or
+        // fetched into from there either.
+        let protected: Arc<dyn Fn() -> Vec<PathBuf> + Send + Sync> = {
+            let terminals = terminals.clone();
+            Arc::new(move || terminals.protected_folders())
+        };
+        let local_files = local_files::LocalFiles::new(Arc::clone(&protected));
+        let sync = terminal::sync::FolderSyncs::new(
+            current.clone(),
+            terminals.clone(),
+            Arc::clone(&bus),
+            local_files.clone(),
+        );
+        let bulk_files = bulk_files::BulkFiles::new(
+            current.clone(),
+            Arc::clone(&bus),
+            BulkRuns::new(store.clone()).with_terminals(terminals.clone()),
+            protected,
+        );
         let retention = Arc::new(JournalRetention::new(store.clone(), current.clone(), Arc::clone(&jobs)));
         let vault_status = adapters.vault.watch();
         let catalog = Catalog::new(store.clone())
@@ -831,6 +861,10 @@ impl Core {
             multiexec,
             groups: MultiExecGroups::new(store.clone()),
             files,
+            bookmarks: bookmarks::Bookmarks::new(store.clone()),
+            local_files,
+            sync,
+            bulk_files,
             snippets,
             terminal_rules: terminal_rules.clone(),
             reachability,

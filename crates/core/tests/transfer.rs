@@ -1390,3 +1390,33 @@ async fn notes_travel_with_their_sessions_folders_and_vms() {
         .any(|e| e.event == "note_changed" && e.action.starts_with("Imported the note")));
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[tokio::test]
+async fn bookmarks_travel_with_their_session() {
+    let dir = temp_folder("fd07-bookmarks");
+    let a = laptop_with(FakeVmware::default()).await;
+    let ctx = a.ctx();
+    let web = a
+        .sessions
+        .create(&ctx, input("web01", "web01.example.com"))
+        .await
+        .unwrap();
+    a.bookmarks.add(&ctx, web.id, "Web root", "/srv/www").await.unwrap();
+    a.bookmarks.add(&ctx, web.id, "", "/var/log/nginx").await.unwrap();
+    let path = export(&a, &dir, false).await;
+
+    let b = laptop_with(FakeVmware::default()).await;
+    let preview = open(&b, &path).await;
+    let index = index_of(&preview, "web01");
+    let report = commit(&b, &preview, &[(index, ItemAction::Import)]).await;
+    assert_eq!(report.bookmarks, 2, "{report:?}");
+    let here = by_name(&b, "web01").await;
+    let marks = b.bookmarks.list(&b.ctx(), here.id).await.unwrap();
+    let got: Vec<(&str, &str)> = marks.iter().map(|m| (m.name.as_str(), m.path.as_str())).collect();
+    assert_eq!(got, vec![("Web root", "/srv/www"), ("nginx", "/var/log/nginx")]);
+    assert!(audit(&b)
+        .await
+        .iter()
+        .any(|e| e.event == "file_bookmark_changed" && e.action.starts_with("Imported bookmarks")));
+    let _ = std::fs::remove_dir_all(dir);
+}

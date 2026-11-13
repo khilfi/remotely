@@ -60,6 +60,7 @@ pub mod activity;
 pub mod alerts;
 pub mod console;
 pub mod file_ops;
+pub mod file_reads;
 pub mod files;
 pub mod folder;
 pub mod log;
@@ -70,6 +71,7 @@ pub mod record;
 pub mod root_files;
 pub mod rules;
 pub mod shell_user;
+pub mod sync;
 pub mod tunnels;
 
 use std::collections::{HashMap, HashSet};
@@ -988,7 +990,7 @@ impl Terminals {
         }
     }
 
-    pub(super) fn protected_folders(&self) -> Vec<std::path::PathBuf> {
+    pub(crate) fn protected_folders(&self) -> Vec<std::path::PathBuf> {
         locks::lock(&self.inner.protected).clone()
     }
 
