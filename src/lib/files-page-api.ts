@@ -127,7 +127,11 @@ export interface Comparison {
   rows: DiffRow[];
   counts: { same: number; onlyHere: number; onlyThere: number; differs: number; conflicts: number };
   leftOut: number;
+  /** More same-size files than the comparison hashes, or more time than it takes: the rest by size and time only. */
   contentsCapped: boolean;
+  contentsCompared: number;
+  /** Host files too large to read for a hash, or not hashed in time: by size and time only. */
+  contentsUnread: number;
 }
 
 export type SyncDirection = "toHost" | "toPc";

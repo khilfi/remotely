@@ -179,7 +179,11 @@ export function CompareSheet(props: Props) {
               {comparison.counts.conflicts > 0 &&
                 `, ${comparison.counts.conflicts} a file on one side and a folder on the other`}
               {comparison.leftOut > 0 && `; ${plural(comparison.leftOut, "link")}, Git's data and the like left out`}
-              {comparison.contentsCapped && "; only the first 1,000 files' contents were compared"}.
+              {comparison.contentsCapped &&
+                `; contents compared for ${plural(comparison.contentsCompared, "file")} only, the rest by size and time`}
+              {comparison.contentsUnread > 0 &&
+                `; ${plural(comparison.contentsUnread, "host file")} too large or slow to hash, compared by size and time`}
+              .
             </p>
             <RadioGroup
               value={direction}

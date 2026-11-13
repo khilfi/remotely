@@ -12,14 +12,19 @@
 //!   the window renders: a file with a NUL byte is binary and shows nothing; control characters show as Unicode's
 //!   control pictures (␛ for ESC) and invisible formatting characters (Cf, such as U+202E) as `⟨U+202E⟩`, each counted.
 //! * **Checksum** is the host's own `sha256sum` (the bytes never cross the network); where that fails, the file is
-//!   read over SFTP and hashed here.
+//!   read over SFTP and hashed here, at most [`MAX_READ_HASH_BYTES`] of it. Either way it stops after
+//!   [`HASH_SECONDS`] (`timeout` on the host where it has it, and a time limit here), so a large file or a slow host
+//!   never holds the terminal's connection for long. "Compare contents" hashes the same way, within its own time.
+
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use super::file_ops::check_path;
-use super::Terminals;
+use super::{Control, Terminals};
 use crate::adapters::remote::{printf_escaped, EntryKind, RemoteFiles};
 use crate::error::{CoreError, Result};
 use crate::untrusted::is_format_char;
@@ -34,6 +39,29 @@ pub const FIND_SECONDS: u64 = 55;
 pub const MAX_PREVIEW_BYTES: usize = 256 * 1024;
 /// A pattern's longest form.
 const MAX_PATTERN: usize = 255;
+/// How long hashing one host file may take, by the host's `sha256sum` or read over SFTP.
+pub const HASH_SECONDS: u64 = 300;
+/// The most of a host file hashed by reading it over SFTP, when the host's own `sha256sum` didn't answer.
+pub const MAX_READ_HASH_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
+/// What hashing a host file for the Files page gave.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum HostHash {
+    /// Its SHA-256, and how: `"host"` (its `sha256sum`) or `"read"` (over SFTP, hashed here).
+    Done { sha256: String, by: &'static str },
+    /// The host's `sha256sum` didn't answer and the file is larger than [`MAX_READ_HASH_BYTES`].
+    TooLarge,
+    /// It took longer than its time.
+    TimedOut,
+}
+
+/// `sha256sum` of `path` on the host, the path as printf escapes through `/bin/sh` (like find's), stopped by
+/// `timeout` after `seconds` where the host has it (exit 124).
+pub(crate) fn sha256sum_script(path: &str, seconds: u64) -> String {
+    let path = printf_escaped(path);
+    let sum = "sha256sum -- \"$p0\"";
+    format!("p0=$(printf '{path}'); command -v timeout >/dev/null 2>&1 && exec timeout {seconds} {sum}; exec {sum}")
+}
 
 /// What the Files page's find asks.
 #[derive(Debug, Clone, Deserialize)]
@@ -240,7 +268,8 @@ pub fn parse_sha256sum(stdout: &str) -> Option<String> {
     (hash.len() == 64 && hash.chars().all(|c| c.is_ascii_hexdigit())).then(|| hash.to_ascii_lowercase())
 }
 
-/// A file's SHA-256, read over SFTP.
+/// A file's SHA-256, read over SFTP, all of it. Only for BX-10's pushes, whose job has a time limit and a cancel; the
+/// Files page's reads use [`read_sha256_within`].
 pub(crate) async fn read_sha256(files: &dyn RemoteFiles, path: &str) -> Result<String> {
     let mut reader = files.read(path).await?;
     let mut hasher = Sha256::new();
@@ -255,7 +284,76 @@ pub(crate) async fn read_sha256(files: &dyn RemoteFiles, path: &str) -> Result<S
     Ok(hex::encode(hasher.finalize()))
 }
 
+/// A file's SHA-256 read over SFTP, at most `max_bytes` of it and within `limit` (A9): a larger file is
+/// [`HostHash::TooLarge`] once that much came, a slow one [`HostHash::TimedOut`].
+pub(crate) async fn read_sha256_within(
+    files: &dyn RemoteFiles,
+    path: &str,
+    max_bytes: u64,
+    limit: Duration,
+) -> Result<HostHash> {
+    let read = async {
+        let mut reader = files.read(path).await?;
+        let mut hasher = Sha256::new();
+        let mut buf = vec![0u8; 256 * 1024];
+        let mut total = 0u64;
+        loop {
+            let n = reader.read(&mut buf).await?;
+            if n == 0 {
+                break;
+            }
+            total += n as u64;
+            if total > max_bytes {
+                return Ok(HostHash::TooLarge);
+            }
+            hasher.update(&buf[..n]);
+        }
+        Ok(HostHash::Done {
+            sha256: hex::encode(hasher.finalize()),
+            by: "read",
+        })
+    };
+    tokio::time::timeout(limit, read)
+        .await
+        .unwrap_or(Ok(HostHash::TimedOut))
+}
+
 impl Terminals {
+    /// SS-14: a host file's SHA-256 within `limit`: the host's own `sha256sum`, else the file read over SFTP (at
+    /// most [`MAX_READ_HASH_BYTES`]; `size` is what its listing said). A `sha256sum` that ran out of time isn't
+    /// followed by a read, which would take as long.
+    pub(super) async fn hash_host_file(
+        &self,
+        control: &Arc<Control>,
+        files: &dyn RemoteFiles,
+        path: &str,
+        size: u64,
+        as_root: bool,
+        limit: Duration,
+    ) -> Result<HostHash> {
+        let started = Instant::now();
+        let script = sha256sum_script(path, limit.as_secs().max(1));
+        match tokio::time::timeout(limit, self.run_script(control, &script, as_root, 4096)).await {
+            Err(_) => return Ok(HostHash::TimedOut),
+            // `timeout` ends with 124 when the time ran out.
+            Ok(Ok(done)) if done.exit_code == Some(124) => return Ok(HostHash::TimedOut),
+            Ok(Ok(done)) if done.exit_code == Some(0) => {
+                if let Some(sha256) = parse_sha256sum(&done.output.stdout) {
+                    return Ok(HostHash::Done { sha256, by: "host" });
+                }
+            }
+            Ok(_) => {}
+        }
+        if size > MAX_READ_HASH_BYTES {
+            return Ok(HostHash::TooLarge);
+        }
+        let left = limit.saturating_sub(started.elapsed());
+        if left.is_zero() {
+            return Ok(HostHash::TimedOut);
+        }
+        read_sha256_within(files, path, MAX_READ_HASH_BYTES, left).await
+    }
+
     /// SS-14: files and folders under a folder whose names match a pattern (see the module's notes).
     pub async fn find(&self, id: Uuid, request: FindRequest) -> Result<FindResult> {
         check_path(&request.folder)?;
@@ -388,26 +486,27 @@ impl Terminals {
                 "{path} is not a regular file, so it has no checksum."
             )));
         }
-        let script = crate::adapters::remote::paths_script("sha256sum", &[path]);
-        if let Ok(done) = self.run_script(&control, &script, as_root, 4096).await {
-            if done.exit_code == Some(0) {
-                if let Some(sha256) = parse_sha256sum(&done.output.stdout) {
-                    return Ok(FileChecksum {
-                        path: path.to_owned(),
-                        sha256,
-                        size: entry.size,
-                        by: "host",
-                    });
-                }
-            }
+        let limit = Duration::from_secs(HASH_SECONDS);
+        match self
+            .hash_host_file(&control, files.as_ref(), path, entry.size, as_root, limit)
+            .await?
+        {
+            HostHash::Done { sha256, by } => Ok(FileChecksum {
+                path: path.to_owned(),
+                sha256,
+                size: entry.size,
+                by,
+            }),
+            HostHash::TooLarge => Err(CoreError::InvalidInput(format!(
+                "{path} is larger than {} and the host's sha256sum didn't answer, so Remotely doesn't read it all \
+                 over SFTP to hash it. Run sha256sum on the host.",
+                crate::command_bus::human_size(MAX_READ_HASH_BYTES)
+            ))),
+            HostHash::TimedOut => Err(CoreError::InvalidInput(format!(
+                "Hashing {path} took more than {} minutes, so it stopped. Run sha256sum on the host.",
+                HASH_SECONDS / 60
+            ))),
         }
-        let sha256 = read_sha256(files.as_ref(), path).await?;
-        Ok(FileChecksum {
-            path: path.to_owned(),
-            sha256,
-            size: entry.size,
-            by: "read",
-        })
     }
 }
 
@@ -443,6 +542,52 @@ mod tests {
         }
         let plain = find_script("/srv", "*.log", false, false);
         assert!(plain.contains("-name \"$p1\" -print0"), "{plain}");
+    }
+
+    #[test]
+    fn the_sha256sum_script_passes_the_path_as_escapes_and_stops_in_time() {
+        let script = sha256sum_script("/srv/it's; rm -rf ~", 300);
+        assert!(!script.contains("rm -rf"), "{script}");
+        assert!(
+            script.contains("exec timeout 300 sha256sum -- \"$p0\"; exec sha256sum -- \"$p0\""),
+            "{script}"
+        );
+        let arg = script.split("printf '").nth(1).unwrap().split('\'').next().unwrap();
+        assert!(
+            arg.chars().all(|c| c.is_ascii_alphanumeric() || "/._-\\".contains(c)),
+            "{arg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_sftp_hash_is_capped_in_bytes_and_time() {
+        let bytes = vec![b'x'; 300 * 1024];
+        let files = crate::fakes::FakeFiles::default().with_file("/srv/big.bin", &bytes);
+        let long = Duration::from_secs(20);
+        assert_eq!(
+            read_sha256_within(&files, "/srv/big.bin", 1024 * 1024, long)
+                .await
+                .unwrap(),
+            HostHash::Done {
+                sha256: hex::encode(Sha256::digest(&bytes)),
+                by: "read"
+            }
+        );
+        // Larger than the cap: it stops once that much came, without a hash.
+        assert_eq!(
+            read_sha256_within(&files, "/srv/big.bin", 100 * 1024, long)
+                .await
+                .unwrap(),
+            HostHash::TooLarge
+        );
+        // A host that sends slowly: it stops at the time limit.
+        let slow = files.with_delay(Duration::from_secs(5));
+        assert_eq!(
+            read_sha256_within(&slow, "/srv/big.bin", 1024 * 1024, Duration::from_millis(50))
+                .await
+                .unwrap(),
+            HostHash::TimedOut
+        );
     }
 
     #[test]

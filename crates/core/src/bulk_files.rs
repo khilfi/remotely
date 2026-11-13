@@ -7,7 +7,9 @@
 //!   host (its own `sha256sum`, or the file read back), so the result says whether every host got the same bytes.
 //!   Medium, and High from the bulk threshold for commands on hosts (5 hosts); as any change, Prod raises it.
 //! * **Fetch** brings the same file from every host into a folder of this PC, `<folder>\<session name>\<file>` (each
-//!   host's own folder, a number added to a name that is there), with the Mark of the Web, audited like any download.
+//!   host's own folder, with the start of its session's id when two names would be one folder on Windows; a number
+//!   added to a file name that is there; never a file Git takes as its own), with the Mark of the Web, audited like
+//!   any download.
 //!   Low, as it changes nothing on the hosts; Prod raises it (the data leaves the host, as for a Prod VM's export).
 //! * **Results** are Compare hosts' (BX-03): each host's output is the same for the same bytes (nothing host-specific
 //!   in it), so hosts group by what they got or hold, and two groups diff. A fetched file's output is its SHA-256 line,
@@ -37,7 +39,7 @@ use crate::policy::Tier;
 use crate::store::{NewAuditEntry, Store};
 use crate::terminal::file_ops::{check_name, check_path, last_part};
 use crate::terminal::file_reads::{parse_sha256sum, read_sha256};
-use crate::terminal::files::join;
+use crate::terminal::files::{git_data_refused, is_git_name, join, local_name};
 
 /// Files one push sends.
 pub const MAX_PUSH_FILES: usize = 100;
@@ -116,6 +118,9 @@ impl BulkFilesSpec {
                 if path == "/" {
                     return invalid("Choose a file, not the top folder.".into());
                 }
+                if is_git_name(last_part(path)) {
+                    return Err(git_data_refused(path));
+                }
                 if !Path::new(dest).is_absolute() {
                     return invalid(format!("'{dest}' is not a full path on this PC."));
                 }
@@ -158,8 +163,30 @@ pub(crate) struct HostRun<'a> {
     pub job_id: Uuid,
     pub tier: Tier,
     pub target: &'a Target,
+    /// Every host of the job, so a fetch names each one's folder apart ([`host_folder`]).
+    pub all_targets: &'a [Target],
     pub spec: &'a BulkFilesSpec,
     pub store: &'a Store,
+}
+
+/// BX-10: the folder of this PC a host's fetched file goes in: its session's name as Windows can hold it, with the
+/// start of the session's id added when another host of the job would get the same folder (Windows compares names
+/// without letter case: `web/01` and `web_01`, `Web01` and `web01`) or when the name is one Git takes as its own.
+pub(crate) fn host_folder(target: &Target, all: &[Target]) -> String {
+    let name = local_name(&target.name);
+    let folded = name.to_lowercase();
+    let shared = all
+        .iter()
+        .any(|other| other.target != target.target && local_name(&other.name).to_lowercase() == folded);
+    if !shared && !is_git_name(&name) {
+        return name;
+    }
+    let id = match &target.target {
+        TargetRef::Session { session_id } => session_id.simple().to_string(),
+        other => other.key(),
+    };
+    let short: String = id.chars().take(8).collect();
+    local_name(&format!("{name} ({short})"))
 }
 
 /// How one host's part went: its output lines and whether everything went.
@@ -363,8 +390,8 @@ async fn fetch(run: &HostRun<'_>, files: &dyn RemoteFiles, path: &str, dest: &Pa
     if entry.kind != EntryKind::File {
         return Ok(HostDone::failed(format!("{path} is not a regular file on this host")));
     }
-    // Each host's file in a folder of its own, named after its session.
-    let folder = dest.join(crate::terminal::files::local_name(&run.target.name));
+    // Each host's file in a folder of its own, named after its session (apart from any other host's).
+    let folder = dest.join(host_folder(run.target, run.all_targets));
     tokio::fs::create_dir_all(&folder).await?;
     let (saved_at, mut file) = crate::terminal::files::claim_file(&folder, last_part(path)).await?;
     let mut cleanup = RemoveOnDrop(Some(saved_at.clone()));
@@ -641,6 +668,39 @@ mod tests {
             assert!(fetch(bad, r"C:\x").validate(&targets).is_err(), "{bad}");
         }
         assert!(fetch("/etc/hosts", "Downloads").validate(&targets).is_err());
+        // A file Git would take as its own data on this PC, as Windows saves the name.
+        for git in ["/srv/app/.git", "/srv/app/.git.", "/srv/app/.git ", "/srv/app/.GIT."] {
+            assert!(fetch(git, r"C:\x").validate(&targets).is_err(), "{git:?}");
+        }
+        assert!(fetch("/srv/app/.gitignore", r"C:\x").validate(&targets).is_ok());
+    }
+
+    #[test]
+    fn each_host_fetches_into_a_folder_of_its_own() {
+        let host = |name: &str| Target {
+            target: session(),
+            name: name.into(),
+            environment: crate::domain::Environment::Lab,
+            protected: false,
+        };
+        let short = |t: &Target| match &t.target {
+            TargetRef::Session { session_id } => session_id.simple().to_string()[..8].to_owned(),
+            _ => unreachable!(),
+        };
+        let (a, b, c, d) = (host("web/01"), host("web_01"), host("Db01"), host("db01"));
+        let solo = host("web02");
+        let git = host(".git.");
+        let all = vec![a.clone(), b.clone(), c.clone(), d.clone(), solo.clone(), git.clone()];
+        assert_eq!(host_folder(&solo, &all), "web02");
+        assert_eq!(host_folder(&a, &all), format!("web_01 ({})", short(&a)));
+        assert_eq!(host_folder(&b, &all), format!("web_01 ({})", short(&b)));
+        assert_eq!(host_folder(&c, &all), format!("Db01 ({})", short(&c)));
+        assert_eq!(host_folder(&d, &all), format!("db01 ({})", short(&d)));
+        let named = host_folder(&git, &all);
+        assert_eq!(named, format!(".git ({})", short(&git)));
+        assert!(!is_git_name(&named));
+        // Alone in its job, a name keeps its plain folder.
+        assert_eq!(host_folder(&a, std::slice::from_ref(&a)), "web_01");
     }
 
     #[test]

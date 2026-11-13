@@ -955,6 +955,10 @@ function UploadSummary({ upload }: { upload: NonNullable<ApprovalRequest["upload
             Deletes {plural(deleting, "item")} on the host that this PC's folder doesn't have, folders with what is in
             them, once everything is sent:
           </p>
+          <p className="text-xs text-muted-foreground">
+            As the comparison found them: a file added to this PC&apos;s folder since isn&apos;t sent, and its copy on
+            the host is still deleted. Compare again if the folder changed.
+          </p>
           <ul className="max-h-32 divide-y overflow-auto rounded-md border border-tier-high/40 text-sm">
             {upload.delete?.map((name) => (
               <li key={name} className="px-3 py-1 font-mono text-xs">

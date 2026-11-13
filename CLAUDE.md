@@ -686,17 +686,20 @@ crates/core/          remotely-core: all app logic
                       printf's octal escapes through /bin/sh, `-xdev`, `-name` or `-iname`, `timeout 55` where the host
                       has it and a time limit here, MAX_FIND_RESULTS 2000 and MAX_FIND_OUTPUT 2 MB; BusyBox's find without
                       -printf gives paths only), preview (MAX_PREVIEW_BYTES 256 KB over SFTP, a NUL byte is binary,
-                      mark_specials: C0 controls as control pictures, Cf and C1 as `⟨U+XXXX⟩`) and checksum (the host's
-                      sha256sum, else read_sha256 over SFTP); as root through root browsing (file_ops.rs run_script: the
+                      mark_specials: C0 controls as control pictures, Cf and C1 as `⟨U+XXXX⟩`) and checksum
+                      (hash_host_file: the host's sha256sum under `timeout`, else read_sha256_within over SFTP, at most
+                      MAX_READ_HASH_BYTES 2 GB; HASH_SECONDS 300 either way); as root through root browsing (file_ops.rs run_script: the
                       script as the login user by /bin/sh, or under root browsing's sudo); sync.rs SS-14 (0.8.0 G3)
                       FolderSyncs (Core.sync): compare a local listing's folder with a host folder (both trees walked,
-                      `.git`, links and other kinds left out, MAX_UPLOAD_FILES a side; compare_pair: only here, only there,
-                      newer by more than TIME_SLACK 2 s, larger; Compare contents hashes pairs of the same size, at most
-                      MAX_CONTENT_FILES), kept by id; sync to the host is one Command::FileUpload with `delete` (only what
+                      Git's data by files.rs is_git_name (`.git.`, `.GIT ` too), links and other kinds left out,
+                      MAX_UPLOAD_FILES a side; compare_pair: only here, only there, newer by more than TIME_SLACK 2 s,
+                      larger; Compare contents hashes pairs of the same size, at most MAX_CONTENT_FILES and
+                      CONTENT_SECONDS 600, the rest counted), kept by id; sync to the host is one Command::FileUpload with `delete` (only what
                       the comparison found only there, when chosen: ActionKind::FileSyncDelete, High; files.rs
                       delete_synced runs them after every upload landed, a folder by file_ops.rs delete_tree, each
                       audited file_changed), to this PC downloads through files.rs land_downloads (Existing::Replace;
-                      nothing on this PC deleted);
+                      nothing on this PC deleted; land_downloads leaves out any part Windows would save as `.git`,
+                      whoever gathered the list, and claim_file never makes such a file);
                       tunnels.rs SS-07 a terminal's tunnels: start (Command::OpenTunnel on the bus, also for forwards
                       that start with the terminal), approve, stop, the job's open_tunnel, reopened after a reconnect,
                       closed with the terminal, audited tunnel_opened and tunnel_closed;
@@ -798,7 +801,9 @@ crates/core/          remotely-core: all app logic
     bulk_files.rs     BX-10 (0.8.0 G3): Command::BulkFiles, files to and from BX-01's targets (SSH sessions): Push (files
                       of this PC into one host folder, MAX_PUSH_FILES 100, `replace` or not; ActionKind::FilePush, Medium,
                       High from exec_bulk_threshold hosts, never below Medium when replacing) and Fetch (one host file into
-                      `<dest>\<session name>\<file>`, numbered when taken, the Mark of the Web, audited file_downloaded;
+                      `<dest>\<session name>\<file>` (host_folder: the session id's start added when two hosts' names are
+                      one folder on Windows), numbered when taken, never a name Git takes, the Mark of the Web, audited
+                      file_downloaded;
                       ActionKind::FileFetch, Low, Prod Medium). The job runner logs in like a Compare hosts run
                       (JobRunner::bulk_files: host_login, RemoteAdapter::connect, ExecSession::files) and run_host checks
                       each pushed file's SHA-256 on the host (its sha256sum, else read back); each host's output is the

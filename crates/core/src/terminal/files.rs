@@ -576,8 +576,11 @@ fn numbered(name: &str, n: usize) -> String {
 }
 
 /// Creates a new file in `folder` named `name`, or `name (1)`, `name (2)`... when that is taken, so a
-/// download never overwrites a file on this PC.
+/// download never overwrites a file on this PC. Never a file Git takes as its own ([`is_git_name`]).
 pub(crate) async fn claim_file(folder: &Path, name: &str) -> Result<(PathBuf, tokio::fs::File)> {
+    if is_git_name(name) {
+        return Err(git_data_refused(name));
+    }
     let name = local_name(name);
     for n in 0..1000 {
         let candidate = folder.join(numbered(&name, n));
@@ -684,11 +687,25 @@ struct DownloadItem {
     replace: bool,
 }
 
-/// SS-14: a name Git takes as its own data on this PC (`.git`, as Windows would save it: `.GIT`, `.git.`). A
-/// folder or file of that name makes the folder around it a Git working tree, whose hooks and `core.fsmonitor` a
-/// Git-aware tool runs when it opens the folder, so none comes down.
-fn is_git_name(name: &str) -> bool {
+/// SS-14: a name Git takes as its own data on this PC (`.git`, as Windows would save it: `.GIT`, `.git.`, `.git `).
+/// A folder or file of that name makes the folder around it a Git working tree, whose hooks and `core.fsmonitor` a
+/// Git-aware tool runs when it opens the folder, so none comes down: not by a download, a folder sync or a fetch from
+/// many hosts.
+pub(crate) fn is_git_name(name: &str) -> bool {
     local_name(name).eq_ignore_ascii_case(".git")
+}
+
+/// SS-14: whether a path under a download's folder (parts split by `/`) has a part that lands as Git's own data.
+fn lands_as_git(path: &str) -> bool {
+    path.split('/').any(is_git_name)
+}
+
+/// SS-14: why `what` (a host path or name) isn't saved on this PC.
+pub(crate) fn git_data_refused(what: &str) -> CoreError {
+    CoreError::InvalidInput(format!(
+        "{what} is Git's own data, so it isn't downloaded: on this PC it would make the folder a Git working tree, \
+         whose hooks Git-aware tools run."
+    ))
 }
 
 /// SS-14: `path` is in one of `protected` (final paths), its parts compared as Windows compares them, without case.
@@ -987,10 +1004,7 @@ impl Terminals {
                 .await?
                 .ok_or_else(|| CoreError::RemoteNotFound { path: full.clone() })?;
             if is_git_name(&entry.name) {
-                return Err(CoreError::InvalidInput(format!(
-                    "{full} is Git's own data, so it isn't downloaded: on this PC it would make the folder a Git \
-                     working tree, whose hooks Git-aware tools run."
-                )));
+                return Err(git_data_refused(&full));
             }
             match entry.kind {
                 EntryKind::File => found.push((full, entry.name.clone(), entry)),
@@ -1037,8 +1051,9 @@ impl Terminals {
 
     /// SS-14: queues what a download brings: `found` as (host path, its name with its folders under `dest`, its entry),
     /// `folders` made first (as names under `dest`). Each lands under `dest` with its folders' names made safe for
-    /// Windows, part by part, never in Remotely's own data; a file there is handled as `options.existing` says. G3's
-    /// sync to this PC lands its files this way too.
+    /// Windows, part by part, never in Remotely's own data and never as Git's own data (a part that would be `.git`
+    /// here, whoever gathered the list, is left out and counted); a file there is handled as `options.existing` says.
+    /// G3's sync to this PC lands its files this way too.
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn land_downloads(
         &self,
@@ -1047,17 +1062,29 @@ impl Terminals {
         dest: &Path,
         found: Vec<(String, String, RemoteEntry)>,
         folders: Vec<String>,
-        left_out: usize,
+        mut left_out: usize,
         options: DownloadOptions,
     ) -> Result<DownloadStart> {
         let id = control.id;
         let dest_real = self.download_dest(dest)?;
         let protected = self.protected_folders();
+        let folders: Vec<String> = folders
+            .into_iter()
+            .filter(|folder| {
+                let git = lands_as_git(folder);
+                left_out += usize::from(git);
+                !git
+            })
+            .collect();
         // Where each lands: its folders' names made safe for Windows, part by part.
         let mut items = Vec::new();
         let mut conflicts = Vec::new();
         let mut skipped = 0;
         for (remote, shown, entry) in found {
+            if lands_as_git(&shown) {
+                left_out += 1;
+                continue;
+            }
             let mut parts: Vec<String> = shown.split('/').map(local_name).collect();
             let name = parts.pop().unwrap_or_else(|| "download".into());
             let folder = parts.iter().fold(dest.to_owned(), |at, part| at.join(part));
@@ -2433,6 +2460,30 @@ mod tests {
         assert_eq!(local_name("a:b*c?.txt"), "a_b_c_.txt");
         assert_eq!(local_name("trailing. "), "trailing");
         assert_eq!(local_name("..."), "download");
+    }
+
+    #[test]
+    fn names_windows_saves_as_git_are_git_data() {
+        for git in [".git", ".GIT", ".git.", ".git ", ".GIT.", ".Git. .", ".git.."] {
+            assert!(is_git_name(git), "{git:?}");
+            assert!(lands_as_git(&format!("site/{git}/hooks/post-checkout")), "{git:?}");
+            assert!(lands_as_git(&format!("{git}/HEAD")), "{git:?}");
+        }
+        for not_git in [".gitignore", ".git_", "git", "_.git", ".git (1)", ".github"] {
+            assert!(!is_git_name(not_git), "{not_git:?}");
+            assert!(!lands_as_git(&format!("site/{not_git}/x")), "{not_git:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn no_file_is_saved_under_a_name_git_takes() {
+        let dir = std::env::temp_dir().join(format!("remotely-claim-git-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for git in [".git", ".git.", ".GIT ", ".git. "] {
+            assert!(claim_file(&dir, git).await.is_err(), "{git:?}");
+        }
+        assert!(!dir.join(".git").exists());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

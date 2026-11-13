@@ -16,6 +16,7 @@
 mod common;
 
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
 
 use common::{temp_folder, Setup, VAULT_PASSWORD};
@@ -24,7 +25,7 @@ use remotely_core::bulk::{GroupOptions, TargetPicks};
 use remotely_core::command_bus::{ApprovalAnswers, ApprovalRequest, SubmitOutcome};
 use remotely_core::domain::Environment;
 use remotely_core::fakes::ssh_server::TestSshServer;
-use remotely_core::fakes::FakeVmware;
+use remotely_core::fakes::{FakeFiles, FakeRemote, FakeVmware};
 use remotely_core::jobs::JobStatus;
 use remotely_core::known_hosts::HostKey;
 use remotely_core::local_files::LocalAsk;
@@ -493,7 +494,7 @@ async fn compare_then_sync_to_the_host_rates_uploads_replacements_and_deletes() 
     assert_eq!(state("extra.html"), Some(RowState::OnlyThere));
     assert_eq!(state("gone"), Some(RowState::OnlyThere));
     assert!(
-        compared.rows.iter().all(|r| !r.path.starts_with(".git")),
+        compared.rows.iter().all(|r| !folds_to_git(&r.path)),
         "Git's data stays out"
     );
     assert_eq!(compared.left_out, 2, ".git on both sides");
@@ -627,6 +628,140 @@ async fn a_sync_to_this_pc_downloads_and_never_deletes_here() {
         "nothing here is deleted"
     );
     std::fs::remove_dir_all(&here).unwrap();
+}
+
+/// A terminal on the fake remote adapter whose host is `files` (names Windows can't hold, such as `.git.`, which the
+/// test server's temp folder can't have).
+async fn fake_pane(files: &FakeFiles) -> (Core, Uuid) {
+    let core = Setup::new(FakeVmware::default())
+        .with_remote(Arc::new(FakeRemote::default().with_files(files.clone())))
+        .build()
+        .await;
+    core.terminals.set_tuning(tuning());
+    let session = core
+        .sessions
+        .create(
+            &core.ctx(),
+            SessionInput {
+                name: "web01".into(),
+                folder_id: None,
+                host: "web01.example.com".into(),
+                port: 22,
+                username: Some("alice".into()),
+                auth: SessionAuth::Agent,
+                jump_session_id: None,
+                jump_direct: false,
+                startup_command: None,
+                startup_on_reconnect: false,
+                prompt_hook: None,
+                environment: Environment::Lab,
+                color: None,
+                tags: vec![],
+                vm_id: None,
+                kind: Default::default(),
+            },
+        )
+        .await
+        .unwrap()
+        .id;
+    let handle = core.terminals.open(&core.ctx(), session, SIZE).await.unwrap();
+    let id = handle.id;
+    drain(&core, handle).await;
+    (core, id)
+}
+
+/// Whether a path has a part Windows would save as `.git`.
+fn folds_to_git(path: &str) -> bool {
+    path.split('/')
+        .any(|part| part.trim_end_matches(['.', ' ']).eq_ignore_ascii_case(".git"))
+}
+
+#[tokio::test]
+async fn names_windows_saves_as_git_never_come_down_by_a_sync() {
+    // Host folders Windows would save as `.git` (a trailing dot or space goes), each with what makes a working tree.
+    let files = FakeFiles::default()
+        .with_dir("/srv/site")
+        .with_file("/srv/site/index.html", b"<p>hi</p>")
+        .with_file("/srv/site/.gitignore", b"*.log\n")
+        .with_dir("/srv/site/.git.")
+        .with_file("/srv/site/.git./HEAD", b"ref: refs/heads/main\n")
+        .with_file("/srv/site/.git./config", b"[core]\n\tbare = false\n")
+        .with_dir("/srv/site/.git./hooks")
+        .with_file("/srv/site/.git./hooks/post-checkout", b"#!/bin/sh\n")
+        .with_dir("/srv/site/.git ")
+        .with_file("/srv/site/.git /HEAD", b"ref: refs/heads/main\n")
+        .with_dir("/srv/site/docs")
+        .with_dir("/srv/site/docs/.GIT.")
+        .with_file("/srv/site/docs/.GIT./config", b"[core]\n")
+        .with_file("/srv/site/docs/readme.md", b"# Docs\n");
+    let (core, t) = fake_pane(&files).await;
+    let here = temp_folder("files-page-git-names");
+    let listing = list_here(&core, &here);
+    let compared = core
+        .sync
+        .compare(CompareRequest {
+            terminal_id: t,
+            listing: listing.id,
+            host_folder: "/srv/site".into(),
+            contents: false,
+            as_root: false,
+        })
+        .await
+        .unwrap();
+    // The comparison never shows them; each is counted as left out.
+    assert!(
+        compared.rows.iter().all(|r| !folds_to_git(&r.path)),
+        "{:?}",
+        compared.rows.iter().map(|r| &r.path).collect::<Vec<_>>()
+    );
+    assert_eq!(compared.left_out, 3);
+    let picks: Vec<String> = compared
+        .rows
+        .iter()
+        .filter(|r| matches!(r.state, RowState::OnlyThere | RowState::Differs))
+        .map(|r| r.path.clone())
+        .collect();
+    assert!(picks.contains(&"docs/readme.md".to_owned()), "{picks:?}");
+    let start = core
+        .sync
+        .sync(SyncRequest {
+            comparison: compared.id,
+            direction: SyncDirection::ToPc,
+            paths: picks,
+            delete: false,
+        })
+        .await
+        .unwrap();
+    let SyncStart::Downloads {
+        start: DownloadStart::Queued { transfers, .. },
+    } = start
+    else {
+        panic!("downloads queued: {start:?}")
+    };
+    let done = wait_done(&core, &transfers.iter().map(|t| t.id).collect::<Vec<_>>()).await;
+    assert!(done.iter().all(|t| t.state == TransferState::Done), "{done:?}");
+    assert_eq!(std::fs::read(here.join("docs").join("readme.md")).unwrap(), b"# Docs\n");
+    assert!(here.join(".gitignore").is_file());
+    // No folder or file here is Git's own data (Windows compares the names without letter case).
+    assert!(!here.join(".git").exists(), "a sync to this PC made a .git");
+    assert!(
+        !here.join("docs").join(".git").exists(),
+        "a sync to this PC made docs\\.git"
+    );
+    // A plain download of the same folder leaves them out the same way.
+    let down = temp_folder("files-page-git-names-down");
+    let transfers = core
+        .terminals
+        .download(&core.ctx(), t, &["/srv/site".into()], &down)
+        .await
+        .unwrap();
+    let done = wait_done(&core, &transfers.iter().map(|t| t.id).collect::<Vec<_>>()).await;
+    assert!(done.iter().all(|t| t.state == TransferState::Done), "{done:?}");
+    assert!(down.join("site").join("index.html").is_file());
+    assert!(!down.join("site").join(".git").exists());
+    assert!(!down.join("site").join("docs").join(".git").exists());
+    std::fs::remove_dir_all(&here).unwrap();
+    std::fs::remove_dir_all(&down).unwrap();
 }
 
 // ---- BX-10: many hosts -----------------------------------------------------------------------------------------
@@ -833,5 +968,33 @@ async fn fetching_from_many_hosts_saves_each_file_and_groups_by_content() {
         .fetch(&picks, "/home/alice/etc/motd", &here.join("repo"), false)
         .await
         .is_err());
+    // A file Windows would save as Git's own data is refused before anything runs.
+    for git in ["/home/alice/etc/.git", "/home/alice/etc/.git.", "/home/alice/etc/.GIT "] {
+        assert!(
+            core.bulk_files.fetch(&picks, git, &here, false).await.is_err(),
+            "{git:?}"
+        );
+    }
+    // Two sessions whose names are one folder on Windows each get a folder of their own.
+    let colon = session(&core, &server, login, "db:01", Environment::Lab).await;
+    let question = session(&core, &server, login, "db?01", Environment::Lab).await;
+    let apart = temp_folder("files-page-fetch-apart");
+    let both = TargetPicks {
+        session_ids: vec![colon, question],
+        ..Default::default()
+    };
+    let started = core
+        .bulk_files
+        .fetch(&both, "/home/alice/etc/motd", &apart, false)
+        .await
+        .unwrap();
+    let (_, status, _, _) = run(&core, started.outcome).await;
+    assert_eq!(status, JobStatus::Succeeded);
+    for id in [colon, question] {
+        let folder = apart.join(format!("db_01 ({})", &id.simple().to_string()[..8]));
+        assert_eq!(std::fs::read(folder.join("motd")).unwrap(), b"Welcome\n", "{folder:?}");
+    }
+    assert!(!apart.join("db_01").exists());
     std::fs::remove_dir_all(&here).unwrap();
+    std::fs::remove_dir_all(&apart).unwrap();
 }

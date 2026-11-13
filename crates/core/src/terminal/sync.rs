@@ -1,11 +1,13 @@
 //! SS-14 (0.8.0 G3): compare a folder of this PC with a folder on a terminal's host, then sync one way
 //! (`docs/plan-0.8.md`, "Compare and sync folders").
 //!
-//! * **Compare** is a read: both trees are walked (links, junctions and Git's own data, `.git`, left out on both
-//!   sides and counted; at most [`MAX_UPLOAD_FILES`] items a side, [`MAX_FOLDER_DEPTH`] deep) and each path is
+//! * **Compare** is a read: both trees are walked (links, junctions and Git's own data, `.git` as Windows would save
+//!   the name, so `.git.` and `.GIT ` too, left out on both sides and counted; at most [`MAX_UPLOAD_FILES`] items a side, [`MAX_FOLDER_DEPTH`] deep) and each path is
 //!   missing on one side, the same, or different: newer (by modification time, two seconds of slack for SFTP's whole
 //!   seconds and FAT's two), larger, and with "Compare contents" each file's SHA-256 (only files of the same size need
-//!   it: the host's own `sha256sum`, else read over SFTP; this PC's read here). The comparison is kept under an id, so
+//!   it: the host's own `sha256sum`, else read over SFTP up to a cap; this PC's read here; [`CONTENT_SECONDS`] in all,
+//!   each host file within [`HASH_SECONDS`]; what didn't fit keeps its size and time verdict, counted). The comparison
+//!   is kept under an id, so
 //!   a sync names its rows by their paths there and nothing else.
 //! * **Sync to the host** is one [`Command::FileUpload`] job: what this PC has that the host lacks or holds older is
 //!   uploaded (Low), what replaces a file there is Medium, and deleting what the host has that this PC doesn't happens
@@ -27,10 +29,10 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::file_ops::check_path;
-use super::file_reads::{parse_sha256sum, read_sha256};
-use super::files::{join, DownloadOptions, DownloadStart, Existing};
+use super::file_reads::{HostHash, HASH_SECONDS};
+use super::files::{is_git_name, join, DownloadOptions, DownloadStart, Existing};
 use super::Terminals;
-use crate::adapters::remote::{paths_script, EntryKind, RemoteEntry, RemoteFiles};
+use crate::adapters::remote::{EntryKind, RemoteEntry, RemoteFiles};
 use crate::command_bus::{Command, CommandBus, SubmitOutcome, UploadFile, MAX_FOLDER_DEPTH, MAX_UPLOAD_FILES};
 use crate::error::{CoreError, Result};
 use crate::local_files::LocalFiles;
@@ -40,6 +42,8 @@ use crate::locks;
 const TIME_SLACK: u64 = 2;
 /// Files whose contents a comparison hashes, at most.
 pub const MAX_CONTENT_FILES: usize = 1000;
+/// How long a comparison may hash files for "Compare contents", in all (each host file within [`HASH_SECONDS`] too).
+pub const CONTENT_SECONDS: u64 = 600;
 /// Comparisons kept for a sync, at most, and for how long.
 const KEEP: usize = 20;
 const KEEP_FOR: Duration = Duration::from_secs(3600);
@@ -130,8 +134,13 @@ pub struct Comparison {
     pub counts: CompareCounts,
     /// Links, junctions, Git's data and what is neither a file nor a folder, on both sides.
     pub left_out: usize,
-    /// More files of the same size than [`MAX_CONTENT_FILES`]: those beyond were compared by size and time only.
+    /// More files of the same size than [`MAX_CONTENT_FILES`], or more than [`CONTENT_SECONDS`] of hashing: those
+    /// beyond were compared by size and time only.
     pub contents_capped: bool,
+    /// Files whose contents were compared.
+    pub contents_compared: usize,
+    /// Files the host couldn't hash in time, or too large to read over SFTP for it: compared by size and time only.
+    pub contents_unread: usize,
 }
 
 /// Which way a sync goes.
@@ -197,7 +206,7 @@ fn walk_local_tree(root: &Path) -> Result<(BTreeMap<String, SideInfo>, usize)> {
                 left_out += 1;
                 continue;
             };
-            if name.eq_ignore_ascii_case(".git") || crate::terminal::files::is_link(&meta) {
+            if is_git_name(&name) || crate::terminal::files::is_link(&meta) {
                 left_out += 1;
                 continue;
             }
@@ -263,7 +272,8 @@ async fn walk_host_tree(files: &dyn RemoteFiles, root: &str) -> Result<(BTreeMap
             )));
         }
         for entry in listing.entries {
-            if entry.name.eq_ignore_ascii_case(".git") || entry.link || entry.kind == EntryKind::Other {
+            // Git's data as Windows would save the name (`.git.`, `.GIT `): a sync to this PC never makes a `.git`.
+            if is_git_name(&entry.name) || entry.link || entry.kind == EntryKind::Other {
                 left_out += 1;
                 continue;
             }
@@ -374,23 +384,19 @@ impl FolderSyncs {
         }
     }
 
-    /// The host's SHA-256 of a file: its own `sha256sum`, else read over SFTP.
-    async fn host_hash(&self, request: &CompareRequest, files: &Arc<dyn RemoteFiles>, path: &str) -> Result<String> {
-        if let Ok((control, _)) = self.terminals.files_for(request.terminal_id, request.as_root) {
-            let script = paths_script("sha256sum", &[path]);
-            if let Ok(done) = self
-                .terminals
-                .run_script(&control, &script, request.as_root, 4096)
-                .await
-            {
-                if done.exit_code == Some(0) {
-                    if let Some(hash) = parse_sha256sum(&done.output.stdout) {
-                        return Ok(hash);
-                    }
-                }
-            }
-        }
-        read_sha256(files.as_ref(), path).await
+    /// The host's SHA-256 of a file within `limit`: its own `sha256sum`, else read over SFTP (capped).
+    async fn host_hash(
+        &self,
+        request: &CompareRequest,
+        files: &Arc<dyn RemoteFiles>,
+        path: &str,
+        size: u64,
+        limit: Duration,
+    ) -> Result<HostHash> {
+        let (control, _) = self.terminals.files_for(request.terminal_id, request.as_root)?;
+        self.terminals
+            .hash_host_file(&control, files.as_ref(), path, size, request.as_root, limit)
+            .await
     }
 
     /// SS-14: compares the local pane's folder with the host's (see the module's notes).
@@ -423,7 +429,10 @@ impl FolderSyncs {
             .map(|p| compare_pair(p, here.get(p).copied(), there.get(p).copied()))
             .collect();
         let mut contents_capped = false;
+        let mut contents_compared = 0;
+        let mut contents_unread = 0;
         if request.contents {
+            let deadline = Instant::now() + Duration::from_secs(CONTENT_SECONDS);
             let mut hashed = 0;
             for row in &mut rows {
                 let (Some(h), Some(t)) = (row.here, row.there) else {
@@ -432,18 +441,26 @@ impl FolderSyncs {
                 if h.folder || t.folder || h.size != t.size {
                     continue;
                 }
-                if hashed >= MAX_CONTENT_FILES {
+                let left = deadline.saturating_duration_since(Instant::now());
+                if hashed >= MAX_CONTENT_FILES || left.is_zero() {
                     contents_capped = true;
                     break;
                 }
                 hashed += 1;
+                let limit = left.min(Duration::from_secs(HASH_SECONDS));
+                let theirs = self
+                    .host_hash(&request, &files, &join(&request.host_folder, &row.path), t.size, limit)
+                    .await?;
+                let HostHash::Done { sha256: theirs, .. } = theirs else {
+                    // Too large to read over SFTP, or out of time: this pair keeps its size and time verdict.
+                    contents_unread += 1;
+                    continue;
+                };
                 let local_file = row.path.split('/').fold(local.clone(), |at, part| at.join(part));
                 let mine = tokio::task::spawn_blocking(move || crate::local_files::file_sha256(&local_file))
                     .await
                     .map_err(|err| CoreError::InvalidInput(format!("the comparison stopped: {err}")))??;
-                let theirs = self
-                    .host_hash(&request, &files, &join(&request.host_folder, &row.path))
-                    .await?;
+                contents_compared += 1;
                 *row = with_content(row.clone(), mine == theirs);
             }
         }
@@ -493,6 +510,8 @@ impl FolderSyncs {
             counts,
             left_out: left_here + left_there,
             contents_capped,
+            contents_compared,
+            contents_unread,
         })
     }
 
@@ -732,5 +751,26 @@ mod tests {
         assert_eq!(paths, vec!["site", "site/css", "site/index.html"]);
         assert_eq!(left_out, 1);
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_host_tree_leaves_out_names_windows_would_save_as_git() {
+        let files = crate::fakes::FakeFiles::default()
+            .with_dir("/srv/site")
+            .with_file("/srv/site/index.html", b"<p>hi</p>")
+            .with_dir("/srv/site/.git.")
+            .with_file("/srv/site/.git./HEAD", b"ref: refs/heads/main\n")
+            .with_dir("/srv/site/.git./hooks")
+            .with_file("/srv/site/.git./hooks/post-checkout", b"#!/bin/sh\n")
+            .with_dir("/srv/site/.git ")
+            .with_file("/srv/site/.git /config", b"[core]\n")
+            .with_dir("/srv/site/css")
+            .with_dir("/srv/site/css/.GIT.")
+            .with_file("/srv/site/css/.GIT./HEAD", b"ref\n")
+            .with_file("/srv/site/.gitignore", b"*.log\n");
+        let (found, left_out) = walk_host_tree(&files, "/srv/site").await.unwrap();
+        let paths: Vec<&str> = found.keys().map(String::as_str).collect();
+        assert_eq!(paths, vec![".gitignore", "css", "index.html"]);
+        assert_eq!(left_out, 3, "each folder Git would take is counted once");
     }
 }

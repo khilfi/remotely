@@ -2624,6 +2624,7 @@ impl JobRunner {
                         job_id,
                         tier: spec.decision.tier,
                         target,
+                        all_targets: &spec.decision.targets,
                         spec: files,
                         store: &self.store,
                     };
