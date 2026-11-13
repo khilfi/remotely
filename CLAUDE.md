@@ -1770,6 +1770,171 @@ on a seed from `deploy::seed::write_seed` (`user-data` the rendered file, `meta-
   `--machine-readable` (`Unattended installation supported = yes` without it): `Ubuntu24_64` for 24.04.5,
   `Ubuntu25_64` for 26.04.1.
 
+## Unattended installs (S2, Debian)
+
+S2 for G6, from 0.8.0 (`docs/plan-0.8.md`, VM-29). Checked by hand on 13 Nov 2026 with
+`debian-12.15.0-amd64-netinst.iso`, `debian-12.15.0-amd64-DVD-1.iso`, `debian-13.7.0-amd64-netinst.iso` and
+`debian-13.7.0-amd64-DVD-1.iso` (cdimage.debian.org, SHA-256 checked), Workstation 26 and VirtualBox 7.2.22 on S1's PC.
+New VMs as `deploy::vmx` and `deploy::virtualbox` make them for the `debian` profile (Workstation `debian12-64`, pvscsi,
+vmxnet3; VirtualBox `Debian_64`, SATA, virtio), 2 vCPUs, 2 GB and a 16 GB thin disk on NAT; G5's `debian-12-minimal`
+starter, unchanged for 13 too, rendered by `catalog::install::render::render` (a key and password made at run time) as
+`preseed.cfg` on a seed from `deploy::seed::write_seed`. Times are from power-on.
+
+- **The ISO** (all four): the primary descriptor (Rock Ridge) at sector 16, El Torito at 17, Joliet at 18, the
+  terminator at 19; an MBR (partition 2 type 0xEF, the EFI image) and a GPT. El Torito's BIOS entry is
+  `/isolinux/isolinux.bin`; its EFI entry is `/boot/grub/efi.img` (12: 9.4 MB FAT16, 13: 3.6 MB FAT12) with shim and
+  GRUB, whose built-in config finds the ISO (12 by `/.disk/info`, 13 by `/.disk/id/<uuid>`) and sources
+  `/boot/grub/x86_64-efi/grub.cfg`, which is `source /boot/grub/grub.cfg`. So BIOS reads **isolinux** and UEFI (Secure
+  Boot too) **`/boot/grub/grub.cfg`**: two files to change. netinst and DVD-1 have the same menus; 13's `grub.cfg` adds
+  `echo "Loading bootloader..."` (Debian #1110759).
+- isolinux: `isolinux.cfg` (157 bytes) is `path`, `prompt 0`, `timeout 0`, `include menu.cfg`, `default vesamenu.c32`:
+  the menu waits forever. `menu.cfg` includes `gtk.cfg` (`default installgui`, `menu default`: Graphical install,
+  `initrd=/install.amd/gtk/initrd.gz`) and `txt.cfg` (`label install`, `kernel /install.amd/vmlinuz`, `append vga=788
+  initrd=/install.amd/initrd.gz --- quiet`). `/boot/grub/grub.cfg` (12: 6,045 bytes with 99 free in its last sector; 13:
+  6,115 with 29 free) sets no `timeout`, so it waits forever too; its first entry is `Graphical install` (`linux
+  /install.amd/vmlinuz vga=788 --- quiet`, `initrd /install.amd/gtk/initrd.gz`), `Install` (`initrd
+  /install.amd/initrd.gz`) the second. `/md5sum.txt` lists `./boot/grub/grub.cfg` and `./install.amd/initrd.gz`, nothing
+  under `isolinux/`.
+- **The change that worked** (on a copy; the original never opened for writing): both files replaced by short ones
+  written over their own sectors (the rest zeroed), the new size in the primary and the Joliet record, and grub.cfg's
+  `md5sum.txt` line (same length). Words added to grub.cfg's own lines wouldn't fit its 29 or 99 free bytes, so the file
+  is replaced. `isolinux.cfg`: `path `, `default unattended`, `prompt 0`, `timeout 0`, `label unattended`, `\tkernel
+  /install.amd/vmlinuz`, `\tappend <words> initrd=/install.amd/initrd.gz --- quiet console=tty0 console=ttyS0,115200n8`
+  (a `default` label with `prompt 0` and no `ui` boots at once, no menu). `grub.cfg`: `set timeout=0`, `set default=0`,
+  `menuentry 'Unattended install' {`, `    linux /install.amd/vmlinuz <words> --- quiet console=tty0
+  console=ttyS0,115200n8`, `    initrd /install.amd/initrd.gz`, `}`. That is the text installer's initrd, whose UI runs
+  on the serial console. GRUB's parser expands `$` and splits words at spaces and `;`, so such a word goes in single
+  quotes (`'preseed/early_command=...'`); GRUB hands it on in double quotes, which the kernel strips. Nothing checks
+  either file (d-i checks the media only when asked to; Workstation's Secure Boot logs `SECUREBOOT: Image APPROVED.`).
+  The installer is up (`Detecting hardware to find installation media`) 10 to 18 s after power-on.
+- **How words reach the installer**: the kernel hands every `name=value` word without a `.` in its name to init's
+  environment (`Unknown kernel command line parameters "..." will be passed to user space`), then d-i's startup scripts
+  run in order: `S30initrd-preseed` loads `/preseed.cfg` from the initrd's root, `S32env-preseed` (`env2debconf`) sets
+  each `a/b=value` as a debconf answer (one pair of quotes stripped), and `S33preseed_early_command` runs
+  `preseed/early_command` at once, before the first menu step, with no preseed file needed. `file-preseed` (menu item
+  1400, after `cdrom-detect`'s 1300) loads `preseed/file` when it is set and then runs `early_command` again;
+  `auto=true` holds the language and keyboard questions until a preseed is loaded. `S02module-params` reads each word
+  with a `.` as a module option and prints harmless `/bin/register-module: line 70: can't create
+  /var/lib/register-module//tmp/preseed.params: nonexistent directory`. The initrd's busybox has no `eject` (it comes
+  from the CD later); `ahci`, `sr_mod` and `isofs` are modules in the initrd.
+- **The delivery that worked on both releases, firmwares and hypervisors (a2)**: the seed in a second CD/DVD drive
+  (Workstation `sata0:1` after the ISO's `sata0:0`; VirtualBox SATA port 2) and these words before `---`: `auto=true
+  priority=critical preseed/file=/tmp/preseed.cfg preseed/early_command="[ -e /tmp/preseed.cfg ] && exit 0; modprobe
+  ahci; modprobe sr_mod; modprobe isofs; mkdir -p /seed; n=0; while [ $n -lt 30 ]; do for d in /dev/sr0 /dev/sr1
+  /dev/sr2 /dev/sr3; do mount -t iso9660 -o ro $d /seed 2>/dev/null && { [ -e /seed/preseed.cfg ] && break 2; umount
+  /seed; }; done; n=$((n+1)); sleep 1; done; cp /seed/preseed.cfg /tmp/preseed.cfg; umount /seed; echo 1 >
+  /sys/block/${d#/dev/}/device/delete" console=tty0 console=ttyS0,115200n8` (both menu files 737 bytes, inside
+  isolinux.cfg's one sector and grub.cfg's three). The command finds the CD that holds `preseed.cfg` (by content, any
+  label), copies it to `/tmp` and drops that drive from the guest's kernel; `file-preseed` then loads it as any preseed
+  (`preseed/include`, `preseed/run` and the file's own `early_command` work: a marker in the file's `early_command`
+  reached the port); a file without an `early_command` leaves the boot line's in debconf, which `file-preseed` runs
+  again, hence the guard. The ISO copy holds nothing of any VM, so one copy serves every VM of an ISO; the rendered file
+  is only on the seed. Other ways:
+  - Without dropping the drive (a): apt-setup's `40cdrom` runs `apt-cdrom add` in the new system with `/cdrom`
+    unmounted, apt-cdrom probes the seed, and the install stops at `[!!] Configure the package manager`, `apt
+    configuration problem`, `An attempt to configure apt to install additional packages from the media failed.` (12 and
+    13, both hypervisors).
+  - `debconf-set-selections /seed/preseed.cfg` in the early command instead of `preseed/file` (and no `auto=true`)
+    installs, but skips the file's `preseed/include`, `preseed/run` and `early_command` (the marker never showed).
+  - (b) `/preseed.cfg` added to the copy and `auto=true priority=critical preseed/file=/cdrom/preseed.cfg`: installs
+    (Workstation BIOS and UEFI). The file's data goes after the volume, a record into the free bytes of the root
+    directory's last sector in each tree (12 netinst: 1,440 primary and 1,020 Joliet bytes left after it; the primary
+    one with Rock Ridge `PX` and `NM`), and the volume space size (bytes 80 to 87) into both descriptors. BIOS and UEFI
+    boot the grown copy (its GPT's backup header is no longer at the end, which a CD boot never reads).
+  - (c) a gzip'd newc cpio of `preseed.cfg` (1,124 bytes) appended to `/install.amd/initrd.gz` and `auto=true
+    priority=critical`: installs (Workstation BIOS, VirtualBox UEFI). 12's initrd had 651 bytes free in its last sector
+    (13's 1,430), so it moved: copied after the volume, both records repointed, the volume size and `md5sum.txt`
+    updated.
+  - b and c put the rendered file, hash and all, into a per-VM copy of a 700 MB to 4 GB ISO. `preseed/url` (d) wasn't
+    tried.
+- **Questions**: with the starter nothing was asked on either release, netinst or DVD-1, BIOS, UEFI or Secure Boot,
+  Workstation or VirtualBox. A preseed holding only the user, the password, the partitioning answers and the late
+  command stops 13 (with `auto=true priority=critical`) at `[!!] Select a language` (`d-i debian-installer/locale`),
+  then `[!!] Configure the keyboard` (`keyboard-configuration/xkb-keymap`), then `[!!] Set up users and passwords`,
+  `Full name for the new user:` (`passwd/user-fullname`). With those three the hostname, domain, mirror (netinst:
+  deb.debian.org), time zone and clock take their defaults, but without `tasksel/first` 13 picks the desktop
+  (`Retrieving file 1 of 1380`), and with `tasksel tasksel/first multiselect standard, ssh-server` a BIOS install then
+  stops at `[!!] Configuring grub-pc`, asking for the device (`- "/dev/sda" will install GRUB to your primary drive`)
+  until `grub-installer/only_debian true` and `grub-installer/bootdev default` are there; with those it installs, ejects
+  the CD (`Unmounting/ejecting installation media...`) and waits at `[!!] Finish the installation`, `Installation
+  complete`, `Please choose <Continue> to reboot.` unless `d-i finish-install/reboot_in_progress note` is there (1,076
+  s). Netinst also logs `Disabling netinst CD in sources.list...`. Only `[!!]` (critical) dialogs show at
+  `priority=critical`, so any `[!!]` title on the port means the install waits for a key. **DVD-1** installs without
+  asking, but the starter's `mirror/http/*` answers don't turn the mirror on there: the installed system's only apt
+  source is `deb cdrom:[Debian GNU/Linux 12.15.0 _Bookworm_ - Official amd64 DVD Binary-1 ...]`, `safe-upgrade` does
+  nothing (the DVD's kernel stays) and on Workstation `open-vm-tools` is missing (13). `d-i apt-setup/use_mirror boolean
+  true` and `d-i apt-setup/disable-cdrom-entries boolean true` give the netinst's sources (`deb.debian.org`,
+  `-security`, `-updates`), the upgrade and open-vm-tools (12 DVD-1, Workstation).
+- **Serial**: with `console=ttyS0,115200n8` last before `---`, the installer's text UI runs on the port inside GNU
+  screen (a status line `0 start 1*installer 2 shell 3 shell 4- log` with the date, redrawn often); newt dialogs in
+  VT100 with line drawing (`ESC(0`) and the title in red (`ESC[31mInstalling the base system`). With the escapes taken
+  out: `Detecting hardware to find installation media`, `Configuring the network with DHCP`, `Detecting disks and all
+  other hardware`, `Starting up the partitioner`, `Partitions formatting`, `Installing the base system` (then each
+  package: `Preparing <pkg> (amd64)`, `Installing ...`, `Configuring ...`, `Installed ...`), `Configuring apt`, `Select
+  and install software` (`Retrieving file N of M`, `(2min 4s remaining)`), `Installing GRUB boot loader`, `Finishing the
+  installation`, then `The system is going down NOW!`, `Requesting system reboot`, `reboot: Restarting system`, the
+  installed GRUB's menu (`GNU GRUB version 2.06-13+deb12u2` or `2.12-9+deb13u2`, `*Debian GNU/Linux`, `The highlighted
+  entry will be executed automatically in 5s.`, ``Booting `Debian GNU/Linux'``), `Debian GNU/Linux 13 <hostname> ttyS0`
+  and `<hostname> login:`. A failure is a `[!!]` dialog waiting with `<Go Back>` and `<Continue>`: a 2 GB disk gives
+  `[!!] Partition disks`, `Failed to partition the selected disk`, `This probably happened because the selected disk or
+  free space is too small to be automatically partitioned.` (at 58 s). The VM's screen meanwhile shows only the boot
+  loader's banner (VirtualBox's `screenshotpng` of a waiting BIOS VM: `ISOLINUX 6.04 ...`), so the port says why, not a
+  screenshot. VirtualBox's UEFI firmware also echoes GRUB (``Booting `Unattended install'``) to the port.
+- **Times** (the starter with `pkgsel/upgrade safe-upgrade`; 3 to 12 Debian installs at once, plus S3's Windows VMs):
+  the installer up at 10 to 18 s, partitioning at 48 to 82 s, `Installing the base system` 2.5 to 5 minutes; the rest is
+  downloading (`Select and install software` with `safe-upgrade`: 116 packages on 13.7) and swung with the mirror and
+  the load: Workstation 12 BIOS with 3 installs at once login at 404 s (software 212 s, GRUB 304 s, reboot 388 s);
+  VirtualBox 13 UEFI with one other at 574 s (software 396 s, GRUB 494 s, reboot 554 s), while the Workstation 13 BIOS
+  install beside it took 1,442 s, its `safe-upgrade` alone 16 minutes through Workstation's NAT; with 10 or more at once
+  21 to 33 minutes. From `reboot: Restarting system` to the login prompt 16 to 40 s (90 s once under load).
+- **The end of the install**: the installer ejects its CD (`finish-install`'s `15cdrom-detect`). Workstation: `CDROM:
+  Guest eject on 'sata0:0'. Disconnecting disc image.` for the running VM only; UEFI then boots `debian` (vmware.log
+  `Guest: About to do EFI boot: debian`; on VirtualBox `efibootmgr`'s `BootCurrent` is Debian's own entry, kept in its
+  NVRAM). With `bios.bootOrder = "cdrom,hdd"` (what `deploy::vmx` writes) a power-off and on after the install booted
+  the copy again, and with the seed still attached it was reinstalling (stopped at 36 s, before partitioning).
+  `bios.bootOrder = "hdd,cdrom"` works: the blank disk falls through to the CD, and after the install a power-off and on
+  boots the disk (login at 20 s) with the ISO copy and the seed still there. But a disk an interrupted install had
+  already partitioned (no boot loader yet) doesn't fall through: the BIOS sat on it, black, the port silent and no `No
+  operating system` message, so a retry on the same disk needs a new disk or `cdrom,hdd`. VirtualBox keeps the eject
+  (`"SATA-1-0"="emptydrive"`, `"SATA-IsEjected-1-0"="on"`), and `--boot1 disk --boot2 dvd` falls through as well. The
+  seed's drive stays attached on both hypervisors (the guest only dropped it from its own kernel).
+- **The installed system**: the user in `sudo` (root can't sign in), the key in `~/.ssh/authorized_keys`, SSH with it
+  works; `/proc/cmdline` is `... ro console=tty0 console=ttyS0,115200n8 quiet` (the words after `---`; `auto`,
+  `priority` and `preseed/*` don't come along), `/etc/default/grub` has `GRUB_CMDLINE_LINUX="console=tty0
+  console=ttyS0,115200n8"`, `GRUB_TERMINAL=serial` and `GRUB_SERIAL_COMMAND="serial --unit=0 --speed=115200 --word=8
+  --parity=no --stop=1"` (GRUB's 5 s menu on the port) and a getty on ttyS0. 12 ends on kernel 6.1.0-54 (the ISO's
+  6.1.0-50, upgraded), 13 on 6.12.116 (the ISO's 6.12.107). On Workstation the installer adds `open-vm-tools` itself
+  (netinst, and DVD-1 with the mirror on): `vmrun getGuestIPAddress` gives the address (`-wait` waits for it) and `vmrun
+  stop soft` works, but `checkToolsState` said `installed`, not `running`, for minutes: on 12 (open-vm-tools 12.2.0) for
+  over 8 minutes after boot, vmware.log `Tools: [RunningStatus] Last heartbeat value 0 (never received)`; on 13 (12.5.0)
+  `running` after about 5 minutes. Remotely asks `getGuestIPAddress` only once the state is `running` (inventory.rs) and
+  refuses a soft stop, restart or suspend otherwise (jobs.rs `tools_missing`, `ToolsNotRunning`). `/var/log/installer/`
+  (`syslog`, `partman`, `cdebconf/questions.dat`: 0600 root) keeps the boot line but not the password hash, which only
+  `/etc/shadow` has (13). The seed is `/dev/sr1` (label `cidata`), and the new user is in the `cdrom` group, so they can
+  read the preseed and its hash until the seed is detached.
+- **VirtualBox on a PC with Hyper-V on** (NEM, as S1): 2 of 13 VirtualBox installer boots (both BIOS, a 12 and a 13)
+  hung for good at `Starting up the partitioner` (13 %, where the md and RAID modules load), the port silent for
+  minutes; one `controlvm reset` each restarted the install from the seed (the drive is back after a reset), which then
+  went through. The kernel is `quiet`, so the RAID6 benchmark's lines don't reach the port. Workstation never hung.
+- **`VBoxManage unattended install --script-template=<rendered preseed.cfg>`** (the VM made first with a disk and an
+  empty DVD drive on SATA): `unattended detect` exits 1 (`E_NOTIMPL`, `DetectIsoOS()`) after `OSTypeId="Debian12_64"` or
+  `"Debian13_64"` and `IsInstallSupported="on"`. It writes beside the .vbox `Unattended-<uuid>-aux-iso.viso` (the ISO
+  imported, `isolinux/isolinux.cfg` and `isolinux/txt.cfg` replaced, `/preseed.cfg` (the template byte for byte, hash
+  and all) and `/vboxpostinstall.sh` added), `-isolinux-isolinux.cfg`, `-isolinux-txt.cfg`, `-preseed.cfg` and
+  `-vboxpostinstall.sh`; it puts the .viso in the VM's existing empty DVD drive (S1 saw it add an IDE controller
+  instead) and sets `--boot1 disk --boot2 dvd --boot3 floppy`. Its isolinux: `timeout 4`, `default
+  VBoxUnatendedInstall`, `append vga=788 initrd=/install.amd/initrd.gz --- quiet  auto=true
+  preseed/file=/cdrom/preseed.cfg priority=critical quiet splash noprompt noshell automatic-ubiquity
+  debian-installer/locale=en_US keyboard-configuration/layoutcode=us languagechooser/language-name=English
+  localechooser/supported-locales=en_US.UTF-8 countrychooser/shortlist=<this PC's country> --` (its words after `---`;
+  none reached the installed system's command line). It leaves `/boot/grub/grub.cfg` alone, so **a UEFI VM waits at
+  Debian's own GRUB menu** (`Graphical install` highlighted, no timeout; the same picture 2.5 minutes later); BIOS
+  installs 12 and 13 (the same 13 VM switched to `--firmware bios`). `--extra-install-kernel-parameters` replaces its
+  words (`auto=true preseed/file=/cdrom/preseed.cfg priority=critical console=tty0 console=ttyS0,115200n8 ---
+  console=tty0 console=ttyS0,115200n8` put the UI on the port). It prints the password in its `Using values:` block and
+  takes the country and time zone from this PC; the .viso is ejected at the end and stays in `list dvds`, and the four
+  files stay beside the .vbox. `vboxpostinstall.sh` runs only from a `late_command` that calls it.
+
 ## Unattended installs (S3, Windows Server)
 
 S3 for G6, from 0.8.0 (`docs/plan-0.8.md`, VM-29). Checked by hand on 13 Nov 2026 with Microsoft's evaluation ISOs
