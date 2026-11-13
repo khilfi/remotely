@@ -102,8 +102,11 @@ pub struct SerialWatcher {
     line: Vec<u8>,
     /// The installer said it restarts (Linux), so the next kernel is the installed one.
     restarting: bool,
-    /// The last line with words, for the hang check.
+    /// The last line with words, for Ubuntu's hang check.
     last_text: String,
+    /// Debian: the last step title the installer showed, for the hang check. Its dialogs go on drawing after the
+    /// title (the frame, then the progress bar's numbers), so the last line is rarely the title itself.
+    debian_step: Option<&'static str>,
     login_seen: bool,
     fingerprint: Option<String>,
     failed: bool,
@@ -146,6 +149,34 @@ fn cut(text: &str, max: usize) -> String {
     out
 }
 
+/// Debian's step titles on the serial console (S2), in the order the watcher tries them.
+const DEBIAN_STEPS: [&str; 10] = [
+    "Detecting disks and all other hardware",
+    DEBIAN_PARTITIONER,
+    "Partitions formatting",
+    "Installing the base system",
+    "Configuring apt",
+    "Select and install software",
+    "Installing GRUB boot loader",
+    "Installing GRUB",
+    "Finishing the installation",
+    "Configuring the network with DHCP",
+];
+
+/// Where VirtualBox under Hyper-V hangs (S2: at 13 %, as the md and RAID modules load).
+const DEBIAN_PARTITIONER: &str = "Starting up the partitioner";
+
+/// `title` shown as a whole title: not the start of a longer name, such as the component `apt-cdrom-setup` the
+/// installer configures as it loads ("Configuring apt-cdrom-setup"), or a package line ("Configuring apt (amd64)").
+fn shows_title(text: &str, title: &str) -> bool {
+    text.match_indices(title).any(|(at, _)| {
+        let rest = &text[at + title.len()..];
+        let next = rest.chars().next();
+        let ends_word = next.is_none_or(|c| !(c.is_alphanumeric() || c == '-' || c == '_' || c == '.'));
+        ends_word && !rest.trim_start().starts_with('(')
+    })
+}
+
 /// GNU screen and newt draw frames with the line-drawing set, which reads as stray letters around a title.
 fn title(text: &str) -> String {
     let mut words: Vec<&str> = text.split_whitespace().collect();
@@ -169,6 +200,7 @@ impl SerialWatcher {
             line: Vec::new(),
             restarting: false,
             last_text: String::new(),
+            debian_step: None,
             login_seen: false,
             fingerprint: None,
             failed: false,
@@ -363,7 +395,7 @@ impl SerialWatcher {
             {
                 Some("the initramfs's RAID6 benchmark")
             }
-            Os::Debian if last.contains("Starting up the partitioner") => Some("starting the partitioner"),
+            Os::Debian if self.debian_step == Some(DEBIAN_PARTITIONER) => Some("starting the partitioner"),
             _ => None,
         }
     }
@@ -476,22 +508,13 @@ impl SerialWatcher {
             return;
         }
         if text.contains("Detecting hardware to find installation media") {
+            // Also after a reset: the installer starts again.
+            self.debian_step = None;
             self.advance(Stage::InstallerBooted, "the installer looks for its CD", out);
             return;
         }
-        const STEPS: [&str; 10] = [
-            "Detecting disks and all other hardware",
-            "Starting up the partitioner",
-            "Partitions formatting",
-            "Installing the base system",
-            "Configuring apt",
-            "Select and install software",
-            "Installing GRUB boot loader",
-            "Installing GRUB",
-            "Finishing the installation",
-            "Configuring the network with DHCP",
-        ];
-        if let Some(step) = STEPS.iter().find(|s| text.contains(**s)) {
+        if let Some(step) = DEBIAN_STEPS.iter().find(|s| shows_title(text, s)) {
+            self.debian_step = Some(*step);
             if self.stage < Stage::Installing {
                 self.advance(Stage::Installing, step, out);
             } else if self.stage == Stage::Installing {
@@ -656,6 +679,43 @@ mod tests {
             "{all:?}"
         );
         assert!(all.contains(&WatchEvent::LoginPrompt));
+    }
+
+    /// The hand check of PR 98: the partitioner's dialog goes on drawing after its title (the frame, "Please wait...",
+    /// the progress bar's numbers), so the hang is told by the last title, not the last line.
+    #[test]
+    fn a_debian_hang_is_seen_behind_the_dialogs_frame_and_progress() {
+        let mut w = SerialWatcher::new(Os::Debian, "db-1");
+        let mut all = w.feed(b"\x1b[1;1H Detecting hardware to find installation media\x1b[K");
+        // Loading the installer's components: their names aren't the "Configuring apt" step.
+        all.extend(w.feed(b"\x1b[13;5H\x1b[30m\x1b[47mConfiguring apt-cdrom-setup   \x1b[26D\x1b[14;1H"));
+        all.extend(w.feed(b"\x1b[13;5HConfiguring apt (amd64)\x1b[14;1H"));
+        assert!(
+            !all.iter()
+                .any(|e| matches!(e, WatchEvent::Stage(_, d) | WatchEvent::Detail(d) if d.contains("apt"))),
+            "{all:?}"
+        );
+        all.extend(w.feed(
+            b"\x1b[10;20H\x1b(0lqqqu\x1b(B Starting up the partitioner \x1b(0tqqqk\x1b(B\x1b[11;20Hx\x1b[11;40H0%\
+              \x1b[13;20H\x1b(0mqqqqj\x1b(B\x1b[15;30HPlease wait...\x1b[11;40H4\x1b[11;40H8\x1b[11;40H13",
+        ));
+        assert_eq!(w.hang_point(), Some("starting the partitioner"));
+        // After a reset the installer starts again: no hang point until it reaches the partitioner again.
+        w.feed(b"\x1b[2J\x1b[1;1H Detecting hardware to find installation media\x1b[K\x1b[2;1H");
+        assert_eq!(w.hang_point(), None);
+        w.feed(b"\x1b[10;20H Starting up the partitioner \x1b[11;40H4");
+        assert_eq!(w.hang_point(), Some("starting the partitioner"));
+        // The next step: no longer there.
+        w.feed(b"\x1b[10;20H Installing the base system \x1b[11;40H2");
+        assert_eq!(w.hang_point(), None);
+        // The real "Configuring apt" step is still seen.
+        let events = w.feed(b"\x1b[10;20H\x1b(0u\x1b(B Configuring apt \x1b(0t\x1b(B\x1b[11;40H1");
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, WatchEvent::Detail(d) if d == "Configuring apt")),
+            "{events:?}"
+        );
     }
 
     #[test]

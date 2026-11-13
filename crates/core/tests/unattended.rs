@@ -294,6 +294,9 @@ async fn ubuntu_installs_unattended_on_workstation_from_its_own_iso_copy_and_see
     let setup =
         Setup::new(FakeVmware::default().with_ip(&vmx_path.display().to_string(), "192.0.2.21")).with_real_vault();
     let ws = Arc::clone(&setup.vmware);
+    // The installed system locks its CD doors, as PR 98's hand check saw: a disconnect that isn't answered ahead
+    // leaves the drive connected and its file open.
+    ws.set_failing("cdrom-locked", true);
     let core = setup.build().await;
     let ssh = ssh_banner().await;
     fast(&core, ssh);
@@ -372,10 +375,14 @@ async fn ubuntu_installs_unattended_on_workstation_from_its_own_iso_copy_and_see
             disc.files
         );
     }
+    let calls = ws.calls();
+    let answer = calls
+        .iter()
+        .position(|c| c.contains("writeVariable") && c.contains("answer.msg.cdromdisconnect.locked Yes"));
+    let disconnect = calls.iter().position(|c| c.contains("disconnectNamedDevice"));
     assert!(
-        ws.calls().iter().any(|c| c.contains("disconnectNamedDevice")),
-        "{:?}",
-        ws.calls()
+        answer.is_some() && disconnect.is_some() && answer < disconnect,
+        "the lock question is answered before the drive is disconnected: {calls:?}"
     );
     assert!(
         ws.snapshot_names(&folder.join("web-1.vmx").display().to_string())
@@ -494,6 +501,8 @@ async fn debian_on_virtualbox_nat_reaches_its_guest_through_a_rule_and_a_questio
         .with_virtualbox(FakeVirtualBox::new())
         .with_real_vault();
     let vb = Arc::clone(&setup.virtualbox);
+    // The installed guest locks its drives, as PR 98's hand check saw: a plain eject fails while it runs.
+    vb.set_failing("dvd-locked", true);
     let core = setup.build().await;
     fast(&core, 1);
     core.set_deploy_tuning(DeployTuning {
@@ -581,10 +590,12 @@ async fn debian_on_virtualbox_nat_reaches_its_guest_through_a_rule_and_a_questio
         "--uart1 0x3F8 4 --uartmode1 file",
         "--boot1 disk --boot2 dvd",
         "natpf1 delete remotely-install",
-        "--medium emptydrive",
+        "--medium emptydrive --forceunmount",
     ] {
         assert!(calls.contains(want), "{want} in {calls}");
     }
+    assert!(notes.contains("the seed is taken out and deleted"), "{notes}");
+    assert!(!notes.contains("still in its drive"), "{notes}");
     // The failed VM is kept, with a screenshot; the one that installed lost its seed and ISO copy.
     let stuck_vm = vb.vm_named("db-2").expect("the failed VM is kept");
     assert!(!stuck_vm.dvds.is_empty());

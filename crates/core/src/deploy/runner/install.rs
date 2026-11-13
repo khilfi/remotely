@@ -925,7 +925,7 @@ impl Deployer {
                     });
                 }
                 Err(err) => out.push(format!(
-                    "its seed is out of its drive, but the file {} couldn't be deleted ({err}): delete it",
+                    "its seed's file {} couldn't be deleted ({err}): the VM may still hold it, so delete it once the VM is off",
                     m.seed.display()
                 )),
             },
@@ -944,16 +944,33 @@ impl Deployer {
     /// closed in the media list.
     async fn eject(&self, key: &str, drive: &Drive, file: &Path) -> Result<()> {
         match drive {
-            Drive::Workstation(slot) => self
-                .hypervisors
-                .vmware()
-                .vmrun_change(vec!["disconnectNamedDevice".into(), key.into(), slot.into()], SHORT)
-                .await
-                .map(drop),
+            Drive::Workstation(slot) => {
+                // The installed system locks its CD doors (the hand check of PR 98), and Workstation then asks
+                // "Disconnect anyway and override the lock?", which with no window gets its default, no: the drive
+                // stays and its file open, while vmrun says nothing went wrong. Answered yes in the running VM's
+                // config first, which Workstation doesn't write to the .vmx.
+                let answer = vec![
+                    "writeVariable".into(),
+                    key.into(),
+                    "runtimeConfig".into(),
+                    "answer.msg.cdromdisconnect.locked".into(),
+                    "Yes".into(),
+                ];
+                if let Err(err) = self.hypervisors.vmware().vmrun_change(answer, SHORT).await {
+                    tracing::warn!(error = %err, "the CD-ROM lock question couldn't be answered ahead");
+                }
+                self.hypervisors
+                    .vmware()
+                    .vmrun_change(vec!["disconnectNamedDevice".into(), key.into(), slot.into()], SHORT)
+                    .await
+                    .map(drop)
+            }
             Drive::VirtualBox(controller, port) => {
-                let out = self
-                    .vbox(vb::attach_named(key, controller, *port, 0, true, "emptydrive"), SHORT)
-                    .await;
+                // The installed system locks its drives (the hand check of PR 98: VERR_PDM_MEDIA_LOCKED on a running
+                // VM, again on every try), so the disc is taken out whatever the guest says; nothing in it is used.
+                let mut args = vb::attach_named(key, controller, *port, 0, true, "emptydrive");
+                args.push("--forceunmount".into());
+                let out = self.vbox(args, SHORT).await;
                 let _ = self
                     .vbox(
                         vec!["closemedium".into(), "dvd".into(), file.display().to_string()],
@@ -1187,7 +1204,7 @@ impl Deployer {
                     out.push(format!("the seed is taken out and deleted{disc}"));
                 }
                 Err(err) => out.push(format!(
-                    "the seed is out of its drive, but the file {} couldn't be deleted ({err}): delete it",
+                    "the seed's file {} couldn't be deleted ({err}): the VM may still hold it, so delete it once the VM is off",
                     m.seed.display()
                 )),
             },

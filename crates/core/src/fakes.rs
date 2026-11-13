@@ -120,6 +120,13 @@ pub struct FakeVmware {
     no_vdiskmanager: bool,
     /// VM-21: a clone takes this long once its files are there (so a test can cancel it halfway).
     clone_delay: Duration,
+    /// VM-29 (PR 98's hand check): with `set_failing("cdrom-locked", true)` the guest has locked its CD doors, and
+    /// Workstation's "Disconnect anyway and override the lock?" gets its default answer (no) unless the VM's
+    /// runtime config pre-answers it: the drive stays connected and its file open, held here, as vmware-vmx holds it,
+    /// while vmrun still says nothing went wrong.
+    held_discs: Mutex<HashMap<String, std::fs::File>>,
+    /// VMs whose runtime config answers that question with Yes.
+    cdrom_answered: Mutex<HashSet<String>>,
 }
 
 /// What the fake writes for a .vmx it was given no text for.
@@ -937,6 +944,37 @@ impl VmwareAdapter for FakeVmware {
                 // VM-29: a drive that won't let go (`set_failing("disconnectNamedDevice", true)`).
                 if self.fails(&args[0]) {
                     return Err(failed(&args[0], "The device is busy"));
+                }
+                let key = path_key(&vmx);
+                if args[0] == "writeVariable"
+                    && args.get(2).map(String::as_str) == Some("runtimeConfig")
+                    && args.get(3).map(String::as_str) == Some("answer.msg.cdromdisconnect.locked")
+                    && args.get(4).map(String::as_str) == Some("Yes")
+                {
+                    locks::lock(&self.cdrom_answered).insert(key.clone());
+                }
+                if args[0] == "disconnectNamedDevice"
+                    && self.fails("cdrom-locked")
+                    && !locks::lock(&self.cdrom_answered).contains(&key)
+                {
+                    let slot = args.get(2).cloned().unwrap_or_default();
+                    let text = self.text_of(&vmx)?;
+                    let file = crate::adapters::vmx_file::VmxFile::from_text(&text)
+                        .get(&format!("{slot}.fileName"))
+                        .map(PathBuf::from);
+                    if let Some(file) = file {
+                        let mut open = std::fs::OpenOptions::new();
+                        open.read(true);
+                        #[cfg(windows)]
+                        {
+                            use std::os::windows::fs::OpenOptionsExt;
+                            // FILE_SHARE_READ only: no delete while the "VM" holds it.
+                            open.share_mode(0x1);
+                        }
+                        if let Ok(handle) = open.open(&file) {
+                            locks::lock(&self.held_discs).insert(format!("{key}|{slot}"), handle);
+                        }
+                    }
                 }
             }
             Some("clone") => {
@@ -1964,6 +2002,19 @@ impl FakeVirtualBox {
                     return Err(failed(
                         "storageattach",
                         &format!("Could not find a controller named '{controller}'"),
+                    ));
+                }
+                // VM-29 (PR 98's hand check): the installed guest locks its drives, so a running VM's disc comes out
+                // only with --forceunmount.
+                if kind == "dvddrive"
+                    && self.fails("dvd-locked")
+                    && info.power_state().is_on()
+                    && !args.iter().any(|a| a == "--forceunmount")
+                    && info.dvds.iter().any(|d| d.slot == slot && d.image.is_some())
+                {
+                    return Err(failed(
+                        "storageattach",
+                        "Could not unmount the currently mounted media/drive (VERR_PDM_MEDIA_LOCKED)",
                     ));
                 }
                 // A DVD's medium changes on a running VM too; anything else needs it off.

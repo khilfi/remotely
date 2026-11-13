@@ -1841,7 +1841,7 @@ starter, unchanged for 13 too, rendered by `catalog::install::render::render` (a
   ahci; modprobe sr_mod; modprobe isofs; mkdir -p /seed; n=0; while [ $n -lt 30 ]; do for d in /dev/sr0 /dev/sr1
   /dev/sr2 /dev/sr3; do mount -t iso9660 -o ro $d /seed 2>/dev/null && { [ -e /seed/preseed.cfg ] && break 2; umount
   /seed; }; done; n=$((n+1)); sleep 1; done; cp /seed/preseed.cfg /tmp/preseed.cfg; umount /seed; echo 1 >
-  /sys/block/${d#/dev/}/device/delete" console=tty0 console=ttyS0,115200n8` (both menu files 737 bytes, inside
+  /sys/block/${d#/dev/}/device/delete" console=tty0 console=ttyS0,115200n8` (both menu files 703 bytes, inside
   isolinux.cfg's one sector and grub.cfg's three). The command finds the CD that holds `preseed.cfg` (by content, any
   label), copies it to `/tmp` and drops that drive from the guest's kernel; `file-preseed` then loads it as any preseed
   (`preseed/include`, `preseed/run` and the file's own `early_command` work: a marker in the file's `early_command`
@@ -2115,9 +2115,11 @@ VM-29 and VM-32, from 0.8.0 (`docs/plan-0.8.md`, G6), built only on what S1 to S
   `install_fail` or `An error occurred`, and `Continue with autoinstall?` fail it. Windows: Workstation's `vmware.log`
   reset lines or VirtualBox's `/VirtualBox/VMInfo/ResetCounter`, the starters' `remotely-stage specialize` line, and the
   fingerprint line, taken only after Setup's two restarts (the serial log is read to its end before they are counted, so an earlier line is never read late); a second, different
-  one fails the install. On VirtualBox a log silent for 3 minutes at a known hang point (Ubuntu's RAID6 benchmark,
-  Debian's partitioner) gets `controlvm reset`, at most 5 times; Windows' restart hang isn't detected (the time limit
-  catches it). Done: Linux at `<hostname> login:` and an SSH banner on the guest; Windows at WinRM over HTTPS signing in.
+  one fails the install. On VirtualBox a log silent for 3 minutes at a known hang point (Ubuntu's RAID6 benchmark as
+  the last line; Debian's partitioner as the last step title, since its dialog goes on drawing the frame and the
+  progress numbers after the title) gets `controlvm reset`, at most 5 times; Windows' restart hang isn't detected (the
+  time limit catches it). Debian's step titles count only whole (`Configuring apt-cdrom-setup`, a component the
+  installer loads, isn't `Configuring apt`). Done: Linux at `<hostname> login:` and an SSH banner on the guest; Windows at WinRM over HTTPS signing in.
 - **A failure, the time limit or a cancel** (`CoreError::InstallFailed`, `InstallCancelled`, recorded as cancelled):
   the seed is taken out and deleted (Workstation's drive keeps an empty disc) and VirtualBox's NAT rule removed; the VM,
   its ISO copy, its serial log and (VirtualBox) `<vm>-install-failed.png` stay for a look, and its pool address stays
@@ -2142,6 +2144,20 @@ VM-29 and VM-32, from 0.8.0 (`docs/plan-0.8.md`, G6), built only on what S1 to S
   closes them in the media list and deletes the files. A link a file system won't delete yet is emptied when another VM
   of the deploy ends. Then the "clean install" snapshot (with the running VM's memory) and the session (SSH as the
   config's user with its key; none on VirtualBox's NAT). The notes say only what happened.
+- **Hand checks (14 Nov 2026, real VMs, PR 98)**: two Ubuntu 24.04.5 VMs on Workstation (UEFI), two Debian 12 netinst
+  on VirtualBox (UEFI, grub.cfg) and one Debian 12 on Workstation (BIOS, isolinux) installed unattended from one ISO
+  copy per deploy. vmware-vmx, VBoxHeadless and VBoxSVC run as the signed-in user, so both read the seed from its
+  private folder (one entry: the user, full control). NTFS deletes a VM's link to the copy while another VM reads the
+  copy through its own (seen on both hypervisors: a VirtualBox VM installed on from its link after its sibling's was
+  deleted), but never the link a VM holds itself. The installed systems (Ubuntu and Debian) lock their CD doors, so a
+  running VM's disc doesn't come out by asking: VirtualBox's `storageattach ... --medium
+  emptydrive` fails with `VERR_PDM_MEDIA_LOCKED` on every try, and `--forceunmount` takes it out; Workstation's
+  `disconnectNamedDevice` asks "Disconnect anyway and override the lock?" (`msg.cdromdisconnect.locked`), which with no
+  window gets its default, no, while vmrun answers 0 and the file stays open, so the job first sets `vmrun writeVariable
+  <vmx> runtimeConfig answer.msg.cdromdisconnect.locked Yes` (not written to the .vmx). Powered off and on with empty
+  discs in both drives, the UEFI VM booted its `Ubuntu` entry and the BIOS VM (`hdd,cdrom`) its disk, each at the login
+  prompt in 25 s with no question. Workstation asks `msg.serial.file.open` at each power-on (the serial log is there)
+  and appends to it.
 - **Address pools (VM-32, migration 0036)**: per workspace, a range on one hypervisor's network with a gateway and DNS
   servers; no tier, audited `address_pool_changed`, refused by the read-only lock. Each pool's network is resolved to
   this PC's (`resolve_network`, from VM-11's `networks_only`: NAT and vmnet8 are one; bridged is one for both
