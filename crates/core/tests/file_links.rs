@@ -6,7 +6,9 @@
 //! * a folder that became a link before its delete runs loses only the link;
 //! * a paused upload whose file became a link starts again, never writing through it;
 //! * a folder download stops at its cap of files and folders, before anything is made on this PC;
-//! * nothing downloads into Remotely's own data folder.
+//! * nothing downloads into Remotely's own data folder;
+//! * (G4) a save from an editing session on this PC never goes through a link swapped in on the host, Overwrite
+//!   included, while an ordinary replacing write follows a link as the real SFTP adapter does.
 //!
 //! No real host is contacted; test data uses alice and files made at run time in the system temp folder.
 
@@ -18,13 +20,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use common::{temp_folder, Setup};
-use remotely_core::adapters::remote::{AgentSource, PtySize};
+use remotely_core::adapters::remote::{AgentSource, PtySize, RemoteFiles};
 use remotely_core::command_bus::{ApprovalAnswers, ApprovalRequest, SubmitOutcome, MAX_UPLOAD_FILES};
 use remotely_core::domain::Environment;
-use remotely_core::fakes::{FakeFiles, FakeRemote, FakeVmware};
+use remotely_core::fakes::{FakeFiles, FakeLocalEditors, FakeRemote, FakeVmware};
 use remotely_core::jobs::JobStatus;
 use remotely_core::policy::ApprovalStep;
 use remotely_core::sessions::{SessionAuth, SessionInput};
+use remotely_core::terminal::edit_local::{EditAnswer, EditInfo, EditState, EditTuning, StopChoice, StopOutcome};
 use remotely_core::terminal::file_ops::FileChange;
 use remotely_core::terminal::files::{DownloadOptions, Existing, TransferState, UploadStart};
 use remotely_core::terminal::folder::FolderTracking;
@@ -375,4 +378,108 @@ async fn nothing_downloads_into_remotelys_data_folder() {
         .unwrap_err();
     assert!(err.to_string().contains("Remotely's own data folder"), "{err}");
     assert_eq!(std::fs::read_dir(&data).unwrap().count(), 0, "nothing landed there");
+}
+
+async fn until_edit(core: &Core, what: &str, ok: impl Fn(&EditInfo) -> bool) -> EditInfo {
+    let found = timeout(WAIT, async {
+        loop {
+            if let Some(edit) = core.terminals.edits(&core.ctx()).into_iter().find(&ok) {
+                return edit;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    match found {
+        Ok(edit) => edit,
+        Err(_) => panic!("{what}: {:?}", core.terminals.edits(&core.ctx())),
+    }
+}
+
+#[tokio::test]
+async fn an_edit_on_this_pc_never_saves_through_a_link_swapped_in_on_the_host() {
+    let files = FakeFiles::default()
+        .with_dir("/srv/shared")
+        .with_dir("/home/alice/.ssh")
+        .with_file("/srv/shared/app.conf", b"port = 80\n")
+        .with_file("/home/alice/.ssh/authorized_keys", b"ssh-ed25519 AAAA alice\n");
+    let (core, t) = pane(&files).await;
+    let editors = FakeLocalEditors::default();
+    core.terminals.set_local_editors(Arc::new(editors.clone()));
+    core.terminals.set_edit_tuning(EditTuning {
+        poll: Duration::from_millis(30),
+        limit: Duration::from_secs(600),
+        retry: Duration::from_secs(600),
+    });
+    core.terminals.set_edit_folder(&temp_folder("link-edits")).unwrap();
+    let program = temp_folder("link-editor").join("Code.exe");
+    std::fs::write(&program, b"").unwrap();
+    core.set_local_editor_path(Some(program)).await.unwrap();
+    let SubmitOutcome::NeedsApproval { request } = core
+        .files
+        .edit_on_pc(t, "/srv/shared/app.conf".into(), false)
+        .await
+        .unwrap()
+    else {
+        panic!("each save replaces the file: it asks");
+    };
+    let answers = ApprovalAnswers {
+        confirmed: true,
+        ..Default::default()
+    };
+    let job = core.bus.approve(request.id, answers).await.unwrap();
+    until_edit(&core, "watching", |e| e.id == job).await;
+    let copy = editors.opened()[0].files[0].clone();
+
+    // Another user who can write the folder changes the file (the next save is a conflict), then puts a link there.
+    files.set_file("/srv/shared/app.conf", b"port = 90\n");
+    std::fs::write(&copy, b"port = 82\n").unwrap();
+    until_edit(&core, "a conflict", |e| matches!(e.state, EditState::Conflict { .. })).await;
+    files.set_link("/srv/shared/app.conf", "/home/alice/.ssh/authorized_keys");
+    core.terminals
+        .answer_edit(&core.ctx(), job, Some(EditAnswer::Overwrite))
+        .await
+        .unwrap();
+    let refused = until_edit(&core, "refused", |e| matches!(e.state, EditState::Failed { .. })).await;
+    let EditState::Failed { message } = &refused.state else {
+        unreachable!()
+    };
+    assert!(message.contains("link"), "{message}");
+    assert_eq!(refused.saves, 0);
+    assert_eq!(
+        files.file("/home/alice/.ssh/authorized_keys").unwrap(),
+        b"ssh-ed25519 AAAA alice\n",
+        "nothing written through the link"
+    );
+    assert_eq!(
+        files.link("/srv/shared/app.conf").as_deref(),
+        Some("/home/alice/.ssh/authorized_keys")
+    );
+
+    // An ordinary save with a link there now is refused too, before anything is written.
+    std::fs::write(&copy, b"port = 83\n").unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(
+        files.file("/home/alice/.ssh/authorized_keys").unwrap(),
+        b"ssh-ed25519 AAAA alice\n"
+    );
+    let asked = core.terminals.stop_edit(&core.ctx(), job, None).await.unwrap();
+    assert!(matches!(asked, StopOutcome::Unsent { .. }), "{asked:?}");
+    core.terminals
+        .stop_edit(&core.ctx(), job, Some(StopChoice::Discard))
+        .await
+        .unwrap();
+    timeout(WAIT, core.jobs.wait(job)).await.unwrap().unwrap();
+
+    // Why editing has its own way to replace: an ordinary replacing write follows the link (as SftpFiles does, for
+    // the login user), so the file it points to would get the bytes.
+    let mut write = RemoteFiles::write(&files, "/srv/shared/app.conf", true).await.unwrap();
+    write.write_all(b"ssh-ed25519 BBBB mallory\n").await.unwrap();
+    write.finish().await.unwrap();
+    assert_eq!(
+        files.file("/home/alice/.ssh/authorized_keys").unwrap(),
+        b"ssh-ed25519 BBBB mallory\n"
+    );
+    assert!(files.link("/srv/shared/app.conf").is_some(), "the link stays a link");
+    core.terminals.close_all().await;
 }

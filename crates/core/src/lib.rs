@@ -97,6 +97,7 @@ pub mod notes;
 pub mod notifications;
 pub mod policy;
 pub mod presentation;
+pub mod private_folder;
 pub mod reachability;
 pub mod reports;
 pub mod retention;
@@ -428,6 +429,14 @@ impl LockParts {
     /// `why`: what happened, for the log ("the vault locked", "the vault was reset").
     async fn vault_locked(&self, why: &'static str) {
         self.bindings.vault_locked();
+        // SS-08 (G4): editing sessions as root end with root browsing (sudo's password is forgotten); the others hold
+        // no secret (their connection is signed in already) and go on.
+        let edits = self
+            .terminals
+            .end_root_edits(terminal::edit_local::EditEnd::VaultLocked);
+        if !edits.is_empty() {
+            tracing::info!(why, edits = edits.len(), "editing sessions as root on this PC end");
+        }
         self.terminals.forget_logins();
         let open = self.jobs.file_server_jobs(None);
         stop_file_server_jobs(
@@ -510,6 +519,13 @@ impl Core {
         // no download lands in it.
         if let Some(folder) = data_folder.filter(|f| !f.as_os_str().is_empty()) {
             core.protect_folder(&folder);
+            // SS-08 (G4): copies edited on this PC go beside the data, each in a folder only this user can open; what a
+            // run before left there goes now.
+            match core.terminals.set_edit_folder(&folder.join("editing")) {
+                Ok(0) => {}
+                Ok(swept) => tracing::info!(swept, "copies left from earlier edits on this PC deleted"),
+                Err(err) => tracing::warn!(error = %err, "the folder for edits on this PC could not be set up"),
+            }
         }
         Ok(core)
     }
@@ -1072,6 +1088,65 @@ impl Core {
         jobs.len()
     }
 
+    /// SS-08 (G4): ends the editing sessions on this PC (of `workspace`, or all) for `why`, without uploading more, and
+    /// waits for their jobs to end (journaled and audited), up to [`FILE_SERVER_STOP_WAIT`] each; one still waiting for
+    /// its approval countdown is cancelled. Returns how many there were.
+    pub(crate) async fn end_edits(
+        &self,
+        workspace: Option<domain::WorkspaceId>,
+        why: terminal::edit_local::EditEnd,
+    ) -> usize {
+        let editing = self.terminals.end_edits(workspace, why);
+        let open = self.jobs.editing_jobs(workspace);
+        for job_id in open.iter().filter(|id| !editing.contains(id)) {
+            self.jobs.cancel(*job_id);
+        }
+        for job_id in &open {
+            if tokio::time::timeout(FILE_SERVER_STOP_WAIT, self.jobs.wait(*job_id))
+                .await
+                .is_err()
+            {
+                tracing::warn!(%job_id, "an editing session's job did not end in time");
+            }
+        }
+        open.len()
+    }
+
+    /// SS-08 (G4): the editor "Edit on this PC" opens copies in (the path saved in Settings, `REMOTELY_LOCAL_EDITOR`,
+    /// VS Code, Notepad++ or Notepad), or `None` when none was found.
+    pub async fn local_editor_path(&self) -> Result<Option<PathBuf>> {
+        self.terminals.local_editor(&self.ctx()).await
+    }
+
+    /// SS-08 (G4): the editor's path saved in Settings, if any.
+    pub async fn saved_local_editor_path(&self) -> Result<Option<PathBuf>> {
+        self.terminals.saved_local_editor(&self.ctx()).await
+    }
+
+    /// SS-08 (G4): saves the editor's path (`None` = find one). It must be an editor's `.exe` on this PC, never one that
+    /// runs what it is given. Audited, since it decides which program opens files from hosts.
+    pub async fn set_local_editor_path(&self, path: Option<PathBuf>) -> Result<Option<PathBuf>> {
+        self.store.read_only().check(Change::Settings)?;
+        if let Some(path) = &path {
+            adapters::local_editor::validate_local_editor_path(path)?;
+        }
+        let as_text = path.as_ref().map(|p| p.display().to_string());
+        self.store
+            .put_setting(&self.ctx(), adapters::local_editor::LOCAL_EDITOR_PATH_KEY, &as_text)
+            .await?;
+        let in_use = self.local_editor_path().await?;
+        let detail = format!(
+            "saved: {}; in use: {}",
+            as_text.as_deref().unwrap_or("find automatically"),
+            in_use
+                .as_ref()
+                .map_or_else(|| "not found".to_owned(), |p| p.display().to_string())
+        );
+        self.audit_setting("Set the editor for files from hosts", &detail)
+            .await?;
+        Ok(in_use)
+    }
+
     /// FD-09, SS-14: Remotely's own data (its database's folder, the logs): the file server never serves it or writes
     /// into it, and no download lands in it.
     pub fn protect_folder(&self, folder: &std::path::Path) {
@@ -1086,6 +1161,8 @@ impl Core {
         let open = self.jobs.file_server_jobs(None);
         self.stop_file_servers(&open, toolbox::file_server::StopReason::AppClosing)
             .await;
+        // SS-08 (G4): editing sessions end (audited) and their copies are deleted before the terminals close.
+        self.end_edits(None, terminal::edit_local::EditEnd::AppClosing).await;
         self.terminals.close_all().await;
         // MO-06: the minute still open is written as it is.
         if let Err(err) = self.history.flush_all().await {

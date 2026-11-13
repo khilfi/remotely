@@ -89,6 +89,11 @@ pub(super) fn every_file_op_command() -> Vec<(Command, Vec<Target>)> {
     ]
     .into_iter()
     .map(|op| change(op, false, Environment::Lab))
+    // SS-14, SS-08 (G4): an editor tab and an editing session on this PC.
+    .chain([
+        editing(false, Environment::Lab, false),
+        editing(false, Environment::Lab, true),
+    ])
     .collect()
 }
 
@@ -379,4 +384,89 @@ fn file_changes_come_only_from_the_core_and_retry_their_failed_paths() {
     assert_eq!(targets.len(), 1);
     assert!(command.with_targets(vec![TargetRef::App]).is_none());
     assert!(!safety_snapshot_applies(&command));
+}
+
+/// SS-14, SS-08 (G4): an editor tab and an editing session on this PC, on a terminal of `env`.
+fn editing(as_root: bool, env: Environment, local: bool) -> (Command, Vec<Target>) {
+    let path = "/etc/nginx/nginx.conf".to_owned();
+    let command = if local {
+        let spec = crate::terminal::edit_local::EditSpec {
+            terminal_id: Uuid::nil(),
+            path,
+            as_root,
+        };
+        Command::EditLocal {
+            targets: spec.targets(),
+            spec: Box::new(spec),
+        }
+    } else {
+        let spec = crate::terminal::editor::EditorSpec {
+            terminal_id: Uuid::nil(),
+            path,
+            editor: "nano".into(),
+            as_root,
+        };
+        Command::EditorOpen {
+            targets: spec.targets(),
+            spec: Box::new(spec),
+        }
+    };
+    let targets = command
+        .targets()
+        .iter()
+        .map(|target| Target {
+            target: target.clone(),
+            name: "web01: /etc/nginx/nginx.conf".into(),
+            environment: env,
+            protected: false,
+        })
+        .collect();
+    (command, targets)
+}
+
+#[test]
+fn an_editor_tab_is_low_and_one_tier_more_for_root_and_for_prod_never_rated_by_the_shell_rules() {
+    for (as_root, env, tier) in [
+        (false, Environment::Lab, Tier::Low),
+        (false, Environment::Prod, Tier::Medium),
+        (true, Environment::Lab, Tier::Medium),
+        (true, Environment::Prod, Tier::High),
+    ] {
+        let (command, targets) = editing(as_root, env, false);
+        let d = engine().evaluate(&command, &targets);
+        assert_eq!(
+            (d.action, d.tier),
+            (ActionKind::FileEditorOpen, tier),
+            "{as_root} {env:?}"
+        );
+        assert!(!d.reasons.iter().any(|r| r.contains("shell rules")), "{:?}", d.reasons);
+    }
+}
+
+#[test]
+fn editing_on_this_pc_is_a_replacement_approved_once_and_never_below_a_confirm() {
+    for (as_root, env, tier) in [
+        (false, Environment::Lab, Tier::Medium),
+        (false, Environment::Prod, Tier::High),
+        (true, Environment::Lab, Tier::High),
+        (true, Environment::Prod, Tier::Critical),
+    ] {
+        let (command, targets) = editing(as_root, env, true);
+        let d = engine().evaluate(&command, &targets);
+        assert_eq!(
+            (d.action, d.tier),
+            (ActionKind::FileEditLocal, tier),
+            "{as_root} {env:?}"
+        );
+    }
+    let mut rules = PolicyRules::default();
+    rules.tiers.insert(ActionKind::FileEditLocal, TierRule::same(Tier::Low));
+    let err = PolicyEngine::new(rules).err().expect("rejected");
+    assert!(err.to_string().contains("always asks first"), "{err}");
+    // An editor tab may be raised, and rules saved before get both by default.
+    let mut saved = PolicyRules::default();
+    saved.tiers.remove(&ActionKind::FileEditorOpen);
+    saved.tiers.remove(&ActionKind::FileEditLocal);
+    saved.fill_missing_tiers();
+    assert_eq!(saved, PolicyRules::default());
 }

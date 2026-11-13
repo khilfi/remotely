@@ -78,6 +78,13 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
     title: "VNC viewer",
     keywords: "vnc viewer vncviewer.exe tvnviewer.exe tigervnc tightvnc realvnc ultravnc remote screen tool paths",
   },
+  {
+    id: "local-editor",
+    group: "tools",
+    card: "tools",
+    title: "Editor for files from hosts",
+    keywords: "edit on this pc editor vs code code.exe notepad++ notepad host files tool paths",
+  },
   { id: "vm-folders", group: "tools", title: "VM folders", keywords: "scan folders vmx library find vms" },
   {
     id: "power",
@@ -90,7 +97,7 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
     group: "terminal",
     title: "Terminal",
     keywords:
-      "keep-alive reconnect copy on select paste font scrollback prompt hook reachability dots notifications long commands",
+      "keep-alive reconnect copy on select paste font scrollback prompt hook reachability dots notifications long commands double-click file editor",
   },
   {
     id: "compare",

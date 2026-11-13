@@ -156,6 +156,21 @@ pub enum Command {
         targets: Vec<TargetRef>,
         spec: Box<crate::terminal::file_ops::FileOpSpec>,
     },
+    /// SS-14 (0.8.0 G4) open a host's file in a terminal editor on the host ([`crate::terminal::editor`]): the job opens
+    /// a new terminal tab at its folder running the editor (as root, `sudoedit`). Rated by its kind, not the shell
+    /// rules. The one target is the spec's [`TargetRef::RemotePath`]. Never built by the UI: `Core.files` builds it
+    /// after looking at the file and the host's editors.
+    EditorOpen {
+        targets: Vec<TargetRef>,
+        spec: Box<crate::terminal::editor::EditorSpec>,
+    },
+    /// SS-08 (0.8.0 G4) edit a host's file on this PC ([`crate::terminal::edit_local`]): the job lasts as long as the
+    /// editing session, and each save replaces the host's file (approved once, audited each time). The one target is
+    /// the spec's [`TargetRef::RemotePath`]. Never built by the UI.
+    EditLocal {
+        targets: Vec<TargetRef>,
+        spec: Box<crate::terminal::edit_local::EditSpec>,
+    },
     /// SS-07 open a saved port forward on one open terminal's connection
     /// ([`crate::terminal::tunnels`]): it listens until it is stopped or the terminal closes, and
     /// opens again by itself after a reconnect. Never built by the UI: the terminal builds it from
@@ -757,6 +772,8 @@ impl Command {
             Command::FileUpload { .. } => "Uploads start from a terminal: its upload button, or files dropped on it.",
             // SS-14: the paths are looked at on the host before the command is built.
             Command::FileOp { .. } => "File changes start from the Files here drawer.",
+            // SS-14, SS-08 (G4): the file and the editor are looked at on the host before the command is built.
+            Command::EditorOpen { .. } | Command::EditLocal { .. } => "Files are edited from the Files here drawer.",
             Command::OpenTunnel { .. } => {
                 "Tunnels start from a terminal's Tunnels panel, from the session's saved port forwards."
             }
@@ -865,6 +882,20 @@ impl Command {
                     return Err(CoreError::InvalidInput(
                         "A file change's targets are its paths, one each.".into(),
                     ));
+                }
+                Ok(())
+            }
+            Command::EditorOpen { targets, spec } => {
+                spec.validate()?;
+                if *targets != spec.targets() {
+                    return Err(CoreError::InvalidInput("An editor's one target is its file.".into()));
+                }
+                Ok(())
+            }
+            Command::EditLocal { targets, spec } => {
+                spec.validate()?;
+                if *targets != spec.targets() {
+                    return Err(CoreError::InvalidInput("An edit's one target is its file.".into()));
                 }
                 Ok(())
             }
@@ -1024,8 +1055,11 @@ impl Command {
             // VM-11: a forward belongs to its network or VM.
             // FD-04: a bundle belongs to its zip; the hosts that failed go into a new one, with its own save dialog.
             // FD-09: a wake-up is for its one machine; a file server runs once, for its time.
+            // SS-14, SS-08 (G4): an editor tab or an editing session belongs to the moment it was asked for.
             Command::AppUpdate { .. }
             | Command::TerminalLine { .. }
+            | Command::EditorOpen { .. }
+            | Command::EditLocal { .. }
             | Command::OpenTunnel { .. }
             | Command::HostNetwork { .. }
             | Command::SupportBundle { .. }
@@ -1050,6 +1084,8 @@ impl Command {
             | Command::TerminalLine { targets, .. }
             | Command::FileUpload { targets, .. }
             | Command::FileOp { targets, .. }
+            | Command::EditorOpen { targets, .. }
+            | Command::EditLocal { targets, .. }
             | Command::OpenTunnel { targets, .. }
             | Command::Container { targets, .. }
             | Command::VmConfig { targets, .. }
@@ -1082,6 +1118,8 @@ impl Command {
             Command::TerminalLine { .. } => "terminalLine",
             Command::FileUpload { .. } => "fileUpload",
             Command::FileOp { .. } => "fileOp",
+            Command::EditorOpen { .. } => "editorOpen",
+            Command::EditLocal { .. } => "editLocal",
             Command::OpenTunnel { .. } => "openTunnel",
             Command::Container { .. } => "container",
             Command::Deploy { .. } => "deploy",
@@ -1128,6 +1166,17 @@ impl Command {
                 **spec = redacted;
                 changed
             }
+            // SS-14, SS-08 (G4): the file edited.
+            Command::EditorOpen { spec, .. } => {
+                let (redacted, changed) = spec.for_journal();
+                **spec = redacted;
+                changed
+            }
+            Command::EditLocal { spec, .. } => {
+                let (redacted, changed) = spec.for_journal();
+                **spec = redacted;
+                changed
+            }
             _ => false,
         };
         (kept, changed)
@@ -1138,7 +1187,21 @@ impl Command {
         match self {
             Command::FileOp { spec, .. } => spec.as_root,
             Command::FileUpload { as_root, .. } => *as_root,
+            // G4: sudoedit, and saves as root.
+            Command::EditorOpen { spec, .. } => spec.as_root,
+            Command::EditLocal { spec, .. } => spec.as_root,
             _ => false,
+        }
+    }
+
+    /// SS-14: the host's path a [`TargetRef::RemotePath`] step stands for: a file change's, or (G4) the file an editor
+    /// or an editing session is for. `None` for every other command.
+    pub fn remote_path(&self, step: usize) -> Option<&str> {
+        match self {
+            Command::FileOp { spec, .. } => spec.path(step),
+            Command::EditorOpen { spec, .. } if step == 0 => Some(&spec.path),
+            Command::EditLocal { spec, .. } if step == 0 => Some(&spec.path),
+            _ => None,
         }
     }
 
@@ -1253,6 +1316,8 @@ impl Command {
                 format!("Upload {what} to {folder}{replacing}{deleting}{root}")
             }
             Command::FileOp { spec, .. } => spec.summary(),
+            Command::EditorOpen { spec, .. } => spec.summary(),
+            Command::EditLocal { spec, .. } => spec.summary(),
             Command::OpenTunnel { forward, .. } => format!("Open a tunnel: {}", forward.describe()),
             Command::Container { op, .. } => match op {
                 ContainerOp::Pull { reference } => {
@@ -2502,9 +2567,9 @@ impl CommandBus {
                 }
                 // SS-14: a path has its terminal's labels, and is named by it; the path is redacted like free text.
                 TargetRef::RemotePath { terminal_id, step, .. } => {
-                    let Command::FileOp { spec, .. } = command else {
+                    let Some(path) = command.remote_path(*step) else {
                         return Err(CoreError::InvalidInput(
-                            "Paths are targets of file changes only.".into(),
+                            "Paths are targets of file changes and edits only.".into(),
                         ));
                     };
                     let on = match &terminal {
@@ -2528,7 +2593,6 @@ impl CommandBus {
                         TargetRef::Terminal { session_id, .. } => *session_id,
                         _ => None,
                     };
-                    let path = spec.path(*step).unwrap_or_default();
                     targets.push(Target {
                         target: TargetRef::RemotePath {
                             terminal_id: *terminal_id,
@@ -2757,6 +2821,10 @@ impl CommandBus {
             bundle: BundleDetails::of(command),
             file_op: match command {
                 Command::FileOp { spec, .. } => Some(Box::new(crate::terminal::file_ops::FileOpDetails::of(spec))),
+                Command::EditorOpen { spec, .. } => {
+                    Some(Box::new(crate::terminal::file_ops::FileOpDetails::editor(spec)))
+                }
+                Command::EditLocal { spec, .. } => Some(Box::new(crate::terminal::file_ops::FileOpDetails::edit(spec))),
                 _ => None,
             },
         })

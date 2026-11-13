@@ -666,6 +666,13 @@ export const HELP = {
       "Every change made as root asks one approval tier more than the same change as the logged-in user. It ends when you stop it, the terminal reconnects or the vault locks. If sudo refuses the password, Remotely doesn't try it again, here or on the Containers page, until the password changes or you try again.",
     ],
   },
+  filesEditing: {
+    title: "Editing files",
+    body: [
+      "Edit in the terminal opens a tab on the host running its editor on the file: the session's choice, else the first of nano, micro, vim and vi it has. As root it runs sudoedit. Edit on this PC opens a copy, in a folder only you can open, in the editor set in Settings, Tools.",
+      "Each save goes up once the host's copy is checked to be the one opened; if it changed, you choose. One approval covers the session; each save is audited. Stop editing ends it, or 4 hours, or the terminal closing. A save that didn't go up is never deleted: the copy stays listed until you save it elsewhere or discard it.",
+    ],
+  },
   filesChanges: {
     title: "Changing files",
     body: [

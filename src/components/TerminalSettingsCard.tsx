@@ -6,7 +6,7 @@
 // opened from then on; font size, scrollback, the paste question and notifications to open ones too.
 //
 // UX-10: every field saves at once (a number on Enter or when you leave it), with "Saved" and Undo in the header;
-// the longer explanations are behind "?".
+// the longer explanations are behind "?". SS-14 (0.8.0 G4): what double-clicking a file in Files here does.
 
 import { useEffect, useState } from "react";
 import { Card, CardAction, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -17,8 +17,20 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Switch } from "@/components/ui/switch";
 import { HelpTip } from "@/components/HelpTip";
 import { NumberSetting, SaveStatus, useSaveStatus } from "@/components/SaveStatus";
-import { api, errorMessage, type NotifyWhen, type ReachabilityMode, type TerminalSettings } from "@/lib/api";
+import {
+  api,
+  errorMessage,
+  type FileDoubleClick,
+  type NotifyWhen,
+  type ReachabilityMode,
+  type TerminalSettings,
+} from "@/lib/api";
 import type { HelpKey } from "@/lib/help";
+
+const DOUBLE_CLICK: { value: FileDoubleClick; label: string }[] = [
+  { value: "terminalEditor", label: "Edit it in the terminal, on the host" },
+  { value: "thisPc", label: "Edit it on this PC" },
+];
 
 const REACHABILITY: { value: ReachabilityMode; label: string }[] = [
   { value: "auto", label: "On, unless there are more than 200 sessions" },
@@ -118,6 +130,28 @@ export function TerminalSettingsCard() {
             "pasteConfirm",
           )}
           {toggle("prompt-hook", "promptHook", "Follow the shell's folder in bash and zsh", "promptHook")}
+        </div>
+
+        <div className="grid gap-2 sm:max-w-sm">
+          <span className="flex items-center gap-1">
+            <Label htmlFor="file-double-click">Double-clicking a file in Files here</Label>
+            <HelpTip topic="filesEditing" />
+          </span>
+          <Select
+            value={s.fileDoubleClick ?? "terminalEditor"}
+            onValueChange={(v) => save({ fileDoubleClick: v as FileDoubleClick })}
+          >
+            <SelectTrigger id="file-double-click" className="w-full">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {DOUBLE_CLICK.map((d) => (
+                <SelectItem key={d.value} value={d.value}>
+                  {d.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
         </div>
 
         <div className="grid gap-4 border-t pt-4 sm:grid-cols-2">

@@ -146,6 +146,10 @@ pub enum ActionKind {
     FilePush,
     /// BX-10 (0.8.0 G3): fetch the same file from many hosts into a folder of this PC.
     FileFetch,
+    /// SS-14 (0.8.0 G4): open a host's file in a terminal editor on the host (a new tab running it).
+    FileEditorOpen,
+    /// SS-08 (0.8.0 G4): edit a host's file on this PC; each save replaces it. Never below Medium: replacing asks.
+    FileEditLocal,
     /// Open a local or SOCKS tunnel only this PC can use (SS-07).
     TunnelLocal,
     /// Open a remote tunnel: the host listens, and connections to it reach a host this PC reaches
@@ -233,7 +237,7 @@ pub enum ActionKind {
 
 impl ActionKind {
     /// Every action, in the order Settings lists them (AP-01).
-    pub const ALL: [ActionKind; 69] = [
+    pub const ALL: [ActionKind; 71] = [
         ActionKind::VmStart,
         ActionKind::VmUnpause,
         ActionKind::VmPause,
@@ -283,6 +287,8 @@ impl ActionKind {
         ActionKind::FileSyncDelete,
         ActionKind::FilePush,
         ActionKind::FileFetch,
+        ActionKind::FileEditorOpen,
+        ActionKind::FileEditLocal,
         ActionKind::TunnelLocal,
         ActionKind::TunnelRemote,
         ActionKind::TunnelShared,
@@ -339,6 +345,8 @@ impl ActionKind {
             ActionKind::FileSyncDelete => "Sync folders, deleting on the host what this PC's folder doesn't have",
             ActionKind::FilePush => "Push files to many hosts",
             ActionKind::FileFetch => "Fetch a file from many hosts",
+            ActionKind::FileEditorOpen => "Open a file in a terminal editor on a host",
+            ActionKind::FileEditLocal => "Edit a host's file on this PC (each save replaces it)",
             ActionKind::TunnelLocal => "Open a tunnel for this PC only",
             ActionKind::TunnelRemote => "Open a remote tunnel (the host listens)",
             ActionKind::TunnelShared => "Open a tunnel other computers can use",
@@ -641,7 +649,11 @@ impl PolicyRules {
             let Some(rule) = self.tiers.get(&kind) else {
                 return invalid(kind.label(), "no tier set for this action".into());
             };
-            if matches!(kind, ActionKind::FileReplace | ActionKind::FileMoveReplace) && rule.single < MIN_REPLACE_TIER {
+            if matches!(
+                kind,
+                ActionKind::FileReplace | ActionKind::FileMoveReplace | ActionKind::FileEditLocal
+            ) && rule.single < MIN_REPLACE_TIER
+            {
                 return invalid(
                     kind.label(),
                     format!(
@@ -1079,6 +1091,10 @@ impl Default for PolicyRules {
             ),
             // Reads on the hosts; a Prod host's is Medium (its data leaves it, as for a Prod VM's export).
             (FileFetch, TierRule::same(Low)),
+            // SS-14, SS-08 (docs/plan-0.8.md, "Approval tiers"): an editor tab is Low and audited; editing on this PC
+            // replaces the file at each save, approved once.
+            (FileEditorOpen, TierRule::same(Low)),
+            (FileEditLocal, TierRule::same(Medium)),
             // SS-07: a tunnel only this PC can use reaches what the terminal reaches anyway (the PRD:
             // Medium on a Prod host, which the Prod rule gives). A remote one opens a port on the host
             // into this PC's network; a shared one lets other computers in without logging in.
@@ -1455,6 +1471,9 @@ impl PolicyEngine {
             Command::FileUpload { .. } => ActionKind::FileUpload,
             // SS-14: what is lost decides.
             Command::FileOp { spec, .. } => file_op_kind(&spec.op),
+            // SS-14, SS-08 (G4): by their kind; an editor can run commands, but the shell rules don't rate it.
+            Command::EditorOpen { .. } => ActionKind::FileEditorOpen,
+            Command::EditLocal { .. } => ActionKind::FileEditLocal,
             // SS-07: who can use the tunnel decides, then which way it goes.
             Command::OpenTunnel { forward, .. } if !forward.spec.loopback_only() => ActionKind::TunnelShared,
             Command::OpenTunnel { forward, .. } if forward.spec.kind == ForwardKind::Remote => ActionKind::TunnelRemote,
@@ -2099,6 +2118,8 @@ pub fn safety_snapshot_applies(command: &Command) -> bool {
         | Command::FileUpload { .. }
         // SS-14: files on a host, never a VM's own state.
         | Command::FileOp { .. }
+        | Command::EditorOpen { .. }
+        | Command::EditLocal { .. }
         | Command::OpenTunnel { .. }
         | Command::Container { .. }
         // VM-11: a forward is the network's (or a NAT adapter's) setting; a snapshot of the guest wouldn't undo it.

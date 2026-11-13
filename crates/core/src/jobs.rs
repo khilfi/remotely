@@ -197,6 +197,8 @@ struct JobOwner {
     scheduled: bool,
     /// FD-09: the file server, which a workspace switch stops rather than waits for.
     stops_on_switch: bool,
+    /// SS-08 (G4): an editing session on this PC, which a workspace switch ends rather than waits for.
+    editing: bool,
 }
 
 /// A command the bus has cleared to run.
@@ -843,9 +845,24 @@ impl JobRunner {
             .filter(|id| {
                 owners
                     .get(id)
-                    .is_some_and(|o| o.workspace == workspace && !o.scheduled && !o.stops_on_switch)
+                    .is_some_and(|o| o.workspace == workspace && !o.scheduled && !o.stops_on_switch && !o.editing)
             })
             .count()
+    }
+
+    /// SS-08 (G4): the editing sessions' jobs still open (queued, in their countdown, or editing), in `workspace` or in
+    /// all.
+    pub fn editing_jobs(&self, workspace: Option<WorkspaceId>) -> Vec<Uuid> {
+        let owners = locks::lock(&self.owners);
+        locks::lock(&self.running)
+            .keys()
+            .filter(|id| {
+                owners
+                    .get(id)
+                    .is_some_and(|o| o.editing && workspace.is_none_or(|w| w == o.workspace))
+            })
+            .copied()
+            .collect()
     }
 
     /// FD-09: the file server's jobs still open (queued, in their countdown, or serving), in `workspace` or in all.
@@ -875,7 +892,15 @@ impl JobRunner {
     /// Waits until `job_id` is the only open job. Cancelling the job stops the wait.
     async fn wait_to_run_alone(&self, job_id: Uuid, token: &CancellationToken) -> Result<()> {
         loop {
-            let others = locks::lock(&self.running).keys().filter(|id| **id != job_id).count();
+            // SS-08 (G4): an editing session on this PC (up to 4 hours) doesn't hold it up: the app's exit ends it, and
+            // a copy with a save that didn't go up stays on this PC.
+            let others = {
+                let owners = locks::lock(&self.owners);
+                locks::lock(&self.running)
+                    .keys()
+                    .filter(|id| **id != job_id && !owners.get(id).is_some_and(|o| o.editing))
+                    .count()
+            };
             if others == 0 {
                 return Ok(());
             }
@@ -1003,6 +1028,7 @@ impl JobRunner {
                 workspace: spec.ctx.workspace_id,
                 scheduled: spec.approval.as_ref().is_some_and(|a| a.standing.is_some()),
                 stops_on_switch: matches!(spec.command, Command::FileServer { .. }),
+                editing: matches!(spec.command, Command::EditLocal { .. }),
             },
         );
         locks::lock(&self.running).insert(id, token.clone());
@@ -1927,6 +1953,42 @@ impl JobRunner {
                     step: *step,
                 };
                 let note = self.terminals.file_op(run, token).await?;
+                Ok(TargetOutcome {
+                    note: Some(note),
+                    ..TargetOutcome::done()
+                })
+            }
+            // SS-14 (G4): the editor tab, opened for the window to take.
+            (Command::EditorOpen { spec: editor, .. }, TargetRef::RemotePath { .. }) => {
+                if token.is_cancelled() {
+                    return Err(CoreError::Cancelled);
+                }
+                let run = crate::terminal::editor::EditorRun {
+                    ctx: spec.ctx,
+                    job_id,
+                    tier: spec.decision.tier,
+                    target,
+                    spec: editor,
+                };
+                let note = self.terminals.open_editor(run).await?;
+                Ok(TargetOutcome {
+                    note: Some(note),
+                    ..TargetOutcome::done()
+                })
+            }
+            // SS-08 (G4): the whole editing session; each save audited as it goes up.
+            (Command::EditLocal { spec: edit, .. }, TargetRef::RemotePath { .. }) => {
+                if token.is_cancelled() {
+                    return Err(CoreError::Cancelled);
+                }
+                let run = crate::terminal::edit_local::EditRun {
+                    ctx: spec.ctx,
+                    job_id,
+                    tier: spec.decision.tier,
+                    target,
+                    spec: edit,
+                };
+                let note = self.terminals.edit_locally(run, token).await?;
                 Ok(TargetOutcome {
                     note: Some(note),
                     ..TargetOutcome::done()
@@ -2918,6 +2980,8 @@ impl JobRunner {
             // SS-14: a file change's paths one after another, in their order (a folder before what goes into it).
             Command::FileUpload { .. }
             | Command::FileOp { .. }
+            | Command::EditorOpen { .. }
+            | Command::EditLocal { .. }
             | Command::OpenTunnel { .. }
             | Command::HostNetwork { .. }
             | Command::WakeOnLan { .. }
@@ -3070,6 +3134,8 @@ fn safety_verb(command: &Command) -> &'static str {
         | Command::TerminalLine { .. } => "command",
         Command::FileUpload { .. } => "upload",
         Command::FileOp { .. } => "file change",
+        Command::EditorOpen { .. } => "editor",
+        Command::EditLocal { .. } => "edit",
         Command::OpenTunnel { .. } => "tunnel",
         Command::Container { .. } => "container",
         Command::AppUpdate { .. } => "update",

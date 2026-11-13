@@ -83,6 +83,8 @@ const GROUPS: { title: string; kinds: ActionKind[]; exec?: boolean; deploy?: boo
       "fileSyncDelete",
       "filePush",
       "fileFetch",
+      "fileEditorOpen",
+      "fileEditLocal",
     ],
   },
   { title: "Tunnels", kinds: ["tunnelLocal", "tunnelRemote", "tunnelShared"] },

@@ -119,6 +119,9 @@ crates/core/          remotely-core: all app logic
                       rule (file_ops_tests.rs)
     presentation.rs   FD-03 presentation mode (saved, fail closed, audited) and ReadOnlyLock, which the store shares
                       with the bus and every service that edits the app's data (Change)
+    private_folder.rs SS-08 (0.8.0 G4) a folder only this Windows user can open: a protected DACL with the user's SID
+                      alone, full control inherited (`D:P(A;OICI;FA;;;<SID>)`; GetTokenInformation, SetNamedSecurityInfoW);
+                      `describe` gives the SDDL for tests
     workspaces.rs     FD-02 (migration 0029): Workspaces (create, rename, colour, archive, restore; audited in the
                       workspace, Change::Workspaces), Current (the shown workspace, a watch every service reads),
                       Core::switch_preview and switch_workspace (refused while a job started from the UI in the shown
@@ -158,7 +161,8 @@ crates/core/          remotely-core: all app logic
                       chain over
                       direct-tcpip channels, each hop's own host key check and login; remote/sftp.rs SS-08 SFTP on a
                       terminal's own connection, behind the RemoteFiles trait (H8: a replace writes a hidden temp
-                      file, keeps mode and owner, posix-rename, else a .bak; RemoteWrite::abort; Written says how; A9
+                      file, keeps mode and owner, posix-rename, else a .bak; RemoteWrite::abort; Written says how; G4
+                      replace_file: the same, never through a link for any user; A9
                       a second RawSftpSession for capped listings, MAX_LISTING; SS-14 lstat, make_folder,
                       remove_folder, rename (posix-rename to replace), set_attrs (mode, owner, times; never through a
                       link: OpenSSH's lsetstat, else an lstat first that refuses one), read_from an offset,
@@ -181,7 +185,12 @@ crates/core/          remotely-core: all app logic
                       HARDWARE\DEVICEMAP\SERIALCOMM, opened with CreateFileW and SetCommState behind SerialPorts; one
                       thread per port, Send Break), launcher.rs (SS-12 ConsoleLauncher: mstsc.exe from System32 on a
                       .rdp file in this user's temp folder, deleted once read; the VNC viewer found like the other tools,
-                      locate_vnc_viewer, `consoles.vncViewerPath`; NoLauncher under `fakes`),
+                      locate_vnc_viewer, `consoles.vncViewerPath`; NoLauncher under `fakes`), local_editor.rs (SS-08
+                      0.8.0 G4: the editor "Edit on this PC" opens copies in, behind LocalEditors: the Settings path
+                      (`files.localEditorPath`, a MACHINE_KEY), `REMOTELY_LOCAL_EDITOR`, then VS Code, Notepad++ and
+                      Notepad where they install; only an `.exe` on this PC and never one that runs what it is given
+                      (cmd, PowerShell, the script hosts, mshta...); started on the file itself, never Windows' default
+                      action; EditorKind (VS Code's `--diff` for Compare); NoEditors under `fakes`),
                       winrm/ (F4, SS-12, MO-05, MO-13: Remotely's own WinRM client behind WinrmAdapter and WinrmSession, which
                       is an ExecSession whose script_kind() is PowerShell; HttpWinrm, NoWinrm until Core sets it:
                       http.rs one hyper HTTP/1.1 connection per sign-in, a Client keeping up to 4 (none reused after
@@ -429,7 +438,8 @@ crates/core/          remotely-core: all app logic
                       (SpecsCollector: a session's facts read when a terminal connects, on its own connection's exec
                       channel, or by the dashboard; HostDetails: Refresh, admin reads and updates on a terminal's, the
                       dashboard's or its own kept connection; VM specs from the hypervisor's files; facts stored per
-                      session and VM, migration 0014), linux.rs (SPECS_SCRIPT and its parsers: os-release, uname,
+                      session and VM, migration 0014; G4: HostSpecs.editors, the host's terminal editors, kept across
+                      reads, stored_editors and keep_editors), linux.rs (SPECS_SCRIPT and its parsers: os-release, uname,
                       lscpu or /proc/cpuinfo, meminfo, swaps, lsblk JSON or pairs, df, systemd-detect-virt), admin.rs
                       (ADMIN_SCRIPT and UPDATES_SCRIPT: systemctl or rc-status/service, ss or netstat, who, last, ps,
                       apt or dnf; every command checked read-only by `classify_script` in tests; FD-05 PORTS_SCRIPT),
@@ -680,7 +690,54 @@ crates/core/          remotely-core: all app logic
                       files_root_stopped (with why: stopped, the vault locked, the connection ended, sudo refused) and
                       files_root_refused; ends with the connection and on a vault lock (forget_logins): its transfers
                       are cancelled and get ROOT_SETTLE (5 s) to delete what they made, then the root files are
-                      revoked;
+                      revoked; G4: RootFiles keeps its park and the place sudo's password went (rule 7), and
+                      root_refused parks and ends root browsing when an editor tab's sudoedit is refused;
+                      editor.rs SS-14 (0.8.0 G4) "Edit in the terminal": Command::EditorOpen (EditorSpec: terminal, path,
+                      one of HOST_EDITORS, as_root; its one target the file's TargetRef::RemotePath; Low and audited,
+                      ActionKind::FileEditorOpen, one tier up as root and for Prod, never rated by the shell rules);
+                      the host's editors found once with EDITOR_PROBE (`command -v` in /bin/sh on the terminal's exec
+                      channel) and kept with the session's facts (SpecsCollector::keep_editors, carried across facts
+                      reads) or the terminal's Control; the session's own editor in `files.hostEditors` (per workspace,
+                      audited setting_changed, read-only lock), else the first of nano, micro, vim, vi; the job opens a
+                      PaneKind::Editor tab (a new connection like a split, the terminal's typed login along) whose
+                      channel is an exec with a PTY of `/bin/sh -c` with the folder and path as printf octal escapes
+                      (exec_string; command_line is what the approval shows), never typed into a shell; as root
+                      `SUDO_EDITOR=<editor> sudoedit -p <marker> --`, SudoWatch hides the marker and gives root
+                      browsing's password once (only to the place it went), a second prompt closes the tab, parks the
+                      password and ends root browsing; the tab never joins Type in all tabs or Compare hosts, has no
+                      drawer, tunnels, hook or startup command and never reconnects; the window takes it once its job
+                      ran (take_editor_tab, kept TAB_KEPT);
+                      edit_local.rs SS-08 (0.8.0 G4) "Edit on this PC": Command::EditLocal (EditSpec; ActionKind::
+                      FileEditLocal, Medium and never below MIN_REPLACE_TIER, one tier up as root and for Prod) whose job
+                      is the editing session: the file (a regular file, not a link, MAX_EDIT_BYTES 16 MB) downloaded into
+                      `<edit folder>/<job>/` made by private_folder, named by copy_name (local_name; a name Explorer or
+                      VS Code acts on, is_shell_file or `.code-workspace`, gets `.txt`; 255 UTF-16 units), with the Mark
+                      of the Web (audited file_edit_opened with its SHA-256), opened in the local editor; each save (the
+                      copy's size or time changed and settled for a poll, other bytes, the copy looked at again after
+                      it is read) goes up only when: the read-only lock is off (else EditState::Held until it is); the
+                      terminal's files now (files_for per save: a reconnect's new SFTP) come from a connection to the
+                      place and login the editing began on (Control.place, set at each connect; else
+                      EditEnd::ConnectionChanged); the session isn't Prod or protected since the approval
+                      (Terminals::target, as the bus's label_changes; else EditEnd::LabelsChanged); and the path is a
+                      regular file, not a link, whose SHA-256 is the one last read or written; then
+                      RemoteFiles::replace_file (H8, never through a link for any user; audited file_changed with the
+                      save's SHA-256), else EditState::Conflict and EditAnswer: overwrite (the path looked at first too),
+                      save beside it (`name (edited).ext`, a new file, 255 bytes), compare (the host's copy as `name (on
+                      the host).ext`, a diff in VS Code), keep editing; a failed save goes again after EditTuning.retry,
+                      doubling to 5 min, at once on a new save or Try again; ends on Stop editing and EDIT_LIMIT (4 h;
+                      the last save goes up first), and without uploading on the job's cancel, a workspace switch and app
+                      exit (Core::end_edits, waiting for the jobs), the terminal closing (Pane::finish), root browsing
+                      ending, and (as root only, end_root_edits) a vault lock: those ends go by Session.ending, a child
+                      of the job's token that interrupts a read or an upload; never deletes a save that didn't go up
+                      (the copy's SHA-256 against what the host has from this PC): Stop editing answers
+                      StopOutcome::Unsent until StopChoice says upload again, keep or discard, and every other end keeps
+                      the copy (EditState::Kept, `<job>.kept.json` beside its folder, listed again after set_edit_folder's
+                      sweep, which deletes everything else, links as links), open_kept, save_kept (the shell's save
+                      dialog, save_guard, the Mark of the Web, audited file_edit_copy_saved) and discard_kept (audited
+                      file_edit_copy_discarded); other copies' folders are deleted on a blocking thread; nothing is edited
+                      before set_edit_folder (`<data>/editing`, never in a Git working tree); `edits` and
+                      `subscribe_edits` for the window (per workspace); JobOwner.editing keeps the job out of
+                      open_user_jobs and the update install's wait_to_run_alone;
                       file_reads.rs SS-14 (0.8.0 G3) the Files page's reads on a terminal's host, no bus, not audited:
                       find (find_script: folder, pattern (check_pattern: one name's glob) and the -printf format from
                       printf's octal escapes through /bin/sh, `-xdev`, `-name` or `-iname`, `timeout 55` where the host
@@ -960,7 +1017,8 @@ crates/core/          remotely-core: all app logic
                       from `installed`) its exec shell describes itself with
     fakes/containers.rs  CT-01, CT-02 the container Fixture (sample, hostile names) and FakeContainers (engines in memory)
     fakes/consoles.rs  SS-12 FakeLauncher (records each .rdp file and viewer command; windows close on cue) and
-                      FakeSerialPorts (COM ports in memory, one open at a time, unplug, breaks)
+                      FakeSerialPorts (COM ports in memory, one open at a time, unplug, breaks); FakeLocalEditors (in
+                      fakes.rs, G4) records each file Edit on this PC opens, never starting a program
     fakes/telnet_server.rs  SS-12 TelnetTestServer: a router console on 127.0.0.1 with a login (sizes, terminal type
                       and raw bytes kept; a dropped connection resets), also in dev_ssh_server
     fakes/winrm_server.rs  F4 WinrmTestServer on 127.0.0.1: HTTPS (an rcgen certificate) with Basic, or HTTP with
@@ -1016,13 +1074,24 @@ crates/core/          remotely-core: all app logic
                       root upload, one sudo park per password shared with the Containers page), and the transfer queue
                       (four at a time, pause and resume both ways, a file changed on the host while paused, what to do
                       with files there both ways, keep both's numbers, times, folders up and down, never `.git`);
-                      file_links.rs: SS-14 on FakeFiles' links: permissions and owners never through a link, a folder
-                      swapped for a link before its delete, a paused upload's file swapped for one, the folder cap on
-                      downloads, Remotely's data folder; files_page.rs: SS-14, BX-10 (0.8.0 G3) on the test SSH server's
+                      file_links.rs: SS-14 on FakeFiles' links (a replacing write follows one, as SftpFiles does for the
+                      login user): permissions and owners never through a link, a folder swapped for a link before its
+                      delete, a paused upload's file swapped for one, the folder cap on downloads, Remotely's data
+                      folder, G4's saves never through a link (Overwrite included); editing.rs: 0.8.0 G4 on the test SSH
+                      server's fake editors
+                      (`with_host_editors`: an exec with a PTY running `exec nano <path>` or `sudoedit` starts one that
+                      notes the path it got) and FakeLocalEditors: a path with quotes, `$(...)` and backticks reaching the
+                      editor byte for byte, the tiers, sudoedit with root browsing's password given once and never shown,
+                      a refused one ending root browsing, the session's editor, edit on this PC's private copy, saves,
+                      conflicts (compare, save beside, overwrite), Stop editing, a vault lock (root sessions only), the
+                      terminal closing, a workspace switch, leftovers, and the PR 91 review's regressions: a save that
+                      didn't go up kept (Stop asks; kept copies saved elsewhere, discarded, through the start sweep), a
+                      reconnect's new connection used and another host's refused, a Prod relabel, the read-only lock;
+                      files_page.rs: SS-14, BX-10 (0.8.0 G3) on the test SSH server's
                       SFTP folder and its toy find and sha256sum: find, preview and checksums as reads, bookmarks (audit,
                       lock, trash), the local pane by listing, compare and sync both ways at their tiers, pushes to five
-                      servers (Medium, High from 5, each copy's SHA-256) and fetches grouped by content; opt-in
-                      workstation_it.rs,
+                      servers (Medium, High from 5, each copy's SHA-256) and fetches grouped by content;
+                      opt-in workstation_it.rs,
                       virtualbox_it.rs and
                       conversion_it.rs (the real conversion tools on small images in the temp folder)
 src-tauri/            Tauri 2 shell (SS-14, BX-10 0.8.0 G3: files_page.rs the Files page's IPC: the local pane's listings
@@ -1037,7 +1106,10 @@ src-tauri/            Tauri 2 shell (SS-14, BX-10 0.8.0 G3: files_page.rs the Fi
                       formats), SS-08 file
                       transfer (files.rs: upload and folder dialogs, drops caught in Rust, Explorer for "Open folder";
                       SS-14 files_change, files_root_start/stop/status, files_pause/resume, a folder's upload dialog,
-                      downloads with the existing-file choice and its `choice` id),
+                      downloads with the existing-file choice and its `choice` id; 0.8.0 G4 editing.rs: the host's
+                      editors and the session's choice, files_open_in_editor and terminal_editor_attach (waits for the
+                      job, then forwards its tab), files_edit_on_pc, files_edits, files_edit_stop, files_edit_answer,
+                      `files://edit` for the shown workspace; Settings' editor path in ipc.rs),
                       SS-07 port forwards and tunnels (tunnels.rs), VM-19 to VM-21 the Templates page (catalog.rs: VM-28
                       install_configs, install_config_check, install_config_apply_form (pure), install_config_preview
                       (masked), add, update, delete;
@@ -1087,7 +1159,10 @@ src/                  React + TypeScript UI
                       bar, WhyDisabled for QL-08, PasteConfirmDialog for QL-05,
                       FilesDrawer and TransfersList for SS-08 (SS-14: each row's "⋯" and the selection bar rename, move,
                       copy, delete, set permissions or the owner; the header's "⋯" makes folders and files, uploads a
-                      folder and browses as root; transfers pause and resume; no permissions or owner on a link),
+                      folder and browses as root; transfers pause and resume; no permissions or owner on a link; G4: a
+                      file's "⋯" edits it in the terminal or on this PC, a double-click as Settings › Terminal says, the
+                      header's "⋯" picks the session's terminal editor; EditingSessionsList: files edited on this PC,
+                      their state, the conflict's answers and Stop editing),
                       FileChangeDialog (SS-14: a name, a folder, a mode or an owner before a change), SudoPasswordDialog
                       (SS-14: sudo's password from the vault when the session saves none), UploadConflictDialog (SS-08,
                       SS-14: replace, replace
@@ -1223,6 +1298,8 @@ src/                  React + TypeScript UI
                       QL-07 notify choice and the one notification per MultiExec line), transfers.ts,
                       transfers-store.ts (SS-08, P6 every transfer outside React state), file-ops.ts (SS-14 the
                       drawer's checks of names, folders, modes and owners; mode text; the existing-file choices),
+                      editing.ts and editing-api.ts (0.8.0 G4: what a double-click does, the editing list's words and
+                      events; types and IPC wrappers; an editor tab is the PaneOpener `editor` by its job),
                       job-events.ts (P6, VM-01
                       which job events and setting changes render or refresh what), chart-gaps.ts (MO-02 a guest
                       polled less often keeps its line on a VM's charts), terminal-render.ts (SS-03 WebGL for panes on
@@ -1613,6 +1690,11 @@ ovftool 5.0, VirtualBox 7.2.22 and qemu-img 10.1 on images of a few MB.
   that fail when asked for one (`import::openssh::IncludeFiles`, `adapters::vm_hardware::VmFiles`) or an injected
   check (`import::importer::key_file`); an end-to-end test may use a DOS device name such as `NUL` instead.
 - Tests against real Workstation or VirtualBox are opt-in: they run only when `REMOTELY_IT=1` is set, read only, and only touch VMs whose display name starts with `it-`.
+- Editing (0.8.0 G4): never start a real editor on this PC in a test, nor edit a real host's file. Under the `fakes`
+  feature `Terminals` starts with `NoEditors`; tests give `FakeLocalEditors` (`set_local_editors`), a fake `Code.exe`
+  made in the temp folder as the saved editor path, an edit folder in the temp folder (`set_edit_folder`) and a short
+  poll (`set_edit_tuning`); the host side is the test SSH server's SFTP folder and its fake editors
+  (`with_host_editors`, `set_sudo`; `tests/editing.rs`).
 - Consoles (SS-12): never start mstsc.exe or a VNC viewer, or open a real COM port, in a test. Under the `fakes`
   feature `Terminals` starts with `NoLauncher` and an empty `FakeSerialPorts`, so a test that forgets its fakes fails
   instead; tests give `FakeLauncher` and `FakeSerialPorts` (`set_launcher`, `set_serial_ports`) and talk Telnet to

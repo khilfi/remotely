@@ -3619,6 +3619,7 @@ fn the_read_only_lock_ignores_tiers_labels_and_protection() {
                 | ActionKind::FileDelete
                 | ActionKind::FileDeleteFolder
                 | ActionKind::FileSyncDelete
+                | ActionKind::FileEditLocal
         ) {
             rules.tiers.insert(kind, TierRule::same(Tier::Low));
         }

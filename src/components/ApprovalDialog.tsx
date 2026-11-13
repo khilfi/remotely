@@ -992,7 +992,14 @@ function UploadSummary({ upload }: { upload: NonNullable<ApprovalRequest["upload
 
 /** SS-14: what a file change does besides its paths (the targets list). */
 function FileOpSummary({ op }: { op: NonNullable<ApprovalRequest["fileOp"]> }) {
-  const where = op.kind === "rename" ? "New name" : op.kind === "move" || op.kind === "copy" ? "Into" : null;
+  const where =
+    op.kind === "rename"
+      ? "New name"
+      : op.kind === "move" || op.kind === "copy"
+        ? "Into"
+        : op.kind === "editInTerminal"
+          ? "Editor"
+          : null;
   return (
     <div className="grid gap-1.5 rounded-md border p-3 text-sm">
       <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1">
@@ -1017,7 +1024,17 @@ function FileOpSummary({ op }: { op: NonNullable<ApprovalRequest["fileOp"]> }) {
         <dt className="text-muted-foreground">Runs as</dt>
         <dd className={op.asRoot ? "text-tier-high" : undefined}>{op.asRoot ? "root (sudo)" : "the logged-in user"}</dd>
       </dl>
-      {op.replace && <p className="text-tier-medium">A file of that name there is replaced.</p>}
+      {op.kind === "editOnPc" ? (
+        <p className="text-tier-medium">
+          It opens in the editor on this PC, and each save replaces the file on the host until you stop editing (at most
+          4 hours). Every save is audited.
+        </p>
+      ) : (
+        op.replace && <p className="text-tier-medium">A file of that name there is replaced.</p>
+      )}
+      {op.kind === "editInTerminal" && (
+        <p className="text-muted-foreground">It opens in a new tab on the host, at the file's folder.</p>
+      )}
       {op.recursive && <p className="text-tier-high">Folders are deleted with everything in them.</p>}
       {op.script && (
         <pre className="max-h-32 overflow-auto rounded bg-muted px-2 py-1 font-mono text-xs whitespace-pre-wrap">
