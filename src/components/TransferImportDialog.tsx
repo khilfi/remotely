@@ -71,9 +71,10 @@ type Section =
   | "checks"
   | "sizes"
   | "images"
-  | "templates";
+  | "templates"
+  | "installConfigs";
 /** VM-19 to VM-21: the catalogue's sections, shown only when the file has some. */
-const CATALOG_SECTIONS = new Set<Section>(["sizes", "images", "templates"]);
+const CATALOG_SECTIONS = new Set<Section>(["sizes", "images", "templates", "installConfigs"]);
 
 /** A section's items; files from before BX-08 have no favourites and from before 0.5.0 no catalogue. */
 function itemsOf(preview: TransferPreview, section: Section): TransferItem[] {
@@ -81,6 +82,7 @@ function itemsOf(preview: TransferPreview, section: Section): TransferItem[] {
     case "sizes":
     case "images":
     case "templates":
+    case "installConfigs":
       return preview.catalog?.[section] ?? [];
     case "favourites":
       return preview.favourites ?? [];
@@ -123,6 +125,7 @@ const SECTIONS: { key: Section; title: string; empty: string }[] = [
   { key: "sizes", title: "VM sizes", empty: "" },
   { key: "images", title: "Images", empty: "" },
   { key: "templates", title: "Launch templates", empty: "" },
+  { key: "installConfigs", title: "Install configs", empty: "" },
 ];
 
 function defaults(preview: TransferPreview): Choices {
@@ -135,6 +138,7 @@ function defaults(preview: TransferPreview): Choices {
     sizes: of("sizes"),
     images: of("images"),
     templates: of("templates"),
+    installConfigs: of("installConfigs"),
     folderDefaults: of("folderDefaults"),
     groups: of("groups"),
     checks: of("checks"),
@@ -161,6 +165,7 @@ function counts(report: TransferReport) {
     report.catalog && part("VM sizes", report.catalog.sizes),
     report.catalog && part("Images", report.catalog.images),
     report.catalog && part("Launch templates", report.catalog.templates),
+    report.catalog?.installConfigs && part("Install configs", report.catalog.installConfigs),
     report.catalog?.imagesMissingHere
       ? `Images: ${report.catalog.imagesMissingHere} without their file or VM on this laptop yet`
       : null,
@@ -186,6 +191,7 @@ export function TransferImportDialog({ vault, onVaultChanged, onImported, onClos
     sizes: {},
     images: {},
     templates: {},
+    installConfigs: {},
   });
   /** SS-01, SS-07: sessions whose startup command, and whose port forwards, come along; none by default. */
   const [keepStartup, setKeepStartup] = useState<Set<number>>(new Set());
@@ -267,7 +273,12 @@ export function TransferImportDialog({ vault, onVaultChanged, onImported, onClos
         folderDefaults: list("folderDefaults"),
         groups: list("groups"),
         checks: list("checks"),
-        catalog: { sizes: list("sizes"), images: list("images"), templates: list("templates") },
+        catalog: {
+          sizes: list("sizes"),
+          images: list("images"),
+          templates: list("templates"),
+          installConfigs: list("installConfigs"),
+        },
         keepStartup: [...keepStartup].sort((a, b) => a - b),
         keepForwards: [...keepForwards].sort((a, b) => a - b),
       };

@@ -21,6 +21,7 @@ import {
   DiscIcon,
   ExternalLinkIcon,
   FileBoxIcon,
+  FileCodeIcon,
   FileCogIcon,
   HardDriveIcon,
   LayersIcon,
@@ -41,6 +42,7 @@ import { EmptyState } from "@/components/EmptyState";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { HelpTip } from "@/components/HelpTip";
 import { ImageDialog } from "@/components/ImageDialog";
+import { InstallConfigsTab } from "@/components/InstallConfigsTab";
 import { PageHeader } from "@/components/PageHeader";
 import { RowMenu } from "@/components/RowMenu";
 import { Term } from "@/components/Term";
@@ -85,6 +87,7 @@ export type { TemplatesTab } from "@/lib/templates-page";
 const TAB_ICON: Record<TemplatesTab, typeof DiscIcon> = {
   images: DiscIcon,
   sizes: HardDriveIcon,
+  installConfigs: FileCodeIcon,
   templates: LayersIcon,
   stacks: BoxesIcon,
   disks: FileCogIcon,
@@ -122,6 +125,7 @@ export function TemplatesPage({ active, request, onDeploy, onSubmitted, onImport
   const [picked, setPicked] = useState<TemplatesTab | null>(null);
   const submittedHere = useCallback((outcome: SubmitOutcome) => onSubmitted?.(outcome), [onSubmitted]);
   const [stackCreate, setStackCreate] = useState(0);
+  const [configCreate, setConfigCreate] = useState(0);
   // The Stacks tab's count, once read (null before): its empty state carries New stack.
   const [stackCount, setStackCount] = useState<number | null>(null);
   const [sizes, setSizes] = useState<Size[]>([]);
@@ -177,6 +181,7 @@ export function TemplatesPage({ active, request, onDeploy, onSubmitted, onImport
       if (request.tab === "sizes") setDialog({ kind: "size" });
       else if (request.tab === "images") setDialog({ kind: "image" });
       else if (request.tab === "stacks") setStackCreate((n) => n + 1);
+      else if (request.tab === "installConfigs") setConfigCreate((n) => n + 1);
       else if (images.length > 0) setDialog({ kind: "template" });
     }
   }
@@ -230,6 +235,14 @@ export function TemplatesPage({ active, request, onDeploy, onSubmitted, onImport
         <Button disabled={readOnly !== null} onClick={() => setDialog({ kind: "size" })}>
           <PlusIcon data-icon="inline-start" />
           New size
+        </Button>
+      </WhyDisabled>
+    ),
+    installConfigs: (
+      <WhyDisabled reason={readOnly}>
+        <Button disabled={readOnly !== null} onClick={() => setConfigCreate((n) => n + 1)}>
+          <PlusIcon data-icon="inline-start" />
+          New install config
         </Button>
       </WhyDisabled>
     ),
@@ -607,6 +620,19 @@ export function TemplatesPage({ active, request, onDeploy, onSubmitted, onImport
               </Table>
             </div>
           )}
+        </TabsContent>
+
+        {/* VM-28: install configs, the answer files an ISO installs itself from. */}
+        <TabsContent value="installConfigs" className="flex min-w-0 flex-col gap-3">
+          <InstallConfigsTab
+            active={active && tab === "installConfigs"}
+            readOnly={readOnly}
+            sizes={sizes}
+            templates={templates}
+            createRequest={configCreate}
+            lit={lit}
+            onChanged={load}
+          />
         </TabsContent>
 
         {/* VM-08: stacks of launch templates, and their instances on this PC. */}

@@ -15,6 +15,8 @@
 //! (`transfer::catalog`).
 
 pub mod images;
+pub mod install;
+mod install_configs;
 pub mod profiles;
 pub mod sizes;
 pub mod templates;
@@ -31,6 +33,7 @@ pub use self::images::{
     checked_site, HashProgress, Image, ImageEdit, ImageFormat, ImageInput, ImageKind, ImageSite, ImageSource,
     SourceInput, IMAGE_SITES,
 };
+pub use self::install_configs::PreviewVm;
 pub use self::profiles::{profiles, Firmware, OsProfile};
 pub use self::sizes::{built_in_sizes, DiskController, DiskSpec, Provisioning, Size, SizeInput};
 pub use self::templates::{
@@ -59,8 +62,8 @@ pub struct TemplatePreview {
 }
 
 /// Saving refuses these problems: the editor can fix them. The others (a file not on this PC yet, a qcow2 waiting
-/// for conversion, a key not read yet) are shown and saved.
-const BLOCKS_SAVING: [ProblemCode; 8] = [
+/// for conversion, a key not read yet, an install config still being written) are shown and saved.
+const BLOCKS_SAVING: [ProblemCode; 10] = [
     ProblemCode::ImageGone,
     ProblemCode::SizeGone,
     ProblemCode::KeyGone,
@@ -69,6 +72,8 @@ const BLOCKS_SAVING: [ProblemCode; 8] = [
     ProblemCode::NetworkMismatch,
     ProblemCode::UnknownProfile,
     ProblemCode::PatternNeedsNumber,
+    ProblemCode::InstallConfigGone,
+    ProblemCode::InstallConfigMismatch,
 ];
 
 fn invalid<T>(message: impl Into<String>) -> Result<T> {
@@ -93,9 +98,58 @@ struct Facts {
     images: Vec<Image>,
     keys: HashMap<SecretId, crate::ssh_keys::PublicKeyInfo>,
     vault_keys: HashSet<SecretId>,
+    /// VM-28: the workspace's own install configs, checked.
+    configs: Vec<install::InstallConfig>,
 }
 
 impl Facts {
+    fn install(&self, id: Option<Uuid>) -> templates::InstallRef<'_> {
+        match id {
+            None => templates::InstallRef::None,
+            Some(id) => {
+                let id = id.to_string();
+                self.configs
+                    .iter()
+                    .find(|c| c.id == id)
+                    .map_or(templates::InstallRef::Gone, templates::InstallRef::Found)
+            }
+        }
+    }
+
+    /// VM-28: why the template's install config can't go with its image and size.
+    fn install_problems(&self, spec: &TemplateInput) -> Vec<Problem> {
+        templates::install_problems(
+            spec,
+            self.image(spec.image_id),
+            self.size(&spec.size_id),
+            self.install(spec.install_config_id),
+        )
+    }
+
+    /// [`templates::resolve`], with the install config's problems too.
+    fn resolve(
+        &self,
+        id: Uuid,
+        spec: &TemplateInput,
+        count: u32,
+        taken: &[String],
+    ) -> std::result::Result<DeployPlan, Vec<Problem>> {
+        let refs = templates::Refs {
+            image: self.image(spec.image_id),
+            size: self.size(&spec.size_id),
+            key: self.key(spec.ssh_key_id),
+        };
+        let install = self.install_problems(spec);
+        match templates::resolve(id, spec, &refs, count, taken, today()) {
+            Ok(_) if !install.is_empty() => Err(install),
+            Ok(plan) => Ok(plan),
+            Err(mut problems) => {
+                problems.extend(install);
+                Err(problems)
+            }
+        }
+    }
+
     fn size(&self, id: &str) -> Option<&Size> {
         self.sizes.iter().find(|s| s.id.eq_ignore_ascii_case(id))
     }
@@ -116,14 +170,16 @@ impl Facts {
     }
 
     fn problems(&self, spec: &TemplateInput) -> Vec<Problem> {
-        templates::problems(
+        let mut problems = templates::problems(
             spec,
             &templates::Refs {
                 image: self.image(spec.image_id),
                 size: self.size(&spec.size_id),
                 key: self.key(spec.ssh_key_id),
             },
-        )
+        );
+        problems.extend(self.install_problems(spec));
+        problems
     }
 }
 
@@ -292,6 +348,7 @@ impl Catalog {
             images: self.images(ctx).await?,
             keys,
             vault_keys,
+            configs: self.install_config_facts(ctx).await?,
         })
     }
 
@@ -301,23 +358,16 @@ impl Catalog {
         let spec = templates::check_template(input)?;
         let facts = self.facts(ctx).await?;
         let taken = self.vm_names(ctx).await?;
-        let refs = templates::Refs {
-            image: facts.image(spec.image_id),
-            size: facts.size(&spec.size_id),
-            key: facts.key(spec.ssh_key_id),
-        };
-        Ok(
-            match templates::resolve(Uuid::nil(), &spec, &refs, spec.default_count, &taken, today()) {
-                Ok(plan) => TemplatePreview {
-                    problems: Vec::new(),
-                    vms: plan.vms,
-                },
-                Err(problems) => TemplatePreview {
-                    problems,
-                    vms: Vec::new(),
-                },
+        Ok(match facts.resolve(Uuid::nil(), &spec, spec.default_count, &taken) {
+            Ok(plan) => TemplatePreview {
+                problems: Vec::new(),
+                vms: plan.vms,
             },
-        )
+            Err(problems) => TemplatePreview {
+                problems,
+                vms: Vec::new(),
+            },
+        })
     }
 
     /// R2: a saved template and `count` VMs as one plan, each VM's name numbered past the VMs already here; or why
@@ -331,12 +381,7 @@ impl Catalog {
         let row = self.template_row(ctx, id).await?;
         let facts = self.facts(ctx).await?;
         let taken = self.vm_names(ctx).await?;
-        let refs = templates::Refs {
-            image: facts.image(row.spec.image_id),
-            size: facts.size(&row.spec.size_id),
-            key: facts.key(row.spec.ssh_key_id),
-        };
-        Ok(templates::resolve(id, &row.spec, &refs, count, &taken, today()))
+        Ok(facts.resolve(id, &row.spec, count, &taken))
     }
 
     /// R2: a template's fields as the Deploy dialog sends them (a saved template's, perhaps with another naming
@@ -365,12 +410,7 @@ impl Catalog {
         let facts = self.facts(ctx).await?;
         let mut taken = self.vm_names(ctx).await?;
         taken.extend(also_taken.iter().cloned());
-        let refs = templates::Refs {
-            image: facts.image(spec.image_id),
-            size: facts.size(&spec.size_id),
-            key: facts.key(spec.ssh_key_id),
-        };
-        Ok(templates::resolve(id, &spec, &refs, count, &taken, today()))
+        Ok(facts.resolve(id, &spec, count, &taken))
     }
 
     async fn vm_names(&self, ctx: &Context) -> Result<Vec<String>> {
@@ -1063,9 +1103,21 @@ fn describe_template(spec: &TemplateInput, facts: &Facts) -> String {
     let size = facts
         .size(&spec.size_id)
         .map_or_else(|| "a deleted size".to_owned(), |s| format!("size {}", s.name));
+    let install = match spec.install_config_id {
+        None => String::new(),
+        Some(id) => {
+            let id = id.to_string();
+            let name = facts
+                .configs
+                .iter()
+                .find(|c| c.id == id)
+                .map_or_else(|| "a deleted one".to_owned(), |c| format!("'{}'", c.spec.name));
+            format!("; install config {name}")
+        }
+    };
     format!(
         "{image}, {size}, on {}, network {}, named {}, {} by default, environment {}, tags {}; after deploy: {}; \
-         guest user {}, packages {}, golden VMs: {}",
+         guest user {}, packages {}, golden VMs: {}{install}",
         templates::hypervisor_label(spec.hypervisor),
         spec.network.describe(),
         spec.naming_pattern,

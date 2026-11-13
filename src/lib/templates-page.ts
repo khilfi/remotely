@@ -1,13 +1,17 @@
 // UX-07 for the Templates page: its tabs in the order a first deploy takes them, the tab it opens on (the first step
 // that isn't done), and each tab's one primary action with why it is off. Pure, tested in templates-page.test.ts.
 
-/** UX-08: "disks" is Disk images, the Image tools page until 0.6.0. */
-export type TemplatesTab = "sizes" | "images" | "templates" | "stacks" | "disks";
+/** UX-08: "disks" is Disk images, the Image tools page until 0.6.0. VM-28: "installConfigs". */
+export type TemplatesTab = "sizes" | "images" | "installConfigs" | "templates" | "stacks" | "disks";
 
-/** In the order a first deploy goes: where the OS comes from, how big, both together, then several together. */
+/**
+ * In the order a first deploy goes: where the OS comes from, how big, how it installs itself, all together, then
+ * several together.
+ */
 export const TEMPLATE_TABS: readonly { id: TemplatesTab; label: string }[] = [
   { id: "images", label: "Images" },
   { id: "sizes", label: "Sizes" },
+  { id: "installConfigs", label: "Install configs" },
   { id: "templates", label: "Launch templates" },
   { id: "stacks", label: "Stacks" },
   { id: "disks", label: "Disk images" },
@@ -15,7 +19,7 @@ export const TEMPLATE_TABS: readonly { id: TemplatesTab; label: string }[] = [
 
 /**
  * The tab the page opens on: Images until there is one, then Launch templates (sizes are built in, so that step is
- * always done, and stacks are optional), where Deploy is.
+ * always done; install configs and stacks are optional), where Deploy is.
  */
 export function openingTab(counts: { images: number; templates: number }): TemplatesTab {
   if (counts.images === 0) return "images";

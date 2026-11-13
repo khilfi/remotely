@@ -150,6 +150,11 @@ fn row_to_template(row: &sqlx::sqlite::SqliteRow) -> Result<TemplateRow> {
             guest_user: row.try_get("guest_user")?,
             packages: serde_json::from_str(&packages)?,
             clone_mode: CloneMode::parse(&clone_mode),
+            install_config_id: row
+                .try_get::<Option<String>, _>("install_config_id")?
+                .as_deref()
+                .map(parse_uuid)
+                .transpose()?,
         },
         created_at: row.try_get("created_at")?,
         updated_at: row.try_get("updated_at")?,
@@ -172,7 +177,7 @@ macro_rules! image_columns {
 macro_rules! template_columns {
     () => {
         "id, name, image_id, size_id, hypervisor, vm_folder, network, ssh_key_id, naming_pattern, default_count,
-         environment, tags, after_deploy, guest_user, packages, clone_mode, created_at, updated_at"
+         environment, tags, after_deploy, guest_user, packages, clone_mode, install_config_id, created_at, updated_at"
     };
 }
 
@@ -380,8 +385,9 @@ impl Store {
         sqlx::query(
             "INSERT INTO catalog_templates (id, workspace_id, user_id, name, image_id, size_id, hypervisor, vm_folder,
                                             network, ssh_key_id, naming_pattern, default_count, environment, tags,
-                                            after_deploy, guest_user, packages, clone_mode, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                                            after_deploy, guest_user, packages, clone_mode, install_config_id,
+                                            created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(id.to_string())
         .bind(ctx.workspace_id.to_string())
@@ -401,6 +407,7 @@ impl Store {
         .bind(t.guest_user.as_deref())
         .bind(serde_json::to_string(&t.packages)?)
         .bind(t.clone_mode.as_str())
+        .bind(t.install_config_id.map(|c| c.to_string()))
         .bind(&now)
         .bind(&now)
         .execute(&self.pool)
@@ -412,7 +419,8 @@ impl Store {
         sqlx::query(
             "UPDATE catalog_templates SET name = ?, image_id = ?, size_id = ?, hypervisor = ?, vm_folder = ?,
                  network = ?, ssh_key_id = ?, naming_pattern = ?, default_count = ?, environment = ?, tags = ?,
-                 after_deploy = ?, guest_user = ?, packages = ?, clone_mode = ?, user_id = ?, updated_at = ?
+                 after_deploy = ?, guest_user = ?, packages = ?, clone_mode = ?, install_config_id = ?, user_id = ?,
+                 updated_at = ?
              WHERE workspace_id = ? AND id = ?",
         )
         .bind(&t.name)
@@ -430,6 +438,7 @@ impl Store {
         .bind(t.guest_user.as_deref())
         .bind(serde_json::to_string(&t.packages)?)
         .bind(t.clone_mode.as_str())
+        .bind(t.install_config_id.map(|c| c.to_string()))
         .bind(ctx.user_id.to_string())
         .bind(now_rfc3339())
         .bind(ctx.workspace_id.to_string())

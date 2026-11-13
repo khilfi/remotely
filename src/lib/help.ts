@@ -31,8 +31,22 @@ export const HELP = {
   "page.templates": {
     title: "Templates",
     body: [
-      "Describe VMs once, then deploy them. A size sets CPU, memory and disks; an image is where the OS comes from; a launch template puts them together with the network, SSH key and names.",
+      "Describe VMs once, then deploy them. A size sets CPU, memory and disks; an image is where the OS comes from; an install config lets an ISO install itself; a launch template puts them together with the network, SSH key and names.",
       "A stack deploys several launch templates in boot order, as one. Disk images reads and converts other hypervisors' disk files.",
+    ],
+  },
+  "installConfig.placeholders": {
+    title: "Values per VM",
+    body: [
+      "{{hostname}}, {{ip}}, {{n}}, {{template}} and {{date}} take each VM's own values. Your own variables have a default each VM can change. Write \\{{ for the characters themselves.",
+      "{{password.<name>}} is picked from the vault and goes in as a SHA-512 hash at deploy (Windows: a one-time password, replaced over WinRM after the install); {{ssh_key.<name>}} is a key's public half. A password or hash in the file itself is never saved.",
+    ],
+  },
+  "installConfig.form": {
+    title: "The form and the file",
+    body: [
+      "Both edit the same file. The form changes only the lines of the fields you change; everything else in the file stays as you wrote it.",
+      "A field the form can't change in this file says why: edit the file beside it instead.",
     ],
   },
   "page.diskImages": {

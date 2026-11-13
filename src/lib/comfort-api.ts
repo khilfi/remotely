@@ -72,7 +72,7 @@ export interface Recent {
 
 // ---- Trash --------------------------------------------------------------------------------------------------------
 
-export type TrashKind = "session" | "command" | "size" | "image" | "template" | "stack";
+export type TrashKind = "session" | "command" | "size" | "image" | "template" | "stack" | "installConfig";
 
 export interface TrashEntry {
   id: string;

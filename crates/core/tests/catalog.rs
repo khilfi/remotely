@@ -110,6 +110,7 @@ fn template(name: &str, image: &Image, size_id: &str) -> TemplateInput {
         guest_user: None,
         packages: Vec::new(),
         clone_mode: CloneMode::Full,
+        install_config_id: None,
     }
 }
 

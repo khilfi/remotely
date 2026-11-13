@@ -822,6 +822,7 @@ async fn sizes_images_templates_stacks_and_favourite_commands_come_back_under_th
                 guest_user: None,
                 packages: vec![],
                 clone_mode: CloneMode::Full,
+                install_config_id: None,
             },
         )
         .await

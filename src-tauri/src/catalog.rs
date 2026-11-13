@@ -12,8 +12,9 @@
 
 use std::sync::Arc;
 
+use remotely_core::catalog::install::{self, ConfigCheck, InstallConfig, InstallConfigInput, InstallForm, InstallKind};
 use remotely_core::catalog::{
-    self, Image, ImageEdit, ImageInput, ImageKind, ImageSite, LaunchTemplate, OsProfile, Size, SizeInput,
+    self, Image, ImageEdit, ImageInput, ImageKind, ImageSite, LaunchTemplate, OsProfile, PreviewVm, Size, SizeInput,
     TemplateInput, TemplatePreview,
 };
 use remotely_core::CoreError;
@@ -225,6 +226,77 @@ pub async fn catalog_template_update(
 pub async fn catalog_template_delete(state: State<'_, AppState>, id: Uuid) -> IpcResult<()> {
     let core = &state.core;
     Ok(core.catalog.delete_template(&core.ctx(), id).await?)
+}
+
+// ---- VM-28: install configs ---------------------------------------------------------------------------------------
+
+/// The starters, then the workspace's own, each checked.
+#[tauri::command]
+pub async fn install_configs(state: State<'_, AppState>) -> IpcResult<Vec<InstallConfig>> {
+    let core = &state.core;
+    Ok(core.catalog.install_configs(&core.ctx()).await?)
+}
+
+/// The editor's check while the file is written: problems, the form, the placeholders, and with `sizeId` whether the
+/// disk layout fits that size. Reads only.
+#[tauri::command]
+pub async fn install_config_check(
+    state: State<'_, AppState>,
+    input: InstallConfigInput,
+    size_id: Option<String>,
+) -> IpcResult<ConfigCheck> {
+    let core = &state.core;
+    Ok(core
+        .catalog
+        .check_install_config(&core.ctx(), &input, size_id.as_deref())
+        .await?)
+}
+
+/// The file with the form's changed fields written into it; every other line stays. Pure: nothing is saved.
+#[tauri::command]
+pub async fn install_config_apply_form(kind: InstallKind, body: String, form: InstallForm) -> IpcResult<String> {
+    tokio::task::spawn_blocking(move || install::apply_form(kind, &body, &form))
+        .await
+        .map_err(|err| IpcError::new("internal", format!("The form couldn't be applied: {err}")))?
+        .map_err(Into::into)
+}
+
+/// One VM's file with every secret masked, for the editor and the deploy dialog. Reads only.
+#[tauri::command]
+pub async fn install_config_preview(
+    state: State<'_, AppState>,
+    input: InstallConfigInput,
+    vm: PreviewVm,
+) -> IpcResult<String> {
+    let core = &state.core;
+    Ok(core.catalog.preview_install_config(&core.ctx(), &input, &vm).await?)
+}
+
+/// Audited; a password or hash written into the file is refused.
+#[tauri::command]
+pub async fn install_config_add(state: State<'_, AppState>, input: InstallConfigInput) -> IpcResult<InstallConfig> {
+    let core = &state.core;
+    let saved = core.catalog.add_install_config(&core.ctx(), input).await?;
+    tracing::info!(kind = saved.spec.kind.as_str(), "install config added");
+    Ok(saved)
+}
+
+/// Audited. Starters are read only.
+#[tauri::command]
+pub async fn install_config_update(
+    state: State<'_, AppState>,
+    id: Uuid,
+    input: InstallConfigInput,
+) -> IpcResult<InstallConfig> {
+    let core = &state.core;
+    Ok(core.catalog.update_install_config(&core.ctx(), id, input).await?)
+}
+
+/// To the trash. Audited.
+#[tauri::command]
+pub async fn install_config_delete(state: State<'_, AppState>, id: Uuid) -> IpcResult<()> {
+    let core = &state.core;
+    Ok(core.catalog.delete_install_config(&core.ctx(), id).await?)
 }
 
 /// Opens an official cloud image page in the default browser. Any address not on the core's list of those sites is

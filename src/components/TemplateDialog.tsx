@@ -62,6 +62,7 @@ function inputOf(t: LaunchTemplate): TemplateInput {
     guestUser: t.guestUser,
     packages: t.packages,
     cloneMode: t.cloneMode,
+    installConfigId: t.installConfigId ?? null,
   };
 }
 

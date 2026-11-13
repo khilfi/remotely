@@ -647,6 +647,7 @@ pub(crate) mod tests {
             guest_user: Some("alice".into()),
             packages: vec!["nginx".into()],
             clone_mode: CloneMode::Linked,
+            install_config_id: None,
         };
         let key = PublicKeyInfo {
             algorithm: "ssh-ed25519".into(),
