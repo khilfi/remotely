@@ -504,6 +504,9 @@ export interface UploadDetails {
   /** SS-14: folders it makes (an uploaded folder's). */
   folders?: number;
   asRoot?: boolean;
+  /** SS-14 (0.8.0 G3): a folder sync's deletes on the host (the first 500), relative to `folder`. */
+  delete?: string[];
+  moreDeleting?: number;
 }
 
 /** SS-14: a file change as the approval dialog shows it, besides its paths (the targets). */
@@ -1018,6 +1021,10 @@ export type ActionKind =
   | "filePermissions"
   | "fileDelete"
   | "fileDeleteFolder"
+  // SS-14, BX-10 (0.8.0 G3): a sync that deletes on the host, a push to many hosts, a fetch from many.
+  | "fileSyncDelete"
+  | "filePush"
+  | "fileFetch"
   | "fileEditorOpen"
   | "fileEditLocal"
   | "tunnelLocal"

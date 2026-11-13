@@ -142,6 +142,11 @@ pub enum Command {
         /// SS-14: through the terminal's root browsing, as root (one tier higher).
         #[serde(default)]
         as_root: bool,
+        /// SS-14 (0.8.0 G3): a folder sync's deletes: what is on the host under `folder` and not in this PC's folder,
+        /// relative to `folder` (files and links, and folders with everything in them), deleted after the uploads.
+        /// Only when the user chose them; any makes the upload a [`ActionKind::FileSyncDelete`] (High).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        delete: Vec<String>,
     },
     /// SS-14 a change to files on one open terminal's host ([`crate::terminal::file_ops`]): rename, move, copy within
     /// the host, delete, new folder or file, permissions, owner. One job, a step per path: each target is one of the
@@ -247,6 +252,13 @@ pub enum Command {
     FileServer {
         targets: Vec<TargetRef>,
         spec: Box<crate::toolbox::file_server::FileServerSpec>,
+    },
+    /// BX-10 (0.8.0 G3): files of this PC pushed to many hosts, or the same file fetched from each
+    /// ([`crate::bulk_files`]). Every target is a saved session ([`TargetRef::Session`]), each host one step. Never
+    /// built by the UI: the files and the folder of this PC come from a dialog, a drop or the Files page's local pane.
+    BulkFiles {
+        targets: Vec<TargetRef>,
+        spec: Box<crate::bulk_files::BulkFilesSpec>,
     },
 }
 
@@ -506,7 +518,13 @@ fn upload_name_problem(name: &str) -> Option<String> {
 /// SS-08: an upload Remotely can carry out: one open terminal, an absolute host folder, plain file
 /// names once each (SS-14: a folder's files with their folder parts, each part a plain name, and every folder
 /// they are in made first), and files on this PC given by their full path.
-fn validate_upload(targets: &[TargetRef], folder: &str, files: &[UploadFile], folders: &[String]) -> Result<()> {
+fn validate_upload(
+    targets: &[TargetRef],
+    folder: &str,
+    files: &[UploadFile],
+    folders: &[String],
+    nothing_else: bool,
+) -> Result<()> {
     let invalid = |message: String| Err(CoreError::InvalidInput(message));
     match targets {
         [TargetRef::Terminal { .. }] => {}
@@ -518,7 +536,8 @@ fn validate_upload(targets: &[TargetRef], folder: &str, files: &[UploadFile], fo
             "'{folder}' is not a folder on the host (it must start with /)."
         ));
     }
-    if files.is_empty() && folders.is_empty() {
+    // SS-14 (0.8.0 G3): a sync may only delete.
+    if files.is_empty() && folders.is_empty() && nothing_else {
         return invalid("Choose at least one file to upload.".into());
     }
     if files.len() > MAX_UPLOAD_FILES || folders.len() > MAX_UPLOAD_FILES {
@@ -555,6 +574,48 @@ fn validate_upload(targets: &[TargetRef], folder: &str, files: &[UploadFile], fo
         }
         if !std::path::Path::new(&file.local_path).is_absolute() {
             return invalid(format!("'{}' is not a full path on this PC.", file.local_path));
+        }
+    }
+    Ok(())
+}
+
+/// SS-14 (0.8.0 G3): a sync's deletes: plain relative paths under the upload's folder (never the folder itself, or `..`),
+/// each once, none of them something the same upload sends or makes, and none inside another (the outer one goes with
+/// what is in it).
+fn validate_sync_deletes(folder: &str, files: &[UploadFile], folders: &[String], delete: &[String]) -> Result<()> {
+    let invalid = |message: String| Err(CoreError::InvalidInput(message));
+    if delete.len() > MAX_UPLOAD_FILES {
+        return invalid(format!(
+            "One sync deletes at most {MAX_UPLOAD_FILES} files and folders."
+        ));
+    }
+    let sent: std::collections::HashSet<&str> = files
+        .iter()
+        .map(|f| f.name.as_str())
+        .chain(folders.iter().map(String::as_str))
+        .collect();
+    let mut seen = std::collections::HashSet::new();
+    for name in delete {
+        if let Some(why) = upload_name_problem(name) {
+            return invalid(why);
+        }
+        crate::terminal::file_ops::check_path(&crate::terminal::files::join(folder, name))?;
+        if sent.contains(name.as_str()) {
+            return invalid(format!("'{name}' is both sent and deleted."));
+        }
+        if !seen.insert(name.as_str()) {
+            return invalid(format!("'{name}' is deleted twice."));
+        }
+    }
+    for name in delete {
+        let mut above = name.as_str();
+        while let Some((up, _)) = above.rsplit_once('/') {
+            if seen.contains(up) {
+                return invalid(format!(
+                    "'{name}' is inside '{up}', which is deleted with what is in it."
+                ));
+            }
+            above = up;
         }
     }
     Ok(())
@@ -606,6 +667,14 @@ fn plural_files(n: usize) -> String {
         "1 file".to_owned()
     } else {
         format!("{n} files")
+    }
+}
+
+fn plural_items(n: usize) -> String {
+    if n == 1 {
+        "1 item".to_owned()
+    } else {
+        format!("{n} items")
     }
 }
 
@@ -739,6 +808,10 @@ impl Command {
             Command::VmExport { .. } => "Exports start from a VM's Export, which asks for the folder.",
             // FD-09: the folders and the address are checked against this PC before the command is built.
             Command::FileServer { .. } => "The file server starts from the Toolbox's File server tab.",
+            // BX-10: the files and the folder of this PC come from a dialog, a drop or the Files page's local pane.
+            Command::BulkFiles { .. } => {
+                "Many-hosts transfers start from the Files page, which picks the files and folders of this PC."
+            }
             // FD-04: the zip's place comes from a save dialog.
             Command::SupportBundle { .. } => {
                 "Support bundles start from the support bundle dialog, which asks where to save the zip."
@@ -797,8 +870,12 @@ impl Command {
                 folder,
                 files,
                 folders,
+                delete,
                 ..
-            } => validate_upload(targets, folder, files, folders),
+            } => {
+                validate_upload(targets, folder, files, folders, delete.is_empty())?;
+                validate_sync_deletes(folder, files, folders, delete)
+            }
             Command::FileOp { targets, spec } => {
                 spec.validate()?;
                 if *targets != spec.targets() {
@@ -856,6 +933,7 @@ impl Command {
             Command::Stack { targets, op } => op.validate(targets),
             Command::HostNetwork { targets, op } => net_ops::validate(targets, op),
             Command::SupportBundle { targets, spec } => spec.validate(targets),
+            Command::BulkFiles { targets, spec } => spec.validate(targets),
             Command::WakeOnLan { targets, wake } => {
                 crate::toolbox::WakeSpec::check_targets(targets)?;
                 wake.validate()
@@ -941,6 +1019,8 @@ impl Command {
             | Command::PushSshKey { targets, .. }
             | Command::RemoveSshKey { targets, .. }
             | Command::FileUpload { targets, .. }
+            // BX-10: the hosts that failed, the same files.
+            | Command::BulkFiles { targets, .. }
             | Command::Container { targets, .. }
             | Command::VmConfig { targets, .. }
             | Command::VmDevice { targets, .. }
@@ -1016,6 +1096,7 @@ impl Command {
             | Command::HostNetwork { targets, .. }
             | Command::WakeOnLan { targets, .. }
             | Command::FileServer { targets, .. }
+            | Command::BulkFiles { targets, .. }
             | Command::Stack { targets, .. } => targets,
             Command::ImageConvert { targets, .. }
             | Command::VmExport { targets, .. }
@@ -1053,6 +1134,7 @@ impl Command {
             Command::SupportBundle { .. } => "supportBundle",
             Command::WakeOnLan { .. } => "wakeOnLan",
             Command::FileServer { .. } => "fileServer",
+            Command::BulkFiles { .. } => "bulkFiles",
         }
     }
 
@@ -1198,6 +1280,7 @@ impl Command {
                 files,
                 folders,
                 as_root,
+                delete,
                 ..
             } => {
                 let size = human_size(files.iter().map(|f| f.size).sum());
@@ -1221,7 +1304,16 @@ impl Command {
                     (n, _) => format!(", replacing {n} files there"),
                 };
                 let root = if *as_root { ", as root" } else { "" };
-                format!("Upload {what} to {folder}{replacing}{root}")
+                // SS-14 (0.8.0 G3): a sync's deletes.
+                let deleting = match delete.len() {
+                    0 => String::new(),
+                    1 => ", deleting 1 item there".to_owned(),
+                    n => format!(", deleting {n} items there"),
+                };
+                if files.is_empty() && folders.is_empty() {
+                    return format!("Sync {folder}: delete {} there{root}", plural_items(delete.len()));
+                }
+                format!("Upload {what} to {folder}{replacing}{deleting}{root}")
             }
             Command::FileOp { spec, .. } => spec.summary(),
             Command::EditorOpen { spec, .. } => spec.summary(),
@@ -1253,6 +1345,7 @@ impl Command {
             Command::SupportBundle { spec, .. } => spec.summary(target_count),
             Command::WakeOnLan { wake, .. } => wake.summary(),
             Command::FileServer { spec, .. } => spec.summary(),
+            Command::BulkFiles { spec, .. } => spec.summary(target_count),
         }
     }
 }
@@ -1456,6 +1549,9 @@ pub struct UploadDetails {
     pub folders: usize,
     /// SS-14: as root.
     pub as_root: bool,
+    /// SS-14 (0.8.0 G3): a sync's deletes on the host (the first [`UPLOAD_DETAILS_SHOWN`]), relative to `folder`.
+    pub delete: Vec<String>,
+    pub more_deleting: usize,
 }
 
 /// SS-14: the files an upload's approval lists by name; a folder of thousands is counted beyond them.
@@ -1476,6 +1572,7 @@ impl UploadDetails {
             files,
             folders,
             as_root,
+            delete,
             ..
         } = command
         else {
@@ -1499,6 +1596,8 @@ impl UploadDetails {
             more_replacing: rest.iter().filter(|f| f.replace).count(),
             folders: folders.len(),
             as_root: *as_root,
+            delete: delete.iter().take(UPLOAD_DETAILS_SHOWN).cloned().collect(),
+            more_deleting: delete.len().saturating_sub(UPLOAD_DETAILS_SHOWN),
         }))
     }
 }
@@ -3175,6 +3274,7 @@ mod tests {
                 folders: vec![],
                 keep_times: true,
                 as_root: false,
+                delete: vec![],
             },
             Command::FileOp {
                 targets: vec![],

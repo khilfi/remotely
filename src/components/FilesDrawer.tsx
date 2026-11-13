@@ -45,6 +45,7 @@ import {
   LaptopIcon,
   LinkIcon,
   MoreHorizontalIcon,
+  PanelsTopLeftIcon,
   PencilIcon,
   RefreshCwIcon,
   ShieldIcon,
@@ -110,6 +111,7 @@ import {
 } from "@/lib/api";
 import { downloadReason, fileChangeReason, uploadReason } from "@/lib/disabled-reasons";
 import { changeLabel } from "@/lib/file-ops";
+import { requestLink } from "@/lib/links";
 import { doubleClickTitle, editInTerminalLabel, editInTerminalReason } from "@/lib/editing";
 import { editingApi, type HostEditors } from "@/lib/editing-api";
 import { plural } from "@/lib/format";
@@ -631,6 +633,13 @@ export function FilesDrawer({
               >
                 <FolderUpIcon />
                 Upload a folder here…
+              </DropdownMenuItem>
+              <DropdownMenuItem
+                disabled={!listing || failed !== null}
+                onSelect={() => terminalId && requestLink({ kind: "files", terminalId, path: here })}
+              >
+                <PanelsTopLeftIcon />
+                Open in Files
               </DropdownMenuItem>
               {hostEditors?.sessionId && hostEditors.found.length > 0 && (
                 <DropdownMenuSub>

@@ -5,6 +5,9 @@
 
 mod alerts;
 mod audit;
+mod bookmarks;
+#[cfg(test)]
+mod bookmarks_upgrade_tests;
 mod catalog;
 mod checks;
 #[cfg(test)]

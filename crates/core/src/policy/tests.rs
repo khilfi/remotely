@@ -3219,6 +3219,7 @@ fn upload(files: &[(&str, bool)], targets: &[Target]) -> Command {
         folders: vec![],
         keep_times: true,
         as_root: false,
+        delete: vec![],
     }
 }
 
@@ -3297,6 +3298,7 @@ fn uploads_go_to_one_open_terminal_with_plain_names() {
         folders: vec![],
         keep_times: true,
         as_root: false,
+        delete: vec![],
     };
     assert!(relative.validate().is_err(), "the host folder must be absolute");
     let mut local = files;
@@ -3308,6 +3310,7 @@ fn uploads_go_to_one_open_terminal_with_plain_names() {
         folders: vec![],
         keep_times: true,
         as_root: false,
+        delete: vec![],
     };
     assert!(local.validate().is_err(), "the PC's path must be absolute");
 }
@@ -3572,6 +3575,7 @@ fn every_command() -> Vec<(Command, Vec<Target>)> {
     .chain([super::wake_tests::wake_on_lan()])
     .chain(super::file_server_tests::every_file_server_command())
     .chain(super::file_ops_tests::every_file_op_command())
+    .chain(super::files_page_tests::every_files_page_command())
     .collect()
 }
 
@@ -3614,6 +3618,7 @@ fn the_read_only_lock_ignores_tiers_labels_and_protection() {
                 | ActionKind::FileMoveReplace
                 | ActionKind::FileDelete
                 | ActionKind::FileDeleteFolder
+                | ActionKind::FileSyncDelete
                 | ActionKind::FileEditLocal
         ) {
             rules.tiers.insert(kind, TierRule::same(Tier::Low));

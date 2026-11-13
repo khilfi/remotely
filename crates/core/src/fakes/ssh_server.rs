@@ -1921,6 +1921,30 @@ const BUILTINS: [&str; 29] = [
     "mv", "cp",
 ];
 
+/// SS-14 (0.8.0 G3): a name glob as `find -name` reads one: `*`, `?`, and every other character as itself.
+fn glob_matches(pattern: &str, name: &str) -> bool {
+    let p: Vec<char> = pattern.chars().collect();
+    let n: Vec<char> = name.chars().collect();
+    let (mut pi, mut ni) = (0, 0);
+    let mut star: Option<(usize, usize)> = None;
+    while ni < n.len() {
+        if pi < p.len() && (p[pi] == '?' || p[pi] == n[ni]) {
+            pi += 1;
+            ni += 1;
+        } else if pi < p.len() && p[pi] == '*' {
+            star = Some((pi, ni));
+            pi += 1;
+        } else if let Some((sp, sn)) = star {
+            pi = sp + 1;
+            ni = sn + 1;
+            star = Some((sp, sn + 1));
+        } else {
+            return false;
+        }
+    }
+    p[pi..].iter().all(|c| *c == '*')
+}
+
 /// SS-14: copies `from` to `to` in the SFTP folder, folders with what is in them, as `cp -a` would.
 fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
     let meta = std::fs::symlink_metadata(from)?;
@@ -2086,6 +2110,106 @@ impl<'a> ToyShell<'a> {
     fn make_dir(&self, path: &str) {
         locks::lock(&self.state.dirs).insert(path.to_owned());
         locks::lock(&self.state.modes).insert(path.to_owned(), 0o777 & !self.umask);
+    }
+
+    /// SS-14 (0.8.0 G3): the toy `find` (see its arm in `builtin`).
+    fn toy_find(&mut self, args: &[String]) -> u32 {
+        let Some(root) = locks::lock(&self.state.sftp_root).clone() else {
+            self.err("find: no files here\n");
+            return 1;
+        };
+        let Some(start) = args.first() else {
+            self.err("find: missing starting point\n");
+            return 1;
+        };
+        let mut pattern = None;
+        let mut ignore_case = false;
+        let mut format = None;
+        let mut i = 1;
+        while i < args.len() {
+            match args[i].as_str() {
+                "-xdev" => {}
+                "-name" | "-iname" => {
+                    ignore_case = args[i] == "-iname";
+                    i += 1;
+                    pattern = args.get(i).cloned();
+                }
+                "-printf" => {
+                    i += 1;
+                    format = args.get(i).cloned();
+                }
+                "-print0" => format = Some(r"%p\0".into()),
+                other => {
+                    self.err(&format!("find: unknown predicate `{other}'\n"));
+                    return 1;
+                }
+            }
+            i += 1;
+        }
+        let (Some(pattern), Some(format)) = (pattern, format) else {
+            self.err("find: this toy needs -name and -printf or -print0\n");
+            return 1;
+        };
+        let unreadable = locks::lock(&self.state.sftp_unreadable).clone();
+        let start = self.path(start);
+        let mut status = 0;
+        let mut queue = std::collections::VecDeque::from([start]);
+        while let Some(folder) = queue.pop_front() {
+            if unreadable.contains(&folder) && self.user != "root" {
+                self.err(&format!("find: '{folder}': Permission denied\n"));
+                status = 1;
+                continue;
+            }
+            let Ok(entries) = std::fs::read_dir(sftp::local(&root, &folder)) else {
+                continue;
+            };
+            let mut entries: Vec<std::fs::DirEntry> = entries.filter_map(std::result::Result::ok).collect();
+            entries.sort_by_key(std::fs::DirEntry::file_name);
+            for entry in entries {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                let path = if folder == "/" {
+                    format!("/{name}")
+                } else {
+                    format!("{folder}/{name}")
+                };
+                let Ok(meta) = std::fs::symlink_metadata(entry.path()) else {
+                    continue;
+                };
+                let (a, b) = if ignore_case {
+                    (pattern.to_lowercase(), name.to_lowercase())
+                } else {
+                    (pattern.clone(), name.clone())
+                };
+                if glob_matches(&a, &b) {
+                    let kind = if meta.file_type().is_symlink() {
+                        "l"
+                    } else if meta.is_dir() {
+                        "d"
+                    } else {
+                        "f"
+                    };
+                    let modified = meta
+                        .modified()
+                        .ok()
+                        .and_then(|at| at.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map_or(0, |d| d.as_secs());
+                    let out = format
+                        .replace("%y", kind)
+                        .replace("%s", &meta.len().to_string())
+                        .replace("%T@", &format!("{modified}.0000000000"))
+                        .replace("%p", &path)
+                        .replace(r"\t", "\t")
+                        .replace(r"\n", "\n")
+                        .replace(r"\0", "\0");
+                    self.print(&out);
+                }
+                if meta.is_dir() && !meta.file_type().is_symlink() {
+                    queue.push_back(path);
+                }
+            }
+        }
+        self.state.note(format!("find as {}", self.user));
+        status
     }
 
     fn expand(&mut self, parts: &[Part]) -> String {
@@ -2519,6 +2643,33 @@ impl<'a> ToyShell<'a> {
                 }
                 status
             }
+            // SS-14 (0.8.0 G3): `sha256sum -- PATH...` of files in the SFTP folder.
+            "sha256sum" => {
+                let Some(root) = locks::lock(&self.state.sftp_root).clone() else {
+                    self.err("sha256sum: no files here\n");
+                    return 1;
+                };
+                let mut status = 0;
+                for p in args.iter().filter(|a| *a != "--") {
+                    let path = self.path(p);
+                    match std::fs::read(sftp::local(&root, &path)) {
+                        Ok(bytes) => {
+                            use sha2::Digest;
+                            let hash = hex::encode(sha2::Sha256::digest(&bytes));
+                            self.print(&format!("{hash}  {p}\n"));
+                        }
+                        Err(_) => {
+                            self.err(&format!("sha256sum: {p}: No such file or directory\n"));
+                            status = 1;
+                        }
+                    }
+                }
+                self.state.note(format!("sha256sum as {}", self.user));
+                status
+            }
+            // SS-14 (0.8.0 G3): `find ROOT -xdev -name|-iname PATTERN -printf FORMAT|-print0` in the SFTP folder, the
+            // format's `%y %s %T@ %p` and `\t \0 \n`; folders the SFTP server can't open are refused here too.
+            "find" => self.toy_find(args),
             "cp" => {
                 // SS-14: `cp -a -- FROM TO` within the SFTP folder; a folder with what is in it. Like the SFTP server,
                 // only root writes into a protected folder.

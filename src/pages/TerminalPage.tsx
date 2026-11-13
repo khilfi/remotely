@@ -100,6 +100,7 @@ import { PageHeader } from "@/components/PageHeader";
 import { Tip } from "@/components/Tip";
 import { ComparePanel, type CompareView } from "@/components/ComparePanel";
 import { FilesDrawer } from "@/components/FilesDrawer";
+import { publishPanes } from "@/lib/open-panes";
 import { HostDetailsSheet } from "@/components/HostDetailsSheet";
 import { HostKeyDialog } from "@/components/HostKeyDialog";
 import { MultiExecBar, type MultiExecNote } from "@/components/MultiExecBar";
@@ -907,6 +908,24 @@ export function TerminalPage({
 
   // Terminal ids and statuses arrive as panes connect: follow them while MultiExec or Compare needs them.
   const everyPane = useMemo(() => tabs.flatMap((t) => allPanes(t.layout)), [tabs]);
+  // SS-14 (0.8.0 G3): the Files page's host tabs ride on these panes' connections.
+  useEffect(() => {
+    const publish = () =>
+      publishPanes(
+        everyPane.map((pane) => ({
+          key: pane.key,
+          terminalId: pane.terminalId,
+          sessionId: pane.sessionId,
+          title: nameOf(pane),
+          ssh: pane.kind === "ssh",
+          subscribe: pane.subscribe,
+          getSnapshot: pane.getSnapshot,
+        })),
+      );
+    publish();
+    const stops = everyPane.map((pane) => pane.subscribe(publish));
+    return () => stops.forEach((stop) => stop());
+  }, [everyPane, nameOf]);
   useEffect(() => {
     if (!multiExec && !compareOpen) return;
     const stops = everyPane.map((pane) => pane.subscribe(() => setPaneTick((n) => n + 1)));

@@ -822,36 +822,8 @@ impl Terminals {
         as_root: bool,
         cancel: &CancellationToken,
     ) -> Result<()> {
-        let commands = crate::locks::lock(&control.commands).clone().ok_or_else(|| {
-            CoreError::InvalidInput(format!(
-                "{} is not connected, so nothing can run on its host. Reconnect it first.",
-                quoted_name(control)
-            ))
-        })?;
-        let run = async {
-            if as_root {
-                let password = crate::locks::lock(&control.root)
-                    .as_ref()
-                    .map(|r| r.password.clone())
-                    .ok_or_else(|| CoreError::InvalidInput("Root browsing ended; browse as root again.".into()))?;
-                match password {
-                    Some(password) => {
-                        commands
-                            .run_sudo(&host_command(program, paths, true), &password, MAX_COPY_OUTPUT)
-                            .await
-                    }
-                    // sudo let root browsing start without a password: it does so for this too.
-                    None => {
-                        let line = format!("sudo -n -- {}", host_command(program, paths, false));
-                        commands.run(&line, MAX_COPY_OUTPUT).await
-                    }
-                }
-            } else {
-                commands
-                    .run(&host_command(program, paths, false), MAX_COPY_OUTPUT)
-                    .await
-            }
-        };
+        let script = paths_script(program, paths);
+        let run = self.run_script(control, &script, as_root, MAX_COPY_OUTPUT);
         let result = tokio::select! {
             biased;
             () = cancel.cancelled() => return Err(CoreError::CancelledRemote),
@@ -877,6 +849,50 @@ impl Terminals {
             (Some(code), false) => format!("{what} ended with exit code {code}: {said}"),
             (None, _) => format!("{what} did not finish; {last} may be as far as it got"),
         }))
+    }
+
+    /// SS-14 (0.8.0 G3): a folder with everything in it, deleted as a recursive delete step does it (a sync's delete).
+    pub(super) async fn delete_tree(
+        &self,
+        control: &Control,
+        path: &str,
+        as_root: bool,
+        cancel: &CancellationToken,
+    ) -> Result<()> {
+        self.run_on_host(control, DELETE, &[path], as_root, cancel).await
+    }
+
+    /// SS-14: a `/bin/sh` script of Remotely's own (fixed words, paths as [`paths_script`] passes them) on an exec
+    /// channel of the terminal's connection: as the login user through `/bin/sh -c`, or as root with root browsing's
+    /// sudo (its password, or none when sudo asked for none). G3's find and checksums run this way too.
+    pub(super) async fn run_script(
+        &self,
+        control: &Control,
+        script: &str,
+        as_root: bool,
+        max_output: usize,
+    ) -> Result<crate::adapters::remote::ExecResult> {
+        let commands = crate::locks::lock(&control.commands).clone().ok_or_else(|| {
+            CoreError::InvalidInput(format!(
+                "{} is not connected, so nothing can run on its host. Reconnect it first.",
+                quoted_name(control)
+            ))
+        })?;
+        if !as_root {
+            return commands.run(&via_sh(script), max_output).await;
+        }
+        let password = crate::locks::lock(&control.root)
+            .as_ref()
+            .map(|r| r.password.clone())
+            .ok_or_else(|| CoreError::InvalidInput("Root browsing ended; browse as root again.".into()))?;
+        match password {
+            Some(password) => commands.run_sudo(script, &password, max_output).await,
+            // sudo let root browsing start without a password: it does so for this too.
+            None => {
+                let line = format!("sudo -n -- {}", via_sh(script));
+                commands.run(&line, max_output).await
+            }
+        }
     }
 }
 

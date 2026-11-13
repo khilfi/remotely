@@ -1253,6 +1253,7 @@ impl JobRunner {
                     | Command::RemoveSshKey { .. }
                     | Command::Container { .. }
                     | Command::SupportBundle { .. }
+                    | Command::BulkFiles { .. }
             ) {
                 "cancelled while the command was running, so the host may still finish it"
             } else if virtualbox && vmware {
@@ -1910,6 +1911,7 @@ impl JobRunner {
                     folders,
                     keep_times,
                     as_root,
+                    delete,
                     ..
                 },
                 TargetRef::Terminal { terminal_id, .. },
@@ -1928,6 +1930,7 @@ impl JobRunner {
                     folders,
                     keep_times: *keep_times,
                     as_root: *as_root,
+                    delete,
                 };
                 let report = self.terminals.upload(run, token).await?;
                 Ok(TargetOutcome {
@@ -2148,6 +2151,11 @@ impl JobRunner {
             // FD-04: one host's commands and files into the job's bundle.
             (Command::SupportBundle { spec: bundle, .. }, TargetRef::Session { session_id }) => {
                 self.collect_bundle(job_id, spec, target, *session_id, bundle, token, accepted)
+                    .await
+            }
+            // BX-10: one host of a many-hosts push or fetch.
+            (Command::BulkFiles { spec: files, .. }, TargetRef::Session { session_id }) => {
+                self.bulk_files(job_id, spec, target, *session_id, files, token, accepted)
                     .await
             }
             (command, other) => Err(CoreError::WrongTargetKind {
@@ -2627,6 +2635,101 @@ impl JobRunner {
         bundle_outcome(result?)
     }
 
+    /// BX-10: one host of a many-hosts push or fetch: a connection checked like a bulk run's (SS-05; no sudo), the
+    /// files over SFTP on it, within the per-host time limit. Cancel and the limit close the connection.
+    #[allow(clippy::too_many_arguments)]
+    async fn bulk_files(
+        &self,
+        job_id: Uuid,
+        spec: &JobSpec,
+        target: &Target,
+        session_id: Uuid,
+        files: &crate::bulk_files::BulkFilesSpec,
+        token: &CancellationToken,
+        accepted: &Arc<Mutex<Option<String>>>,
+    ) -> Result<TargetOutcome> {
+        // Checked when it was asked for; the folder could have become a working tree since.
+        if let crate::bulk_files::BulkFilesOp::Fetch { dest, .. } = &files.op {
+            crate::save_guard::refuse_repository_folder(Path::new(dest), crate::save_guard::Saved::Download)?;
+        }
+        let HostLogin {
+            session,
+            credentials,
+            jump_credentials,
+            options,
+            verifier,
+            ..
+        } = self
+            .host_login(spec, target, session_id, false, None, files.trust_new_host_keys, token)
+            .await?;
+        let mut secrets = Vec::new();
+        if let Credentials::Password(Some(password)) = &credentials {
+            secrets.push(password.clone());
+        }
+        let work = async {
+            let connection = self
+                .remote
+                .connect(ConnectRequest {
+                    session: &session,
+                    credentials,
+                    jump_credentials,
+                    options: &options,
+                    verifier: Arc::clone(&verifier) as Arc<dyn HostKeyVerifier>,
+                    who: "a many-hosts transfer",
+                })
+                .await?;
+            let peer_ip = connection.peer_ip();
+            let result = match connection.files() {
+                Some(sftp) => {
+                    let run = crate::bulk_files::HostRun {
+                        ctx: spec.ctx,
+                        job_id,
+                        tier: spec.decision.tier,
+                        target,
+                        all_targets: &spec.decision.targets,
+                        spec: files,
+                        store: &self.store,
+                    };
+                    crate::bulk_files::run_host(run, connection.as_ref(), sftp).await
+                }
+                None => Err(CoreError::InvalidInput(
+                    "this host's connection offers no SFTP, so no file can go to or from it".into(),
+                )),
+            };
+            connection.close().await;
+            result.map(|done| (done, peer_ip))
+        };
+        let limited = async {
+            match files.timeout_secs {
+                Some(secs) => tokio::time::timeout(Duration::from_secs(secs), work)
+                    .await
+                    .map_err(|_| CoreError::CommandTimedOut { seconds: secs })?,
+                None => work.await,
+            }
+        };
+        let result = tokio::select! {
+            biased;
+            _ = token.cancelled() => Err(CoreError::CancelledRemote),
+            result = limited => result,
+        };
+        *locks::lock(accepted) = locks::lock(&verifier.accepted).take();
+        let (done, peer_ip) = result?;
+        let secrets: Vec<&SecretString> = secrets.iter().collect();
+        Ok(TargetOutcome {
+            ok: done.ok,
+            exit_code: None,
+            output: Some(OutputCollector::collect(
+                done.output.as_bytes(),
+                b"",
+                &secrets,
+                MAX_OUTPUT_PER_STREAM,
+            )),
+            failure: done.failure,
+            note: done.note,
+            peer_ip: peer_ip.map(|ip| ip.to_string()),
+        })
+    }
+
     /// FD-04: a host's part of a bundle within its time limit; cancel closes its connection.
     async fn bundle_limits<T>(
         &self,
@@ -2867,7 +2970,8 @@ impl JobRunner {
             | Command::PushSshKey { .. }
             | Command::RemoveSshKey { .. }
             | Command::Container { .. }
-            | Command::SupportBundle { .. } => limits.remote,
+            | Command::SupportBundle { .. }
+            | Command::BulkFiles { .. } => limits.remote,
             Command::AppUpdate { .. } => 1,
             // SS-10: pressing Enter is instant; every terminal at once, so they start together.
             Command::TerminalLine { targets, .. } => targets.len(),
@@ -3059,6 +3163,7 @@ fn safety_verb(command: &Command) -> &'static str {
         Command::ImageConvert { .. } => "conversion",
         Command::VmExport { .. } => "export",
         Command::SupportBundle { .. } => "support bundle",
+        Command::BulkFiles { .. } => "many-hosts transfer",
     }
 }
 

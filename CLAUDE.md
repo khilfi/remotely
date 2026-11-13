@@ -494,6 +494,18 @@ crates/core/          remotely-core: all app logic
                       (`favourite:<id>`, `library:<id>`), and the MAX_RECENTS (20) sessions, VMs and pages opened last
                       (a terminal's session notes itself in Store::record_session_opened); per workspace, not audited,
                       not locked, kept by key so a restored session keeps its star
+    bookmarks.rs      SS-14 (0.8.0 G3, migration 0034): Bookmarks (Core.bookmarks): the Files page's named folders per saved
+                      session (MAX_BOOKMARKS 100, a name of MAX_NAME_CHARS 80, the path checked by check_path), per
+                      workspace; audited file_bookmark_changed with the session as target, refused by the read-only lock
+                      (Change::FileBookmarks); into the trash with their session (attached rows) and back; in FD-07
+                      exports with it (SessionEntry.bookmarks, import adds the paths not bookmarked yet); store/bookmarks.rs
+    local_files.rs    SS-14 (0.8.0 G3): LocalFiles (Core.local_files), the Files page's left pane: this PC's folders, read
+                      only. Each listing kept under an id (KEEP_LISTINGS, KEEP_FOR); the window names files by (listing,
+                      name), a name the listing found (LocalAsk::Child, paths_of, folder_of, sha256), never a path it made
+                      up; a typed folder through untrusted::path_refusal, absolute, then canonicalized (a `\\?\UNC\`
+                      final path refused); links and junctions listed, never opened or staged; Remotely's own data folder
+                      (Terminals::protected_folders) never opened; the drives view by GetLogicalDrives and GetDriveTypeW;
+                      hidden by Windows' attribute or a leading dot
     trash/            QL-27 (migration 0033): mod.rs Trash (Core.trash): move_to_trash, in the delete's transaction, for
                       a session (its whole row, SS-12's protocol and kind_options too, with its port forwards, container
                       marks, saved group places, secret grants, its own QL-17 highlight rules (reloaded on restore),
@@ -726,6 +738,25 @@ crates/core/          remotely-core: all app logic
                       before set_edit_folder (`<data>/editing`, never in a Git working tree); `edits` and
                       `subscribe_edits` for the window (per workspace); JobOwner.editing keeps the job out of
                       open_user_jobs and the update install's wait_to_run_alone;
+                      file_reads.rs SS-14 (0.8.0 G3) the Files page's reads on a terminal's host, no bus, not audited:
+                      find (find_script: folder, pattern (check_pattern: one name's glob) and the -printf format from
+                      printf's octal escapes through /bin/sh, `-xdev`, `-name` or `-iname`, `timeout 55` where the host
+                      has it and a time limit here, MAX_FIND_RESULTS 2000 and MAX_FIND_OUTPUT 2 MB; BusyBox's find without
+                      -printf gives paths only), preview (MAX_PREVIEW_BYTES 256 KB over SFTP, a NUL byte is binary,
+                      mark_specials: C0 controls as control pictures, Cf and C1 as `⟨U+XXXX⟩`) and checksum
+                      (hash_host_file: the host's sha256sum under `timeout`, else read_sha256_within over SFTP, at most
+                      MAX_READ_HASH_BYTES 2 GB; HASH_SECONDS 300 either way); as root through root browsing (file_ops.rs run_script: the
+                      script as the login user by /bin/sh, or under root browsing's sudo); sync.rs SS-14 (0.8.0 G3)
+                      FolderSyncs (Core.sync): compare a local listing's folder with a host folder (both trees walked,
+                      Git's data by files.rs is_git_name (`.git.`, `.GIT ` too), links and other kinds left out,
+                      MAX_UPLOAD_FILES a side; compare_pair: only here, only there, newer by more than TIME_SLACK 2 s,
+                      larger; Compare contents hashes pairs of the same size, at most MAX_CONTENT_FILES and
+                      CONTENT_SECONDS 600, the rest counted), kept by id; sync to the host is one Command::FileUpload with `delete` (only what
+                      the comparison found only there, when chosen: ActionKind::FileSyncDelete, High; files.rs
+                      delete_synced runs them after every upload landed, a folder by file_ops.rs delete_tree, each
+                      audited file_changed), to this PC downloads through files.rs land_downloads (Existing::Replace;
+                      nothing on this PC deleted; land_downloads leaves out any part Windows would save as `.git`,
+                      whoever gathered the list, and claim_file never makes such a file);
                       tunnels.rs SS-07 a terminal's tunnels: start (Command::OpenTunnel on the bus, also for forwards
                       that start with the terminal), approve, stop, the job's open_tunnel, reopened after a reconnect,
                       closed with the terminal, audited tunnel_opened and tunnel_closed;
@@ -824,6 +855,19 @@ crates/core/          remotely-core: all app logic
                       recorded MultiExec lines group (group_with_output), diff and export (export_recorded, audited
                       multiexec_exported) through the same code; Reach: runs keep SSH sessions, F6's Ansible export
                       SSH and WinRM (resolve_reaching)
+    bulk_files.rs     BX-10 (0.8.0 G3): Command::BulkFiles, files to and from BX-01's targets (SSH sessions): Push (files
+                      of this PC into one host folder, MAX_PUSH_FILES 100, `replace` or not; ActionKind::FilePush, Medium,
+                      High from exec_bulk_threshold hosts, never below Medium when replacing) and Fetch (one host file into
+                      `<dest>\<session name>\<file>` (host_folder: the session id's start added when two hosts' names are
+                      one folder on Windows), numbered when taken, never a name Git takes, the Mark of the Web, audited
+                      file_downloaded;
+                      ActionKind::FileFetch, Low, Prod Medium). The job runner logs in like a Compare hosts run
+                      (JobRunner::bulk_files: host_login, RemoteAdapter::connect, ExecSession::files) and run_host checks
+                      each pushed file's SHA-256 on the host (its sha256sum, else read back); each host's output is the
+                      same for the same bytes (a push's lines, a fetch's SHA-256 line then its text up to 1 MB), so
+                      BX-03's grouping and diff work on it. BulkFiles (Core.bulk_files) resolves the picks (Reach::Ssh),
+                      takes files from a dialog, a drop or the local pane, and checks a fetch's folder (save_guard,
+                      Remotely's data folder); never built by the UI
     support_bundle/   FD-04 support bundles (no migration): spec.rs BundleSpec (Command::SupportBundle; presets expanded
                       into its items before the bus rates them; refused from the UI: the zip's place comes from the
                       shell's save dialog; never retried), its checks, entry names safe for Windows and the file name
@@ -963,7 +1007,8 @@ crates/core/          remotely-core: all app logic
                       rmdir, setstat with times and a size, and root browsing: an exec of root_command meets the toy
                       sudo (its prompt marker, a line of stdin per try, the ready marker) and then SFTP as root on the
                       same channel, SftpServer::new_root; SFTP_SERVER_PROBE answers with_sftp_server's path; lsetstat;
-                      its toy shell's `cp -a` and `rm -rf` work in the SFTP folder, protected folders only as root,
+                      its toy shell's `cp -a` and `rm -rf` work in the SFTP folder, protected folders only as root (0.8.0 G3: and
+                      `find` with -xdev, -name, -iname, -printf's %y %s %T@ %p or -print0, and `sha256sum`),
                       and it knows `/bin/sh -c`, `exec`, variables and printf's octal escapes); SS-07
                       direct-tcpip (with_route names reach another port on 127.0.0.1, so a server is reachable only
                       through another) and tcpip-forward; QL-09 `su [-] [user]` in its shell, a shell without the hook;
@@ -1042,10 +1087,17 @@ crates/core/          remotely-core: all app logic
                       terminal closing, a workspace switch, leftovers, and the PR 91 review's regressions: a save that
                       didn't go up kept (Stop asks; kept copies saved elsewhere, discarded, through the start sweep), a
                       reconnect's new connection used and another host's refused, a Prod relabel, the read-only lock;
+                      files_page.rs: SS-14, BX-10 (0.8.0 G3) on the test SSH server's
+                      SFTP folder and its toy find and sha256sum: find, preview and checksums as reads, bookmarks (audit,
+                      lock, trash), the local pane by listing, compare and sync both ways at their tiers, pushes to five
+                      servers (Medium, High from 5, each copy's SHA-256) and fetches grouped by content;
                       opt-in workstation_it.rs,
                       virtualbox_it.rs and
                       conversion_it.rs (the real conversion tools on small images in the temp folder)
-src-tauri/            Tauri 2 shell: window, IPC commands (ipc.rs), terminal bridge, MultiExec (multiexec.rs; groups.rs
+src-tauri/            Tauri 2 shell (SS-14, BX-10 0.8.0 G3: files_page.rs the Files page's IPC: the local pane's listings
+                      with the shell's Home and Downloads, uploads from a listing, downloads into one, find, preview,
+                      checksums, bookmarks, compare and sync, push and fetch with the push's file dialog and the fetch's
+                      folder dialog): window, IPC commands (ipc.rs), terminal bridge, MultiExec (multiexec.rs; groups.rs
                       QL-19 saved MultiExec groups; terminal_rules.rs QL-17 rules), command
                       panel, notifications and QL-13 manual links opened with ShellExecute after the core's check
                       (command_panel.rs; QL-17 notify_terminal_alert), clipboard.rs (the clipboard read for right-click paste, and QL-05/SS-11
@@ -1184,12 +1236,21 @@ src/                  React + TypeScript UI
                       "Add a check" opens a `checks` link; 0.7.0 F5: NoteSheet (FD-06, hosted once by App and opened by
                       a `note` AppLink; the core's HTML, the web link confirm, Send to terminal), StarButton (QL-26),
                       TrashCard (QL-27, Settings › Privacy and data), BulkEditDialog (QL-28, the Sessions page's selection
-                      bar, which also has FD-04's Support bundle for the SSH sessions picked)
+                      bar, which also has FD-04's Support bundle for the SSH sessions picked); SS-14, BX-10 (0.8.0 G3)
+                      files/: FileTable (both panes' table: folders first, sort, click with Ctrl and Shift, a row menu, a
+                      pointer drag followed by window listeners, host folder rows `data-files-folder` drop targets),
+                      LocalPane (this PC by listing), HostPane (a host tab on an open terminal's connection: G2's changes,
+                      root browsing, bookmarks, find, preview, checksums, compare), FindSheet, PreviewDialog,
+                      ChecksumDialog, CompareSheet, NameDialog, PaneButton, ManyHostsView (BulkTargetPicker, push or
+                      fetch, BulkResultsView); FilesPage puts them together (tabs per host, "Open a host" from open
+                      terminals or saved sessions, opened behind on the Terminal page; drops between panes and from
+                      Explorer's `files://dropped`; the conflict dialog; the transfers list)
   pages/              one file per page (bulk execution is in TerminalPage: Type in all tabs (MultiExec) and Compare
                       hosts; QL-14 VmsPage
                       is VMs and snapshots, with the selection's bulk snapshot actions and the details panel;
                       UX-08 the sidebar's order and shortcuts are lib/navigation.ts's: Machines (VMs Ctrl+1, Templates
-                      Ctrl+2, Schedules Ctrl+3), Remote (Sessions Ctrl+4, Terminal Ctrl+5, Containers Ctrl+6, and
+                      Ctrl+2, Schedules Ctrl+3), Remote (Sessions Ctrl+4, Terminal Ctrl+5, SS-14's FilesPage (no digit:
+                      Ctrl+K, `files` links, the Terminal drawer's "Open in Files"), Containers Ctrl+6, and
                       FD-09's ToolboxPage, which has no digit and opens from Ctrl+K, rows and `toolbox` links),
                       Overview (Dashboard Ctrl+7, Activity Ctrl+8), then Vault Ctrl+9 and Settings Ctrl+,;
                       TemplatesPage: VM-19 to VM-21 sizes, images and launch
@@ -1244,6 +1305,10 @@ src/                  React + TypeScript UI
                       polled less often keeps its line on a VM's charts), terminal-render.ts (SS-03 WebGL for panes on
                       screen, at most 12, released 2 s after a pane hides, DOM after failures; FD-03 the masked copy's
                       1,000 lines written in pieces), tunnels.ts (SS-07 chains and forwards),
+                      files-page.ts and files-page-api.ts (SS-14, BX-10 0.8.0 G3: each pane's view, clickPick, Back and
+                      Forward, this PC's breadcrumbs, dropAction (a local folder is never a drop target), a comparison's
+                      rows in words and a sync's default picks; the IPC wrappers), open-panes.ts (the Terminal page's
+                      panes published for the Files page's host tabs),
                       navigation.ts (UX-08 the page registry: ids, sidebar names (the headers' titles), groups and
                       shortcuts in sidebar order; MOVED_PAGES: the old Snapshots, Image tools, Map and Known hosts ids
                       open their home page's view or tab, and OLD_SHORTCUTS the 0.5.0 shortcuts no page took),

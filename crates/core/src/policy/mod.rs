@@ -24,6 +24,8 @@ mod file_ops_tests;
 #[cfg(test)]
 mod file_server_tests;
 #[cfg(test)]
+mod files_page_tests;
+#[cfg(test)]
 mod host_networks_tests;
 pub(crate) mod powershell;
 #[cfg(test)]
@@ -137,6 +139,13 @@ pub enum ActionKind {
     FileDelete,
     /// Delete folders with everything in them on a host. Never below Medium.
     FileDeleteFolder,
+    /// SS-14 (0.8.0 G3): a folder sync to a host that deletes there what this PC's folder doesn't have. Never below
+    /// Medium.
+    FileSyncDelete,
+    /// BX-10 (0.8.0 G3): push files to many hosts. Its bulk tier applies from [`PolicyRules::exec_bulk_threshold`] hosts.
+    FilePush,
+    /// BX-10 (0.8.0 G3): fetch the same file from many hosts into a folder of this PC.
+    FileFetch,
     /// SS-14 (0.8.0 G4): open a host's file in a terminal editor on the host (a new tab running it).
     FileEditorOpen,
     /// SS-08 (0.8.0 G4): edit a host's file on this PC; each save replaces it. Never below Medium: replacing asks.
@@ -228,7 +237,7 @@ pub enum ActionKind {
 
 impl ActionKind {
     /// Every action, in the order Settings lists them (AP-01).
-    pub const ALL: [ActionKind; 68] = [
+    pub const ALL: [ActionKind; 71] = [
         ActionKind::VmStart,
         ActionKind::VmUnpause,
         ActionKind::VmPause,
@@ -275,6 +284,9 @@ impl ActionKind {
         ActionKind::FilePermissions,
         ActionKind::FileDelete,
         ActionKind::FileDeleteFolder,
+        ActionKind::FileSyncDelete,
+        ActionKind::FilePush,
+        ActionKind::FileFetch,
         ActionKind::FileEditorOpen,
         ActionKind::FileEditLocal,
         ActionKind::TunnelLocal,
@@ -330,6 +342,9 @@ impl ActionKind {
             ActionKind::FilePermissions => "Change files' permissions or owner on a host",
             ActionKind::FileDelete => "Delete files or empty folders on a host",
             ActionKind::FileDeleteFolder => "Delete folders with what is in them on a host",
+            ActionKind::FileSyncDelete => "Sync folders, deleting on the host what this PC's folder doesn't have",
+            ActionKind::FilePush => "Push files to many hosts",
+            ActionKind::FileFetch => "Fetch a file from many hosts",
             ActionKind::FileEditorOpen => "Open a file in a terminal editor on a host",
             ActionKind::FileEditLocal => "Edit a host's file on this PC (each save replaces it)",
             ActionKind::TunnelLocal => "Open a tunnel for this PC only",
@@ -581,7 +596,8 @@ impl PolicyRules {
     /// Target count from which an action's bulk tier applies: [`Self::exec_bulk_threshold`] hosts for
     /// commands on hosts, [`Self::bulk_threshold`] targets for the rest.
     pub fn threshold(&self, kind: ActionKind) -> usize {
-        if kind.is_exec() {
+        // BX-10: a transfer to or from many hosts counts hosts as a command on them does.
+        if kind.is_exec() || matches!(kind, ActionKind::FilePush | ActionKind::FileFetch) {
             self.exec_bulk_threshold
         } else if kind == ActionKind::VmDeploy {
             self.deploy_bulk_threshold
@@ -646,7 +662,11 @@ impl PolicyRules {
                     ),
                 );
             }
-            if matches!(kind, ActionKind::FileDelete | ActionKind::FileDeleteFolder) && rule.single < MIN_DELETE_TIER {
+            if matches!(
+                kind,
+                ActionKind::FileDelete | ActionKind::FileDeleteFolder | ActionKind::FileSyncDelete
+            ) && rule.single < MIN_DELETE_TIER
+            {
                 return invalid(
                     kind.label(),
                     format!(
@@ -1059,6 +1079,18 @@ impl Default for PolicyRules {
             (FilePermissions, TierRule::same(Medium)),
             (FileDelete, TierRule::same(Medium)),
             (FileDeleteFolder, TierRule::same(High)),
+            // SS-14 (docs/plan-0.8.md): a sync's biggest change decides; deleting on the other side is the full approval.
+            (FileSyncDelete, TierRule::same(High)),
+            // BX-10 (docs/plan-0.8.md): one confirm for a few hosts, the full approval from the bulk threshold (5 hosts).
+            (
+                FilePush,
+                TierRule {
+                    single: Medium,
+                    bulk: High,
+                },
+            ),
+            // Reads on the hosts; a Prod host's is Medium (its data leaves it, as for a Prod VM's export).
+            (FileFetch, TierRule::same(Low)),
             // SS-14, SS-08 (docs/plan-0.8.md, "Approval tiers"): an editor tab is Low and audited; editing on this PC
             // replaces the file at each save, approved once.
             (FileEditorOpen, TierRule::same(Low)),
@@ -1433,6 +1465,8 @@ impl PolicyEngine {
             Command::PushSshKey { .. } => ActionKind::SshKeyPush,
             Command::RemoveSshKey { .. } => ActionKind::SshKeyRemove,
             // SS-08: replacing a file loses what was there; adding one does not.
+            // SS-14 (0.8.0 G3): a sync that deletes on the host is rated by its deletes, its biggest change.
+            Command::FileUpload { delete, .. } if !delete.is_empty() => ActionKind::FileSyncDelete,
             Command::FileUpload { files, .. } if files.iter().any(|f| f.replace) => ActionKind::FileReplace,
             Command::FileUpload { .. } => ActionKind::FileUpload,
             // SS-14: what is lost decides.
@@ -1494,6 +1528,10 @@ impl PolicyEngine {
             // FD-09: accepting uploads lets other computers write files onto this PC.
             Command::FileServer { spec, .. } if spec.uploads.is_some() => ActionKind::FileServerUploads,
             Command::FileServer { .. } => ActionKind::FileServer,
+            Command::BulkFiles { spec, .. } => match spec.op {
+                crate::bulk_files::BulkFilesOp::Push { .. } => ActionKind::FilePush,
+                crate::bulk_files::BulkFilesOp::Fetch { .. } => ActionKind::FileFetch,
+            },
         }
     }
 
@@ -1588,6 +1626,39 @@ impl PolicyEngine {
                     "{} or more hosts: the bulk tier for commands on hosts applies",
                     self.rules.exec_bulk_threshold
                 ));
+            }
+        }
+
+        // BX-10: and for a transfer to or from many hosts, which counts hosts the same way.
+        if matches!(action, ActionKind::FilePush | ActionKind::FileFetch)
+            && active.len() >= self.rules.exec_bulk_threshold
+        {
+            let rule = self.rules.tiers[&action];
+            if rule.bulk != rule.single {
+                reasons.push(format!(
+                    "{} or more hosts: the bulk tier for commands on hosts applies",
+                    self.rules.exec_bulk_threshold
+                ));
+            }
+        }
+        // BX-10: replacing files on the hosts always asks at least for a confirm.
+        if let Command::BulkFiles { spec, .. } = command {
+            if spec.replaces() {
+                reasons.push("files of those names on the hosts are replaced".into());
+                if tier < MIN_REPLACE_TIER {
+                    reasons.push(format!("{} -> {}", tier.as_str(), MIN_REPLACE_TIER.as_str()));
+                    tier = MIN_REPLACE_TIER;
+                }
+            }
+        }
+        // SS-14 (0.8.0 G3): what a sync deletes on the host.
+        if let Command::FileUpload { delete, .. } = command {
+            match delete.len() {
+                0 => {}
+                1 => reasons.push("the sync deletes 1 item on the host that this PC's folder doesn't have".into()),
+                n => reasons.push(format!(
+                    "the sync deletes {n} items on the host that this PC's folder doesn't have"
+                )),
             }
         }
 
@@ -2063,7 +2134,9 @@ pub fn safety_snapshot_applies(command: &Command) -> bool {
         // FD-09: a wake-up starts a machine that is off; there is nothing in it to lose. The file server runs on this
         // PC.
         | Command::WakeOnLan { .. }
-        | Command::FileServer { .. } => false,
+        | Command::FileServer { .. }
+        // BX-10: files on hosts.
+        | Command::BulkFiles { .. } => false,
     };
     on_vms && can_lose_state
 }
