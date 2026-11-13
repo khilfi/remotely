@@ -1840,6 +1840,31 @@ impl CommandBus {
         let Command::Deploy { spec, .. } = command else {
             return Ok(());
         };
+        // VM-29: an install config's answer files take vault passwords (as hashes, or Windows' one-time password the
+        // deploy replaces with the vault's): new places for each, so the approval asks for the vault password too.
+        if let Some(install) = spec.install.as_ref().filter(|i| !i.password_ids.is_empty()) {
+            let mut what = Vec::new();
+            for id in &install.password_ids {
+                what.push(self.bindings().describe(ctx, *id).await?);
+            }
+            let vms = match spec.vms.len() {
+                1 => "the new VM".to_owned(),
+                n => format!("{n} new VMs"),
+            };
+            decision.add_warnings(vec![format!(
+                "The install config '{}' gives the {} to {vms}: {}. Approving asks for the vault password",
+                install.config_name,
+                what.join(" and the "),
+                if install.kind.windows() {
+                    "Setup gets a one-time password, which the deploy replaces with the vault's over WinRM once Windows is installed"
+                } else {
+                    "each answer file holds it as a SHA-512 hash, on a seed only this Windows user can open, taken out once the install is done"
+                }
+            )]);
+            if !decision.steps.contains(&ApprovalStep::VaultReauth) {
+                decision.steps.push(ApprovalStep::VaultReauth);
+            }
+        }
         let Some(unattended) = &spec.unattended else {
             return Ok(());
         };

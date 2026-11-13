@@ -12,6 +12,8 @@
 //! that was there before.
 
 pub mod cloud_init;
+pub mod install;
+pub mod iso;
 pub mod ovf;
 pub mod preview;
 pub mod runner;
@@ -20,6 +22,7 @@ pub mod service;
 pub mod spec;
 pub mod virtualbox;
 pub mod vmx;
+pub mod watch;
 pub mod workstation;
 
 use async_trait::async_trait;
@@ -34,6 +37,12 @@ use crate::error::Result;
 
 /// How many VMs of one deploy are made at once: each copies or writes whole disks.
 pub const PARALLEL_VMS: usize = 2;
+/// VM-29: how many VMs of an unattended install deploy are made and watched at once: each writes only a blank disk,
+/// then waits for its installer (S2: ten at once through Workstation's NAT took 20 to 30 minutes).
+pub const PARALLEL_INSTALLS: usize = 10;
+
+/// A step's progress: overall percent (0 to 100) and what it does now, in words.
+pub type DeployProgress<'a> = dyn Fn(f64, &str) + Send + Sync + 'a;
 
 /// What the job runner calls for each new VM of a [`DeploySpec`].
 #[async_trait]
@@ -41,13 +50,15 @@ pub trait DeployActions: Send + Sync {
     /// Makes `vm`, then its after-deploy steps. Returns what the job's audit entry says about it (where it is,
     /// its IP, what the after-deploy steps did or why they didn't). A failure or a cancel before the VM is made
     /// removes what this call made for it, and is the error; an after-deploy step that doesn't work is reported
-    /// in the note, never a failure.
+    /// in the note, never a failure. VM-29: an unattended install is watched until it is done; one that fails or
+    /// runs out of time is the error, and its VM is kept for a look.
     async fn deploy_vm(
         &self,
         ctx: &Context,
         job_id: Uuid,
         spec: &DeploySpec,
         vm: &DeployVm,
+        progress: &DeployProgress<'_>,
         token: &CancellationToken,
     ) -> Result<String>;
 }

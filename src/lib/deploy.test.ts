@@ -119,6 +119,22 @@ test("a deploy job's events become one step per VM", () => {
   );
 });
 
+test("an unattended install shows its stage, and a failed one keeps its VM", () => {
+  const vms = [{ name: "web-1", target: newVmKey("vmware", "web-1") }];
+  let p = startProgress("job", vms);
+  p = applyJobEvent(p, { event: "targetStarted", jobId: "job", target: vms[0].target, name: "web-1" });
+  p = applyJobEvent(p, {
+    event: "targetProgress",
+    jobId: "job",
+    target: vms[0].target,
+    percent: 40,
+    step: "installing: Installing the base system",
+  });
+  assert.equal(stepText(p.steps[0]), "Installing: Installing the base system…");
+  const failed = { ...p.steps[0], status: "failed" as const, message: "the install failed; the VM is kept as it is" };
+  assert.equal(stepText(failed), "Failed: the install failed; the VM is kept as it is.");
+});
+
 test("sizes read in GB and TB", () => {
   assert.equal(bytesText(540 * 2 ** 30), "540 GB");
   assert.equal(bytesText(1.5 * 2 ** 30), "1.5 GB");

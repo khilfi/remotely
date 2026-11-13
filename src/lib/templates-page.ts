@@ -1,17 +1,18 @@
 // UX-07 for the Templates page: its tabs in the order a first deploy takes them, the tab it opens on (the first step
 // that isn't done), and each tab's one primary action with why it is off. Pure, tested in templates-page.test.ts.
 
-/** UX-08: "disks" is Disk images, the Image tools page until 0.6.0. VM-28: "installConfigs". */
-export type TemplatesTab = "sizes" | "images" | "installConfigs" | "templates" | "stacks" | "disks";
+/** UX-08: "disks" is Disk images, the Image tools page until 0.6.0. VM-28: "installConfigs". VM-32: "addressPools". */
+export type TemplatesTab = "sizes" | "images" | "installConfigs" | "addressPools" | "templates" | "stacks" | "disks";
 
 /**
- * In the order a first deploy goes: where the OS comes from, how big, how it installs itself, all together, then
- * several together.
+ * In the order a first deploy goes: where the OS comes from, how big, how it installs itself and which addresses it
+ * gets, all together, then several together.
  */
 export const TEMPLATE_TABS: readonly { id: TemplatesTab; label: string }[] = [
   { id: "images", label: "Images" },
   { id: "sizes", label: "Sizes" },
   { id: "installConfigs", label: "Install configs" },
+  { id: "addressPools", label: "Address pools" },
   { id: "templates", label: "Launch templates" },
   { id: "stacks", label: "Stacks" },
   { id: "disks", label: "Disk images" },

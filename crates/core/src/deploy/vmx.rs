@@ -113,6 +113,21 @@ pub fn seed_slot(disks: &[VmxDisk], iso: bool) -> String {
     format!("sata0:{}", first_cdrom_slot(disks) + u32::from(iso))
 }
 
+/// VM-29: where an ISO install's CD/DVD drive goes: after the SATA disks.
+pub fn iso_slot(disks: &[VmxDisk]) -> String {
+    format!("sata0:{}", first_cdrom_slot(disks))
+}
+
+/// VM-29: COM1 to a file, where an installer started with `console=ttyS0` writes its log (S1 to S3).
+pub fn serial_file_keys(file: &std::path::Path) -> Vec<(&'static str, String)> {
+    vec![
+        ("serial0.present", "TRUE".into()),
+        ("serial0.fileType", "file".into()),
+        ("serial0.fileName", file.display().to_string()),
+        ("serial0.startConnected", "TRUE".into()),
+    ]
+}
+
 /// The `.vmx` text, with Windows line ends as Workstation writes them.
 pub fn render(vmx: &NewVmx) -> String {
     let mut lines: Vec<(String, String)> = Vec::new();
@@ -125,8 +140,10 @@ pub fn render(vmx: &NewVmx) -> String {
     set("nvram", format!("{}.nvram", vmx.display_name));
     match vmx.firmware {
         Firmware::Bios => {
+            // VM-29 (S1 to S3): the disk first. A blank one falls through to the ISO; with the CD first, a power
+            // cycle after an unattended install boots the installer again, which wipes the disk.
             if vmx.iso.is_some() {
-                set("bios.bootOrder", "cdrom,hdd".into());
+                set("bios.bootOrder", "hdd,cdrom".into());
             }
         }
         Firmware::Efi => set("firmware", "efi".into()),
@@ -321,7 +338,7 @@ mod tests {
             ..ubuntu()
         };
         let k = keys(&render(&bios));
-        assert_eq!(get(&k, "bios.bootOrder"), Some("cdrom,hdd"));
+        assert_eq!(get(&k, "bios.bootOrder"), Some("hdd,cdrom"), "the disk first");
         assert_eq!(get(&k, "firmware"), None);
         assert_eq!(get(&k, "sata0:0.fileName"), Some("x.vmdk"));
         assert_eq!(

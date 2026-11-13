@@ -431,6 +431,7 @@ fn fast(core: &Core) {
         ip_wait_cap: Some(Duration::from_millis(300)),
         cleanup_tries: 2,
         cleanup_pause: Duration::from_millis(10),
+        ..DeployTuning::default()
     });
 }
 

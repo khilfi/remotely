@@ -11,6 +11,7 @@ pub mod disk_images;
 pub mod disk_tools;
 pub mod github_server;
 pub mod host_networks;
+pub mod install_isos;
 pub mod net_tools;
 pub mod ssh_server;
 pub mod stack_clock;
@@ -1801,9 +1802,22 @@ impl FakeVirtualBox {
             "modifyvm" => {
                 locked(&vm_now()?)?;
                 let opts = &args[2..];
+                // VM-29: COM1 to a file (`--uart1 <base> <irq>`, `--uartmode1 file <path>`) and a NAT rule take more
+                // or fewer words than a pair; the fake keeps them in `calls` only.
+                let mut pairs: Vec<(&str, &str)> = Vec::new();
+                let mut at = 0;
+                while at < opts.len() {
+                    match opts[at].as_str() {
+                        "--uart1" | "--uartmode1" => at += 3,
+                        "--natpf1" => at += 2,
+                        name => {
+                            pairs.push((name, opts.get(at + 1).map(String::as_str).unwrap_or_default()));
+                            at += 2;
+                        }
+                    }
+                }
                 with_vm(&mut |vm| {
-                    for pair in opts.chunks(2) {
-                        let (name, value) = (pair[0].as_str(), pair.get(1).map(String::as_str).unwrap_or_default());
+                    for &(name, value) in &pairs {
                         let nic = |prefix: &str| name.strip_prefix(prefix).and_then(|n| n.parse::<u32>().ok());
                         match name {
                             "--cpus" => vm.cpus = value.parse().ok(),
@@ -2034,6 +2048,16 @@ impl FakeVirtualBox {
             "controlvm" => {
                 let info = vm_now()?;
                 let verb = args.get(2).cloned().unwrap_or_default();
+                // VM-29: a reset (a hang under Hyper-V) and a running VM's NAT rules.
+                if verb == "reset" || verb.starts_with("natpf") {
+                    if !info.power_state().is_on() {
+                        return Err(failed(
+                            "controlvm",
+                            &format!("Machine '{}' is not currently running", info.name),
+                        ));
+                    }
+                    return Ok(String::new());
+                }
                 let Some(n) = verb.strip_prefix("setlinkstate").and_then(|n| n.parse::<u32>().ok()) else {
                     return Err(failed("controlvm", "Unknown command"));
                 };

@@ -2,8 +2,9 @@
 <!--
   Windows Server 2025 (UEFI, GPT): the whole disk, the edition by its index in install.wim (the image_index variable: 2 is
   Standard with the Desktop Experience on Microsoft's media), the Administrator with a one-time password, and WinRM over
-  HTTPS turned on at the first sign-in (a self-signed certificate, port 5986), so Remotely can reach the VM and set the
-  Administrator's password from the vault. A starter from Remotely: copy it to change it.
+  HTTPS turned on at the first sign-in (a self-signed certificate, port 5986, its fingerprint written to COM1 so a deploy
+  can check it), so Remotely can reach the VM and set the Administrator's password from the vault. Setup's stages go to
+  COM1 too, for the deploy's install watcher. A starter from Remotely: copy it to change it.
 -->
 <unattend xmlns="urn:schemas-microsoft-com:unattend" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
   <settings pass="windowsPE">
@@ -81,6 +82,15 @@
       <ComputerName>{{hostname}}</ComputerName>
       <TimeZone>UTC</TimeZone>
     </component>
+    <component name="Microsoft-Windows-Deployment" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
+      <RunSynchronous>
+        <RunSynchronousCommand wcm:action="add">
+          <Order>1</Order>
+          <Path>cmd /c (echo remotely-stage specialize %TIME%>COM1) 2>nul &amp; exit 0</Path>
+          <Description>Tell Remotely that Windows is being set up (on the serial port)</Description>
+        </RunSynchronousCommand>
+      </RunSynchronous>
+    </component>
   </settings>
   <settings pass="oobeSystem">
     <component name="Microsoft-Windows-International-Core" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
@@ -121,8 +131,8 @@
         </SynchronousCommand>
         <SynchronousCommand wcm:action="add">
           <Order>2</Order>
-          <CommandLine>powershell -NoProfile -ExecutionPolicy Bypass -Command "$c = New-SelfSignedCertificate -DnsName $env:COMPUTERNAME -CertStoreLocation Cert:\LocalMachine\My; New-Item -Path WSMan:\localhost\Listener -Transport HTTPS -Address * -CertificateThumbPrint $c.Thumbprint -Force"</CommandLine>
-          <Description>WinRM over HTTPS with a self-signed certificate</Description>
+          <CommandLine>powershell -NoProfile -ExecutionPolicy Bypass -Command "$c = New-SelfSignedCertificate -DnsName $env:COMPUTERNAME -CertStoreLocation Cert:\LocalMachine\My; New-Item -Path WSMan:\localhost\Listener -Transport HTTPS -Address * -CertificateThumbPrint $c.Thumbprint -Force; $f = [Convert]::ToBase64String([Security.Cryptography.SHA256]::Create().ComputeHash($c.RawData)).TrimEnd('='); try { $p = New-Object System.IO.Ports.SerialPort COM1,115200; $p.Open(); $p.WriteLine('remotely-winrm SHA256:' + $f); $p.Close() } catch { }"</CommandLine>
+          <Description>WinRM over HTTPS with a self-signed certificate, its fingerprint written to the serial port for Remotely</Description>
           <RequiresUserInput>false</RequiresUserInput>
         </SynchronousCommand>
         <SynchronousCommand wcm:action="add">

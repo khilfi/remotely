@@ -49,6 +49,13 @@ export const HELP = {
       "A field the form can't change in this file says why: edit the file beside it instead.",
     ],
   },
+  "addressPool.free": {
+    title: "Which addresses a pool hands out",
+    body: [
+      "A deploy gives each VM the next address of the range that no VM holds and nothing answers a ping on, checked again just before the VM is made. The gateway and the DNS servers are never handed out.",
+      "An address stays its VM's until Remotely deletes the VM. A host that drops pings looks free, so keep the range apart from addresses set by hand.",
+    ],
+  },
   "page.diskImages": {
     title: "Disk images",
     body: [
@@ -584,6 +591,13 @@ export const HELP = {
     body: [
       "Before anything is made you see each VM's name, folder, size and disk space, with this PC's room after it, and approve the deploy.",
       "A VM that fails is removed with what it made; VMs already made stay.",
+    ],
+  },
+  "deploy.unattended": {
+    title: "Unattended installs",
+    body: [
+      "The install config answers the installer. Remotely copies the ISO once with its boot menu changed (the ISO itself is only read) and gives each VM its answer file on a small CD, kept where only you can open it. Values per VM fill {{ip}} and the config's own variables; an empty one takes its default.",
+      "Each VM's step watches its install on the serial port, then signs in: SSH for Linux, WinRM over HTTPS for Windows, where Setup's one-time password becomes the vault's. Then the CDs come out and the snapshot 'clean install' is taken if the template asks.",
     ],
   },
   containerHosts: {

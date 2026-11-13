@@ -61,6 +61,7 @@
 //! runner (changes) or [`inventory::Inventory`] and [`metrics`] (reads).
 
 pub mod adapters;
+pub mod address_pools;
 pub mod alerts;
 pub mod bookmarks;
 pub mod bulk;
@@ -407,6 +408,9 @@ pub struct Core {
     /// FD-05, BX-12, FD-08: the inventory to Excel, an Ansible inventory and the handover pack. Reads only; each export
     /// is audited.
     pub reports: reports::Reports,
+    /// VM-32: address pools for static addresses (edits audited, refused by the read-only lock), and the deploy's
+    /// claims on them; free addresses are found with the toolbox's ping.
+    pub address_pools: Arc<address_pools::AddressPools>,
 }
 
 /// What lets go of decrypted secrets when the vault locks ([`Core::spawn_lock_watch`]).
@@ -526,6 +530,10 @@ impl Core {
                 Ok(swept) => tracing::info!(swept, "copies left from earlier edits on this PC deleted"),
                 Err(err) => tracing::warn!(error = %err, "the folder for edits on this PC could not be set up"),
             }
+        }
+        // VM-32: addresses claimed by deploys the app stopped in the middle of go back to their pools.
+        if let Err(err) = core.address_pools.release_stale_claims_everywhere(ctx.user_id).await {
+            tracing::warn!(error = %err, "address claims left by earlier deploys could not be released");
         }
         Ok(core)
     }
@@ -785,6 +793,19 @@ impl Core {
         // FD-04: a support bundle is a job; the job runner writes its zip through the bundle runner.
         jobs.set_bundles(Arc::new(support_bundle::BundleRunner::new(store.clone())));
         let bundles = support_bundle::SupportBundles::new(store.clone(), Arc::clone(&bus));
+        // VM-32: a free address is one nothing answers on, asked with the toolbox's ping.
+        let address_pools = Arc::new(address_pools::AddressPools::new(
+            store.clone(),
+            Arc::clone(&adapters.network_tools),
+        ));
+        // VM-29: unattended installs render from the catalogue's configs, take their addresses from the pools, and
+        // sign in to a new Windows VM over WinRM with the certificate it wrote to its serial port.
+        deployer.set_install_tools(deploy::runner::InstallTools {
+            catalog: catalog.clone(),
+            winrm: Arc::clone(&winrm),
+            known_hosts: Arc::clone(&known_hosts),
+            pools: Some(Arc::clone(&address_pools)),
+        });
         let deploy = deploy::service::Deploys::new(
             store.clone(),
             catalog.clone(),
@@ -792,7 +813,8 @@ impl Core {
             Arc::clone(&adapters.host_counters),
             Arc::clone(&bus),
         )
-        .with_converter(Arc::clone(&converter));
+        .with_converter(Arc::clone(&converter))
+        .with_address_pools(Arc::clone(&address_pools));
         // VM-08: the job runner runs a stack's steps through the deploy runner and power commands, and waits between
         // them through the stack runner.
         let stack_runner = Arc::new(stacks::StackRunner::new(
@@ -835,6 +857,7 @@ impl Core {
             BulkRuns::new(store.clone()).with_terminals(terminals.clone()),
         );
         let core = Self {
+            address_pools,
             reports,
             vm_settings,
             networks,
@@ -961,6 +984,11 @@ impl Core {
     /// VM-21: how the deploy runner waits for a guest's IP and for VirtualBox to let go of a VM; tests shorten it.
     pub fn set_deploy_tuning(&self, tuning: deploy::runner::DeployTuning) {
         self.deployer.set_tuning(tuning);
+    }
+
+    /// VM-29 (tests): the WinRM client an unattended deploy signs in to a new Windows VM with.
+    pub fn set_deploy_winrm(&self, winrm: Arc<dyn adapters::winrm::WinrmAdapter>) {
+        self.deployer.set_install_winrm(winrm);
     }
 
     /// VM-08: the clock a stack job's readiness checks and delays wait on (tests give a fake one, so nothing sleeps),

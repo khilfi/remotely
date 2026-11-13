@@ -617,6 +617,7 @@ async fn a_libvirt_vm_imports_into_workstation_as_a_deploy() {
         ip_wait_cap: Some(Duration::from_millis(100)),
         cleanup_tries: 2,
         cleanup_pause: Duration::from_millis(10),
+        ..DeployTuning::default()
     });
     let analysis = core.deploy.analyze_import(&source).await.unwrap();
     assert_eq!(analysis.suggested_name, "db01");

@@ -142,7 +142,13 @@ impl Facts {
         let install = self.install_problems(spec);
         match templates::resolve(id, spec, &refs, count, taken, today()) {
             Ok(_) if !install.is_empty() => Err(install),
-            Ok(plan) => Ok(plan),
+            Ok(mut plan) => {
+                // VM-29: the deploy installs from the config as the catalogue has it now.
+                if let templates::InstallRef::Found(config) = self.install(spec.install_config_id) {
+                    plan.install_config = Some(config.clone());
+                }
+                Ok(plan)
+            }
             Err(mut problems) => {
                 problems.extend(install);
                 Err(problems)

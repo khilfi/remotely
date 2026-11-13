@@ -53,6 +53,33 @@ export function DeployPreviewView({ preview, showWarnings = true }: Props) {
             </dd>
           </>
         )}
+        {preview.install && (
+          <>
+            <dt className="text-muted-foreground">Installs</dt>
+            <dd>
+              unattended from &apos;{preview.install.configName}&apos; ({preview.install.kind}):{" "}
+              {preview.install.delivery}
+              {preview.install.isoCopyBytes !== null
+                ? `; the ISO's copy takes ${bytesText(preview.install.isoCopyBytes)} until the installs are done`
+                : ""}
+              ; watched for up to {preview.install.timeLimitMinutes} minutes
+            </dd>
+            {preview.install.vms.some((vm) => vm.ip) && (
+              <>
+                <dt className="text-muted-foreground">Addresses</dt>
+                <dd>
+                  {preview.install.vms.map((vm, i) => (
+                    <span key={vm.name}>
+                      {i > 0 && ", "}
+                      {vm.name} <span data-mask="ip">{vm.ip ?? "DHCP"}</span>
+                    </span>
+                  ))}
+                  {preview.install.pool ? ` (from the pool ${preview.install.pool})` : ""}
+                </dd>
+              </>
+            )}
+          </>
+        )}
         <dt className="text-muted-foreground">Environment</dt>
         <dd className="flex flex-wrap items-center gap-2">
           <EnvBadge env={preview.environment} />

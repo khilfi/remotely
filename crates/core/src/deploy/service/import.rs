@@ -445,12 +445,14 @@ impl Deploys {
             after_deploy: request.after_deploy,
             ip_wait_secs: DEFAULT_IP_WAIT_SECS,
             unattended: None,
+            install: None,
             stack: None,
             vms: vec![DeployVm {
                 number: 1,
                 hostname: templates::hostname(&name, 1),
                 name,
                 clone_of: None,
+                install: None,
             }],
         };
         spec.validate()?;
@@ -558,6 +560,7 @@ impl Deploys {
                 problems,
                 preview: None,
                 capacity: None,
+                vm_names: Vec::new(),
             }),
             Ok((spec, analysis)) => {
                 // VM-26: an import is a deploy, so it shows this PC after it too (every disk counts).
@@ -569,6 +572,7 @@ impl Deploys {
                     problems: Vec::new(),
                     preview: Some(checked),
                     capacity: Some(capacity),
+                    vm_names: Vec::new(),
                 })
             }
         }

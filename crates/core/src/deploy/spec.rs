@@ -8,6 +8,7 @@ use uuid::Uuid;
 
 use crate::adapters::hypervisor::Hypervisor;
 use crate::catalog::images::{ImageFormat, ImageSource};
+use crate::catalog::install::InstallKind;
 use crate::catalog::profiles::{Firmware, GuestFamily};
 use crate::catalog::sizes::{DiskController, Provisioning};
 use crate::catalog::templates::{
@@ -224,6 +225,68 @@ pub struct UnattendedSpec {
     pub password_id: SecretId,
 }
 
+/// VM-29: an unattended install from an install config (VM-28), delivered as an ISO copy with the installer's boot
+/// menu changed and each VM's rendered answer file on a seed CD ([`super::install`]). The config is named by its id
+/// and its fingerprint: the job renders the config as it was approved, and refuses one changed since.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InstallSpec {
+    pub config_id: Uuid,
+    pub config_name: String,
+    pub kind: InstallKind,
+    /// SHA-256 of the config as approved: its kind, file, variables and vault picks ([`config_fingerprint`]).
+    pub fingerprint: String,
+    /// The vault passwords its answer files take (Linux: as hashes; Windows: a one-time password the deploy replaces
+    /// with this one once the install is done). AP-06: new places for them, so the approval asks again.
+    pub password_ids: Vec<SecretId>,
+    /// The vault key whose public half the files give the user, for the session made after.
+    #[serde(default)]
+    pub key_id: Option<SecretId>,
+    /// How long the install watcher waits for each VM before it counts as failed.
+    pub time_limit_minutes: u32,
+    /// VM-32: the address pool the VMs' addresses come from.
+    #[serde(default)]
+    pub pool: Option<PoolRef>,
+}
+
+/// VM-32: an address pool, by id and name (for the audit log).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PoolRef {
+    pub id: Uuid,
+    pub name: String,
+}
+
+/// VM-29: one VM's values for its answer file (the deploy dialog's row): `{{ip}}` and the config's own variables.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VmInstall {
+    /// `{{ip}}`: typed, or the address pool's.
+    #[serde(default)]
+    pub ip: Option<String>,
+    /// The config's own variables (a missing one takes its default).
+    #[serde(default)]
+    pub values: std::collections::BTreeMap<String, String>,
+}
+
+/// The most minutes the install watcher may wait (the default is [`DEFAULT_INSTALL_MINUTES`]).
+pub const MAX_INSTALL_MINUTES: u32 = 4 * 60;
+pub const DEFAULT_INSTALL_MINUTES: u32 = 60;
+
+/// VM-29: what identifies an install config's content: its kind, file, variables and vault picks.
+pub fn config_fingerprint(spec: &crate::catalog::install::InstallConfigInput) -> String {
+    use sha2::Digest;
+    let mut hash = sha2::Sha256::new();
+    hash.update(spec.kind.as_str().as_bytes());
+    hash.update([0]);
+    hash.update(spec.body.as_bytes());
+    hash.update([0]);
+    hash.update(serde_json::to_vec(&spec.variables).unwrap_or_default());
+    hash.update([0]);
+    hash.update(serde_json::to_vec(&spec.secrets).unwrap_or_default());
+    hex::encode(hash.finalize())
+}
+
 /// One VM the deploy makes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -235,6 +298,9 @@ pub struct DeployVm {
     /// VM-10: the VM it is a clone of (its key) and that VM's name.
     #[serde(default)]
     pub clone_of: Option<(String, String)>,
+    /// VM-29: its answer file's values, when the deploy installs from an install config.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub install: Option<VmInstall>,
 }
 
 /// Everything a deploy needs, for every VM it makes.
@@ -269,6 +335,9 @@ pub struct DeploySpec {
     #[serde(default)]
     pub unattended: Option<UnattendedSpec>,
     pub vms: Vec<DeployVm>,
+    /// VM-29: an unattended install from an install config (an ISO deploy only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub install: Option<InstallSpec>,
     /// VM-08: a step of a stack deploy: each VM made joins this stack instance, at this step.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stack: Option<crate::stacks::StackTag>,
@@ -391,6 +460,7 @@ impl DeploySpec {
             after_deploy: plan.after_deploy,
             ip_wait_secs: DEFAULT_IP_WAIT_SECS,
             unattended: None,
+            install: None,
             stack: None,
             vms: plan
                 .vms
@@ -400,6 +470,7 @@ impl DeploySpec {
                     name: vm.name.clone(),
                     hostname: vm.hostname.clone(),
                     clone_of: None,
+                    install: None,
                 })
                 .collect(),
         }
@@ -479,6 +550,28 @@ impl DeploySpec {
                     ""
                 }
             ));
+        }
+        if let Some(install) = &self.install {
+            // The config by name and fingerprint; never a rendered file (its SHA-256 goes in each VM's note).
+            let mut text = format!(
+                "installs unattended from the install config '{}' ({}, SHA-256 {}), watched for up to {} minutes",
+                install.config_name,
+                install.kind.label(),
+                install.fingerprint,
+                install.time_limit_minutes
+            );
+            let ips: Vec<String> = self
+                .vms
+                .iter()
+                .filter_map(|vm| Some(format!("{} {}", vm.name, vm.install.as_ref()?.ip.as_ref()?)))
+                .collect();
+            if !ips.is_empty() {
+                text.push_str(&format!(", addresses {}", ips.join(", ")));
+            }
+            if let Some(pool) = &install.pool {
+                text.push_str(&format!(" from the address pool '{}'", pool.name));
+            }
+            parts.push(text);
         }
         parts.push(format!("environment {}", self.environment.as_str()));
         parts.push(format!("after deploy: {}", self.after_deploy.describe()));
@@ -579,6 +672,11 @@ impl DeploySpec {
                 return invalid("The unattended install's user isn't one VirtualBox can make.");
             }
         }
+        if let Some(install) = &self.install {
+            self.validate_install(install)?;
+        } else if self.vms.iter().any(|vm| vm.install.is_some()) {
+            return invalid("Only an install from an install config takes values per VM.");
+        }
         if self.ip_wait_secs > MAX_IP_WAIT_SECS {
             return invalid("The wait for the guest's IP is at most an hour.");
         }
@@ -587,6 +685,68 @@ impl DeploySpec {
         }
         if self.stack.is_some() && matches!(self.source, DeploySource::BulkClone) {
             return invalid("A stack deploys launch templates, not bulk clones.");
+        }
+        Ok(())
+    }
+
+    /// VM-29: an install from an install config: an ISO deploy of a kind Remotely delivers, with each VM's values in
+    /// a shape the answer file can take (the render checks them again against the config).
+    fn validate_install(&self, install: &InstallSpec) -> Result<()> {
+        if !matches!(self.source, DeploySource::Iso { .. }) {
+            return invalid("An install config installs from an ISO.");
+        }
+        if self.unattended.is_some() {
+            return invalid("A deploy installs from an install config or by VirtualBox itself, not both.");
+        }
+        if super::install::Flavor::of(install.kind).is_none() {
+            return invalid(format!(
+                "Remotely doesn't deliver {} installs yet.",
+                install.kind.label()
+            ));
+        }
+        if install.config_name.trim().is_empty()
+            || install.fingerprint.len() != 64
+            || !install.fingerprint.bytes().all(|b| b.is_ascii_hexdigit())
+        {
+            return invalid("The install config's name or fingerprint is damaged.");
+        }
+        if !(1..=MAX_INSTALL_MINUTES).contains(&install.time_limit_minutes) {
+            return invalid(format!(
+                "The install's time limit is 1 to {MAX_INSTALL_MINUTES} minutes."
+            ));
+        }
+        let mut ips = std::collections::HashSet::new();
+        for vm in &self.vms {
+            let Some(values) = &vm.install else {
+                return invalid(format!("{} has no values for its answer file.", vm.name));
+            };
+            if let Some(ip) = &values.ip {
+                let parsed: std::net::IpAddr = ip
+                    .parse()
+                    .map_err(|_| CoreError::InvalidInput(format!("'{ip}' isn't an IP address.")))?;
+                if !ips.insert(parsed) {
+                    return invalid(format!("Two VMs get the address {ip}."));
+                }
+            }
+            if values.values.len() > crate::catalog::install::MAX_VARIABLES {
+                return invalid(format!("{} has too many values.", vm.name));
+            }
+            for (name, value) in &values.values {
+                if !crate::catalog::install::vars::valid_name(name) {
+                    return invalid(format!("'{name}' isn't a variable's name."));
+                }
+                if let Some(why) = crate::catalog::install::vars::check_value(install.kind, value) {
+                    return invalid(format!("{{{{{name}}}}}'s value for {} {why}.", vm.name));
+                }
+            }
+        }
+        if install.pool.is_some()
+            && self
+                .vms
+                .iter()
+                .any(|vm| vm.install.as_ref().is_some_and(|v| v.ip.is_none()))
+        {
+            return invalid("Each VM gets an address from the pool.");
         }
         Ok(())
     }

@@ -86,6 +86,7 @@ async fn lab_both(label: &str, vmware: impl FnOnce(&Path) -> FakeVmware, virtual
         ip_wait_cap: Some(Duration::from_millis(100)),
         cleanup_tries: 3,
         cleanup_pause: Duration::from_millis(10),
+        ..DeployTuning::default()
     });
     let clock = Arc::new(FakeStackClock::default());
     core.set_stack_clock(
@@ -1079,6 +1080,9 @@ async fn the_capacity_planner_shows_this_pc_after_a_deploy_and_what_to_suspend()
         naming_pattern: None,
         host_adapter: None,
         guest_password_id: None,
+        vm_values: Vec::new(),
+        address_pool_id: None,
+        install_minutes: None,
     };
     let check = core.deploy.check(ctx, &request(1)).await.unwrap();
     let capacity = check.capacity.unwrap();

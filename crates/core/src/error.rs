@@ -434,6 +434,10 @@ pub enum CoreError {
     #[error("{vm} was not made: {message}")]
     DeployFailed { vm: String, message: String },
 
+    /// VM-29: a new VM's unattended install failed or ran out of time; the VM is kept, and `message` says why.
+    #[error("{vm}: {message}")]
+    InstallFailed { vm: String, message: String },
+
     /// CT-01, CT-02: a container CLI could not do what was asked. The message says why in words and
     /// never holds a secret, a log line or an environment value.
     #[error("{message}")]
@@ -588,6 +592,7 @@ impl CoreError {
             CoreError::OvftoolNotFound => "ovftool_not_found",
             CoreError::Ovftool { .. } => "ovftool_failed",
             CoreError::DeployFailed { .. } => "deploy_failed",
+            CoreError::InstallFailed { .. } => "install_failed",
             CoreError::Container { problem, .. } => problem.code(),
             CoreError::QemuImgNotFound => "qemu_img_not_found",
             CoreError::ConversionTool { .. } => "conversion_failed",

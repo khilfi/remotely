@@ -520,6 +520,88 @@ async fn file_bookmarks_are_per_workspace() {
 }
 
 #[tokio::test]
+async fn address_pools_and_their_leases_are_per_workspace() {
+    use remotely_core::address_pools::AddressPoolInput;
+    // VM-32: every address answers the fake's ping unless made silent.
+    let tools = Arc::new(remotely_core::fakes::FakeNetworkTools::new());
+    for n in 10..=20 {
+        tools.set_silent(&format!("192.0.2.{n}"), true);
+    }
+    let core = Setup::new(FakeVmware::default())
+        .with_network_tools(tools.clone())
+        .build()
+        .await;
+    let acme = core.ctx();
+    let input = AddressPoolInput {
+        name: "lab".into(),
+        hypervisor: remotely_core::adapters::hypervisor::Hypervisor::Vmware,
+        network: remotely_core::catalog::templates::Network::Nat,
+        first_ip: "192.0.2.10".into(),
+        last_ip: "192.0.2.20".into(),
+        prefix: 24,
+        gateway: Some("192.0.2.1".into()),
+        dns: vec![],
+        notes: None,
+    };
+    let lab = core.address_pools.add(&acme, input.clone()).await.unwrap();
+    let ten: std::net::Ipv4Addr = "192.0.2.10".parse().unwrap();
+    core.address_pools
+        .claim(&acme, lab.id, ten, "web-1", Uuid::new_v4())
+        .await
+        .unwrap();
+
+    let globex = create(&core, "Globex").await;
+    switch(&core, &globex).await;
+    let b = core.ctx();
+    assert!(core.address_pools.list(&b).await.unwrap().is_empty());
+    // Another workspace's pool can't be read, changed, deleted, picked from or claimed in from here.
+    assert!(core.address_pools.leases(&b, lab.id).await.is_err());
+    assert!(core.address_pools.update(&b, lab.id, input.clone()).await.is_err());
+    assert!(core.address_pools.delete(&b, lab.id).await.is_err());
+    assert!(core.address_pools.pick(&b, lab.id, 1, &[]).await.is_err());
+    assert!(core
+        .address_pools
+        .claim(&b, lab.id, "192.0.2.11".parse().unwrap(), "web-2", Uuid::new_v4())
+        .await
+        .is_err());
+    assert!(core
+        .address_pools
+        .assign(&b, lab.id, ten, r"C:\VMs\x\x.vmx")
+        .await
+        .is_err());
+    // The same name and range are free in another workspace, whose leases are its own.
+    let own = core.address_pools.add(&b, input).await.unwrap();
+    assert_eq!(own.used, 0);
+    assert_eq!(core.address_pools.pick(&b, own.id, 1, &[]).await.unwrap()[0].ip, ten);
+    assert!(audit_of(&core, &b)
+        .await
+        .iter()
+        .any(|e| e.event == "address_pool_changed"));
+
+    let home = core
+        .workspaces
+        .list()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|w| !w.current)
+        .unwrap();
+    switch(&core, &home).await;
+    let back = core.address_pools.list(&acme).await.unwrap();
+    assert_eq!(back.len(), 1);
+    assert_eq!(back[0].used, 1, "its claim is still there");
+    assert_eq!(
+        audit_of(&core, &acme)
+            .await
+            .iter()
+            .filter(|e| e.event == "address_pool_changed")
+            .count(),
+        1,
+        "each workspace audits its own"
+    );
+}
+
+#[tokio::test]
 async fn notes_stars_recents_and_the_trash_are_per_workspace() {
     let core = Setup::new(FakeVmware::default()).build().await;
     let acme = core.ctx();

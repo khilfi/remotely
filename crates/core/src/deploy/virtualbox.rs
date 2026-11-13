@@ -68,14 +68,14 @@ pub fn nic_args(network: &Network, host_adapter: Option<&str>, nic: &str) -> Vec
 }
 
 /// `modifyvm` for a new VM: the size's CPU and memory, the profile's firmware and TPM, the network card, the
-/// boot order (the DVD first for an ISO install) and a display that works for every guest.
+/// boot order and a display that works for every guest. The disk boots first, the DVD after it (VM-29, S1 to S3: a
+/// blank disk falls through to an ISO install's DVD, and once the OS is installed it boots, the DVD still in).
 pub fn modifyvm_args(
     uuid: &str,
     size: &SizeSpec,
     profile: &ProfileSpec,
     network: &Network,
     host_adapter: Option<&str>,
-    boot_dvd_first: bool,
 ) -> Vec<String> {
     let mut out = vec![
         "modifyvm".into(),
@@ -102,13 +102,8 @@ pub fn modifyvm_args(
         out.push(tpm.clone());
     }
     out.extend(nic_args(network, host_adapter, &profile.nic));
-    let (first, second) = if boot_dvd_first {
-        ("dvd", "disk")
-    } else {
-        ("disk", "dvd")
-    };
     out.extend(args(&[
-        "--boot1", first, "--boot2", second, "--boot3", "none", "--boot4", "none",
+        "--boot1", "disk", "--boot2", "dvd", "--boot3", "none", "--boot4", "none",
     ]));
     out
 }
@@ -342,6 +337,20 @@ pub fn unattended_args(uuid: &str, iso: &Path, user: &str, password_file: &Path,
     ]
 }
 
+/// VM-29: COM1 to a file, where an installer started with `console=ttyS0` writes its log (S1, S2).
+pub fn uart_args(uuid: &str, file: &Path) -> Vec<String> {
+    vec![
+        "modifyvm".into(),
+        uuid.into(),
+        "--uart1".into(),
+        "0x3F8".into(),
+        "4".into(),
+        "--uartmode1".into(),
+        "file".into(),
+        path(file),
+    ]
+}
+
 pub fn unregister_args(uuid: &str) -> Vec<String> {
     args(&["unregistervm", uuid, "--delete"])
 }
@@ -417,7 +426,6 @@ mod tests {
             &profile(Firmware::Efi, None),
             &Network::HostOnly,
             Some("VirtualBox Host-Only Ethernet Adapter"),
-            false,
         );
         let joined = modify.join(" ");
         for part in [
@@ -437,14 +445,17 @@ mod tests {
             &profile(Firmware::EfiSecureBoot, Some("2.0")),
             &Network::Internal { name: "lab".into() },
             None,
-            true,
         )
         .join(" ");
         assert!(windows.contains("--tpm-type 2.0"), "{windows}");
         assert!(windows.contains("--nic1 intnet --intnet1 lab"), "{windows}");
         assert!(
-            windows.contains("--boot1 dvd --boot2 disk"),
-            "an ISO install boots the DVD first"
+            windows.contains("--boot1 disk --boot2 dvd"),
+            "the disk first: a blank one falls through to an ISO install's DVD"
+        );
+        assert_eq!(
+            uart_args("u", Path::new(r"C:\VMs\w\w-serial.log")).join(" "),
+            r"modifyvm u --uart1 0x3F8 4 --uartmode1 file C:\VMs\w\w-serial.log"
         );
         assert_eq!(secure_boot_calls(uuid).len(), 4);
         assert_eq!(

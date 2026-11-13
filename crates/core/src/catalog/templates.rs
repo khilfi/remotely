@@ -850,6 +850,8 @@ pub struct DeployPlan {
     pub packages: Vec<String>,
     /// VM-21 (R2): how a golden VM image is cloned.
     pub clone_mode: CloneMode,
+    /// VM-28, VM-29: the install config its deploys install from, as the catalogue checked it (G6 delivers it).
+    pub install_config: Option<super::install::InstallConfig>,
 }
 
 impl DeployPlan {
@@ -994,6 +996,7 @@ pub fn resolve(
         guest_user: template.guest_user.clone(),
         packages: template.packages.clone(),
         clone_mode: template.clone_mode,
+        install_config: None,
     })
 }
 

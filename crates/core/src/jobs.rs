@@ -1737,7 +1737,10 @@ impl JobRunner {
                     .spec
                     .vm(name)
                     .ok_or_else(|| CoreError::UnknownTarget(target.target.key()))?;
-                let note = deployer.deploy_vm(&spec.ctx, job_id, &step.spec, vm, token).await?;
+                let progress = self.progress_for(job_id, target);
+                let note = deployer
+                    .deploy_vm(&spec.ctx, job_id, &step.spec, vm, &progress, token)
+                    .await?;
                 let output = OutputCollector::collect(note.as_bytes(), b"", &[], MAX_OUTPUT_PER_STREAM);
                 Ok(TargetOutcome {
                     output: Some(output),
@@ -2107,7 +2110,10 @@ impl JobRunner {
                 let vm = deploy
                     .vm(name)
                     .ok_or_else(|| CoreError::UnknownTarget(target.target.key()))?;
-                let note = deployer.deploy_vm(&spec.ctx, job_id, deploy, vm, token).await?;
+                let progress = self.progress_for(job_id, target);
+                let note = deployer
+                    .deploy_vm(&spec.ctx, job_id, deploy, vm, &progress, token)
+                    .await?;
                 // Activity shows each VM's result as its output.
                 let output = OutputCollector::collect(note.as_bytes(), b"", &[], MAX_OUTPUT_PER_STREAM);
                 Ok(TargetOutcome {
@@ -2987,6 +2993,8 @@ impl JobRunner {
             | Command::WakeOnLan { .. }
             | Command::FileServer { .. } => 1,
             // VM-21: each VM copies or writes whole disks, so two at a time keep this PC's disk usable.
+            // VM-29: an unattended install writes a blank disk, then waits for its installer.
+            Command::Deploy { spec, .. } if spec.install.is_some() => crate::deploy::PARALLEL_INSTALLS,
             Command::Deploy { .. } => limits.vm_ops.min(crate::deploy::PARALLEL_VMS),
             // VM-08: within a step, as the commands it stands for.
             Command::Stack { op, .. } => match op {

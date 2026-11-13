@@ -2526,6 +2526,29 @@ export interface DeployRequest {
   hostAdapter?: string | null;
   /** VirtualBox, an ISO it installs by itself: the vault password its guest user gets; null: install from the console. */
   guestPasswordId?: string | null;
+  /** VM-29: with an install config, each VM's row in the order the VMs are named: `{{ip}}` and own variables. */
+  vmValues?: VmInstall[];
+  /** VM-32: the address pool each VM's `{{ip}}` comes from. */
+  addressPoolId?: string | null;
+  /** VM-29: how long the install watcher waits for each VM, in minutes (null: an hour). */
+  installMinutes?: number | null;
+}
+
+/** VM-29: one VM's values for its answer file. */
+export interface VmInstall {
+  ip?: string | null;
+  values: Record<string, string>;
+}
+
+/** VM-29: what an install from an install config does. */
+export interface InstallPreview {
+  configName: string;
+  kind: string;
+  delivery: string;
+  isoCopyBytes: number | null;
+  timeLimitMinutes: number;
+  pool: string | null;
+  vms: { name: string; hostname: string; ip: string | null; values: Record<string, string> }[];
 }
 
 /** VM-10: one full clone of each picked VM. */
@@ -2595,6 +2618,8 @@ export interface DeployPreview {
   warnings: string[];
   /** Why it can't run as it is. */
   refusals: string[];
+  /** VM-29: an install from an install config. */
+  install?: InstallPreview | null;
 }
 
 export interface DeployCheck {
@@ -2602,6 +2627,8 @@ export interface DeployCheck {
   preview: DeployPreview | null;
   /** VM-26: this PC after the deploy, next to now. */
   capacity?: DeployCapacity | null;
+  /** VM-29: the VMs it names, also while it has problems. */
+  vmNames?: string[];
 }
 
 /** BX-01: what is picked: tabs and tree sessions for Compare, sessions, VMs, tags and filters for a key push. */

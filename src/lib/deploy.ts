@@ -59,6 +59,8 @@ export interface DeployStep {
   /** What it came to: its folder, IP, session... */
   note: string | null;
   durationMs: number | null;
+  /** VM-29: what it does now (an unattended install's stage), as its last progress event said. */
+  doing?: string | null;
 }
 
 export interface DeployProgress {
@@ -106,6 +108,8 @@ export function applyJobEvent(progress: DeployProgress, event: JobEvent): Deploy
       return { ...progress, countdownUntil: null };
     case "targetStarted":
       return step(event.target, { status: "running" });
+    case "targetProgress":
+      return step(event.target, { doing: event.step });
     case "targetFinished":
       return step(event.target, {
         status: event.status,
@@ -181,10 +185,12 @@ export function stepText(step: DeployStep): string {
     case "pending":
       return "Waiting";
     case "running":
-      return "Making it…";
+      return step.doing ? `${step.doing[0].toUpperCase()}${step.doing.slice(1)}…` : "Making it…";
     case "succeeded":
       return step.note ?? "Made";
     case "failed":
+      // VM-29: an install that failed keeps its VM, and says so itself.
+      if (step.message?.includes("is kept as it is")) return `Failed: ${step.message}.`;
       return step.message ? `Failed: ${step.message}. What it made was removed.` : "Failed";
     case "cancelled":
       return "Cancelled; what it made was removed";

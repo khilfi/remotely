@@ -41,9 +41,14 @@ import {
   type Size,
   type SshKey,
   type SubmitOutcome,
+  type VmInstall,
 } from "@/lib/api";
 import { HYPERVISOR_LABEL, templateReason } from "@/lib/catalog";
+import { InstallValuesCard } from "@/components/InstallValuesCard";
+import { addressPoolsApi, type AddressPool } from "@/lib/address-pools-api";
+import { installConfigsApi, type InstallConfig } from "@/lib/install-configs-api";
 import { requestLink } from "@/lib/links";
+import { DEFAULT_INSTALL_MINUTES, MAX_INSTALL_MINUTES, parseMinutes, poolsFor, requestRows } from "@/lib/unattended";
 import {
   applyJobEvent,
   applyJobTargets,
@@ -152,6 +157,12 @@ export function DeployDialog({ templateId, onSubmitted, onClose }: Props) {
   const [busy, setBusy] = useState(false);
   const [progress, setStarted] = useDeployProgress();
   const following = progress !== null;
+  // VM-29, VM-32: an install config's values per VM and where their addresses come from.
+  const [configs, setConfigs] = useState<InstallConfig[]>([]);
+  const [pools, setPools] = useState<AddressPool[]>([]);
+  const [rows, setRows] = useState<VmInstall[]>([]);
+  const [poolId, setPoolId] = useState<string | null>(null);
+  const [minutesText, setMinutesText] = useState(String(DEFAULT_INSTALL_MINUTES));
 
   useEffect(() => {
     let stopped = false;
@@ -175,6 +186,14 @@ export function DeployDialog({ templateId, onSubmitted, onClose }: Props) {
     );
     api.secrets().then(
       (list) => !stopped && setPasswords(list.filter((x) => x.kind === "password")),
+      () => {},
+    );
+    installConfigsApi.list().then(
+      (list) => !stopped && setConfigs(list),
+      () => {},
+    );
+    addressPoolsApi.list().then(
+      (list) => !stopped && setPools(list),
       () => {},
     );
     return () => {
@@ -205,6 +224,12 @@ export function DeployDialog({ templateId, onSubmitted, onClose }: Props) {
   const imageId = mode === "template" ? template?.imageId : customInput?.imageId;
   const isoOnVirtualBox = hypervisor === "virtualbox" && images.find((i) => i.id === imageId)?.source.kind === "iso";
   const bridged = network?.kind === "bridged";
+  // VM-29: the template's install config, which installs the VMs unattended.
+  const installConfigId = mode === "template" ? template?.installConfigId : customInput?.installConfigId;
+  const installConfig = configs.find((c) => c.id === installConfigId) ?? null;
+  const fittingPools = installConfig ? poolsFor(pools, hypervisor, network) : [];
+  const pool = fittingPools.some((p) => p.id === poolId) ? poolId : null;
+  const minutes = parseMinutes(minutesText);
 
   // VirtualBox's host-only or bridged adapters, when the network needs one.
   useEffect(() => {
@@ -223,6 +248,16 @@ export function DeployDialog({ templateId, onSubmitted, onClose }: Props) {
     };
   }, [needsAdapter, bridged]);
 
+  // VM-29: the install's rows and pool go with the request; VirtualBox's own unattended install doesn't then.
+  const install: Pick<DeployRequest, "vmValues" | "addressPoolId" | "installMinutes" | "guestPasswordId"> =
+    installConfig && count !== null
+      ? {
+          vmValues: requestRows(rows, count, pool !== null),
+          addressPoolId: pool,
+          installMinutes: minutes,
+          guestPasswordId: null,
+        }
+      : { guestPasswordId: isoOnVirtualBox ? guestPassword : null };
   const request: DeployRequest | null =
     count === null
       ? null
@@ -233,7 +268,7 @@ export function DeployDialog({ templateId, onSubmitted, onClose }: Props) {
               count,
               namingPattern: pattern.trim() && pattern.trim() !== template.namingPattern ? pattern.trim() : null,
               hostAdapter: needsAdapter ? adapter : null,
-              guestPasswordId: isoOnVirtualBox ? guestPassword : null,
+              ...install,
             }
           : null
         : customInput && customInput.imageId
@@ -241,7 +276,7 @@ export function DeployDialog({ templateId, onSubmitted, onClose }: Props) {
               from: { kind: "custom", input: customInput },
               count,
               hostAdapter: needsAdapter ? adapter : null,
-              guestPasswordId: isoOnVirtualBox ? guestPassword : null,
+              ...install,
             }
           : null;
   const requestKey = JSON.stringify(request);
@@ -270,19 +305,22 @@ export function DeployDialog({ templateId, onSubmitted, onClose }: Props) {
   }, [checkedKey, following]);
 
   const current = check?.key === requestKey ? check.check : null;
+  const vmNames = check?.check.vmNames ?? [];
   const reason =
     readOnly ??
     (mode === "template" && !template
       ? templates?.length === 0
         ? "Add a launch template on the Templates page, or use Custom"
         : "Pick a launch template"
-      : deployReason({
-          busy,
-          count,
-          checking: requestKey !== checkedKey || (!current && !checkError),
-          check: current,
-          error: checkError,
-        }));
+      : installConfig && minutes === null
+        ? `Give the install's time limit in whole minutes, 1 to ${MAX_INSTALL_MINUTES}`
+        : deployReason({
+            busy,
+            count,
+            checking: requestKey !== checkedKey || (!current && !checkError),
+            check: current,
+            error: checkError,
+          }));
 
   async function deploy() {
     if (!request || !current?.preview) return;
@@ -428,7 +466,21 @@ export function DeployDialog({ templateId, onSubmitted, onClose }: Props) {
               )
             )}
 
-            {isoOnVirtualBox && (
+            {installConfig && (
+              <InstallValuesCard
+                config={installConfig}
+                names={vmNames}
+                rows={rows}
+                onRows={setRows}
+                pools={fittingPools}
+                poolId={pool}
+                onPool={setPoolId}
+                minutesText={minutesText}
+                onMinutes={setMinutesText}
+                templateName={(mode === "template" ? template?.name : customInput?.name) ?? ""}
+              />
+            )}
+            {isoOnVirtualBox && !installConfig && (
               <div className="grid max-w-md gap-2">
                 <Label htmlFor="deploy-guest-password">Install by itself</Label>
                 <Select
