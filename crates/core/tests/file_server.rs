@@ -26,7 +26,7 @@ use remotely_core::toolbox::file_server::{
 use remotely_core::workspaces::WorkspaceInput;
 use remotely_core::Core;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream, UdpSocket};
+use tokio::net::{TcpStream, UdpSocket};
 use uuid::Uuid;
 
 const SECRET: &[u8] = b"outside-the-root: never served";
@@ -1314,14 +1314,29 @@ async fn tftp_transfers_are_capped_in_all_and_per_client() {
 
 // ---- Stopping --------------------------------------------------------------------------------------------------------
 
-/// The ports are free again: something else can listen on them.
+/// How long a stopped server's port may still be taken. The server closes its sockets before its job ends, but Windows
+/// frees a port a moment after its socket is gone: on a busy PC a bind may fail "in use" for a few milliseconds (20 ms
+/// seen) while no socket of any process holds the port. A port still taken after this was not given back.
+const RELEASE_WAIT: Duration = Duration::from_secs(2);
+
+/// The ports are free again: something else can listen on them (within [`RELEASE_WAIT`]).
 async fn released(running: &Running) {
-    UdpSocket::bind(running.tftp)
-        .await
-        .expect("the TFTP port was given back");
-    TcpListener::bind(running.http)
-        .await
-        .expect("the HTTP port was given back");
+    free_within("TFTP", || std::net::UdpSocket::bind(running.tftp).map(drop)).await;
+    free_within("HTTP", || std::net::TcpListener::bind(running.http).map(drop)).await;
+}
+
+/// Tries `bind` until it works; panics once [`RELEASE_WAIT`] is over, or at once on another error than "in use".
+async fn free_within(what: &str, bind: impl Fn() -> std::io::Result<()>) {
+    let deadline = tokio::time::Instant::now() + RELEASE_WAIT;
+    loop {
+        match bind() {
+            Ok(()) => return,
+            Err(err) if err.kind() == std::io::ErrorKind::AddrInUse && tokio::time::Instant::now() < deadline => {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            Err(err) => panic!("the {what} port was given back: {err}"),
+        }
+    }
 }
 
 #[tokio::test]
