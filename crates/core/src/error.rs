@@ -327,6 +327,23 @@ pub enum CoreError {
     #[error("{0}")]
     Console(String),
 
+    /// SS-08 (0.8.0 G4): "Edit on this PC" found no editor: none set in Settings and none of VS Code, Notepad++ or
+    /// Notepad where they install.
+    #[error(
+        "no editor was found on this PC. Install VS Code or Notepad++, or give an editor's path in Settings, Tools"
+    )]
+    LocalEditorNotFound,
+
+    /// SS-08 (0.8.0 G4): the editor on this PC could not be started.
+    #[error("{0}")]
+    LocalEditor(String),
+
+    /// SS-14 (0.8.0 G4): the host has none of the terminal editors Remotely knows.
+    #[error(
+        "the host has none of the editors Remotely opens files in (nano, micro, vim, vi, nvim, emacs, mcedit, joe, ne), so the file can't be edited in a terminal there. Use Edit on this PC instead"
+    )]
+    NoHostEditor,
+
     /// SS-12: a COM port could not be opened or set up (in use, unplugged, or settings it refuses).
     #[error("{0}")]
     SerialPort(String),
@@ -550,6 +567,9 @@ impl CoreError {
             CoreError::WrongSessionKind { .. } => "wrong_session_kind",
             CoreError::VncViewerNotFound => "vnc_viewer_not_found",
             CoreError::Console(_) => "console_failed",
+            CoreError::LocalEditorNotFound => "local_editor_not_found",
+            CoreError::LocalEditor(_) => "local_editor_failed",
+            CoreError::NoHostEditor => "no_host_editor",
             CoreError::Winrm(_) => "winrm",
             CoreError::CertificateChanged { .. } => "certificate_changed",
             CoreError::CertificateRejected { .. } => "certificate_rejected",

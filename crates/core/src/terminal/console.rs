@@ -56,6 +56,9 @@ pub enum PaneKind {
     Tunnel,
     /// F4: a WinRM session's PowerShell console.
     Powershell,
+    /// SS-14 (0.8.0 G4): an SSH connection whose one channel runs a terminal editor on a host's file
+    /// ([`super::editor`]): never in Type in all tabs or Compare hosts, no Files drawer or tunnels, never reconnected.
+    Editor,
 }
 
 impl PaneKind {
@@ -66,6 +69,7 @@ impl PaneKind {
             PaneKind::Serial => "serial",
             PaneKind::Tunnel => "tunnel",
             PaneKind::Powershell => "PowerShell",
+            PaneKind::Editor => "editor",
         }
     }
 
@@ -543,6 +547,7 @@ impl Terminals {
                 carrier: None,
                 serial_port,
             },
+            editor: None,
         };
         let handle = self.start(ctx, pane, size).await?;
         if let Err(err) = self.inner.store.record_session_opened(ctx, session.id).await {
@@ -639,6 +644,7 @@ impl Terminals {
                 carrier: Some(Arc::clone(&carrier)),
                 serial_port: None,
             },
+            editor: None,
         };
         let handle = self.start(ctx, pane, size).await?;
         if let Err(err) = self.inner.store.record_session_opened(ctx, session.id).await {
@@ -756,7 +762,7 @@ mod tests {
         assert!(PaneKind::Ssh.joins_multiexec());
         // BX-13.
         assert!(PaneKind::Powershell.joins_multiexec());
-        for kind in [PaneKind::Telnet, PaneKind::Serial, PaneKind::Tunnel] {
+        for kind in [PaneKind::Telnet, PaneKind::Serial, PaneKind::Tunnel, PaneKind::Editor] {
             assert!(!kind.joins_multiexec(), "{kind:?}");
         }
         assert_eq!(higher(Environment::Lab, Environment::Prod), Environment::Prod);

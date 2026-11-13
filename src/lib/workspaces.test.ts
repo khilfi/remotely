@@ -48,6 +48,11 @@ test("FD-02: a switch is refused while jobs started here run, and says what it c
     "1 approval waiting for an answer: cancelled.",
   ]);
   assert.deepEqual(switchCloses({ ...nothing, fileServer: true }), ["The file server stops."]);
+  // SS-08 (G4): editing on this PC ends; it doesn't hold the switch back.
+  assert.equal(switchRefusal({ ...nothing, edits: 2 }), null);
+  assert.deepEqual(switchCloses({ ...nothing, edits: 1 }), [
+    "1 file edited on this PC stops being edited; saves not uploaded yet are lost.",
+  ]);
 });
 
 test("FD-02: only unprotected, non-Prod VMs leave a workspace, and only when another workspace exists", () => {

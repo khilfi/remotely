@@ -53,6 +53,10 @@ pub struct HostSpecs {
     pub adapters: Vec<super::windows::NetAdapter>,
     /// F4: listening TCP ports (Windows hosts' System tab; Linux's are MO-14's admin read).
     pub listening: Vec<super::windows::ListeningPort>,
+    /// SS-14 (0.8.0 G4): the terminal editors the host has ([`crate::terminal::editor::EDITOR_PROBE`]), looked for once
+    /// when a file is first opened in one, and kept across later reads of the facts. `None`: not looked for yet.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub editors: Option<Vec<String>>,
 }
 
 impl HostSpecs {

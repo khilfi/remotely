@@ -122,6 +122,9 @@ windows = { version = "0.62", features = [
     "Win32_System_IO",
     "Win32_Networking_WinSock",
     "Win32_Security_Cryptography",
+    # SS-08 (0.8.0 G4): "Edit on this PC" downloads into a folder only this user can open (a protected DACL with the
+    # user's SID alone: OpenProcessToken, GetTokenInformation, SetNamedSecurityInfoW).
+    "Win32_Security_Authorization",
     # SS-12: WinRM's sign-in and message sealing through Windows' own NTLM and Negotiate (SSPI: AcquireCredentialsHandleW,
     # InitializeSecurityContextW, EncryptMessage, DecryptMessage; SEC_WINNT_AUTH_IDENTITY_W is in System_Rpc).
     "Win32_Security_Authentication_Identity",

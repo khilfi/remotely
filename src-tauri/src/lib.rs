@@ -13,6 +13,7 @@ mod dashboard;
 pub mod data_dirs;
 mod deploy;
 pub mod diagnostics;
+mod editing;
 mod file_server;
 mod files;
 mod groups;
@@ -328,6 +329,9 @@ fn forward_events(app: &App, core: &Arc<Core>) {
 
         // FD-09: the file server's start, requests and stop -> UI (the shown workspace's).
         file_server::forward(app.handle(), core);
+
+        // SS-08 (G4): editing sessions on this PC -> UI (the shown workspace's).
+        editing::forward(app.handle(), core);
 
         // SS-04: vault status -> UI, so the idle lock shows at once.
         let mut vault_status = core.vault.watch();
@@ -685,6 +689,7 @@ fn commands() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         containers::container_shell_open,
         ipc::settings_set_docker_path,
         ipc::settings_set_vnc_viewer_path,
+        ipc::settings_set_local_editor_path,
         tunnels::forwards_list,
         tunnels::forwards_all,
         tunnels::forwards_save,
@@ -808,6 +813,15 @@ fn commands() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         files::files_pause,
         files::files_resume,
         files::files_pick_upload_folder,
+        // SS-14, SS-08 (0.8.0 G4): editing a host's files.
+        editing::files_host_editors,
+        editing::files_set_host_editor,
+        editing::files_open_in_editor,
+        editing::terminal_editor_attach,
+        editing::files_edit_on_pc,
+        editing::files_edits,
+        editing::files_edit_stop,
+        editing::files_edit_answer,
         // FD-04 support bundles.
         support_bundle::bundle_presets,
         support_bundle::bundle_limits,

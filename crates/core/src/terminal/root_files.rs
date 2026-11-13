@@ -46,6 +46,11 @@ pub(crate) struct RootFiles {
     pub(crate) server: String,
     /// Who started it: the entry when it ends is theirs.
     ctx: Context,
+    /// G4: where a refused password parks when an editor tab's sudoedit is refused it ([`Terminals::root_refused`]).
+    park: SudoPark,
+    guard: Option<LoginGuard>,
+    /// G4: where sudo's password went (rule 7): an editor tab's sudoedit gives it only to the same place.
+    pub(crate) place: crate::vault::Destination,
 }
 
 /// SS-14: how long root browsing's cancelled transfers get to delete what they made before its channels close.
@@ -66,7 +71,9 @@ impl RootEnd {
             RootEnd::Stopped => "stopped by the user",
             RootEnd::VaultLocked => "the vault locked",
             RootEnd::ConnectionEnded => "the terminal's connection ended or reconnected",
-            RootEnd::SudoRefused => "sudo refused the password when the root channel opened again",
+            RootEnd::SudoRefused => {
+                "sudo refused the password when a root channel or an editor tab's sudoedit asked again"
+            }
         }
     }
 }
@@ -231,8 +238,8 @@ impl Terminals {
             files: root.files,
             terminals: Arc::downgrade(&self.inner),
             control: Arc::downgrade(&control),
-            guard,
-            park,
+            guard: guard.clone(),
+            park: park.clone(),
         });
         // One at a time: a root browsing started twice ends the first.
         let before = locks::lock(&control.root).replace(RootFiles {
@@ -241,6 +248,9 @@ impl Terminals {
             password: sudo.password.filter(|_| with_password),
             server: server.clone(),
             ctx: *ctx,
+            park,
+            guard,
+            place,
         });
         if let Some(before) = before {
             before.files.revoke();
@@ -299,6 +309,18 @@ impl Terminals {
                 tracing::error!(error = %err, "could not audit the end of root browsing");
             }
         });
+    }
+
+    /// SS-14 (G4): sudo refused root browsing's password somewhere else on the session (an editor tab's sudoedit): it
+    /// parks as when root browsing's own channel is refused, and root browsing ends.
+    pub(super) fn root_refused(&self, control: &Arc<Control>) {
+        let parked = locks::lock(&control.root)
+            .as_ref()
+            .map(|r| (r.guard.clone(), r.park.clone()));
+        if let Some((Some(guard), park)) = parked {
+            guard.park(park.subject, park.scope, &park.key, refused(control));
+        }
+        self.end_root(control, RootEnd::SudoRefused);
     }
 
     /// Takes the terminal's root browsing, so nothing new goes through it, and cancels its transfers; the ids of

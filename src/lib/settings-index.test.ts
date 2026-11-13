@@ -51,7 +51,11 @@ test("the search finds a setting by its name, a word it covers or its group", ()
 test("search results show each card once, with the rows that matched", () => {
   const cards = searchCards("path");
   assert.deepEqual(cards, [
-    { card: "tools", group: "tools", sections: ["vmware", "virtualbox", "qemu-img", "docker", "vnc-viewer"] },
+    {
+      card: "tools",
+      group: "tools",
+      sections: ["vmware", "virtualbox", "qemu-img", "docker", "vnc-viewer", "local-editor"],
+    },
   ]);
   assert.deepEqual(searchCards("prod"), [{ card: "rules", group: "approvals", sections: ["rules", "change-ids"] }]);
 });

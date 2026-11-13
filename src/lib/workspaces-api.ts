@@ -42,6 +42,8 @@ export interface SwitchPreview {
   approvals: number;
   /** FD-09: the file server runs here (it stops; it doesn't hold the switch back). */
   fileServer: boolean;
+  /** SS-08 (G4): files edited on this PC; their editing ends (it doesn't hold the switch back). */
+  edits: number;
 }
 
 /** A VM on this PC that no workspace has (crates/core/src/inventory.rs). */

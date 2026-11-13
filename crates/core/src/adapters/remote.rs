@@ -241,6 +241,9 @@ pub struct ShellRequest<'a> {
     pub size: PtySize,
     pub options: &'a ConnectOptions,
     pub verifier: Arc<dyn HostKeyVerifier>,
+    /// SS-14 (G4): an exec request with the PTY instead of a shell: an editor tab's one command. `None`: the login
+    /// shell.
+    pub command: Option<&'a str>,
 }
 
 /// A command or script to run on one host (BX-02), with no terminal and nothing typed.
@@ -808,6 +811,7 @@ impl RemoteAdapter for RusshAdapter {
             size,
             options,
             verifier,
+            command,
         } = request;
         let chain = Chain {
             session,
@@ -817,7 +821,7 @@ impl RemoteAdapter for RusshAdapter {
             verifier,
         };
         let connected = connect_chain(chain, prompter, true).await?;
-        open_pty(connected, size, &options.term).await
+        open_pty(connected, size, &options.term, command).await
     }
 }
 
@@ -1872,7 +1876,7 @@ async fn agent_login(
 /// the same task asks the server for its `hostname` once (QL-03) and which shell it runs (SS-08).
 /// SFTP (SS-08) and port forwards (SS-07) open channels on the same connection when they are used.
 /// The jump hosts' connections (SS-07) stay open as long as the shell's.
-async fn open_pty(connected: Connected, size: PtySize, term: &str) -> Result<ShellHandle> {
+async fn open_pty(connected: Connected, size: PtySize, term: &str, command: Option<&str>) -> Result<ShellHandle> {
     let Connected {
         handle,
         shared,
@@ -1890,7 +1894,7 @@ async fn open_pty(connected: Connected, size: PtySize, term: &str) -> Result<She
             return Err(CoreError::Ssh(format!("the server did not open a session: {err}")));
         }
     };
-    match ask_for_shell(&mut channel, &shared, size, term).await {
+    match ask_for_shell(&mut channel, &shared, size, term, command).await {
         Ok(early) => Ok(pump_pty(handle, shared, channel, early, peer_ip, user, jumps)),
         Err(err) => {
             let _ = handle.disconnect(Disconnect::ByApplication, "", "en").await;
@@ -1900,22 +1904,30 @@ async fn open_pty(connected: Connected, size: PtySize, term: &str) -> Result<She
     }
 }
 
-/// Asks for a PTY and a shell on the channel. Output that arrives before the replies (rare) is
-/// returned, to be sent first.
+/// Asks for a PTY and a shell on the channel (SS-14, G4: or `command` with the PTY). Output that arrives before the
+/// replies (rare) is returned, to be sent first.
 async fn ask_for_shell(
     channel: &mut russh::Channel<client::Msg>,
     shared: &Arc<Mutex<Shared>>,
     size: PtySize,
     term: &str,
+    command: Option<&str>,
 ) -> Result<Vec<Vec<u8>>> {
     let mut early: Vec<Vec<u8>> = Vec::new();
-    for (what, request) in [("a terminal (PTY)", 0), ("a shell", 1)] {
-        let sent = if request == 0 {
-            channel
-                .request_pty(true, term, u32::from(size.cols), u32::from(size.rows), 0, 0, &[])
-                .await
-        } else {
-            channel.request_shell(true).await
+    let second = if command.is_some() {
+        "the editor's command"
+    } else {
+        "a shell"
+    };
+    for (what, request) in [("a terminal (PTY)", 0), (second, 1)] {
+        let sent = match (request, command) {
+            (0, _) => {
+                channel
+                    .request_pty(true, term, u32::from(size.cols), u32::from(size.rows), 0, 0, &[])
+                    .await
+            }
+            (_, Some(command)) => channel.exec(true, command.as_bytes().to_vec()).await,
+            (_, None) => channel.request_shell(true).await,
         };
         sent.map_err(|err| CoreError::Ssh(format!("asking for {what} failed: {err}")))?;
         loop {

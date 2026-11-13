@@ -18,6 +18,11 @@
 // no password for sudo picks one from the vault). Permissions and owners are never offered on a link (the core refuses
 // them too). Each change goes through the command bus, which asks at its tier; the folder lists again once its job
 // ends. The full two-pane Files page is 0.8.0's G3.
+//
+// SS-14, SS-08 (0.8.0 G4): a file's "⋯" edits it in the terminal (a new tab on the host running its editor; as root,
+// sudoedit) or on this PC (a private copy in the editor chosen in Settings, each save uploaded); a double-click does
+// the first, or the second when Settings says so. The header's "⋯" picks the session's terminal editor. Files edited
+// on this PC are listed above the transfers (EditingSessionsList).
 
 import { Fragment, useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 import {
@@ -28,6 +33,7 @@ import {
   CrosshairIcon,
   DownloadIcon,
   FileIcon,
+  FilePenLineIcon,
   FilePlusIcon,
   FolderIcon,
   FolderInputIcon,
@@ -36,12 +42,14 @@ import {
   FolderUpIcon,
   HouseIcon,
   KeyRoundIcon,
+  LaptopIcon,
   LinkIcon,
   MoreHorizontalIcon,
   PencilIcon,
   RefreshCwIcon,
   ShieldIcon,
   ShieldOffIcon,
+  SquareTerminalIcon,
   Trash2Icon,
   UploadIcon,
   UserIcon,
@@ -55,7 +63,12 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
   DropdownMenuSeparator,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
@@ -71,6 +84,7 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
+import { EditingSessionsList } from "@/components/EditingSessionsList";
 import { FileChangeDialog, type FileAsk } from "@/components/FileChangeDialog";
 import { HelpTip } from "@/components/HelpTip";
 import { RowMenu } from "@/components/RowMenu";
@@ -86,6 +100,7 @@ import {
   api,
   errorMessage,
   type FileChange,
+  type FileDoubleClick,
   type FolderListing,
   type FolderTracking,
   type RemoteEntry,
@@ -95,6 +110,8 @@ import {
 } from "@/lib/api";
 import { downloadReason, fileChangeReason, uploadReason } from "@/lib/disabled-reasons";
 import { changeLabel } from "@/lib/file-ops";
+import { doubleClickTitle, editInTerminalLabel, editInTerminalReason } from "@/lib/editing";
+import { editingApi, type HostEditors } from "@/lib/editing-api";
 import { plural } from "@/lib/format";
 import { readOnlyLocked } from "@/lib/presentation-state";
 import { isReauthCancelled } from "@/lib/reauth";
@@ -117,6 +134,10 @@ interface Props {
   onRetry: (transfer: TransferInfo) => void;
   /** SS-14: a file change went to the bus: queued, or the approval dialog; `onJob` once its job runs. */
   onSubmitted: (outcome: SubmitOutcome, onJob: (jobId: string) => void) => void;
+  /** SS-14 (G4): an editor job is queued: the page opens its tab. */
+  onEditorJob: (jobId: string, title: string) => void;
+  /** SS-14 (G4): what a double-click on a file does (Settings, Terminal). */
+  doubleClick: FileDoubleClick;
 }
 
 /** A folder opened by hand: a path (absolute, `~`, or relative to `from`, the folder shown when it was typed). */
@@ -238,6 +259,8 @@ export function FilesDrawer({
   onDownload,
   onRetry,
   onSubmitted,
+  onEditorJob,
+  doubleClick,
 }: Props) {
   // Grows when an upload into this terminal finished, so the listing shows the new file.
   const refresh = useUploadsDone(terminalId);
@@ -269,6 +292,9 @@ export function FilesDrawer({
   const [askSudo, setAskSudo] = useState(false);
   /** SS-14: jobs of changes made here; the folder lists again when one ends. */
   const watched = useRef(new Set<string>());
+  /** SS-14 (G4): the host's terminal editors and the session's choice, per terminal; asked again after a choice. */
+  const [editors, setEditors] = useState<{ terminal: string; editors: HostEditors } | null>(null);
+  const [editorsTick, setEditorsTick] = useState(0);
 
   useEffect(() => {
     const unlisten = api.onJobEvent((event) => {
@@ -302,6 +328,19 @@ export function FilesDrawer({
       gone = true;
     };
   }, [want, terminalId, connected, browse, asRoot]);
+
+  useEffect(() => {
+    if (!terminalId || !connected) return;
+    let gone = false;
+    editingApi.hostEditors(terminalId).then(
+      (found) => !gone && setEditors({ terminal: terminalId, editors: found }),
+      () => undefined,
+    );
+    return () => {
+      gone = true;
+    };
+  }, [terminalId, connected, editorsTick]);
+  const hostEditors = editors && editors.terminal === terminalId ? editors.editors : null;
 
   const fresh = loaded?.key === want;
   // While the next folder loads, the last one stays (dimmed).
@@ -388,6 +427,42 @@ export function FilesDrawer({
     }
   }
 
+  /** SS-14 (G4): opens a file in a terminal editor on the host (a new tab once its job runs). */
+  async function editInTerminal(path: string) {
+    if (!terminalId) return;
+    try {
+      const outcome = await editingApi.openInEditor(terminalId, path, asRoot);
+      const title = path.split("/").pop() || path;
+      // Queued at once (Low) or after the approval: the page opens the tab that job opens.
+      onSubmitted(outcome, (jobId) => onEditorJob(jobId, title));
+    } catch (err) {
+      toast.error(`Can't edit it in the terminal: ${errorMessage(err)}`);
+    }
+  }
+
+  /** SS-08 (G4): edits a file on this PC (one approval for the editing session). */
+  async function editOnPc(path: string) {
+    if (!terminalId) return;
+    try {
+      const outcome = await editingApi.editOnPc(terminalId, path, asRoot);
+      onSubmitted(outcome, () => undefined);
+    } catch (err) {
+      toast.error(`Can't edit it on this PC: ${errorMessage(err)}`);
+    }
+  }
+
+  /** SS-14 (G4): the session's terminal editor. */
+  async function chooseEditor(editor: string | null) {
+    const sessionId = hostEditors?.sessionId;
+    if (!sessionId) return;
+    try {
+      await editingApi.setHostEditor(sessionId, editor);
+      setEditorsTick((n) => n + 1);
+    } catch (err) {
+      toast.error(errorMessage(err));
+    }
+  }
+
   /** A change from a menu (no dialog of its own): its error is a toast. */
   function run(next: FileChange) {
     change(next).catch((err) => toast.error(errorMessage(err)));
@@ -445,9 +520,15 @@ export function FilesDrawer({
   ) {
     const p = paths(list);
     const one = list.length === 1 ? list[0] : null;
+    // SS-14 (G4): a file is edited in the terminal or on this PC; never a link as root (sudoedit edits none).
+    const editable = one?.kind === "file" && !(asRoot && one.link);
     return [
       one?.kind === "folder" &&
         item("open", "Open", <FolderOpenIcon />, () => listing && open(joinPath(listing.path, one.name))),
+      editable &&
+        editInTerminalReason(hostEditors) === null &&
+        item("editTerminal", editInTerminalLabel(hostEditors), <SquareTerminalIcon />, () => void editInTerminal(p[0])),
+      editable && item("editPc", "Edit on this PC", <LaptopIcon />, () => void editOnPc(p[0])),
       list.every((e) => e.kind !== "other") &&
         item("download", "Download", <DownloadIcon />, () => onDownload(p, "downloads", asRoot)),
       list.every((e) => e.kind !== "other") &&
@@ -550,6 +631,27 @@ export function FilesDrawer({
                 <FolderUpIcon />
                 Upload a folder here…
               </DropdownMenuItem>
+              {hostEditors?.sessionId && hostEditors.found.length > 0 && (
+                <DropdownMenuSub>
+                  <DropdownMenuSubTrigger disabled={readOnly}>
+                    <FilePenLineIcon />
+                    Terminal editor
+                  </DropdownMenuSubTrigger>
+                  <DropdownMenuSubContent>
+                    <DropdownMenuRadioGroup
+                      value={hostEditors.chosen ?? ""}
+                      onValueChange={(value) => void chooseEditor(value === "" ? null : value)}
+                    >
+                      <DropdownMenuRadioItem value="">First found (nano, micro, vim, vi)</DropdownMenuRadioItem>
+                      {hostEditors.found.map((editor) => (
+                        <DropdownMenuRadioItem key={editor} value={editor}>
+                          {editor}
+                        </DropdownMenuRadioItem>
+                      ))}
+                    </DropdownMenuRadioGroup>
+                  </DropdownMenuSubContent>
+                </DropdownMenuSub>
+              )}
               <DropdownMenuSeparator />
               {asRoot ? (
                 <DropdownMenuItem onSelect={() => void stopRoot()}>
@@ -731,15 +833,20 @@ export function FilesDrawer({
                       data-state={names.includes(e.name) ? "selected" : undefined}
                       onDoubleClick={() => {
                         if (!listing) return;
-                        if (e.kind === "folder") open(joinPath(listing.path, e.name));
-                        else if (e.kind === "file") onDownload([joinPath(listing.path, e.name)], "downloads", asRoot);
+                        const path = joinPath(listing.path, e.name);
+                        if (e.kind === "folder") open(path);
+                        // SS-14 (G4): a terminal editor on the host, or this PC when Settings says so.
+                        else if (e.kind === "file" && changes === null) {
+                          if (doubleClick === "thisPc") void editOnPc(path);
+                          else void editInTerminal(path);
+                        }
                       }}
                       className="group cursor-default text-xs"
                       title={
                         e.kind === "folder"
                           ? "Double-click to open"
                           : e.kind === "file"
-                            ? "Double-click to download to Downloads"
+                            ? doubleClickTitle(doubleClick, hostEditors)
                             : "Not a regular file"
                       }
                     >
@@ -807,7 +914,8 @@ export function FilesDrawer({
           </Tip>
         </>
       )}
-      <div className="flex max-h-[35%] min-h-0 shrink-0 flex-col overflow-hidden">
+      <div className="flex max-h-[35%] min-h-0 shrink-0 flex-col gap-2 overflow-hidden">
+        <EditingSessionsList />
         <TransfersList onRetry={onRetry} />
       </div>
       {ask && <FileChangeDialog ask={ask} asRoot={asRoot} onSubmit={change} onClose={() => setAsk(null)} />}

@@ -2,7 +2,8 @@
 // vmrun (VMware Workstation), vdiskmanager beside it, ovftool, VBoxManage (VM-18), qemu-img (CV-03) and docker
 // (CT-02), and (SS-12) the VNC viewer. Change opens a small dialog with the path; an empty path finds the tool again
 // by itself. How each is found (the path set here, its REMOTELY_ variable, the registry, the default folder) is the
-// "?"'s. Each change saves at once, audited by the core, with Undo; the read-only lock refuses them.
+// "?"'s. Each change saves at once, audited by the core, with Undo; the read-only lock refuses them. SS-08 (0.8.0
+// G4): the editor files from hosts open in on this PC.
 
 import { useEffect, useState } from "react";
 import { CheckIcon, CircleSlashIcon, ExternalLinkIcon } from "lucide-react";
@@ -25,6 +26,7 @@ import { SaveStatus, useSaveStatus } from "@/components/SaveStatus";
 import { WhyDisabled } from "@/components/WhyDisabled";
 import { api, errorMessage, type Settings } from "@/lib/api";
 import { convertApi } from "@/lib/convert-api";
+import { editingApi } from "@/lib/editing-api";
 import type { SettingsChange } from "@/lib/job-events";
 import { settingsCardId } from "@/lib/settings-index";
 import { toolRows, toolStatus, type ToolId, type ToolRow } from "@/lib/settings-summary";
@@ -40,6 +42,7 @@ const SAVE: Record<Exclude<ToolId, "vdiskmanager">, (path: string | null) => Pro
   qemuImg: convertApi.setQemuImgPath,
   docker: api.setDockerPath,
   vncViewer: api.setVncViewerPath,
+  localEditor: editingApi.setLocalEditorPath,
 };
 
 /** What else reads a tool's path again once it changes (the VM list, the sidebar, Containers). */
@@ -210,6 +213,8 @@ function rowOf(id: Exclude<ToolId, "vdiskmanager">, s: Settings): string | null 
       return s.qemuImgPathInUse;
     case "vncViewer":
       return s.vncViewerPathInUse;
+    case "localEditor":
+      return s.localEditorPathInUse;
     case "docker":
       return s.dockerPathInUse;
   }

@@ -383,6 +383,8 @@ pub struct SwitchPreview {
     pub approvals: usize,
     /// FD-09: the file server runs (or waits to start); it stops.
     pub file_server: bool,
+    /// SS-08 (G4): files edited on this PC; their editing ends.
+    pub edits: usize,
 }
 
 impl crate::Core {
@@ -396,6 +398,7 @@ impl crate::Core {
             multiexec: self.multiexec.status().await.map(|s| s.on).unwrap_or(false),
             approvals: self.bus.pending_approvals().len(),
             file_server: !self.jobs.file_server_jobs(Some(self.ctx().workspace_id)).is_empty(),
+            edits: self.jobs.editing_jobs(Some(self.ctx().workspace_id)).len(),
         })
     }
 
@@ -448,6 +451,12 @@ impl crate::Core {
         let open = self.jobs.file_server_jobs(Some(old.workspace_id));
         self.stop_file_servers(&open, crate::toolbox::file_server::StopReason::WorkspaceSwitched)
             .await;
+        // SS-08 (G4): editing sessions on this PC end (audited in the old workspace) without uploading more.
+        self.end_edits(
+            Some(old.workspace_id),
+            crate::terminal::edit_local::EditEnd::WorkspaceSwitched,
+        )
+        .await;
         let terminals = self.terminals.open_count();
         self.terminals.close_all().await;
         let approvals = self

@@ -26,7 +26,7 @@ export function listen<T>(event: string, handler: EventCallback<T>): Promise<Unl
 }
 
 /** A terminal's events, learnt like the answers above (QL-03's host name and IP arrive this way). */
-function eventChannel(onEvent: (event: TerminalEvent) => void): Channel<TerminalEvent> {
+export function eventChannel(onEvent: (event: TerminalEvent) => void): Channel<TerminalEvent> {
   const events = new Channel<TerminalEvent>();
   events.onmessage = (event) => {
     learnFields(masker, event);
@@ -302,6 +302,8 @@ export type Command =
     }
   /** SS-14: a change to a host's files. Never submitted by the UI: `filesChange` builds it in Rust. */
   | { type: "fileOp"; targets: TargetRef[]; spec: unknown }
+  | { type: "editorOpen"; targets: TargetRef[]; spec: unknown }
+  | { type: "editLocal"; targets: TargetRef[]; spec: unknown }
   /** SS-07: a saved port forward opened on a terminal. Never submitted by the UI: `terminalTunnelStart` builds it. */
   | { type: "openTunnel"; targets: TargetRef[]; forward: PortForward }
   /** CT-01, CT-02: every target a container target whose object fits the op. */
@@ -506,7 +508,19 @@ export interface UploadDetails {
 
 /** SS-14: a file change as the approval dialog shows it, besides its paths (the targets). */
 export interface FileOpDetails {
-  kind: "newFolder" | "newFile" | "rename" | "move" | "copy" | "delete" | "mode" | "owner";
+  kind:
+    | "newFolder"
+    | "newFile"
+    | "rename"
+    | "move"
+    | "copy"
+    | "delete"
+    | "mode"
+    | "owner"
+    /** SS-14 (G4): a terminal editor on the host; `into` is the editor, `script` what runs. */
+    | "editInTerminal"
+    /** SS-08 (G4): an editing session on this PC; every save replaces the file. */
+    | "editOnPc";
   /** Where they go (a move or a copy), or the new name (a rename). */
   into: string | null;
   /** "0644". */
@@ -1004,6 +1018,8 @@ export type ActionKind =
   | "filePermissions"
   | "fileDelete"
   | "fileDeleteFolder"
+  | "fileEditorOpen"
+  | "fileEditLocal"
   | "tunnelLocal"
   | "tunnelRemote"
   | "tunnelShared"
@@ -1172,6 +1188,10 @@ export interface Settings {
   vncViewerPathSaved: string | null;
   /** SS-12: the VNC viewer in use; null: none found, so VNC sessions can't open. */
   vncViewerPathInUse: string | null;
+  /** SS-08 (G4): the editor for files from hosts, as set; null: found by itself. */
+  localEditorPathSaved: string | null;
+  /** SS-08 (G4): the editor in use; null: none found. */
+  localEditorPathInUse: string | null;
 }
 
 /** SS-04. */
@@ -1352,7 +1372,7 @@ export interface WindowOpened {
 }
 
 /** SS-12: what a terminal pane is for. */
-export type PaneKind = "ssh" | "telnet" | "serial" | "tunnel" | "powershell";
+export type PaneKind = "ssh" | "telnet" | "serial" | "tunnel" | "powershell" | "editor";
 
 /** QL-16: the folder a value comes from. */
 export interface FromFolder {
@@ -1768,7 +1788,12 @@ export interface TerminalSettings {
   promptHook: boolean;
   /** QL-05: ask before pasting text that holds a line break (see paste.ts). */
   confirmMultilinePaste: boolean;
+  /** SS-14 (G4): what double-clicking a file in Files here does. */
+  fileDoubleClick?: FileDoubleClick;
 }
+
+/** SS-14 (G4): a terminal editor on the host (the default), or edit on this PC. */
+export type FileDoubleClick = "terminalEditor" | "thisPc";
 
 // ---- BX-08 command panel ----
 

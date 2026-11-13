@@ -2680,7 +2680,12 @@ impl RemoteAdapter for FakeRemote {
             [] => String::new(),
             names => format!(" via {}", names.join(", ")),
         };
-        locks::lock(&self.calls).push(format!("{}: shell{via}", request.session.host));
+        // SS-14 (G4): an editor tab's channel runs a command with the PTY instead of a shell.
+        let what = match request.command {
+            Some(command) => format!("pty exec {command}"),
+            None => "shell".to_owned(),
+        };
+        locks::lock(&self.calls).push(format!("{}: {what}{via}", request.session.host));
         Ok(loopback_shell_with(self.files.clone(), None))
     }
 
@@ -2710,6 +2715,38 @@ impl RemoteAdapter for FakeRemote {
             closed: std::sync::atomic::AtomicBool::new(false),
             files: self.files.clone(),
         }))
+    }
+}
+
+/// SS-08 (G4): the editor on this PC in tests: records each file "Edit on this PC" opens, never starts a program.
+#[derive(Default, Clone)]
+pub struct FakeLocalEditors {
+    opened: std::sync::Arc<Mutex<Vec<OpenedInEditor>>>,
+}
+
+/// One [`FakeLocalEditors`] open: the program, the files, and whether as a diff.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenedInEditor {
+    pub program: std::path::PathBuf,
+    pub files: Vec<std::path::PathBuf>,
+    pub diff: bool,
+}
+
+impl FakeLocalEditors {
+    pub fn opened(&self) -> Vec<OpenedInEditor> {
+        locks::lock(&self.opened).clone()
+    }
+}
+
+#[async_trait]
+impl crate::adapters::local_editor::LocalEditors for FakeLocalEditors {
+    async fn open(&self, program: &std::path::Path, files: &[std::path::PathBuf], diff: bool) -> Result<()> {
+        locks::lock(&self.opened).push(OpenedInEditor {
+            program: program.to_path_buf(),
+            files: files.to_vec(),
+            diff,
+        });
+        Ok(())
     }
 }
 

@@ -421,6 +421,10 @@ pub struct Settings {
     vnc_viewer_path_saved: Option<String>,
     /// SS-12: the VNC viewer in use; `None`: none found (VNC sessions can't open).
     vnc_viewer_path_in_use: Option<String>,
+    /// SS-08 (G4): the editor for "Edit on this PC" the user chose; `None`: find one (VS Code, Notepad++, Notepad).
+    local_editor_path_saved: Option<String>,
+    /// SS-08 (G4): the editor in use; `None`: none found (Edit on this PC can't open files).
+    local_editor_path_in_use: Option<String>,
 }
 
 async fn settings(core: &Core) -> IpcResult<Settings> {
@@ -449,7 +453,21 @@ async fn settings(core: &Core) -> IpcResult<Settings> {
         qemu_img_path_in_use: core.qemu_img_path().map(|p| p.display().to_string()),
         vnc_viewer_path_saved: core.saved_vnc_viewer_path().await?.map(|p| p.display().to_string()),
         vnc_viewer_path_in_use: core.vnc_viewer_path().await?.map(|p| p.display().to_string()),
+        local_editor_path_saved: core.saved_local_editor_path().await?.map(|p| p.display().to_string()),
+        local_editor_path_in_use: core.local_editor_path().await?.map(|p| p.display().to_string()),
     })
+}
+
+/// SS-08 (G4): the editor "Edit on this PC" opens copies in. `None` or an empty string goes back to finding one
+/// (`REMOTELY_LOCAL_EDITOR`, then VS Code, Notepad++ and Notepad where they install).
+#[tauri::command]
+pub async fn settings_set_local_editor_path(state: State<'_, AppState>, path: Option<String>) -> IpcResult<Settings> {
+    let path = path
+        .map(|p| p.trim().to_owned())
+        .filter(|p| !p.is_empty())
+        .map(PathBuf::from);
+    state.core.set_local_editor_path(path).await?;
+    settings(&state.core).await
 }
 
 /// SS-12: the VNC viewer. `None` or an empty string goes back to finding it (`REMOTELY_VNC_VIEWER`, then TigerVNC's,
