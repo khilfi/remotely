@@ -10,6 +10,10 @@
 //
 // Edits are the app's own data: audited in the core with no approval tier, and refused by the read-only lock (FD-03).
 // P6: the page reads nothing while it is hidden.
+//
+// VM-30 (0.8.0 G7): golden image builds. "Build an image…" is in the Images tab's "⋯" (Add an image stays its one
+// primary); an image Remotely builds shows its version, and its row menu rebuilds it (the approval dialog, through
+// onSubmitted), edits its build settings and lists its versions.
 
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { toast } from "sonner";
@@ -23,13 +27,17 @@ import {
   FileBoxIcon,
   FileCodeIcon,
   FileCogIcon,
+  HammerIcon,
   HardDriveIcon,
+  HistoryIcon,
   LayersIcon,
   LockIcon,
   NetworkIcon,
   PencilIcon,
   PlusIcon,
+  RefreshCwIcon,
   ServerIcon,
+  SlidersHorizontalIcon,
   Trash2Icon,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
@@ -40,10 +48,12 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { AddressPoolsTab } from "@/components/AddressPoolsTab";
 import { EnvBadge } from "@/components/Badges";
+import { BuildImageDialog } from "@/components/BuildImageDialog";
 import { EmptyState } from "@/components/EmptyState";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { HelpTip } from "@/components/HelpTip";
 import { ImageDialog } from "@/components/ImageDialog";
+import { ImageVersionsSheet } from "@/components/ImageVersionsSheet";
 import { InstallConfigsTab } from "@/components/InstallConfigsTab";
 import { PageHeader } from "@/components/PageHeader";
 import { RowMenu } from "@/components/RowMenu";
@@ -52,7 +62,7 @@ import { useReadOnlyReason } from "@/components/Presentation";
 import { SizeDialog } from "@/components/SizeDialog";
 import { StacksTab } from "@/components/StacksTab";
 import { TemplateDialog } from "@/components/TemplateDialog";
-import { WhyDisabled } from "@/components/WhyDisabled";
+import { ReasonLine, WhyDisabled } from "@/components/WhyDisabled";
 import { ImageToolsPage } from "@/pages/ImageToolsPage";
 import {
   api,
@@ -80,6 +90,8 @@ import {
   templateReason,
 } from "@/lib/catalog";
 import { plural } from "@/lib/format";
+import { goldenApi } from "@/lib/golden-api";
+import { versionText } from "@/lib/golden";
 import { reveal } from "@/lib/reveal";
 import { newStackReason, newTemplateReason, openingTab, TEMPLATE_TABS, type TemplatesTab } from "@/lib/templates-page";
 import { cn } from "@/lib/utils";
@@ -120,7 +132,11 @@ type Dialog =
   | { kind: "template"; existing?: LaunchTemplate; initial?: TemplateInput }
   | { kind: "deleteSize"; size: Size }
   | { kind: "deleteImage"; image: Image }
-  | { kind: "deleteTemplate"; template: LaunchTemplate };
+  | { kind: "deleteTemplate"; template: LaunchTemplate }
+  /** VM-30: a new golden image, an image's build settings, its versions. */
+  | { kind: "build" }
+  | { kind: "buildSettings"; image: Image }
+  | { kind: "versions"; image: Image };
 
 export function TemplatesPage({ active, request, onDeploy, onSubmitted, onImport, onOpenSettings, refreshKey }: Props) {
   const readOnly = useReadOnlyReason();
@@ -164,9 +180,10 @@ export function TemplatesPage({ active, request, onDeploy, onSubmitted, onImport
     );
   }, []);
 
+  // VM-30: a finished VM job may be a build (a new version) or its retention, so the catalogue is read again too.
   useEffect(() => {
     if (active) load();
-  }, [active, load]);
+  }, [active, load, refreshKey]);
 
   // A new request from the palette: its tab, and the new item's dialog when it asked for one.
   const [handled, setHandled] = useState(0);
@@ -215,6 +232,19 @@ export function TemplatesPage({ active, request, onDeploy, onSubmitted, onImport
   function newTemplate() {
     setPicked("templates");
     setDialog({ kind: "template" });
+  }
+  /** VM-30: the build dialog's "New install config", on the Install configs tab. */
+  function newConfig() {
+    setPicked("installConfigs");
+    setConfigCreate((n) => n + 1);
+  }
+  /** VM-30: the image's next version from its saved build settings, through the approval dialog. */
+  async function rebuild(image: Image) {
+    try {
+      submittedHere(await goldenApi.rebuild(image.id));
+    } catch (err) {
+      toast.error(errorMessage(err));
+    }
   }
 
   const addImageButton = (
@@ -279,6 +309,20 @@ export function TemplatesPage({ active, request, onDeploy, onSubmitted, onImport
         <PageHeader
           page="templates"
           primary={primary[tab] ?? undefined}
+          toolsClassName="w-72"
+          tools={
+            // VM-30: Add an image stays the tab's one primary; a build is the other way to fill it.
+            tab === "images" ? (
+              <DropdownMenuItem disabled={readOnly !== null} onSelect={() => setDialog({ kind: "build" })}>
+                <HammerIcon />
+                <span className="grid">
+                  Build an image…
+                  <span className="text-xs text-muted-foreground">From an ISO and an install config</span>
+                  <ReasonLine reason={readOnly} />
+                </span>
+              </DropdownMenuItem>
+            ) : undefined
+          }
           tabs={
             <TabsList>
               {TEMPLATE_TABS.map((t) => {
@@ -332,7 +376,13 @@ export function TemplatesPage({ active, request, onDeploy, onSubmitted, onImport
                         )}
                       </TableCell>
                       <TableCell className="whitespace-nowrap">
-                        {i.source.kind === "goldenVm" ? (
+                        {i.build ? (
+                          // VM-30: an image Remotely builds, by version.
+                          <>
+                            <Term id="goldenImage" />
+                            <div className="text-xs text-muted-foreground">{versionText(i.version)}</div>
+                          </>
+                        ) : i.source.kind === "goldenVm" ? (
                           <Term id="goldenVm">{IMAGE_KIND_LABEL[i.source.kind]}</Term>
                         ) : (
                           IMAGE_KIND_LABEL[i.source.kind]
@@ -362,18 +412,56 @@ export function TemplatesPage({ active, request, onDeploy, onSubmitted, onImport
                         {hypervisorsText(i.hypervisors)}
                       </TableCell>
                       <TableCell>
-                        <RowMenu label={i.name} disabled={readOnly !== null}>
-                          <DropdownMenuItem onSelect={() => setDialog({ kind: "image", existing: i })}>
+                        {/* VM-30: a built image's Versions… is a read, so its menu opens under the read-only lock. */}
+                        <RowMenu label={i.name} disabled={readOnly !== null && !i.build}>
+                          {i.build && (
+                            <>
+                              <DropdownMenuItem disabled={readOnly !== null} onSelect={() => void rebuild(i)}>
+                                <RefreshCwIcon />
+                                <span>
+                                  Rebuild
+                                  <ReasonLine reason={readOnly} />
+                                </span>
+                              </DropdownMenuItem>
+                              <DropdownMenuItem
+                                disabled={readOnly !== null}
+                                onSelect={() => setDialog({ kind: "buildSettings", image: i })}
+                              >
+                                <SlidersHorizontalIcon />
+                                <span>
+                                  Build settings…
+                                  <ReasonLine reason={readOnly} />
+                                </span>
+                              </DropdownMenuItem>
+                              <DropdownMenuItem onSelect={() => setDialog({ kind: "versions", image: i })}>
+                                <HistoryIcon />
+                                Versions…
+                              </DropdownMenuItem>
+                              <DropdownMenuSeparator />
+                            </>
+                          )}
+                          <DropdownMenuItem
+                            disabled={readOnly !== null}
+                            onSelect={() => setDialog({ kind: "image", existing: i })}
+                          >
                             <PencilIcon />
-                            Edit…
+                            {/* C8 of PR 100's review: a built image's menu opens under the lock, so each says why. */}
+                            <span>
+                              Edit…
+                              {i.build && <ReasonLine reason={readOnly} />}
+                            </span>
                           </DropdownMenuItem>
                           <DropdownMenuSeparator />
                           <DropdownMenuItem
                             variant="destructive"
+                            disabled={readOnly !== null}
                             onSelect={() => setDialog({ kind: "deleteImage", image: i })}
                           >
                             <Trash2Icon />
-                            Delete…
+                            <span>
+                              Delete…
+                              {i.build && <ReasonLine reason={readOnly} />}
+                            </span>
                           </DropdownMenuItem>
                         </RowMenu>
                       </TableCell>
@@ -706,6 +794,30 @@ export function TemplatesPage({ active, request, onDeploy, onSubmitted, onImport
           }}
           onClose={() => setDialog(null)}
         />
+      )}
+      {dialog?.kind === "build" && (
+        <BuildImageDialog
+          onSubmitted={submittedHere}
+          onAddImage={addImage}
+          onNewConfig={newConfig}
+          onClose={() => setDialog(null)}
+        />
+      )}
+      {dialog?.kind === "buildSettings" && (
+        <BuildImageDialog
+          image={dialog.image}
+          onSubmitted={submittedHere}
+          onSaved={(i) => {
+            toast.success(`Saved the build settings of ${i.name}`);
+            load();
+          }}
+          onAddImage={addImage}
+          onNewConfig={newConfig}
+          onClose={() => setDialog(null)}
+        />
+      )}
+      {dialog?.kind === "versions" && (
+        <ImageVersionsSheet image={dialog.image} refreshKey={refreshKey} onClose={() => setDialog(null)} />
       )}
       {dialog?.kind === "template" && (
         <TemplateDialog

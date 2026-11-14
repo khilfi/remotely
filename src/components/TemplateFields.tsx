@@ -148,6 +148,118 @@ export function effectiveInput(
   };
 }
 
+/** A size: the built-ins, then the owner's own, with its summary under it (VM-30's build dialog uses it too). */
+export function SizeField({
+  id,
+  sizes,
+  value,
+  onChange,
+}: {
+  id: string;
+  sizes: Size[];
+  value: string;
+  onChange: (sizeId: string) => void;
+}) {
+  const builtIns = sizes.filter((s) => s.builtIn);
+  const own = sizes.filter((s) => !s.builtIn);
+  const size = sizes.find((s) => s.id === value);
+  return (
+    <div className="grid gap-2">
+      <Label htmlFor={id}>
+        <Term id="size">Size</Term>
+      </Label>
+      <Select value={value} onValueChange={onChange}>
+        <SelectTrigger id={id} className="w-full">
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent>
+          <SelectGroup>
+            <SelectLabel>Built-in</SelectLabel>
+            {builtIns.map((s) => (
+              <SelectItem key={s.id} value={s.id}>
+                {s.name}
+              </SelectItem>
+            ))}
+          </SelectGroup>
+          {own.length > 0 && (
+            <SelectGroup>
+              <SelectLabel>Yours</SelectLabel>
+              {own.map((s) => (
+                <SelectItem key={s.id} value={s.id}>
+                  {s.name}
+                </SelectItem>
+              ))}
+            </SelectGroup>
+          )}
+          {!size && sizes.length > 0 && (
+            <SelectItem value={value} disabled>
+              (deleted size)
+            </SelectItem>
+          )}
+        </SelectContent>
+      </Select>
+      {size && <p className="text-xs text-muted-foreground">{sizeSummary(size)}</p>}
+    </div>
+  );
+}
+
+/** A network the hypervisor has, with a vmnet's number or a named network's name (VM-30's build dialog uses it too). */
+export function NetworkField({
+  id,
+  hypervisor,
+  value,
+  onChange,
+}: {
+  id: string;
+  hypervisor: Hypervisor;
+  value: TemplateNetwork;
+  onChange: (network: TemplateNetwork) => void;
+}) {
+  return (
+    <div className="grid gap-2">
+      <Label htmlFor={id}>Network</Label>
+      <div className="flex gap-2">
+        <Select value={value.kind} onValueChange={(v) => onChange(networkOfKind(v as TemplateNetwork["kind"], value))}>
+          <SelectTrigger id={id} className="w-full">
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {networkKinds(hypervisor).map((k) => (
+              <SelectItem key={k} value={k}>
+                {NETWORK_KIND_LABEL[k]}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+        {value.kind === "vmnet" && (
+          <Input
+            aria-label="vmnet number"
+            className="w-20"
+            inputMode="numeric"
+            value={String(value.number)}
+            onChange={(e) => {
+              const n = Number(e.currentTarget.value.replace(/\D/g, "") || "0");
+              onChange({ kind: "vmnet", number: Math.min(n, 99) });
+            }}
+          />
+        )}
+        {(value.kind === "natNetwork" || value.kind === "internal") && (
+          <Input
+            aria-label="Network name"
+            placeholder="Name"
+            value={value.name}
+            maxLength={64}
+            onChange={(e) => {
+              const kind = value.kind as "natNetwork" | "internal";
+              onChange({ kind, name: e.currentTarget.value });
+            }}
+          />
+        )}
+      </div>
+    </div>
+  );
+}
+
 interface Props {
   form: TemplateForm;
   onChange: (form: TemplateForm) => void;
@@ -184,9 +296,6 @@ export function TemplateFields({
   const image = images.find((i) => i.id === value.imageId);
   const profile = profiles.find((p) => p.id === image?.osProfile);
   const hypervisors = useMemo(() => hypervisorsFor(image, profile), [image, profile]);
-  const builtIns = sizes.filter((s) => s.builtIn);
-  const own = sizes.filter((s) => !s.builtIn);
-  const size = sizes.find((s) => s.id === value.sizeId);
   const hypervisor = hypervisors.includes(value.hypervisor) ? value.hypervisor : (hypervisors[0] ?? value.hypervisor);
   const network: TemplateNetwork = networkKinds(hypervisor).includes(value.network.kind)
     ? value.network
@@ -262,42 +371,7 @@ export function TemplateFields({
             </Select>
           )}
         </div>
-        <div className="grid gap-2">
-          <Label htmlFor={id("size")}>
-            <Term id="size">Size</Term>
-          </Label>
-          <Select value={value.sizeId} onValueChange={(v) => set({ sizeId: v })}>
-            <SelectTrigger id={id("size")} className="w-full">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectGroup>
-                <SelectLabel>Built-in</SelectLabel>
-                {builtIns.map((s) => (
-                  <SelectItem key={s.id} value={s.id}>
-                    {s.name}
-                  </SelectItem>
-                ))}
-              </SelectGroup>
-              {own.length > 0 && (
-                <SelectGroup>
-                  <SelectLabel>Yours</SelectLabel>
-                  {own.map((s) => (
-                    <SelectItem key={s.id} value={s.id}>
-                      {s.name}
-                    </SelectItem>
-                  ))}
-                </SelectGroup>
-              )}
-              {!size && (
-                <SelectItem value={value.sizeId} disabled>
-                  (deleted size)
-                </SelectItem>
-              )}
-            </SelectContent>
-          </Select>
-          {size && <p className="text-xs text-muted-foreground">{sizeSummary(size)}</p>}
-        </div>
+        <SizeField id={id("size")} sizes={sizes} value={value.sizeId} onChange={(sizeId) => set({ sizeId })} />
         <div className="grid gap-2">
           <Label htmlFor={id("hypervisor")}>Hypervisor</Label>
           <Select
@@ -323,50 +397,12 @@ export function TemplateFields({
             </SelectContent>
           </Select>
         </div>
-        <div className="grid gap-2">
-          <Label htmlFor={id("network")}>Network</Label>
-          <div className="flex gap-2">
-            <Select
-              value={network.kind}
-              onValueChange={(v) => set({ network: networkOfKind(v as TemplateNetwork["kind"], network) })}
-            >
-              <SelectTrigger id={id("network")} className="w-full">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                {networkKinds(hypervisor).map((k) => (
-                  <SelectItem key={k} value={k}>
-                    {NETWORK_KIND_LABEL[k]}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-            {network.kind === "vmnet" && (
-              <Input
-                aria-label="vmnet number"
-                className="w-20"
-                inputMode="numeric"
-                value={String(network.number)}
-                onChange={(e) => {
-                  const n = Number(e.currentTarget.value.replace(/\D/g, "") || "0");
-                  set({ network: { kind: "vmnet", number: Math.min(n, 99) } });
-                }}
-              />
-            )}
-            {(network.kind === "natNetwork" || network.kind === "internal") && (
-              <Input
-                aria-label="Network name"
-                placeholder="Name"
-                value={network.name}
-                maxLength={64}
-                onChange={(e) => {
-                  const kind = network.kind as "natNetwork" | "internal";
-                  set({ network: { kind, name: e.currentTarget.value } });
-                }}
-              />
-            )}
-          </div>
-        </div>
+        <NetworkField
+          id={id("network")}
+          hypervisor={hypervisor}
+          value={network}
+          onChange={(network) => set({ network })}
+        />
         {count}
         <div className="col-span-2 grid gap-2">
           <Label>

@@ -90,6 +90,8 @@ pub struct Catalog {
     hashing: Arc<Mutex<HashMap<Uuid, CancellationToken>>>,
     /// CV-03: whether qemu-img is installed, for qcow2 images. `None` (FD-07's own copy): not checked.
     disk_tools: Option<Arc<dyn crate::adapters::disk_tools::DiskTools>>,
+    /// VM-30: whether Windows golden images build and deploy (never in 0.8.0: [`crate::golden::WINDOWS_DEFERRED`]).
+    windows_images: crate::golden::WindowsImages,
 }
 
 /// What a check of templates needs, read once.
@@ -100,6 +102,10 @@ struct Facts {
     vault_keys: HashSet<SecretId>,
     /// VM-28: the workspace's own install configs, checked.
     configs: Vec<install::InstallConfig>,
+    /// VM-30: each built image's newest version (C5 of PR 100's review: its clones read that version's config).
+    versions: HashMap<Uuid, crate::store::VersionRow>,
+    /// VM-30: whether a Windows image Remotely built deploys (never in 0.8.0: [`crate::golden::WINDOWS_DEFERRED`]).
+    windows_images: bool,
 }
 
 impl Facts {
@@ -116,14 +122,83 @@ impl Facts {
         }
     }
 
-    /// VM-28: why the template's install config can't go with its image and size.
+    /// VM-28: why the template's install config can't go with its image and size. VM-30: a Windows image Remotely
+    /// built deploys with its own build config (see [`Self::golden_config`]).
     fn install_problems(&self, spec: &TemplateInput) -> Vec<Problem> {
-        templates::install_problems(
+        let mut problems = templates::install_problems(
             spec,
             self.image(spec.image_id),
             self.size(&spec.size_id),
             self.install(spec.install_config_id),
-        )
+        );
+        if let Err(problem) = self.golden_config(spec) {
+            problems.push(problem);
+        }
+        problems
+    }
+
+    /// VM-30: a clone of a Windows image Remotely built (sysprepped) reads its name, a one-time password and a WinRM
+    /// certificate of its own from the specialize and oobeSystem passes of the config its newest version was built
+    /// from, as G6 delivers a Windows install: that config, for a template of such an image that names none. C5 of
+    /// PR 100's review: the version's own config (not the recipe's, which may name another since), and only while it
+    /// is as it was then (its SHA-256), since the version's sysprepped system expects those passes.
+    fn golden_config(&self, spec: &TemplateInput) -> std::result::Result<Option<&install::InstallConfig>, Problem> {
+        let Some(image) = self.image(spec.image_id) else {
+            return Ok(None);
+        };
+        if image.build.is_none() {
+            return Ok(None);
+        }
+        let windows = profiles::profile(&image.os_profile).is_some_and(|p| p.family == profiles::GuestFamily::Windows);
+        if !windows {
+            return Ok(None);
+        }
+        // 0.8.0: refused, with or without an install config of the template's own, instead of a deploy that waits at
+        // OOBE to its time limit.
+        if !self.windows_images {
+            return Err(Problem::new(
+                ProblemCode::InstallConfigMismatch,
+                format!("Image '{}': {}", image.name, crate::golden::WINDOWS_DEFERRED),
+            ));
+        }
+        if spec.install_config_id.is_some() {
+            return Ok(None);
+        }
+        let Some(version) = self.versions.get(&image.id) else {
+            return Err(Problem::new(
+                ProblemCode::InstallConfigGone,
+                format!("Image '{}' has no version left to deploy: build it again.", image.name),
+            ));
+        };
+        let id = version.config_id.to_string();
+        match self.configs.iter().find(|c| c.id == id) {
+            Some(config) if !config.can_deploy() => Err(Problem::new(
+                ProblemCode::InstallConfigMismatch,
+                format!(
+                    "Image '{}''s install config '{}' has errors: its clones read their accounts and WinRM certificate from it, so fix it first.",
+                    image.name, config.spec.name
+                ),
+            )),
+            Some(config)
+                if crate::deploy::spec::config_fingerprint(&config.spec) != version.config_fingerprint =>
+            {
+                Err(Problem::new(
+                    ProblemCode::InstallConfigMismatch,
+                    format!(
+                        "Install config '{}' changed since version {} of image '{}' was built from it: its clones read their accounts and WinRM certificate from the config as it was, so build the image again.",
+                        config.spec.name, version.number, image.name
+                    ),
+                ))
+            }
+            Some(config) => Ok(Some(config)),
+            None => Err(Problem::new(
+                ProblemCode::InstallConfigGone,
+                format!(
+                    "The install config version {} of image '{}' was built from ('{}') was deleted: its clones read their accounts and WinRM certificate from it, so restore it from the trash or build the image again.",
+                    version.number, image.name, version.config_name
+                ),
+            )),
+        }
     }
 
     /// [`templates::resolve`], with the install config's problems too.
@@ -145,6 +220,10 @@ impl Facts {
             Ok(mut plan) => {
                 // VM-29: the deploy installs from the config as the catalogue has it now.
                 if let templates::InstallRef::Found(config) = self.install(spec.install_config_id) {
+                    plan.install_config = Some(config.clone());
+                }
+                // VM-30: a Windows image Remotely built: its clones take their passes from its build config.
+                if let Ok(Some(config)) = self.golden_config(spec) {
                     plan.install_config = Some(config.clone());
                 }
                 Ok(plan)
@@ -196,7 +275,13 @@ impl Catalog {
             hypervisors: None,
             hashing: Arc::default(),
             disk_tools: None,
+            windows_images: crate::golden::WindowsImages::default(),
         }
+    }
+
+    /// VM-30: whether Windows golden images build and deploy (never in 0.8.0; [`crate::golden::WindowsImages`]).
+    pub fn windows_images(&self) -> &crate::golden::WindowsImages {
+        &self.windows_images
     }
 
     /// Golden VM images check that their snapshot is still there.
@@ -253,6 +338,13 @@ impl Catalog {
     /// doesn't have, a snapshot that is gone. Refused paths are never looked at.
     async fn with_problems(&self, ctx: &Context, mut images: Vec<Image>) -> Result<Vec<Image>> {
         let vms = self.store.list_vms(ctx).await?;
+        // VM-30: an image Remotely built shows its newest version.
+        if images.iter().any(|i| i.build.is_some()) {
+            let newest = self.store.newest_image_versions(ctx).await?;
+            for image in &mut images {
+                image.version = newest.get(&image.id).map(|v| v.number);
+            }
+        }
         let files: Vec<(usize, String, Option<u64>)> = images
             .iter()
             .enumerate()
@@ -355,6 +447,8 @@ impl Catalog {
             keys,
             vault_keys,
             configs: self.install_config_facts(ctx).await?,
+            versions: self.store.newest_image_versions(ctx).await?,
+            windows_images: self.windows_images.allowed(),
         })
     }
 
@@ -923,6 +1017,14 @@ impl Catalog {
             .filter(|s| s.len() == 64 && s.chars().all(|c| c.is_ascii_hexdigit()));
         let existing = self.store.list_catalog_images(ctx).await?;
         name_free(&existing, &name, replace)?;
+        // VM-30 (C6 of PR 100's review): an image Remotely builds here keeps its build settings and versions; an
+        // export's image (which never carries them) doesn't replace it.
+        if let Some(built) = replace.and_then(|id| existing.iter().find(|i| i.id == id && i.build.is_some())) {
+            return invalid(format!(
+                "Image '{}' is one Remotely builds here, with its versions, so an export doesn't replace it: it was left as it is (import the export's with Keep both).",
+                built.name
+            ));
+        }
         if let Some(id) = replace {
             self.store.delete_catalog_image(ctx, id).await?;
         }

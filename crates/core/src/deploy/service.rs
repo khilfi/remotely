@@ -680,12 +680,17 @@ impl Deploys {
                 kind.label()
             ))]));
         };
-        let DeploySource::Iso { path } = &spec.source else {
-            return Ok(Err(vec![install_problem(
-                "An install config installs from an ISO image.",
-            )]));
+        // VM-30: a clone of a sysprepped Windows image takes the config's specialize and oobeSystem passes from a seed:
+        // no ISO, and its disk is laid out already.
+        let path = match &spec.source {
+            DeploySource::Iso { path } => Some(path.clone()),
+            DeploySource::GoldenVm { .. } if flavor.windows() => None,
+            _ => {
+                return Ok(Err(vec![install_problem(
+                    "An install config installs from an ISO image.",
+                )]))
+            }
         };
-        let path = path.clone();
         let mut problems = Vec::new();
         if request.guest_password_id.is_some() {
             problems.push(install_problem(
@@ -693,7 +698,7 @@ impl Deploys {
             ));
         }
         // S3: Setup on UEFI wants a GPT layout, and on BIOS stops at the disk page with one.
-        if flavor.windows() {
+        if flavor.windows() && path.is_some() {
             match (unattend::disk_style(&config.spec.body), plan.profile.firmware) {
                 (Some(unattend::DiskStyle::Gpt), Firmware::Bios) => problems.push(install_problem(format!(
                     "The install config lays the disk out for UEFI (GPT), and the OS profile {} starts with BIOS: Setup would stop at the disk page.",
@@ -705,11 +710,11 @@ impl Deploys {
                 ))),
                 _ => {}
             }
-            if !config.spec.body.contains(unattend::WINRM_FINGERPRINT_MARKER) {
-                problems.push(install_problem(
-                    "The install config doesn't write its WinRM certificate's fingerprint to COM1, so Remotely can't check the certificate before it sets the Administrator's password: copy the starter's first sign-in commands.",
-                ));
-            }
+        }
+        if flavor.windows() && !config.spec.body.contains(unattend::WINRM_FINGERPRINT_MARKER) {
+            problems.push(install_problem(
+                "The install config doesn't write its WinRM certificate's fingerprint to COM1, so Remotely can't check the certificate before it sets the Administrator's password: copy the starter's first sign-in commands.",
+            ));
         }
         // Remotely must reach the installed system to say it is done (Windows: to set its password).
         let uses_ip = render::uses_ip(&config.spec);
@@ -818,13 +823,15 @@ impl Deploys {
             .find(|s| s.kind == SecretRefKind::SshKey)
             .and_then(|s| s.secret_id);
         // The ISO's layout must be what the spikes saw, read now (the copy is made by the job).
-        let iso_flavor = flavor.iso();
-        let iso_path = path.clone();
-        let planned = tokio::task::spawn_blocking(move || super::iso::plan_file(Path::new(&iso_path), iso_flavor))
-            .await
-            .map_err(|err| CoreError::InvalidInput(format!("the ISO couldn't be read: {err}")))?;
-        if let Err(err) = planned {
-            problems.push(install_problem(format!("The ISO {path} can't be prepared: {err}")));
+        if let Some(path) = &path {
+            let iso_flavor = flavor.iso();
+            let iso_path = path.clone();
+            let planned = tokio::task::spawn_blocking(move || super::iso::plan_file(Path::new(&iso_path), iso_flavor))
+                .await
+                .map_err(|err| CoreError::InvalidInput(format!("the ISO couldn't be read: {err}")))?;
+            if let Err(err) = planned {
+                problems.push(install_problem(format!("The ISO {path} can't be prepared: {err}")));
+            }
         }
         if !problems.is_empty() {
             return Ok(Err(problems));
@@ -843,7 +850,10 @@ impl Deploys {
             key_id,
             time_limit_minutes: minutes,
             pool: pool_ref,
-            iso_seen: super::spec::IsoSeen::of(Path::new(&path)).await,
+            iso_seen: match &path {
+                Some(path) => super::spec::IsoSeen::of(Path::new(path)).await,
+                None => None,
+            },
         });
         if key_id.is_some() {
             spec.ssh_key_id = key_id;

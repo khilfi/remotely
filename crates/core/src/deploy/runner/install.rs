@@ -59,13 +59,15 @@ pub struct InstallTools {
     pub known_hosts: Arc<KnownHosts>,
     /// VM-32: where the addresses of a deploy with a pool are claimed.
     pub pools: Option<Arc<crate::address_pools::AddressPools>>,
+    /// VM-30: how a golden image build signs in to a Linux build VM to make it generic (SSH; tests give their own).
+    pub guests: Option<Arc<dyn super::GuestShell>>,
 }
 
 /// One account whose one-time password (Windows) becomes its vault password once the install is done.
 pub(super) struct OneTime {
-    account: String,
+    pub(super) account: String,
     password: SecretString,
-    vault: SecretId,
+    pub(super) vault: SecretId,
 }
 
 /// Where an install's CD drives are, to take them out once it is done.
@@ -79,15 +81,15 @@ pub(super) enum Drive {
 
 /// What an install made for one VM.
 pub(super) struct InstallMade {
-    flavor: Flavor,
+    pub(super) flavor: Flavor,
     config_name: String,
     /// The VM's own copy of the install ISO (a hard link to the deploy's).
     pub(super) iso: PathBuf,
     pub(super) seed: PathBuf,
-    seed_folder: PathBuf,
+    pub(super) seed_folder: PathBuf,
     pub(super) serial: PathBuf,
     sha256: String,
-    one_time: Vec<OneTime>,
+    pub(super) one_time: Vec<OneTime>,
     /// The user the config makes (Linux), for the session.
     user: Option<String>,
     pub(super) iso_drive: Option<Drive>,
@@ -150,12 +152,12 @@ impl IsoCopies {
     }
 
     /// The VM no longer offers its link to the next VM (it is emptied, or its VM failed and is kept).
-    async fn forget(&self, job_id: Uuid, path: &Path) {
+    pub(super) async fn forget(&self, job_id: Uuid, path: &Path) {
         let job = self.job(job_id);
         job.lock().await.living.retain(|p| p != path);
     }
 
-    async fn later(&self, job_id: Uuid, path: PathBuf, empty_disc: bool) {
+    pub(super) async fn later(&self, job_id: Uuid, path: PathBuf, empty_disc: bool) {
         let job = self.job(job_id);
         job.lock().await.pending.push((path, empty_disc));
     }
@@ -169,7 +171,7 @@ fn empty_disc() -> Result<Vec<u8>> {
 
 /// The link out of the way, and on Workstation an empty disc in its place. NTFS deletes a link while another VM still
 /// reads the copy through its own link; a file system that refuses that leaves the link to [`IsoCopies::later`].
-async fn empty_link(path: &Path, empty_disc_after: bool) -> Result<()> {
+pub(super) async fn empty_link(path: &Path, empty_disc_after: bool) -> Result<()> {
     match tokio::fs::remove_file(path).await {
         Ok(()) => {}
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
@@ -182,13 +184,13 @@ async fn empty_link(path: &Path, empty_disc_after: bool) -> Result<()> {
 }
 
 /// Trusts only the certificate the VM wrote to its own serial port, and remembers any other it was shown.
-struct PinnedCertificate {
+pub(super) struct PinnedCertificate {
     fingerprint: String,
     other: std::sync::Mutex<Option<String>>,
 }
 
 impl PinnedCertificate {
-    fn new(fingerprint: &str) -> Self {
+    pub(super) fn new(fingerprint: &str) -> Self {
         Self {
             fingerprint: fingerprint.to_owned(),
             other: std::sync::Mutex::new(None),
@@ -196,7 +198,7 @@ impl PinnedCertificate {
     }
 
     /// The certificate WinRM showed instead of the pinned one, if it did.
-    fn mismatch(&self) -> Option<String> {
+    pub(super) fn mismatch(&self) -> Option<String> {
         crate::locks::lock(&self.other).clone()
     }
 }
@@ -246,7 +248,7 @@ pub const VAULT_WAIT: &str = "waiting for the vault to be unlocked";
 /// The longest wait between two sign-in tries.
 const MAX_SIGN_IN_BACKOFF: Duration = Duration::from_secs(60);
 /// N9: how long, at most, a step waits for the vault beyond the install's time limit.
-const MAX_VAULT_WAIT: Duration = Duration::from_secs(4 * 60 * 60);
+pub(super) const MAX_VAULT_WAIT: Duration = Duration::from_secs(4 * 60 * 60);
 
 /// D7: sets its flag when dropped, so a copy on a blocking thread stops when the step that started it does.
 struct CancelOnDrop(Arc<AtomicBool>);
@@ -276,7 +278,7 @@ async fn ssh_answers(host: &str, port: u16, wait: Duration) -> bool {
 const MAX_SERIAL_ROUND: usize = 64 * 1024 * 1024;
 
 /// What `path` grew by since `offset`, to its end (at most [`MAX_SERIAL_ROUND`]).
-async fn read_to_end_now(path: &Path, offset: &mut u64) -> Vec<u8> {
+pub(super) async fn read_to_end_now(path: &Path, offset: &mut u64) -> Vec<u8> {
     let mut out = Vec::new();
     loop {
         let chunk = read_new(path, offset).await;
@@ -322,7 +324,14 @@ impl Deployer {
         }
     }
 
-    fn install_tools(&self) -> Result<InstallTools> {
+    /// VM-30 (tests): how a golden image build signs in to a Linux build VM.
+    pub fn set_guest_shell(&self, guests: Arc<dyn super::GuestShell>) {
+        if let Some(tools) = crate::locks::write(&self.install_tools).as_mut() {
+            tools.guests = Some(guests);
+        }
+    }
+
+    pub(super) fn install_tools(&self) -> Result<InstallTools> {
         crate::locks::read(&self.install_tools)
             .clone()
             .ok_or(CoreError::NotImplemented("unattended installs"))
@@ -341,8 +350,14 @@ impl Deployer {
         progress: &DeployProgress<'_>,
         token: &CancellationToken,
     ) -> Result<()> {
-        let (Some(install), DeploySource::Iso { path: source }) = (&spec.install, &spec.source) else {
+        let Some(install) = &spec.install else {
             return Ok(());
+        };
+        // VM-30: a clone of a sysprepped Windows image reads its answer file from a seed too, with no ISO to copy.
+        let source = match &spec.source {
+            DeploySource::Iso { path } => Some(path),
+            DeploySource::GoldenVm { .. } => None,
+            _ => return Ok(()),
         };
         let tools = self.install_tools()?;
         let flavor = Flavor::of(install.kind).ok_or_else(|| {
@@ -367,7 +382,7 @@ impl Deployer {
             )));
         }
         // The ISO approved is the ISO used: one replaced or changed since refuses (its copy is planned from it again).
-        if let Some(seen) = install.iso_seen {
+        if let (Some(seen), Some(source)) = (install.iso_seen, source) {
             if crate::deploy::spec::IsoSeen::of(Path::new(source)).await != Some(seen) {
                 return Err(CoreError::InvalidInput(format!(
                     "The ISO {source} changed since the deploy was approved: deploy again."
@@ -454,7 +469,9 @@ impl Deployer {
             install.config_name, rendered.sha256
         ));
         let iso_file = folder.join(format!("{}-install.iso", vm.name));
-        self.vm_iso(job_id, source, flavor, &iso_file, progress, token).await?;
+        if let Some(source) = source {
+            self.vm_iso(job_id, source, flavor, &iso_file, progress, token).await?;
+        }
         let nat_port = match (spec.hypervisor, &spec.network) {
             (Hypervisor::VirtualBox, Some(Network::Nat) | None) => Some(free_port()?),
             _ => None,
@@ -703,6 +720,10 @@ impl Deployer {
         let start = tokio::time::Instant::now();
         let deadline = start + limit;
         let mut watcher = SerialWatcher::new(m.flavor.os(), &vm.hostname);
+        if matches!(spec.source, DeploySource::GoldenVm { .. }) {
+            // VM-30: a clone of a sysprepped image: specialize and the first sign-in, no Setup from an ISO.
+            watcher = watcher.sysprepped();
+        }
         let mut detail = String::from("starting");
         let report = |events: Vec<WatchEvent>, watcher: &SerialWatcher, detail: &mut String| -> Option<String> {
             let mut failed = None;
@@ -942,7 +963,7 @@ impl Deployer {
 
     /// A CD drive emptied: Workstation's disconnected (its .vmx keeps the drive), VirtualBox's ejected and its image
     /// closed in the media list.
-    async fn eject(&self, key: &str, drive: &Drive, file: &Path) -> Result<()> {
+    pub(super) async fn eject(&self, key: &str, drive: &Drive, file: &Path) -> Result<()> {
         match drive {
             Drive::Workstation(slot) => {
                 // The installed system locks its CD doors (the hand check of PR 98), and Workstation then asks
@@ -1209,22 +1230,21 @@ impl Deployer {
                 )),
             },
         }
-        let iso_ejected = match &m.iso_drive {
-            Some(drive) => self.eject(key, drive, &m.iso).await,
-            None => Ok(()),
-        };
-        match iso_ejected {
-            Err(err) => out.push(format!("the install ISO's copy is still in its drive ({err})")),
-            Ok(()) => match empty_link(&m.iso, workstation).await {
-                Ok(()) => out.push(format!("the install ISO's copy is taken out and deleted{disc}")),
-                Err(_) => {
-                    // Another VM of the deploy still reads the same copy: emptied once it lets go.
-                    self.isos.later(job_id, m.iso.clone(), workstation).await;
-                    out.push(format!(
-                        "the install ISO's copy is taken out; its file is emptied once the deploy's other VMs let go of it{disc}"
-                    ));
-                }
-            },
+        // VM-30: a clone of a sysprepped image has no ISO drive.
+        if let Some(drive) = &m.iso_drive {
+            match self.eject(key, drive, &m.iso).await {
+                Err(err) => out.push(format!("the install ISO's copy is still in its drive ({err})")),
+                Ok(()) => match empty_link(&m.iso, workstation).await {
+                    Ok(()) => out.push(format!("the install ISO's copy is taken out and deleted{disc}")),
+                    Err(_) => {
+                        // Another VM of the deploy still reads the same copy: emptied once it lets go.
+                        self.isos.later(job_id, m.iso.clone(), workstation).await;
+                        out.push(format!(
+                            "the install ISO's copy is taken out; its file is emptied once the deploy's other VMs let go of it{disc}"
+                        ));
+                    }
+                },
+            }
         }
         if m.nat_port.is_some() {
             out.push(self.remove_nat_rule(key).await);
@@ -1360,19 +1380,25 @@ impl Deployer {
         }
     }
 
-    async fn read_fingerprint(&self, serial: &Path) -> Option<String> {
+    /// The certificate the installed system wrote to its serial port, read once the install is done: the watcher
+    /// pinned it after Setup's restarts, and two different lines failed the install there, so this reader waits for no
+    /// restart (a fresh watcher counts none, so it never took a line: the session's certificate was never trusted from
+    /// it). Two different lines in the whole log give none.
+    pub(super) async fn read_fingerprint(&self, serial: &Path) -> Option<String> {
         let mut at = 0u64;
-        let mut watcher = SerialWatcher::new(crate::deploy::watch::Os::Windows, "");
+        let mut watcher = SerialWatcher::new(crate::deploy::watch::Os::Windows, "").sysprepped();
+        let mut failed = false;
         loop {
             let bytes = read_new(serial, &mut at).await;
             if bytes.is_empty() {
-                return watcher.fingerprint().map(str::to_owned);
+                break;
             }
-            watcher.feed(&bytes);
-            if let Some(found) = watcher.fingerprint() {
-                return Some(found.to_owned());
-            }
+            failed |= watcher.feed(&bytes).iter().any(|e| matches!(e, WatchEvent::Failed(_)));
         }
+        if failed {
+            return None;
+        }
+        watcher.fingerprint().map(str::to_owned)
     }
 
     /// The VM's link to the ISO copy isn't offered to the next VM any more.

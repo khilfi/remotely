@@ -216,9 +216,11 @@ impl ImpactPreviewer {
         command: &Command,
         host: &dyn crate::adapters::host_counters::HostCounters,
     ) -> Option<crate::deploy::preview::DeployPreview> {
-        let Command::Deploy { spec, .. } = command else {
-            return None;
-        };
+        // VM-30: a golden image build's VM is a deploy's too.
+        let spec = *command
+            .deploy_specs()
+            .first()
+            .filter(|_| matches!(command, Command::Deploy { .. } | Command::ImageBuild { .. }))?;
         Some(crate::deploy::preview::preview(spec, &self.hypervisors, host).await)
     }
 

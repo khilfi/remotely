@@ -3565,6 +3565,7 @@ fn every_command() -> Vec<(Command, Vec<Target>)> {
     .into_iter()
     .chain(every_container_command())
     .chain([super::deploy_tests::deploy(1, Environment::Lab)])
+    .chain([super::golden_tests::build(None), super::golden_tests::build(Some(1))])
     .chain([
         super::convert_tests::convert(),
         super::convert_tests::export(Environment::Lab, false),

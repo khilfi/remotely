@@ -78,6 +78,8 @@ crates/core/          remotely-core: all app logic
                       each scheduled command (read-only lock; edited, new, Prod or protected targets, rules changed:
                       StandingChanged, nothing runs; another command or a revoked grant refused, approval_refused),
                       audits approval_used; ApprovalRecord.standing names the schedule and run in the job's entries;
+                      VM-30 a rebuild's grant covers a build of the same image whose BuildSpec::differences are none
+                      (its new VM's name aside), standing_grant_changes for the scheduler's cheap check;
                       command_bus/change_id.rs AP-08 ChangeIdRules (`approvals.changeIds`, per workspace: required for
                       Prod) and clean_change_id (one line, 64 characters, export::redact_secrets); ApprovalStep::ChangeId
                       on High and Critical, made required by apply_change_id_rule (submit, preview, ask_again,
@@ -112,6 +114,7 @@ crates/core/          remotely-core: all app logic
                       --%, function definitions, class/using/param, anything left open, nesting past 64);
                       PolicyEngine::evaluate_on rates each target's script in its own language (ScriptKind; the
                       highest counts; Decision.script_kinds for the job runner) and classify_script_as;
+                      VM-30 ImageBuild Medium, ImageBuildPrune Critical (golden_tests.rs);
                       SS-14 file_op_kind (FileNew, FileMove Low; FileMoveReplace, FileCopy, FilePermissions,
                       FileDelete Medium; FileDeleteFolder High; MIN_REPLACE_TIER and MIN_DELETE_TIER floors), a
                       copy's `cp -a` rated by the shell rules on one host too (a recursive delete's fixed `rm -rf`
@@ -298,8 +301,10 @@ crates/core/          remotely-core: all app logic
                       resolve: a template and a count into a DeployPlan per VM, pure; VM-22 the guest user,
                       packages and full or linked clone, migration 0023; VM-28 install_config_id and
                       install_problems: a config of another image kind or OS, with errors, gone, or a disk layout past
-                      the size's boot disk); mod.rs the Catalog service (Core.catalog; `plan`, and `plan_input` for the
-                      Deploy dialog's Custom, are the deploy's entry; Facts::resolve adds the install config's problems);
+                      the size's boot disk; VM-30 a Windows image Remotely built deploys with its build config,
+                      Facts::golden_config, and images.rs's Image.build and Image.version); mod.rs the Catalog service
+                      (Core.catalog; `plan`, and `plan_input` for the Deploy dialog's Custom, are the deploy's entry;
+                      Facts::resolve adds the install config's problems);
                       install_configs.rs VM-28 the catalogue's install configs (starters first, own ones checked; the
                       editor's check, masked preview, add/update/delete to the trash, FD-07's import; audited with the
                       file's SHA-256, never its text; a password or hash in the file refuses saving);
@@ -386,9 +391,27 @@ crates/core/          remotely-core: all app logic
                       install.rs (Flavor, seed files, leases, the WinRM scripts), iso/ (the ISO copy planned from the
                       original as untrusted input: ISO 9660 with Rock Ridge and Joliet, UDF, El Torito; md5sum.txt),
                       watch.rs (the serial log's stages), runner/install.rs (render, seed, links, the watcher, the
-                      first sign-in, the CDs out, the session)
+                      first sign-in, the CDs out, the session); VM-30 (0.8.0 G7) runner/golden.rs: a golden image
+                      build's VM (G6's make and watcher, then made generic through GuestShell (SshGuestShell) or WinRM,
+                      the power-off, its install drives, serial port and NAT rule out, the snapshot), and a sysprepped
+                      Windows image's clones taking G6's install (a seed CD and COM1 added to the clone,
+                      SerialWatcher::sysprepped)
     address_pools.rs  VM-32 (0.8.0 G6, migration 0036) address pools per workspace: ranges per hypervisor network,
                       pick (pinged), claim, assign, release; store/address_pools.rs
+    golden/           VM-30 (0.8.0 G7, migration 0037) golden image builds ("Golden image builds (G7)"): spec.rs
+                      BuildRecipe (an image's `build` column), BuildSpec (Command::ImageBuild's: the build VM's whole
+                      DeploySpec, the version, SignIn, the old versions it deletes (PruneVm, each a target), the
+                      fingerprint a standing approval compares, `differences` with the planned VM's), BuildDetails for
+                      the approval, version_vm_name and snapshot_name; generic.rs LINUX_SCRIPT (LINUX_STEPS, each must
+                      say `ok`), LINUX_POWER_OFF, windows_script (WINDOWS_STEPS before its power-off counts) and Report
+                      (`remotely-generic` lines); mod.rs WINDOWS_DEFERRED and WindowsImages (0.8.0 refuses Windows
+                      images; only tests turn them on); service.rs GoldenImages (Core.golden: check, submit, rebuild,
+                      rebuild_request, command_for and changes_since for schedules, refuse_windows before a schedule's
+                      save, set_recipe, versions with their linked clones), its ImageBuildActions for the job runner
+                      (begin: one build of an image at a time, BuildGuard; register, version_deleted) and StandingCheck
+                      (StillApproved: a scheduled build's grant and schedule asked during vault waits); store/golden.rs
+                      image_versions (each with its config's id and SHA-256), the recipe, forget_version_vm (R3's delete
+                      of a version's VM)
     convert/          CV-01 to CV-03, VM-17 conversion (other hypervisors' formats read and written, never managed).
                       formats.rs DiskFormat and OutputKind (VMDK sparse, flat, stream-optimized, ESXi's vmfs; VDI,
                       VHD, VHDX dynamic or fixed; qcow2; raw); inspect.rs CV-03 Inspect from each header (MO-13's
@@ -483,7 +506,8 @@ crates/core/          remotely-core: all app logic
                       late is missed, reported once, never caught up; the read-only lock skips; a run still going
                       skips), runs on the bus under the grant (power runs leave VMs already in the state alone;
                       snapshot runs record each new snapshot by id, retention deletes only those whose id and name
-                      still match), ScheduleEvent for the UI and QL-25, schedule_* audit events
+                      still match), ScheduleEvent for the UI and QL-25, schedule_* audit events; VM-30
+                      ScheduleAction::RebuildImage on one ScheduleTarget::Image (run_rebuild through Core.golden)
     dashboard.rs      MO-16 the layout (`dashboard.layout`, per workspace, null is the default): widgets on 4 columns
                       and 1 to 6 rows, checks, audited dashboard_layout_changed, Change::DashboardLayout
     notifications.rs  QL-25 the notification centre's history in memory (no migration; the module says why): the UI
@@ -522,7 +546,7 @@ crates/core/          remotely-core: all app logic
                       its MO-08 health checks (without their results; Checks reloaded on delete and restore, under
                       MAX_CHECKS), tags, note, where it went and what it sent, SentThen, and the sessions and folders
                       whose jump host it was, named on restore), a favourite command, size, image, launch template,
-                      stack or VM-28 install config
+                      stack or VM-28 install config (VM-30: a built image with its image_versions rows)
                       (SessionLibrary, Snippets, Catalog and Stacks call it); restore under the item's own id (a new one
                       if taken), " (restored)" for a taken name, gone folders, jump hosts (or one that is no longer an
                       SSH session), VMs, vault items and groups left out with notes, AP-06 confirm when a restored
@@ -1097,6 +1121,11 @@ crates/core/          remotely-core: all app logic
                       terminal closing, a workspace switch, leftovers, and the PR 91 review's regressions: a save that
                       didn't go up kept (Stop asks; kept copies saved elsewhere, discarded, through the start sweep), a
                       reconnect's new connection used and another host's refused, a Prod relabel, the read-only lock;
+                      golden_images.rs: VM-30 (0.8.0 G7) builds on both hypervisors' fakes: Ubuntu on Workstation (the
+                      image and its versions, its template deploying the newest, a rebuild), retention and a linked
+                      clone, Debian on VirtualBox (drives, serial port and NAT rule out), the vault's wait, refusals, a
+                      Windows image sysprepped and its clone's G6 delivery, a scheduled rebuild under its standing
+                      approval paused by a config change;
                       files_page.rs: SS-14, BX-10 (0.8.0 G3) on the test SSH server's
                       SFTP folder and its toy find and sha256sum: find, preview and checksums as reads, bookmarks (audit,
                       lock, trash), the local pane by listing, compare and sync both ways at their tiers, pushes to five
@@ -1104,8 +1133,9 @@ crates/core/          remotely-core: all app logic
                       opt-in workstation_it.rs,
                       virtualbox_it.rs and
                       conversion_it.rs (the real conversion tools on small images in the temp folder)
-src-tauri/            Tauri 2 shell (SS-14, BX-10 0.8.0 G3: files_page.rs the Files page's IPC: the local pane's listings
-                      with the shell's Home and Downloads, uploads from a listing, downloads into one, find, preview,
+src-tauri/            Tauri 2 shell (VM-30 0.8.0 G7: golden.rs the build dialog's check and submit, rebuild, build
+                      settings and versions; SS-14, BX-10 0.8.0 G3: files_page.rs the Files page's IPC: the local pane's
+                      listings with the shell's Home and Downloads, uploads from a listing, downloads into one, find, preview,
                       checksums, bookmarks, compare and sync, push and fetch with the push's file dialog and the fetch's
                       folder dialog): window, IPC commands (ipc.rs), terminal bridge, MultiExec (multiexec.rs; groups.rs
                       QL-19 saved MultiExec groups; terminal_rules.rs QL-17 rules), command
@@ -1200,7 +1230,14 @@ src/                  React + TypeScript UI
                       CloneDialog; VM-28: InstallConfigsTab (the Templates page's Install configs tab: own configs, then the
                       starters with Make a copy) and InstallConfigDialog (the form beside the file, vault picks and
                       variables, problems that jump to their line, a size to check the disk against, the masked preview;
-                      TemplateFields picks a fitting own config); VM-08, VM-26: StacksTab (the Templates page's Stacks tab: stacks and instances),
+                      TemplateFields picks a fitting own config);
+                      VM-30 (0.8.0 G7): BuildImageDialog (a new image, or an image's build settings: the ISO image, the
+                      install config, size, hypervisor and network (TemplateFields' SizeField and NetworkField), folder,
+                      the config's values, keep the newest N; the live check with BuildDetailsView, the deploy preview
+                      and capacity), BuildDetailsView (also in the approval dialog), ImageVersionsSheet (an image's
+                      versions, their linked clones, Show the VM); the Images tab's "⋯" has Build an image…, a built
+                      image's row menu Rebuild, Build settings… and Versions…;
+                      VM-08, VM-26: StacksTab (the Templates page's Stacks tab: stacks and instances),
                       StackDialog, StackDeployDialog, StackDetailsView (also in the approval dialog), StackGroupRow
                       (an instance's header row on the VMs page), CapacityPlanView (the Deploy, Clone, Import and stack
                       deploy dialogs and the approval; Suspend what it suggests); CV-01 VmImportDialog (a file analysed,
@@ -1333,7 +1370,9 @@ src/                  React + TypeScript UI
                       packages, a job's steps from its events and targets), vm-insight-api.ts and vm-insight.ts (R4
                       wrappers; a followed log, search, timeline groups, the forward form and its command, the waste
                       rows' QL-08 reasons), install-configs.ts and install-configs-api.ts (VM-28 kinds, blank files, copy
-                      names, vault picks and variables a file needs, fitsImage; types and IPC wrappers), stacks.ts and
+                      names, vault picks and variables a file needs, fitsImage; types and IPC wrappers), golden.ts and
+                      golden-api.ts (VM-30 the build dialog's form, the configs and ISOs a build may use, version and
+                      retention words; types and IPC wrappers), stacks.ts and
                       stacks-api.ts (VM-08, VM-26 texts, QL-08 reasons, the VMs
                       page's grouping by instance; types and IPC wrappers), convert.ts and convert-api.ts (CV-01 to
                       CV-03, VM-17 texts, QL-08 reasons, the Verify verdict; the conversion IPC's types and wrappers),
@@ -2184,6 +2223,249 @@ VM-29 and VM-32, from 0.8.0 (`docs/plan-0.8.md`, G6), built only on what S1 to S
   locale, keymap, user full name, `grub-installer/only_debian` and `bootdev`, and `finish-install/reboot_in_progress`;
   the unattend lint warns on a windowsPE command without `& exit 0` and on a file without the fingerprint line.
 
+## Golden image builds (G7)
+
+VM-30, from 0.8.0 (`docs/plan-0.8.md`, G7). The code is `golden/` (the recipe, the build's spec, the generalization
+scripts, the service), `deploy/runner/golden.rs` (the job's work on the VM), `store/golden.rs` and migration 0037. The
+per-system facts below come from the tools' own documentation and G6's spikes; the ones marked *(hand check)* weren't
+seen on a real VM yet (the PR lists the checks).
+
+- **0.8.0 builds no Windows image** (the owner deferred them on 14 Nov 2026, after hand checks 3 and 4 below: the
+  builds sealed, their clones never read their answer file). Every way in refuses with `golden::WINDOWS_DEFERRED`
+  ("Windows golden images come in a later release: a clone of a sysprepped image doesn't read its answer file yet."):
+  `GoldenImages::spec_for`, which every build comes through (the build dialog's check, submit, Rebuild, `set_recipe`,
+  a schedule's ask and each scheduled run's `command_for`, which fails the run with it), `GoldenImages::refuse_windows`
+  before a rebuild schedule is saved (nothing is stored), and `catalog::Facts::golden_config` for a template of a
+  Windows image Remotely built (the deploy's check and submit, stacks, the template editor, which can't save it:
+  `InstallConfigMismatch`), so no clone waits at OOBE to its time limit. Only a build of this PR's earlier commits made
+  such an image; FD-07 doesn't carry an image's recipe, so an import is a plain golden VM. The build dialog offers no
+  unattend config (`golden.ts` `BUILD_KINDS`), marks a Windows ISO, and its config field and Build say why
+  (`windowsBuild`, QL-08). The Windows seal (`WINDOWS_TASK_BODY`, `WINDOWS_STEPS`, the watcher) and the clone delivery
+  below are kept, and their tests run on the fakes as the later release would run them: `WindowsImages` (the
+  catalogue's, shared with `GoldenImages`) is always off outside tests, and only `set_allowed_for_tests` (`fakes`)
+  turns it on. `docs/plan-0.8.md` G7 says what the later package needs.
+- **A build is G6's deploy of one VM, then more.** "Build an image" (the Templates page's Images tab) plans the build VM
+  as the Deploy dialog's Custom plans a VM (`Deploys::spec_for_taken`): a launch template's fields made from the recipe
+  (the catalogue's ISO image, the size, the hypervisor and its network, the folder, the install config; no session,
+  console or snapshot of its own) and one VM named `<image>-v<N>` (`golden::spec::version_vm_name`: the image's name as
+  a hostname, at most 15 characters with `-v<N>` for Windows). `Command::ImageBuild` carries that whole `DeploySpec`
+  (what is approved is what runs), the recipe (`BuildRecipe`, kept in `catalog_images.build`), the config's name and
+  fingerprint, the ISO's size and time, how the build signs in (`SignIn`) and the version. The job makes and installs
+  the VM exactly as G6 does (`Deployer::make`, `watch_install`: the seed in a private folder, the watcher, Windows'
+  password swap), takes the seed out as soon as the install is done (G6's `eject` and `empty_link`: the answer file's
+  hashes are gone before anything else runs; `Deployer::seed_out`; a Windows build whose seed won't leave its drive
+  fails there, before sysprep could run with `autounattend.xml` attached), makes it generic, waits for the guest to power
+  itself off (`seal_minutes`, 30), takes the ISO copy's and the seed's drives out of its settings (Workstation: their
+  `sataX:Y.*` keys out of the `.vmx`; VirtualBox: `storageattach --medium none`, `closemedium`), turns its serial port
+  off (`serial0.*` out; `--uart1 off`), deletes VirtualBox's NAT rule (`modifyvm --natpf1 delete`), the seed, the ISO
+  link and the serial log, and takes the snapshot `Remotely image v<N>` powered off (no memory). Its clones copy nothing
+  of the install: a settings change of that seal that fails fails the build before the snapshot (the VM is kept,
+  generic and off; nothing is registered; its seed, ISO link and serial log stay, as its settings still name them).
+  VirtualBox's changes are asked again (`Deployer::vbox_unlocked`, up to five more times over about 8 seconds) while
+  it says the VM's session lock is held, as VBoxHeadless does for a moment after the guest powered off. A
+  VirtualBox VM that `aborted` instead of shutting down fails it too
+  (Workstation's list of running VMs can't tell the two apart). A failure before the VM is made removes what the build
+  made; after that the VM is kept for a look with its seed taken out (G6's `abandon_install`). The build VM takes its
+  address by DHCP: a config that uses `{{ip}}` (`install::render::uses_ip`) or a recipe with an address pool is refused,
+  since every clone would take that address (and `BuildSpec::validate` refuses an install pool or a VM address on the
+  bus). The recipe's folder is checked by its text first
+  (`catalog::images::folder_problem`: no share or device path is ever looked at).
+- **Versions: a new VM per build.** A reinstall over a VM that has snapshots was never seen to work (UEFI boots the
+  installed system's entry, BIOS `hdd,cdrom` its disk: S1, S2), and a version that is its own VM is deleted without
+  merging anyone's disks, pins exactly what its linked clones need and nothing else. `image_versions` keeps every
+  version (numbers are never used twice); the image's own `vm_key` and `snapshot_id` always name the newest, so launch
+  templates and deploys that use the image deploy that one with no change (`Image.version` says which). Retention is the
+  recipe's `keep` (off by default). The build plans it (`GoldenImages::plan_prune`): each version past the newest `keep`
+  (counting the new one) whose VM is this workspace's and that no linked clone uses is a `PruneVm` in the spec and a
+  `TargetRef::Vm` target of the command, so the approval names it and the policy engine rates it (a protected one is
+  skipped, AP-04); the others are `retained`, with why. The job (`JobRunner::run_image_build`) runs the build VM's step
+  first and the old versions' only once it registered its version (else they are left, not started); each
+  (`prune_version`) must still be that version of the image and this workspace's VM (`require_vm_here`; another
+  workspace's stays), not protected nor labelled Prod since the approval, then goes through R3's VM delete, whose checks
+  run then (running, Workstation's lock, VM-04's linked clones: a version a clone uses stays). A version whose VM is gone
+  is marked `deleted_at`. A version VM deleted any other way (R3's delete by hand) is marked too
+  (`Store::forget_version_vm`), and the image moves to its newest version left. **One build of an image at a time**
+  (`ImageBuildActions::begin`, a `BuildGuard` by image id and a new image's name): another is refused when it starts,
+  as is one whose version number was built since it was planned, and registering a version moves the image only when
+  it is the newest; a rebuild never writes the image's recipe, and a build of an image's next version must be from its
+  saved build settings (`GoldenImages::submit`). The versions list shows each version's linked clones.
+- **Tiers** (`policy/golden_tests.rs`): `ActionKind::ImageBuild` Medium (the plan's tier); with `keep` the command is
+  `ImageBuildPrune`, Critical, since it deletes VMs and their files as VM-24's delete does (the same reasoning as
+  VM-27's snapshot schedule with retention, which is High because it deletes snapshots). A vault password going into
+  the answer file and to the build VM's sudo adds `VaultReauth` (G6's `ask_for_guest_password`, through
+  `Command::deploy_specs`), in the dialog's approval and in a schedule's standing one (`ask_standing_as` asks it for each
+  command too). The approval shows `ApprovalRequest.image_build` (`BuildDetails`) beside the build VM's deploy preview.
+- **Signing in to make it generic.** Linux: SSH as the config's first user (`install::read_form`'s users; a preseed's
+  late command gives the key, so the config's own key then), with the config's vault key, the steps as root through
+  `sudo -S` with that user's vault password (none: the user's password is locked and sudo must need none), on one
+  connection, within 45 minutes (`LINUX_RUN_LIMIT`: a hung step fails the build), then `systemctl --no-block poweroff`
+  on the same connection without waiting for its answer (sshd stops, and with the host keys deleted a new connection
+  couldn't sign in). The host key is taken on first use for this build
+  only (`FirstUse`: a VM this build just made on this PC's network; another key later is refused; nothing goes in
+  known_hosts). Windows: WinRM over HTTPS as the account whose one-time password G6 replaced, with the vault's
+  password and only the certificate the VM wrote to COM1 (`PinnedCertificate`).
+- **Linux, made generic** (`golden::generic::LINUX_SCRIPT`): each step is a function that says `remotely-generic ok
+  <step>` or `failed <step>`, the script stops at the first that fails (and still exits 0, so its report comes back),
+  and the build fails, keeping the VM, unless every step of `LINUX_STEPS` said `ok` and the script said `done`
+  (`Report::linux_problems`). Only then does `SshGuestShell` power it off: a VM whose steps didn't all go is left
+  running (for a look, and so the work a step waited for isn't cut short), and the error says so. The steps, in
+  order:
+  - `boot`: the first boot's own work is waited for, each with `timeout 600` (a time-out fails the step): `systemctl
+    is-system-running --wait`, `cloud-init status --wait` (any status but 0 is a note), and no package work (polled
+    every 5 s, 10 minutes at most): `apt`, `apt-get` and `dpkg` by name (`pgrep -x`), `unattended-upgrade` by its
+    command line (`pgrep -f '^/usr/bin/python3(\.[0-9]+)? /usr/bin/unattended-upgrade( |$)'`), never by the name
+    `unattended-upgr`, which unattended-upgrades.service's `unattended-upgrade-shutdown --wait-for-signal` also has
+    (a python script, its name cut to 15 characters) for as long as the system is up. It says how long it waited
+    (`waited <s>`, kept in the version's facts), so nothing writes keys, IDs or logs after they are cleaned.
+  - `cloud_init`: back on and as if it never ran, so VM-22's first boot works on each clone:
+    `/etc/cloud/cloud-init.disabled` deleted (S1: Ubuntu's installed system has it), then the installer's own
+    `cloud.cfg.d` files if there (`99-installer.cfg`, which pins the datasource to `None` and holds the config it ran
+    with; `subiquity-disable-cloudinit-networking.cfg`, which turns a seed's network-config off;
+    `90-installer-network.cfg`) *(hand check: which of them 24.04 and 26.04 write)*, `cloud-init clean --logs` (its
+    instance state, semaphores and logs) and `/var/lib/cloud/seed`; each file checked gone after its `rm` (a leftover
+    `99-installer.cfg` would keep every clone from reading its seed), then: no `cloud-init.disabled`, no
+    `/var/lib/cloud/seed` or `/var/lib/cloud/instance`, `/var/lib/cloud/instances` empty. The files it removed are
+    in the version's facts (`removed`).
+  - `machine_id`: `/etc/machine-id` emptied, never deleted (systemd makes a new one at the next boot and treats it as a
+    first boot); `/var/lib/dbus/machine-id` deleted (on Ubuntu and Debian a link to it; D-Bus falls back to
+    `/etc/machine-id`).
+  - `host_keys`: `remotely-ssh-host-keys.service` made, enabled and checked enabled, and only then the SSH host keys
+    deleted: a oneshot `ssh-keygen -A` `After=cloud-init.service cloud-init-network.service` (cloud-init's ssh module
+    makes a clone's keys first when it runs, in its network stage, which newer cloud-init names
+    `cloud-init-network.service`; the condition then skips the unit, and `After=` a unit that isn't there is ignored),
+    `Before=ssh.service sshd.service`, `ConditionPathExistsGlob=!/etc/ssh/ssh_host_*_key`,
+    `WantedBy=multi-user.target ssh.service` (Ubuntu 24.04 starts ssh.service from ssh.socket). Debian's and Ubuntu's
+    sshd refuse to start without keys (`sshd -t` in `ExecStartPre`), and only their postinst or cloud-init's ssh module
+    (when cloud-init runs) make them, so without the unit a Debian clone has no SSH *(hand check, with the order on
+    Ubuntu)*.
+  - `answer_files`: `/var/log/installer` deleted whole (Ubuntu's `autoinstall-user-data`, 0400 root with the password
+    hash, S1; Debian's `cdebconf/questions.dat`, 0600 root, with the boot line, S2), and debconf's
+    `/var/cache/debconf/passwords.dat` emptied when there (where a preseed's password answers can stay *(hand check:
+    what Debian 12 leaves in it)*). Kickstart isn't delivered (no spike), so its `/root/*-ks.cfg` only go if there.
+  - `logs`, `history`, `leases`: the journal vacuumed, rotated logs deleted and the rest of `/var/log` truncated, root's
+    and the users' `.bash_history` deleted (each checked gone on its own), DHCP leases deleted (`/var/lib/dhcp/*.leases`, `/var/lib/dhcpcd/*`, NetworkManager's). The shutdown logs a
+    few lines again, into the build's own (old machine-id's) journal folder.
+  - It says whether the system has cloud-init and open-vm-tools (`facts` of the version): Workstation's first boot reads
+    cloud-init's guestinfo through open-vm-tools, which `ubuntu-server-minimal` leaves out (S1), so the dialog warns and
+    the note says to add it to the config's packages.
+- **A Debian image without cloud-init** (the starter installs none): its clones can be full or linked, and each gets a
+  new machine-id and new SSH host keys at its first boot, DHCP on its card (the installer's `/etc/network/interfaces`
+  names it; a clone on the same hypervisor and profile has the same name), and the config's users with their keys and
+  passwords. They can't take a hostname (every clone is named like the build VM), a template's guest user, SSH key or
+  packages, or a seed's network-config: nothing reads VM-22's seed or guestinfo. `cloud-init` in the preseed's
+  `pkgsel/include` gives what Ubuntu's images get; the build dialog says so.
+- **Windows, made generic** (kept, refused in 0.8.0; `golden::generic::windows_script`): one WinRM run
+  (`$ErrorActionPreference = 'Stop'`, which under `-Command -` ends only the line that fails) writes
+  `C:\Windows\Temp\remotely-generalize.ps1` (from base64: a WinRM console ends a statement at an empty line) and
+  registers the task `Remotely generalize` as SYSTEM 15 seconds later (on battery power too), since a process started
+  from a WinRM shell is killed with the shell; its last line says `scheduled` only when both the script's file and the
+  task are there. The task deletes itself and its script, deletes the build's WinRM over HTTPS listener
+  (`Transport=HTTPS`) and its certificate with its private key (`Cert:\LocalMachine\My`, `-DeleteKey`: else every clone
+  would share the build's key, and its listener would point at it), Setup's `Panther\unattend.xml` and
+  `unattend-original.xml`, PowerShell's history and the event logs; each removal is said only once `Test-Path` shows it
+  gone, else the task says `failed <what>` and stops before sysprep (the build fails at once, Windows left running).
+  Then `sysprep.exe /generalize /oobe /quit /quiet` (`Start-Process -Wait -PassThru`: sysprep is a GUI program), its old
+  `Sysprep_succeeded.tag` deleted first; only an exit code 0 with a new `Sysprep_succeeded.tag` is `sealed`, after which
+  the task looks at Panther again (`after-sysprep <file>`, for the record, deleted) and shuts Windows down itself
+  (`Stop-Computer -Force`); otherwise it says `sysprep-failed <code>` and leaves Windows running, and the build fails at
+  once. Not `/shutdown`: the shutdown could end sysprep.exe before its code was read (or have the task's PowerShell
+  report a code from the kill), and a power-off while sysprep runs would look like sysprep's own. A power-off before the
+  task said `removed winrm-https`, `sysprep` and `sealed` (`WINDOWS_STEPS`) fails the build; a wait that runs out says
+  what COM1 showed last (nothing: see Task Scheduler; `sysprep`: sysprep's own log; `sealed`: the shutdown). Seen by
+  hand (checks 3 and 4 below): sysprep as SYSTEM returned 0 with its tag, Panther held no answer file after it, the
+  listener's removal was said, and Windows was off seconds after `sealed` on both hypervisors.
+- **A clone of a Windows image gets G6's delivery: it doesn't work yet (hand checks 3 and 4 below), so 0.8.0 refuses it
+  (the first bullet) and the rest of this bullet runs only in tests.** A template of a Windows image Remotely built (and
+  no install config of its own) deploys with the config its newest version was built from
+  (`catalog::Facts::golden_config`, by the version row's `config_id`, never the recipe's, which may name another since),
+  and only while that config is as it was then (the row's `config_fingerprint`; a changed, deleted or broken config is
+  the template's problem, and building the image again fixes it): `DeploySpec.install` on a `GoldenVm` source
+  (`validate_install`, `install_spec`: no ISO, no disk layout check). Each clone's file is rendered for it (its
+  hostname, a one-time password) onto a seed in its private folder, in a CD drive added to the clone (Workstation: the
+  first free `sata0:N`; VirtualBox: `dvd_slot`) with COM1 to `<vm>-serial.log` (and VirtualBox's NAT rule). After
+  sysprep, specialize sets the computer name and oobeSystem the one-time password, the autologon and its
+  FirstLogonCommands, which turn WinRM over HTTPS on with a new self-signed certificate and write its fingerprint to
+  COM1 (the starters' lines); windowsPE and offlineServicing don't run. The watcher is G6's with no Setup restarts to
+  wait for (`SerialWatcher::sysprepped`: the clone's serial log is new), then G6's first sign-in replaces the one-time
+  password with the vault's, deletes Panther's copy and signs the autologon out; the seed is taken out. **Seen by hand:
+  the sysprepped clones don't read the seed CD's `autounattend.xml`.** On both releases and both hypervisors the clone
+  ran specialize without it (no `remotely-stage specialize` line on COM1) and stopped at OOBE's first page ("Hi there",
+  the region and keyboard), so it got no name, one-time password or WinRM certificate of its own and the deploy waits to
+  its time limit. Microsoft's implicit search table lists removable read-only media for every pass, but it isn't used
+  here; which delivery replaces it is open (a generic answer file given to sysprep at build time whose specialize step
+  points Setup at the clone's seed, or the clone's file written into its disk before its first boot). *(Still to check
+  by hand once it reads its file: that a `LocalAccounts` account the build made doesn't stop OOBE; the starters'
+  `New-NetFirewallRule` failing harmlessly on a rule that is there.)*
+- **Scheduled rebuilds** (`ScheduleAction::RebuildImage`, one `ScheduleTarget::Image`): the save asks the bus for a
+  standing approval of the image's next build as it would be built then (VM-27; Medium, or Critical with `keep`). Each
+  run builds the command from the recipe as it is then (`GoldenImages::command_for`) and submits it under the grant: a
+  rebuild of the same image is covered (`standing::covers`), and `changes_since` compares what it builds
+  (`BuildSpec::differences`: the install config's fingerprint and name, the ISO's path, size and time, the OS profile,
+  the recipe, `keep`, and what the recipe's ids resolve to as the run planned its VM: the size's CPU, memory and disk,
+  the folder, the network and adapter, the profile's values, the install's time limit, vault picks and values), not
+  the version's new VM. Each run's old versions are its own targets: one labelled Prod that wasn't approved as Prod asks
+  again. **A config, ISO or recipe changed since the grant** is a change like an edited schedule: the scheduler's tick
+  sees it cheaply (`GoldenImages::changes_since`, no planning; `standing_grant_changes` for the rules and AP-08's change
+  ID), pauses the schedule (`NeedsApproval`, the reason names what changed) and nothing runs until it is approved
+  again; the run's own submit, which compares the planned VM too, refuses it the same way (`StandingChanged`). **The
+  vault locked** when a build starts (or when it signs in to make the VM generic): the job waits, saying `waiting for
+  the vault to be unlocked` (G6's `VAULT_WAIT`, which the window turns into a notification), for up to 4 hours, sends
+  nothing meanwhile, and checks the config against the approved one when it goes on (G6's `prepare_install`); after 4
+  hours it fails and the image keeps its versions. Before the wait and after each of its rounds it asks whether the
+  approval still stands (`golden::StandingCheck`: the grant not withdrawn and the schedule active), so a schedule
+  edited, paused or deleted meanwhile builds nothing. Weekly is the longest timing schedules have.
+- **Rule 8**: images, versions and recipes are the workspace's (`store/golden.rs` by `ctx`); the build VM is
+  `assign_vm`ed by G6's `list`; a deleted version's VM is `release_vm`d by R3's delete; scheduled rebuilds run in their
+  own workspace's ctx, their VMs that workspace's (`tests/workspaces.rs`, with another workspace shown). Edits of build
+  settings are `catalog_changed` (audited, refused by the read-only lock); a build is a job audited as any. An image in
+  the trash takes its versions' rows with it (attached rows) and brings them back under its id; its versions' VMs stay.
+  An FD-07 export carries a built image as a golden VM image at its newest version, without its recipe or versions
+  (they name this PC's VMs and configs); an import never replaces an image Remotely builds here (the item's problem
+  says to keep both).
+- **Hand checks on real VMs** (14 Nov 2026, at 3ea88e0; Workstation 26, VirtualBox 7.2.22 under Hyper-V, the owner's
+  ISOs read only, a core built like the app's with its own data folder, VMs named `g7-check-*`, all deleted after):
+  1. **Ubuntu 24.04.5 on Workstation (UEFI), `open-vm-tools` added: passed.** Making it generic began 24 s after the
+     installed system booted (`systemctl is-system-running`: running; `cloud-init status`: disabled, the installer's
+     marker), and `boot` waited 0 s although unattended-upgrades.service's `unattended-upgrade-shutdown
+     --wait-for-signal` was running (N1). `cloud.cfg.d` held `99-installer.cfg` and `90-installer-network.cfg` (both
+     removed; no `subiquity-disable-cloudinit-networking.cfg`) and keeps `05_logging.cfg`, `20-disable-cc-dpkg-grub.cfg`,
+     `90_dpkg.cfg`, `curtin-preserve-sources.cfg` and `README`; `/var/cache/debconf/passwords.dat` was empty. The version's
+     `.vmx` names no install CD and no `serial0` (only the empty SATA controller's `sata0.present` and its PCI slot), and
+     was the same 60 s later with Workstation no longer running the VM: vmware-vmx didn't write it again as it exited.
+     Two linked clones from a template with a guest user and key: each has its own hostname, machine-id and SSH host keys
+     (cloud-init's ssh module made them; `remotely-ssh-host-keys.service` is enabled, but its condition was false, so it
+     didn't run: Q4's order holds on Ubuntu), `cloud-init status` done, the guest user signs in with its key,
+     `/var/log/installer` gone. The install took about 8 minutes.
+  2. **Debian 12 netinst on VirtualBox (UEFI): passed.** Making it generic began 11 s after boot, `boot` waited 0 s;
+     no cloud-init; `passwords.dat` was 180 bytes with no answer holding a value (Q5: emptied all the same). After the
+     build: no medium in any drive, `uart1="off"`, no NAT rule. A full clone has its own machine-id and its own SSH host
+     keys, made by the unit (its condition held and it ran), sshd is up, and it keeps the build's hostname (as above).
+  3. **Windows Server 2025 on Workstation: the build passed, its clone failed.** COM1: `started`, `removed
+     winrm-https`, `removed C:\Windows\Panther\unattend.xml`, `cleared event-logs`, `sysprep`, then 46 s later
+     `sysprep-exit 0` and `sealed` (`/quit` returned 0 with its tag); no `after-sysprep` line (Panther held no answer file
+     after sysprep); Windows was off 3 s after `sealed`. Its `.vmx` names no install CD and no `serial0`. The clone: see
+     the Windows bullet above (no COM1 line; one restart after specialize, then OOBE).
+  4. **Windows Server 2022 on VirtualBox: the build passed, its clone failed.** The same COM1 lines; sysprep took 103 s,
+     `sysprep-exit 0`, `sealed`, off 2 s later; no `after-sysprep` line; no drive medium, serial port or NAT rule left.
+     The clone's first boot hung at the firmware logo (no disk writes for 17 minutes: S3's VirtualBox-under-Hyper-V hang,
+     which G6's hang reset doesn't cover for a clone's first boot); after a reset by hand it ran specialize and stopped
+     at OOBE's first page, as above.
+  5. **Retention (`keep` 1, on check 1's image): passed.** The v2 build's approval had no old version to delete and said
+     `version 1 stays: the linked clones ... use it`; the v3 build's approval named v2 as its second target (Critical);
+     once v3 was registered the job deleted v2's VM (9 files, 4.6 GB) and kept v1 for its clones.
+  6. **A scheduled rebuild (through the core, not the window): passed.** The standing approval was Medium with the
+     vault password; the vault was locked at the due time; the run started and waited (`waiting for the vault to be
+     unlocked to render the answer file`) with nothing made; unlocked 30 s later, it built v2, the newest. An edit of the
+     install config then paused the schedule at the next tick (NeedsApproval: the install config changed). The window's
+     notification wasn't looked at.
+  - **N2:** no VirtualBox seal (three) was refused for the session lock, so the retries weren't needed there;
+    VBoxSVC logged nothing of the kind. It logged one refusal each time the seed was forced out of a running VM's drive:
+    the `closemedium` that follows is refused ("locked for reading by another task"); `eject` ignores it, and the seed's
+    file was deleted all the same.
+- G6 fix: `Deployer::read_fingerprint` read the serial log with a fresh watcher, which counts no Setup restarts and so
+  never took the fingerprint line: a deploy's saved WinRM session never had its certificate trusted from the VM's
+  serial port. It now reads the whole log without waiting for restarts, and two different lines give none.
+
 ## Development safety
 
 - Unit and integration tests must never stop, reset, suspend, revert or delete snapshots on real VMs. Use the fake VMware adapter, and `fakes::FakeVirtualBox` for VirtualBox.
@@ -2233,6 +2515,10 @@ VM-29 and VM-32, from 0.8.0 (`docs/plan-0.8.md`, G6), built only on what S1 to S
   like OpenSSH (direct-tcpip, tcpip-forward on 127.0.0.1 only); `with_route("db01.test", port)` makes a name only it
   resolves, so `tests/jump_hosts.rs` chains three servers, and `tests/tunnels.rs` carries bytes to an echo service on
   127.0.0.1. Tunnel tests bind loopback with port 0; never a network address.
+- Golden image builds (VM-30): `tests/golden_images.rs` builds on `FakeVmware` and `FakeVirtualBox` from small ISOs
+  made at run time, plays each installer into the VM's serial log as `tests/unattended.rs` does, makes Linux generic
+  through a fake `GuestShell` (`Core::set_guest_shell`) that powers the fake VM off, and Windows through a fake WinRM
+  client whose sysprep task does; never a real SSH host, WinRM host, VM or ISO.
 - Unattended deploys (VM-29, VM-32): `tests/unattended.rs` deploys on the fakes from small ISOs that
   `fakes::install_isos` makes at run time, plays each installer by writing S1 to S3's lines into the VM's serial log,
   answers SSH with a banner on 127.0.0.1 (`DeployTuning.probe`) and Windows' WinRM with a fake client

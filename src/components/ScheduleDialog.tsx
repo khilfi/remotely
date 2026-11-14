@@ -3,6 +3,9 @@
 // auto-suspend). The preview beside it is the core's: the next three runs in local time (with what daylight saving does
 // to one), the VMs it finds now, and warnings (snapshot chains, VM-27). Saving asks for the schedule's approval, which
 // the page shows next; new content always asks again.
+//
+// VM-30: "Rebuild an image" picks one image Remotely builds instead of VMs, tags and stacks; each run builds its next
+// version from its build settings then (a changed recipe, config or ISO asks again). It never runs on idle timing.
 
 import { useEffect, useMemo, useState } from "react";
 import { CalendarClockIcon, TriangleAlertIcon } from "lucide-react";
@@ -24,7 +27,9 @@ import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { HelpTip } from "@/components/HelpTip";
 import { Term } from "@/components/Term";
 import { WhyDisabled } from "@/components/WhyDisabled";
-import { errorMessage, type Tag, type VmRecord } from "@/lib/api";
+import { api, errorMessage, type Image, type Tag, type VmRecord } from "@/lib/api";
+import { builtImages, versionText } from "@/lib/golden";
+import { requestLink } from "@/lib/links";
 import {
   ACTION_CHOICES,
   DAYS,
@@ -35,6 +40,7 @@ import {
   formToInput,
   MAX_KEEP,
   TIMING_CHOICES,
+  timingReason,
   withAction,
   withTiming,
   type ActionKind,
@@ -86,6 +92,20 @@ export function ScheduleDialog({ existing, initialVms, vms, tags, onSaved, onClo
       live = false;
     };
   }, []);
+  // VM-30: the images Remotely builds, for a rebuild (null until read).
+  const [images, setImages] = useState<Image[] | null>(null);
+  useEffect(() => {
+    let live = true;
+    api.catalogImages().then(
+      (list) => live && setImages(builtImages(list)),
+      () => live && setImages([]),
+    );
+    return () => {
+      live = false;
+    };
+  }, []);
+  const rebuild = form.action === "rebuildImage";
+  const rebuilt = images?.find((i) => i.id === form.image) ?? null;
 
   // The core's preview, once the form is complete, a moment after the last change.
   const input = useMemo(() => (problem === null ? formToInput(form) : null), [form, problem]);
@@ -208,11 +228,15 @@ export function ScheduleDialog({ existing, initialVms, vms, tags, onSaved, onClo
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    {TIMING_CHOICES.map((t) => (
-                      <SelectItem key={t.value} value={t.value}>
-                        {t.label}
-                      </SelectItem>
-                    ))}
+                    {TIMING_CHOICES.map((t) => {
+                      const off = timingReason(form.action, t.value);
+                      return (
+                        <SelectItem key={t.value} value={t.value} disabled={off !== null} title={off ?? undefined}>
+                          {t.label}
+                          {off ? " (not for a rebuild)" : ""}
+                        </SelectItem>
+                      );
+                    })}
                   </SelectContent>
                 </Select>
                 {form.timing === "hourly" && (
@@ -285,55 +309,97 @@ export function ScheduleDialog({ existing, initialVms, vms, tags, onSaved, onClo
               )}
             </div>
 
-            <div className="grid gap-2">
-              <Label>On</Label>
-              {vmTags.length > 0 && (
-                <div className="flex flex-wrap gap-3">
-                  {vmTags.map((tag) => (
-                    <label key={tag.id} className="flex items-center gap-1.5 text-sm">
-                      <Checkbox
-                        checked={form.tags.includes(tag.name)}
-                        onCheckedChange={(on) => set({ tags: toggle(form.tags, tag.name, on === true) })}
-                      />
-                      Tag &lsquo;{tag.name}&rsquo; ({tag.vmCount === 1 ? "1 VM" : `${tag.vmCount} VMs`})
-                    </label>
-                  ))}
-                </div>
-              )}
-              {stacks.length > 0 && (
-                <div className="flex flex-wrap gap-3">
-                  {stacks.map((stack) => (
-                    <label key={stack.id} className="flex items-center gap-1.5 text-sm">
-                      <Checkbox
-                        checked={form.stacks.includes(stack.id)}
-                        onCheckedChange={(on) => set({ stacks: toggle(form.stacks, stack.id, on === true) })}
-                      />
-                      Stack &lsquo;{stack.name}&rsquo; ({stack.vms === 1 ? "1 VM" : `${stack.vms} VMs`})
-                    </label>
-                  ))}
-                </div>
-              )}
-              <Input
-                aria-label="Filter VMs"
-                placeholder="Filter VMs…"
-                value={filter}
-                onChange={(e) => setFilter(e.currentTarget.value)}
-              />
-              <div className="grid max-h-48 gap-1 overflow-auto rounded-md border p-2">
-                {shownVms.length === 0 && <p className="text-sm text-muted-foreground">No VM matches.</p>}
-                {shownVms.map((vm) => (
-                  <label key={vm.vmxPath} className="flex items-center gap-1.5 text-sm">
-                    <Checkbox
-                      checked={form.vms.includes(vm.vmxPath)}
-                      onCheckedChange={(on) => set({ vms: toggle(form.vms, vm.vmxPath, on === true) })}
-                    />
-                    {vm.displayName}
-                    {vm.environment === "prod" && <span className="text-xs text-tier-high">Prod</span>}
-                    {vm.protected && <span className="text-xs text-muted-foreground">protected (skipped)</span>}
-                  </label>
-                ))}
+            {rebuild ? (
+              <div className="grid gap-2">
+                <Label htmlFor="schedule-image">Image</Label>
+                {images?.length === 0 ? (
+                  // UX-07: no dead end; the Templates page's Images tab builds one.
+                  <div className="flex min-h-9 items-center gap-2 text-sm text-muted-foreground">
+                    No image Remotely builds yet.
+                    <Button
+                      type="button"
+                      variant="link"
+                      size="sm"
+                      className="h-auto p-0"
+                      onClick={() => {
+                        onClose();
+                        requestLink({ kind: "catalog", tab: "images" });
+                      }}
+                    >
+                      Open Images
+                    </Button>
+                  </div>
+                ) : (
+                  <Select value={form.image ?? ""} onValueChange={(image) => set({ image })}>
+                    <SelectTrigger id="schedule-image" className="w-full">
+                      <SelectValue placeholder={images ? "Pick an image" : "Reading the images…"} />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {(images ?? []).map((i) => (
+                        <SelectItem key={i.id} value={i.id}>
+                          {i.name} ({versionText(i.version).toLowerCase()})
+                        </SelectItem>
+                      ))}
+                      {form.image && images && !rebuilt && (
+                        <SelectItem value={form.image} disabled>
+                          (deleted image)
+                        </SelectItem>
+                      )}
+                    </SelectContent>
+                  </Select>
+                )}
               </div>
-            </div>
+            ) : (
+              <div className="grid gap-2">
+                <Label>On</Label>
+                {vmTags.length > 0 && (
+                  <div className="flex flex-wrap gap-3">
+                    {vmTags.map((tag) => (
+                      <label key={tag.id} className="flex items-center gap-1.5 text-sm">
+                        <Checkbox
+                          checked={form.tags.includes(tag.name)}
+                          onCheckedChange={(on) => set({ tags: toggle(form.tags, tag.name, on === true) })}
+                        />
+                        Tag &lsquo;{tag.name}&rsquo; ({tag.vmCount === 1 ? "1 VM" : `${tag.vmCount} VMs`})
+                      </label>
+                    ))}
+                  </div>
+                )}
+                {stacks.length > 0 && (
+                  <div className="flex flex-wrap gap-3">
+                    {stacks.map((stack) => (
+                      <label key={stack.id} className="flex items-center gap-1.5 text-sm">
+                        <Checkbox
+                          checked={form.stacks.includes(stack.id)}
+                          onCheckedChange={(on) => set({ stacks: toggle(form.stacks, stack.id, on === true) })}
+                        />
+                        Stack &lsquo;{stack.name}&rsquo; ({stack.vms === 1 ? "1 VM" : `${stack.vms} VMs`})
+                      </label>
+                    ))}
+                  </div>
+                )}
+                <Input
+                  aria-label="Filter VMs"
+                  placeholder="Filter VMs…"
+                  value={filter}
+                  onChange={(e) => setFilter(e.currentTarget.value)}
+                />
+                <div className="grid max-h-48 gap-1 overflow-auto rounded-md border p-2">
+                  {shownVms.length === 0 && <p className="text-sm text-muted-foreground">No VM matches.</p>}
+                  {shownVms.map((vm) => (
+                    <label key={vm.vmxPath} className="flex items-center gap-1.5 text-sm">
+                      <Checkbox
+                        checked={form.vms.includes(vm.vmxPath)}
+                        onCheckedChange={(on) => set({ vms: toggle(form.vms, vm.vmxPath, on === true) })}
+                      />
+                      {vm.displayName}
+                      {vm.environment === "prod" && <span className="text-xs text-tier-high">Prod</span>}
+                      {vm.protected && <span className="text-xs text-muted-foreground">protected (skipped)</span>}
+                    </label>
+                  ))}
+                </div>
+              </div>
+            )}
           </div>
 
           <aside className="grid content-start gap-3 rounded-md border p-3 text-sm" aria-label="Preview">
@@ -360,10 +426,23 @@ export function ScheduleDialog({ existing, initialVms, vms, tags, onSaved, onClo
                     </ul>
                   </div>
                 )}
-                <div>
-                  <div className="text-xs font-medium text-muted-foreground">VMs now</div>
-                  <p>{preview.vms.length ? preview.vms.join(", ") : "None: no VM has those tags now"}</p>
-                </div>
+                {rebuild ? (
+                  <div>
+                    <div className="text-xs font-medium text-muted-foreground">Image</div>
+                    <p>
+                      {!rebuilt
+                        ? "(deleted image)"
+                        : rebuilt.version === null
+                          ? `${rebuilt.name}; each run builds its next version`
+                          : `${rebuilt.name}, version ${rebuilt.version} now; each run builds the next`}
+                    </p>
+                  </div>
+                ) : (
+                  <div>
+                    <div className="text-xs font-medium text-muted-foreground">VMs now</div>
+                    <p>{preview.vms.length ? preview.vms.join(", ") : "None: no VM has those tags now"}</p>
+                  </div>
+                )}
                 {preview.warnings.length > 0 && (
                   <Alert>
                     <TriangleAlertIcon />

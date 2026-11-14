@@ -66,7 +66,7 @@ use crate::adapters::vmware::{path_key, ToolsState};
 use crate::adapters::winrm::{NoWinrm, WinrmAdapter, WinrmConnect, WinrmSession, WinrmTuning};
 use crate::command_bus::{ApprovalRecord, Command, PowerOp, Rollout, SnapshotOp, StopMode};
 use crate::containers::ContainerActions;
-use crate::domain::{Context, PowerState, Target, TargetRef, WorkspaceId};
+use crate::domain::{Context, Environment, PowerState, Target, TargetRef, WorkspaceId};
 use crate::error::{CoreError, Result};
 use crate::known_hosts::{HostKey, HostKeyCheck, KnownHosts};
 use crate::linked_clones::{LinkedClones, VboxMedia};
@@ -357,6 +357,8 @@ impl JobScope {
             | Command::VmLifecycle { .. } => JobScope::Vms,
             // VM-21: the new VMs show in the list. VM-08: a stack's VMs are made, started, stopped or deleted.
             Command::Deploy { .. } | Command::Stack { .. } => JobScope::Vms,
+            // VM-30: the build's VM shows in the list, and old versions' go.
+            Command::ImageBuild { .. } => JobScope::Vms,
             Command::Container { .. } => JobScope::Containers,
             _ => JobScope::Other,
         }
@@ -686,6 +688,8 @@ pub struct JobRunner {
     /// VM-08: readiness checks, delays and instance records between a stack's steps (set once the core is put
     /// together).
     stacks: RwLock<Option<Arc<dyn crate::stacks::StackActions>>>,
+    /// VM-30: what registers a golden image's new version and finds its old ones (set once the core is put together).
+    image_builds: RwLock<Option<Arc<dyn crate::golden::ImageBuildActions>>>,
     /// CV-03, VM-17: what converts images and exports VMs (set once the core is put together).
     converter: RwLock<Option<Arc<dyn crate::convert::runner::ConvertActions>>>,
     /// FD-04: what writes a support bundle's zip (set once the core is put together).
@@ -746,6 +750,7 @@ impl JobRunner {
             terminals,
             containers: RwLock::new(None),
             deployer: RwLock::new(None),
+            image_builds: RwLock::new(None),
             stacks: RwLock::new(None),
             converter: RwLock::new(None),
             bundles: RwLock::new(None),
@@ -796,6 +801,11 @@ impl JobRunner {
     }
 
     /// VM-08: what runs between a stack's steps.
+    /// VM-30: golden image builds register their versions and keep the newest through these.
+    pub fn set_image_builds(&self, builds: Arc<dyn crate::golden::ImageBuildActions>) {
+        *locks::write(&self.image_builds) = Some(builds);
+    }
+
     pub fn set_stacks(&self, stacks: Arc<dyn crate::stacks::StackActions>) {
         *locks::write(&self.stacks) = Some(stacks);
     }
@@ -1217,6 +1227,8 @@ impl JobRunner {
         if let Command::Stack { op, .. } = &spec.command {
             // VM-08: step by step, in boot order (the last step first to stop).
             Arc::clone(&self).run_stack(&run, op, targets, &mut tally).await;
+        } else if matches!(spec.command, Command::ImageBuild { .. }) {
+            Arc::clone(&self).run_image_build(&run, targets, &mut tally).await;
         } else {
             Arc::clone(&self).run_targets(&run, targets, &mut tally).await;
         }
@@ -1750,6 +1762,128 @@ impl JobRunner {
         }
     }
 
+    /// VM-30: a build's targets in order: its new VM first; then, only once that registered the image's new version,
+    /// each older version its retention deletes (B3 of PR 100's review: each a target the approval named and the
+    /// policy engine rated). A build that didn't register leaves them all, not started.
+    async fn run_image_build(self: Arc<Self>, run: &TargetsRun<'_>, targets: Vec<Target>, tally: &mut Tally) {
+        let (build, prune): (Vec<Target>, Vec<Target>) = targets
+            .into_iter()
+            .partition(|t| matches!(t.target, TargetRef::NewVm { .. }));
+        let before = tally.failed + tally.unknown + tally.cancelled + tally.skipped;
+        Arc::clone(&self).run_targets(run, build, tally).await;
+        if prune.is_empty() {
+            return;
+        }
+        if tally.failed + tally.unknown + tally.cancelled + tally.skipped > before || run.token.is_cancelled() {
+            tally.halted = Some("the build didn't register its version, so no old version was deleted".into());
+            run.halt.cancel();
+        }
+        Arc::clone(&self).run_targets(run, prune, tally).await;
+    }
+
+    /// VM-30: one older version the build's retention deletes, once the build registered its own: the version must
+    /// still be the image's and its VM this workspace's (B2: `require_vm_here`, then its labels now, not the row a
+    /// release keeps); a protected one, or one labelled Prod since the approval, stays. Then R3's delete, whose checks
+    /// run there and then (running, Workstation's lock, VM-04's linked clones: a version a clone uses stays).
+    async fn prune_version(
+        &self,
+        ctx: &Context,
+        job_id: Uuid,
+        build: &crate::golden::BuildSpec,
+        target: &Target,
+    ) -> Result<TargetOutcome> {
+        let TargetRef::Vm { vmx_path } = &target.target else {
+            return Err(CoreError::UnknownTarget(target.target.key()));
+        };
+        let images = locks::read(&self.image_builds)
+            .clone()
+            .ok_or_else(|| CoreError::NotImplemented("golden image builds"))?;
+        let planned = build
+            .pruned(vmx_path)
+            .ok_or_else(|| CoreError::UnknownTarget(target.target.key()))?;
+        let n = planned.number;
+        let said = |text: String| TargetOutcome {
+            output: Some(OutputCollector::collect(
+                text.as_bytes(),
+                b"",
+                &[],
+                MAX_OUTPUT_PER_STREAM,
+            )),
+            note: Some(text),
+            ..TargetOutcome::done()
+        };
+        let versions = self.store.image_versions(ctx, build.image_id).await?;
+        if !versions
+            .iter()
+            .any(|v| v.number == build.version && v.deleted_at.is_none())
+        {
+            return Err(CoreError::InvalidInput(format!(
+                "version {} of image '{}' wasn't registered, so version {n} stays",
+                build.version, build.image_name
+            )));
+        }
+        let Some(version) = versions
+            .iter()
+            .find(|v| v.number == n && v.vm_key.eq_ignore_ascii_case(vmx_path))
+        else {
+            return Err(CoreError::InvalidInput(format!(
+                "{} isn't version {n} of image '{}' any more, so it is left alone",
+                target.name, build.image_name
+            )));
+        };
+        if version.deleted_at.is_some() {
+            return Ok(said(format!("version {n} was deleted already")));
+        }
+        // B2 of PR 100's review: a VM given to another workspace (or let go) since the approval is left alone.
+        match self.store.require_vm_here(ctx, vmx_path).await {
+            Ok(()) => {}
+            Err(err @ (CoreError::NotInWorkspace(_) | CoreError::VmUnassigned(_))) => {
+                return Ok(said(format!("version {n} stays: {err}")));
+            }
+            Err(err) => return Err(err),
+        }
+        let Some(vm) = self.store.find_vm(ctx, vmx_path).await? else {
+            if let Err(err) = images.version_deleted(ctx, version, job_id, "its VM was gone").await {
+                tracing::warn!(error = %err, "a golden image version whose VM is gone couldn't be marked");
+            }
+            return Ok(said(format!(
+                "version {n} is gone: its VM isn't in the VM list any more"
+            )));
+        };
+        if vm.protected {
+            return Ok(said(format!("version {n} stays: {} is protected", vm.display_name)));
+        }
+        if vm.environment == Environment::Prod && target.environment != Environment::Prod {
+            return Ok(said(format!(
+                "version {n} stays: {} is labelled Prod since the build was approved",
+                vm.display_name
+            )));
+        }
+        let live = Target {
+            target: target.target.clone(),
+            name: vm.display_name.clone(),
+            environment: vm.environment,
+            protected: vm.protected,
+        };
+        let delete = Command::VmLifecycle {
+            targets: vec![live.target.clone()],
+            op: crate::vm_settings::VmLifecycleOp::Delete,
+        };
+        match self.vm_editor.run(ctx, job_id, &delete, &live).await {
+            Ok(changes) => {
+                if let Err(err) = images
+                    .version_deleted(ctx, version, job_id, "the image keeps newer versions")
+                    .await
+                {
+                    tracing::warn!(error = %err, "a deleted golden image version couldn't be marked");
+                }
+                Ok(said(format!("version {n} deleted with its VM {changes}")))
+            }
+            Err(CoreError::LinkedClones(reason)) => Ok(said(format!("version {n} stays: {reason}"))),
+            Err(err) => Err(err),
+        }
+    }
+
     async fn execute(
         &self,
         job_id: Uuid,
@@ -2175,6 +2309,63 @@ impl JobRunner {
                     note: Some(format!("{}: {note}", vm.name)),
                     ..TargetOutcome::done()
                 })
+            }
+            // VM-30: a golden image's new version: the build VM made, installed, made generic and snapshotted by the
+            // deploy runner, then registered as the image's newest version, then (with `keep`) the image's old
+            // versions deleted through R3's delete, whose checks run again now: a version a linked clone uses stays.
+            (Command::ImageBuild { spec: build, .. }, TargetRef::NewVm { .. }) => {
+                if token.is_cancelled() {
+                    return Err(CoreError::Cancelled);
+                }
+                let deployer = locks::read(&self.deployer)
+                    .clone()
+                    .ok_or_else(|| CoreError::NotImplemented("deploys"))?;
+                let images = locks::read(&self.image_builds)
+                    .clone()
+                    .ok_or_else(|| CoreError::NotImplemented("golden image builds"))?;
+                // C1 of PR 100's review: one build of an image at a time, and never a version older than one there.
+                let _building = images.begin(&spec.ctx, job_id, build).await?;
+                let progress = self.progress_for(job_id, target);
+                // Q1 of PR 100's review: a scheduled build that waits for the vault goes on only while its schedule's
+                // approval still stands.
+                let approved = crate::golden::StandingCheck::new(
+                    self.store.clone(),
+                    spec.ctx,
+                    spec.approval.as_ref().and_then(|a| a.standing.clone()),
+                );
+                let built = deployer
+                    .build_image(&spec.ctx, job_id, build, &approved, &progress, token)
+                    .await?;
+                let mut notes = built.notes.clone();
+                let registered = images.register(&spec.ctx, job_id, build, &built).await.map_err(|err| {
+                    CoreError::DeployFailed {
+                        vm: build.vm_name().to_owned(),
+                        message: format!(
+                            "{}; it wasn't registered as version {} of image '{}' ({err}): the VM and its snapshot '{}' are kept, add it as an image by hand or build again",
+                            notes.join("; "),
+                            build.version,
+                            build.image_name,
+                            built.snapshot_name
+                        ),
+                    }
+                })?;
+                notes.push(registered);
+                // What retention leaves, as planned (each old version it deletes is a step of its own).
+                notes.extend(build.retained.iter().cloned());
+                let note = notes.join("; ");
+                let output = OutputCollector::collect(note.as_bytes(), b"", &[], MAX_OUTPUT_PER_STREAM);
+                Ok(TargetOutcome {
+                    output: Some(output),
+                    note: Some(format!("{}: {note}", build.vm_name())),
+                    ..TargetOutcome::done()
+                })
+            }
+            // VM-30: an older version the build's retention deletes (see `run_image_build`).
+            (Command::ImageBuild { spec: build, .. }, TargetRef::Vm { .. }) => {
+                if token.is_cancelled() {
+                    return Err(CoreError::Cancelled);
+                }
+                self.prune_version(&spec.ctx, job_id, build, target).await
             }
             // CV-03, VM-17: a conversion or an export, with the tools' progress. Cancel kills the running tool and
             // removes what the job made.
@@ -3052,6 +3243,8 @@ impl JobRunner {
                 limits.vm_ops.min(crate::deploy::PARALLEL_INSTALLS)
             }
             Command::Deploy { .. } => limits.vm_ops.min(crate::deploy::PARALLEL_VMS),
+            // VM-30: one VM.
+            Command::ImageBuild { .. } => 1,
             // VM-08: within a step, as the commands it stands for.
             Command::Stack { op, .. } => match op {
                 crate::stacks::StackOp::Deploy { spec } if spec.steps.iter().any(|s| s.spec.install.is_some()) => {
@@ -3207,6 +3400,7 @@ fn safety_verb(command: &Command) -> &'static str {
         Command::Container { .. } => "container",
         Command::AppUpdate { .. } => "update",
         Command::Deploy { .. } => "deploy",
+        Command::ImageBuild { .. } => "image build",
         Command::VmConfig {
             edit: crate::vm_settings::VmConfigEdit::UpgradeHardware,
             ..
