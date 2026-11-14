@@ -16,6 +16,7 @@ mod checks_upgrade_tests;
 mod containers;
 mod favourites;
 mod forwards;
+mod golden;
 mod host_specs;
 mod install_configs;
 #[cfg(test)]
@@ -66,6 +67,8 @@ pub use audit::{chain_start, AuditEntry, ChainCheck, NewAuditEntry, GENESIS_HASH
 pub(crate) use catalog::{NewImage, TemplateRow};
 pub use checks::{CheckUptime, ResultBucket};
 pub(crate) use favourites::{FavouriteFields, FavouriteRow};
+pub(crate) use golden::NewVersion;
+pub use golden::VersionRow;
 pub use host_specs::StoredSpecs;
 pub(crate) use install_configs::InstallConfigRow;
 pub use inventory::{DiscoveredVm, VmRecord};

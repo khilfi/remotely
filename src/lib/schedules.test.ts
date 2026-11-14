@@ -14,6 +14,7 @@ import {
   outcomeTone,
   rowReasons,
   targetsText,
+  timingReason,
   withAction,
   withTiming,
 } from "./schedules.ts";
@@ -107,6 +108,39 @@ test("rows say why a button is off", () => {
   assert.match(rowReasons(view({ state: "paused" }), null).pause ?? "", /active/);
   assert.equal(rowReasons(view({ state: "paused" }), "Read-only").resume, "Read-only");
   assert.equal(rowReasons(view({ state: "needsApproval" }), null).approve, null);
+});
+
+test("a rebuild schedule rebuilds one image, never on idle", () => {
+  const form = { ...emptyForm(["k"]), name: "monthly", tags: ["lab"], action: "rebuildImage" as const };
+  assert.equal(formProblem(form), "Choose the image to rebuild");
+  const picked = { ...form, image: "img-1" };
+  assert.equal(formProblem(picked), null);
+  assert.deepEqual(formToInput(picked).spec, {
+    action: { kind: "rebuildImage" },
+    targets: [{ kind: "image", imageId: "img-1" }],
+    timing: { kind: "daily", at: "02:00" },
+  });
+  assert.equal(timingReason("rebuildImage", "idle"), "A rebuild runs at set times, not when VMs are idle");
+  assert.equal(timingReason("rebuildImage", "daily"), null);
+  assert.equal(timingReason("suspend", "idle"), null);
+  assert.match(formProblem({ ...picked, timing: "idle" }) ?? "", /not when VMs are idle/);
+  assert.equal(withAction(withTiming(picked, "idle"), "rebuildImage").timing, "daily");
+  const back = formFromView(
+    view({
+      spec: {
+        action: { kind: "rebuildImage" },
+        targets: [{ kind: "image", imageId: "img-1" }],
+        timing: { kind: "daily", at: "03:00" },
+      },
+    }),
+  );
+  assert.equal(back.action, "rebuildImage");
+  assert.equal(back.image, "img-1");
+  assert.deepEqual(back.vms, []);
+  assert.equal(
+    targetsText(view({ targets: [{ target: { kind: "image", imageId: "img-1" }, name: "Ubuntu golden", vms: 0 }] })),
+    "image 'Ubuntu golden'",
+  );
 });
 
 test("targets and outcomes read in words", () => {

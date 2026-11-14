@@ -161,6 +161,12 @@ export const GLOSSARY = {
     definition: "A VM kept as a master copy: new VMs are cloned from one of its snapshots.",
     aliases: ["master", "base vm"],
   },
+  goldenImage: {
+    term: "Golden image",
+    definition:
+      "An image Remotely builds itself from an ISO and an install config, made generic, with a new version each rebuild.",
+    aliases: ["image build", "rebuild", "golden image build"],
+  },
   size: {
     term: "Size",
     definition: "A named amount of CPU, memory and disk, such as gp.medium.",

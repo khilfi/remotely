@@ -18,6 +18,7 @@ mod editing;
 mod file_server;
 mod files;
 mod files_page;
+mod golden;
 mod groups;
 mod host_details;
 mod ipc;
@@ -761,6 +762,12 @@ fn commands() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         catalog::install_config_add,
         catalog::install_config_update,
         catalog::install_config_delete,
+        golden::golden_build_check,
+        golden::golden_build_submit,
+        golden::golden_rebuild,
+        golden::golden_rebuild_request,
+        golden::golden_set_recipe,
+        golden::golden_versions,
         address_pools::address_pools_list,
         address_pools::address_pool_leases,
         address_pools::address_pool_add,

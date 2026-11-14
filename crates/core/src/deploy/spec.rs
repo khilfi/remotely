@@ -715,7 +715,9 @@ impl DeploySpec {
     /// VM-29: an install from an install config: an ISO deploy of a kind Remotely delivers, with each VM's values in
     /// a shape the answer file can take (the render checks them again against the config).
     fn validate_install(&self, install: &InstallSpec) -> Result<()> {
-        if !matches!(self.source, DeploySource::Iso { .. }) {
+        // VM-30: a clone of a sysprepped Windows image reads the config's specialize and oobeSystem passes.
+        let clone = matches!(self.source, DeploySource::GoldenVm { .. }) && install.kind.windows();
+        if !matches!(self.source, DeploySource::Iso { .. }) && !clone {
             return invalid("An install config installs from an ISO.");
         }
         if self.unattended.is_some() {
@@ -812,6 +814,8 @@ pub(crate) mod tests {
             updated_at: String::new(),
             problem: None,
             vm_name: Some("golden".into()),
+            build: None,
+            version: None,
         };
         let size = built_in("disk.large").unwrap();
         let template = TemplateInput {

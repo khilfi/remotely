@@ -81,6 +81,7 @@ pub mod export;
 #[cfg(any(test, feature = "fakes"))]
 pub mod fakes;
 pub mod forwards;
+pub mod golden;
 pub mod host_details;
 pub mod host_networks;
 pub mod impact;
@@ -289,6 +290,8 @@ pub struct Core {
     /// VM-08: stacks of launch templates, their instances (deployed, started, stopped and torn down through
     /// [`Core::bus`]) and the VMs each instance holds.
     pub stacks: stacks::Stacks,
+    /// VM-30: golden image builds (each a command on [`Core::bus`]), their recipes and versions.
+    pub golden: golden::GoldenImages,
     pub bus: Arc<CommandBus>,
     pub jobs: Arc<JobRunner>,
     /// SS-04: set up, unlock, lock and the secrets' labels. Values go in, never out.
@@ -678,6 +681,8 @@ impl Core {
             )),
         )));
         alerts.set_checks(Arc::new(checks.clone()));
+        // VM-30: a golden image build signs in to its Linux VM through the same remote adapter.
+        let build_remote = Arc::clone(&adapters.remote);
         let jobs = JobRunner::new(
             store.clone(),
             hypervisors.clone(),
@@ -806,6 +811,8 @@ impl Core {
             winrm: Arc::clone(&winrm),
             known_hosts: Arc::clone(&known_hosts),
             pools: Some(Arc::clone(&address_pools)),
+            // VM-30: a golden image build signs in to its Linux VM over SSH to make it generic.
+            guests: Some(Arc::new(deploy::runner::SshGuestShell::new(build_remote))),
         });
         let deploy = deploy::service::Deploys::new(
             store.clone(),
@@ -816,6 +823,15 @@ impl Core {
         )
         .with_converter(Arc::clone(&converter))
         .with_address_pools(Arc::clone(&address_pools));
+        // VM-30: a golden image build is a deploy of one VM made generic; the job registers it as a version.
+        let golden = golden::GoldenImages::new(
+            store.clone(),
+            catalog.clone(),
+            deploy.clone(),
+            Arc::clone(&bus),
+            hypervisors.clone(),
+        );
+        jobs.set_image_builds(Arc::new(golden.clone()));
         // VM-08: the job runner runs a stack's steps through the deploy runner and power commands, and waits between
         // them through the stack runner.
         let stack_runner = Arc::new(stacks::StackRunner::new(
@@ -848,6 +864,8 @@ impl Core {
             inventory: Arc::clone(&inventory),
             metrics: Arc::clone(&metrics),
         });
+        // VM-30: a rebuild schedule builds its image's next version through the golden images service.
+        schedules.set_golden(golden.clone());
         // FD-05, BX-12, FD-08: the exports read what the other services read (BX-01's targets with the terminals).
         let notes = notes::Notes::new(store.clone());
         let reports = reports::Reports::new(
@@ -873,6 +891,7 @@ impl Core {
             snapshots: SnapshotReader::new(store.clone(), hypervisors.clone()),
             catalog,
             deploy,
+            golden,
             inventory,
             deployer,
             stack_runner,
@@ -990,6 +1009,11 @@ impl Core {
     /// VM-29 (tests): the WinRM client an unattended deploy signs in to a new Windows VM with.
     pub fn set_deploy_winrm(&self, winrm: Arc<dyn adapters::winrm::WinrmAdapter>) {
         self.deployer.set_install_winrm(winrm);
+    }
+
+    /// VM-30 (tests): how a golden image build signs in to a Linux build VM to make it generic.
+    pub fn set_guest_shell(&self, shell: Arc<dyn deploy::runner::GuestShell>) {
+        self.deployer.set_guest_shell(shell);
     }
 
     /// VM-08: the clock a stack job's readiness checks and delays wait on (tests give a fake one, so nothing sleeps),

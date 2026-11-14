@@ -26,6 +26,8 @@ mod file_server_tests;
 #[cfg(test)]
 mod files_page_tests;
 #[cfg(test)]
+mod golden_tests;
+#[cfg(test)]
 mod host_networks_tests;
 pub(crate) mod powershell;
 #[cfg(test)]
@@ -222,6 +224,12 @@ pub enum ActionKind {
     VmDeploy,
     /// VM-08 (docs/plan-0.5.md, "Approval tiers"): delete a stack instance's VMs and their files.
     StackTeardown,
+    /// VM-30 (docs/plan-0.8.md, "Approval tiers"): build a version of a golden image (one new VM installed from an
+    /// install config, made generic and snapshotted).
+    ImageBuild,
+    /// VM-30: the same, keeping only the newest versions: older versions' VMs and their files are deleted (never one a
+    /// linked clone uses), so it is rated like deleting VMs.
+    ImageBuildPrune,
     /// CV-03: convert a disk image into a new one (reads the source, writes a new file only).
     ImageConvert,
     /// VM-17, CV-02: export a powered-off VM for another hypervisor (reads the VM, writes new files only).
@@ -237,7 +245,7 @@ pub enum ActionKind {
 
 impl ActionKind {
     /// Every action, in the order Settings lists them (AP-01).
-    pub const ALL: [ActionKind; 71] = [
+    pub const ALL: [ActionKind; 73] = [
         ActionKind::VmStart,
         ActionKind::VmUnpause,
         ActionKind::VmPause,
@@ -268,6 +276,8 @@ impl ActionKind {
         ActionKind::NatForwardRemove,
         ActionKind::VmDeploy,
         ActionKind::StackTeardown,
+        ActionKind::ImageBuild,
+        ActionKind::ImageBuildPrune,
         ActionKind::VmExport,
         ActionKind::ImageConvert,
         ActionKind::ExecReadOnly,
@@ -380,6 +390,8 @@ impl ActionKind {
             ActionKind::NatForwardRemove => "Remove a NAT port forward",
             ActionKind::VmDeploy => "Deploy VMs (create, clone or import)",
             ActionKind::StackTeardown => "Tear down a stack instance (deletes its VMs)",
+            ActionKind::ImageBuild => "Build a golden image",
+            ActionKind::ImageBuildPrune => "Build a golden image and delete its old versions",
             ActionKind::ImageConvert => "Convert a disk image (writes a new file)",
             ActionKind::VmExport => "Export a VM (writes new files)",
             ActionKind::WakeOnLan => "Wake a machine up (Wake-on-LAN)",
@@ -1175,6 +1187,10 @@ impl Default for PolicyRules {
             ),
             // VM-08: its VMs and their files go, like deleting them.
             (StackTeardown, TierRule::same(Critical)),
+            // VM-30 (docs/plan-0.8.md): one new VM, which no one uses yet. Keeping only the newest versions deletes the
+            // older versions' VMs and their files, like deleting VMs.
+            (ImageBuild, TierRule::same(Medium)),
+            (ImageBuildPrune, TierRule::same(Critical)),
             // CV-03, VM-17, CV-02 (docs/plan-0.5.md): read the source, write new files only. A Prod VM's export is
             // Medium (its data leaves the VM).
             (ImageConvert, TierRule::same(Low)),
@@ -1522,6 +1538,8 @@ impl PolicyEngine {
                 HostNetworkOp::RemoveForward { .. } => ActionKind::NatForwardRemove,
             },
             Command::Deploy { .. } => ActionKind::VmDeploy,
+            Command::ImageBuild { spec, .. } if spec.recipe.keep.is_some() => ActionKind::ImageBuildPrune,
+            Command::ImageBuild { .. } => ActionKind::ImageBuild,
             Command::ImageConvert { .. } => ActionKind::ImageConvert,
             Command::VmExport { .. } => ActionKind::VmExport,
             Command::WakeOnLan { .. } => ActionKind::WakeOnLan,
@@ -1862,6 +1880,18 @@ impl PolicyEngine {
                 op: VmLifecycleOp::Delete,
                 ..
             } => reasons.push("the VMs' files are deleted with them".into()),
+            // VM-30: what the build makes, and what its retention deletes.
+            Command::ImageBuild { spec, .. } => {
+                reasons.push(format!(
+                    "version {} of image '{}': a new VM installed from '{}', made generic and snapshotted",
+                    spec.version, spec.image_name, spec.config_name
+                ));
+                if let Some(keep) = spec.recipe.keep {
+                    reasons.push(format!(
+                        "then the image keeps its newest {keep}: older versions' VMs and their files are deleted, unless a linked clone uses them"
+                    ));
+                }
+            }
             // VM-08: what a stack command does as a whole, for the dialog and the audit log.
             Command::Stack { op, .. } => match op {
                 StackOp::Deploy { spec } => reasons.push(format!(
@@ -2126,6 +2156,8 @@ pub fn safety_snapshot_applies(command: &Command) -> bool {
         | Command::HostNetwork { .. }
         // VM-21: the VMs don't exist yet, and a clone's source is only read.
         | Command::Deploy { .. }
+        // VM-30: the build's VM doesn't exist yet; an old version it deletes is a generic image no one works in.
+        | Command::ImageBuild { .. }
         // CV-03, VM-17: the source is only read.
         | Command::ImageConvert { .. }
         | Command::VmExport { .. }

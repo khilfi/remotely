@@ -105,6 +105,8 @@ const image = (over: Partial<Image>): Image => ({
   updatedAt: "",
   problem: null,
   vmName: null,
+  build: null,
+  version: null,
   ...over,
 });
 

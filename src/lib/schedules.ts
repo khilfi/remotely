@@ -21,7 +21,18 @@ export const ACTION_CHOICES: { value: ActionKind; label: string; hint: string }[
   { value: "stop", label: "Shut down", hint: "Through the guest (VMware Tools; ACPI on VirtualBox)." },
   { value: "suspend", label: "Suspend", hint: "Saves each running VM's state to disk." },
   { value: "resume", label: "Resume", hint: "Powers on only the suspended VMs; the ones that are off stay off." },
+  {
+    value: "rebuildImage",
+    label: "Rebuild an image",
+    hint: "Builds the image's next version from its build settings as they are at each run.",
+  },
 ];
+
+/** VM-30: why a timing can't go with the action, or null (idle timing is for Suspend, and picking it switches). */
+export function timingReason(action: ActionKind, timing: TimingKind): string | null {
+  if (timing === "idle" && action === "rebuildImage") return "A rebuild runs at set times, not when VMs are idle";
+  return null;
+}
 
 export const TIMING_CHOICES: { value: TimingKind; label: string }[] = [
   { value: "hourly", label: "Every hour" },
@@ -68,6 +79,8 @@ export interface ScheduleForm {
   tags: string[];
   /** VM-08: stack ids. */
   stacks: string[];
+  /** VM-30: the image a rebuild schedule rebuilds (its one target; the VMs, tags and stacks are left out). */
+  image: string | null;
 }
 
 export function emptyForm(vms: string[] = []): ScheduleForm {
@@ -86,6 +99,7 @@ export function emptyForm(vms: string[] = []): ScheduleForm {
     vms,
     tags: [],
     stacks: [],
+    image: null,
   };
 }
 
@@ -114,6 +128,7 @@ export function formFromView(view: ScheduleView): ScheduleForm {
   form.vms = targets.filter((t) => t.kind === "vm").map((t) => (t as { vmKey: string }).vmKey);
   form.tags = targets.filter((t) => t.kind === "tag").map((t) => (t as { tag: string }).tag);
   form.stacks = targets.filter((t) => t.kind === "stack").map((t) => (t as { stackId: string }).stackId);
+  form.image = targets.flatMap((t) => (t.kind === "image" ? [t.imageId] : []))[0] ?? null;
   return form;
 }
 
@@ -135,7 +150,12 @@ export function formProblem(form: ScheduleForm): string | null {
   const name = form.name.trim();
   if (!name) return "Give the schedule a name";
   if (name.length > MAX_NAME) return `A name can be at most ${MAX_NAME} characters`;
-  if (form.vms.length + form.tags.length + form.stacks.length === 0) return "Choose at least one VM, tag or stack";
+  if (form.action === "rebuildImage") {
+    if (!form.image) return "Choose the image to rebuild";
+    if (form.timing === "idle") return timingReason(form.action, form.timing);
+  } else if (form.vms.length + form.tags.length + form.stacks.length === 0) {
+    return "Choose at least one VM, tag or stack";
+  }
   if (form.action === "snapshot" && form.keepOn) {
     const keep = whole(form.keep);
     if (keep === null || keep < 1 || keep > MAX_KEEP) return `Keep 1 to ${MAX_KEEP} snapshots`;
@@ -191,11 +211,17 @@ export function formToInput(form: ScheduleForm): ScheduleInput {
       };
       break;
   }
-  const targets: ScheduleTarget[] = [
-    ...form.vms.map((vmKey): ScheduleTarget => ({ kind: "vm", vmKey })),
-    ...form.tags.map((tag): ScheduleTarget => ({ kind: "tag", tag })),
-    ...form.stacks.map((stackId): ScheduleTarget => ({ kind: "stack", stackId })),
-  ];
+  // VM-30: a rebuild's one target is its image; only a rebuild targets one.
+  const targets: ScheduleTarget[] =
+    form.action === "rebuildImage"
+      ? form.image
+        ? [{ kind: "image", imageId: form.image }]
+        : []
+      : [
+          ...form.vms.map((vmKey): ScheduleTarget => ({ kind: "vm", vmKey })),
+          ...form.tags.map((tag): ScheduleTarget => ({ kind: "tag", tag })),
+          ...form.stacks.map((stackId): ScheduleTarget => ({ kind: "stack", stackId })),
+        ];
   return { id: form.id, name: form.name.trim(), spec: { action, targets, timing } };
 }
 
@@ -258,15 +284,17 @@ export function outcomeTone(outcome: RunOutcome): Tone {
   }
 }
 
-/** "web01, tag 'lab' (3 VMs)". */
+/** "web01, tag 'lab' (3 VMs)"; VM-30 "image 'Ubuntu golden'". */
 export function targetsText(view: Pick<ScheduleView, "targets">): string {
   return view.targets
     .map((t) =>
-      t.target.kind === "tag" || t.target.kind === "stack"
-        ? `${t.target.kind} '${t.name}' (${t.vms === 1 ? "1 VM" : `${t.vms} VMs`})`
-        : t.vms === 0
-          ? `${t.name} (not in the VM list)`
-          : t.name,
+      t.target.kind === "image"
+        ? `image '${t.name}'`
+        : t.target.kind === "tag" || t.target.kind === "stack"
+          ? `${t.target.kind} '${t.name}' (${t.vms === 1 ? "1 VM" : `${t.vms} VMs`})`
+          : t.vms === 0
+            ? `${t.name} (not in the VM list)`
+            : t.name,
     )
     .join(", ");
 }

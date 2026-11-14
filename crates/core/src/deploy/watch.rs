@@ -114,6 +114,8 @@ pub struct SerialWatcher {
     resets: u32,
     /// Marks the current (unfinished) line already matched, so a prompt without a line break is reported once.
     partial_matched: bool,
+    /// Windows: the resets of Setup's to see before the certificate's line counts (2; a sysprepped clone's 0).
+    setup_resets: u32,
 }
 
 /// Text with escapes and controls taken out, as a person reading the console would see its words.
@@ -206,7 +208,15 @@ impl SerialWatcher {
             failed: false,
             resets: 0,
             partial_matched: false,
+            setup_resets: 2,
         }
+    }
+
+    /// VM-30: a clone of a sysprepped Windows image: no Setup from an ISO and no restarts to wait for before its
+    /// certificate's line (its serial log is new, so nothing in it is older than this clone).
+    pub fn sysprepped(mut self) -> Self {
+        self.setup_resets = 0;
+        self
     }
 
     pub fn stage(&self) -> Stage {
@@ -331,7 +341,7 @@ impl SerialWatcher {
     /// Windows: the hypervisor saw `resets` resets of the guest since power-on (Setup restarts twice).
     pub fn resets(&mut self, resets: u32) -> Vec<WatchEvent> {
         let mut out = Vec::new();
-        if self.os != Os::Windows || resets <= self.resets {
+        if self.os != Os::Windows || resets <= self.resets || self.setup_resets == 0 {
             return out;
         }
         self.resets = resets;
@@ -350,7 +360,13 @@ impl SerialWatcher {
     /// Windows: the VM is on and Setup runs from the ISO (nothing of windowsPE reaches the serial port).
     pub fn started(&mut self) -> Vec<WatchEvent> {
         let mut out = Vec::new();
-        if self.os == Os::Windows {
+        if self.os == Os::Windows && self.setup_resets == 0 {
+            self.advance(
+                Stage::InstallerBooted,
+                "the clone of a sysprepped image starts",
+                &mut out,
+            );
+        } else if self.os == Os::Windows {
             self.advance(Stage::InstallerBooted, "Setup runs from the ISO", &mut out);
         }
         out
@@ -570,7 +586,7 @@ impl SerialWatcher {
             // Only after a round that counted Setup's second restart: the runner reads the log to its end before it
             // counts, so a line written before the restarts is read (and dropped) here first. The installed system
             // writes its line minutes after that restart, rounds seconds apart.
-            if self.resets >= 2 {
+            if self.resets >= self.setup_resets {
                 self.take_fingerprint(fingerprint.to_owned(), out);
             }
             return;

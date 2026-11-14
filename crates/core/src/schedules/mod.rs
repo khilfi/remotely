@@ -340,6 +340,8 @@ struct Resolved {
     /// Targets not found.
     missing: Vec<String>,
     views: Vec<TargetView>,
+    /// VM-30: the images a rebuild schedule builds (id, name).
+    images: Vec<(Uuid, String)>,
 }
 
 impl Resolved {
@@ -473,6 +475,8 @@ struct Inner {
     /// FD-02: the workspace shown, for [`Schedules::shown`].
     current: Current,
     store: Store,
+    /// VM-30: what a rebuild schedule builds (set once the core is put together).
+    golden: RwLock<Option<crate::golden::GoldenImages>>,
     bus: Arc<CommandBus>,
     jobs: Arc<JobRunner>,
     hypervisors: Hypervisors,
@@ -526,6 +530,7 @@ impl Schedules {
             inner: Arc::new(Inner {
                 current: parts.current,
                 store: parts.store,
+                golden: RwLock::new(None),
                 bus: parts.bus,
                 jobs: parts.jobs,
                 hypervisors: parts.hypervisors,
@@ -543,6 +548,15 @@ impl Schedules {
                 ticking: tokio::sync::Mutex::new(()),
             }),
         }
+    }
+
+    /// VM-30: rebuild schedules build their image's next version through this.
+    pub fn set_golden(&self, golden: crate::golden::GoldenImages) {
+        *locks::write(&self.inner.golden) = Some(golden);
+    }
+
+    fn golden(&self) -> Option<crate::golden::GoldenImages> {
+        locks::read(&self.inner.golden).clone()
     }
 
     /// Tests: a clock of their own (a fake one moves only when told).
@@ -802,6 +816,28 @@ impl Schedules {
                         }
                     }
                 }
+                // VM-30: an image Remotely builds, by its id.
+                ScheduleTarget::Image { image_id } => {
+                    let image = self.store().catalog_image(self.ctx(), *image_id).await?;
+                    let name = image
+                        .as_ref()
+                        .map_or_else(|| "(deleted)".to_owned(), |i| i.name.clone());
+                    resolved.views.push(TargetView {
+                        target: target.clone(),
+                        name: name.clone(),
+                        vms: 0,
+                    });
+                    match image {
+                        Some(image) if image.build.is_some() => {
+                            resolved.shown.push(format!("image '{name}': its next version"));
+                            resolved.images.push((image.id, name));
+                        }
+                        Some(_) => resolved
+                            .missing
+                            .push(format!("image '{name}' isn't one Remotely builds")),
+                        None => resolved.missing.push("its image was deleted".into()),
+                    }
+                }
                 // VM-08: the VMs of every instance of the stack now (gone ones left out).
                 ScheduleTarget::Stack { stack_id } => {
                     let instances = self.store().list_stack_instances(self.ctx()).await?;
@@ -852,6 +888,29 @@ impl Schedules {
         let Some(grant) = self.inner.bus.standing_grant(self.ctx(), approval).await? else {
             return Ok(vec!["its approval was withdrawn".into()]);
         };
+        // VM-30: a rebuild is approved for what it builds; read without planning the build.
+        if row.spec.action == ScheduleAction::RebuildImage {
+            let mut changes = self.inner.bus.standing_grant_changes(self.ctx(), &grant).await?;
+            let approved = grant.commands.iter().find_map(|c| match c {
+                Command::ImageBuild { spec, .. } => Some(spec),
+                _ => None,
+            });
+            match (approved, self.golden()) {
+                (Some(approved), Some(golden)) => {
+                    for change in golden.changes_since(self.ctx(), approved).await? {
+                        if !changes.contains(&change) {
+                            changes.push(change);
+                        }
+                    }
+                }
+                (None, _) => changes.push("its approval isn't for a build".into()),
+                (Some(_), None) => {}
+            }
+            if resolved.images.is_empty() {
+                changes.extend(resolved.missing.iter().cloned());
+            }
+            return Ok(changes);
+        }
         let approved: HashSet<String> = grant
             .targets
             .iter()
@@ -1017,13 +1076,22 @@ impl Schedules {
         if !resolved.missing.is_empty() {
             return Err(CoreError::InvalidInput(format!("{}.", resolved.missing.join("; "))));
         }
-        if resolved.vms.is_empty() {
+        if resolved.vms.is_empty() && resolved.images.is_empty() {
             return Err(CoreError::InvalidInput(
                 "No VM has that tag now. Tag the VMs first, or choose them by name.".into(),
             ));
         }
+        // VM-30: 0.8.0 rebuilds no Windows image (golden::WINDOWS_DEFERRED); refused before anything is saved.
+        if spec.action == ScheduleAction::RebuildImage {
+            if let (Some((image_id, _)), Some(golden)) = (resolved.images.first(), self.golden()) {
+                golden.refuse_windows(self.ctx(), *image_id).await?;
+            }
+        }
         let targets = resolved.targets();
-        let summary = spec.summary(&name, resolved.vms.len());
+        let summary = match resolved.images.first() {
+            Some((_, image)) => spec.rebuild_summary(&name, image),
+            None => spec.summary(&name, resolved.vms.len()),
+        };
         let row = match input.id {
             None => {
                 let id = Uuid::new_v4();
@@ -1093,7 +1161,21 @@ impl Schedules {
     /// Asks the bus for the schedule's approval. `None` when nothing is asked (Low): it is approved and active.
     async fn ask(&self, row: &ScheduleRow) -> Result<Option<ApprovalRequest>> {
         let resolved = self.resolve(&row.spec).await?;
-        if resolved.vms.is_empty() {
+        // VM-30: a rebuild's approval is for its image's next build as it would be built now.
+        let rebuild = match (&row.spec.action, resolved.images.first()) {
+            (ScheduleAction::RebuildImage, Some((image_id, _))) => {
+                let golden = self.golden().ok_or(CoreError::NotImplemented("golden image builds"))?;
+                Some(golden.command_for(self.ctx(), *image_id).await?)
+            }
+            (ScheduleAction::RebuildImage, None) => {
+                return Err(CoreError::InvalidInput(format!(
+                    "{}, so there is nothing to approve.",
+                    resolved.missing.join("; ")
+                )))
+            }
+            _ => None,
+        };
+        if resolved.vms.is_empty() && rebuild.is_none() {
             return Err(CoreError::InvalidInput(
                 "None of the schedule's VMs is in the VM list now, so there is nothing to approve.".into(),
             ));
@@ -1115,11 +1197,18 @@ impl Schedules {
             ScheduleAction::Snapshot { keep } => keep,
             _ => None,
         };
+        let summary = match resolved.images.first() {
+            Some((_, image)) => row.spec.rebuild_summary(&row.name, image),
+            None => row.spec.summary(&row.name, resolved.vms.len()),
+        };
         let draft = StandingDraft {
             owner_id: row.id,
-            summary: row.spec.summary(&row.name, resolved.vms.len()),
+            summary,
             content_hash: row.content_hash.clone(),
-            commands: row.spec.commands(resolved.refs(), &example),
+            commands: match rebuild {
+                Some(command) => vec![command],
+                None => row.spec.commands(resolved.refs(), &example),
+            },
             details: StandingDetails {
                 schedule_id: row.id,
                 name: row.name.clone(),
@@ -1639,6 +1728,9 @@ impl Schedules {
                         self.run_snapshots(&row, run_id, due, *keep, &resolved, &mut jobs, &notes)
                             .await
                     }
+                    (ScheduleAction::RebuildImage, RunKind::Timed { .. }) => {
+                        self.run_rebuild(&row, run_id, due, &resolved, &mut jobs, &notes).await
+                    }
                     (action, RunKind::Timed { .. }) => {
                         self.run_power(&row, run_id, due, action, &resolved, &mut jobs, &notes)
                             .await
@@ -1736,6 +1828,67 @@ impl Schedules {
         (status, targets)
     }
 
+    /// VM-30: the image's next version, built from its recipe as it is now under the schedule's approval (the bus
+    /// refuses a build other than the one approved: the schedule then waits to be approved again). A locked vault
+    /// holds the job, which waits for it (saying so) for up to 4 hours.
+    async fn run_rebuild(
+        &self,
+        row: &ScheduleRow,
+        run_id: Uuid,
+        due: OffsetDateTime,
+        resolved: &Resolved,
+        jobs: &mut Vec<Uuid>,
+        notes: &[String],
+    ) -> RunResult {
+        let before = notes.to_vec();
+        let Some((image_id, image)) = resolved.images.first().cloned() else {
+            return Stop::Failed("nothing to build: its image isn't there any more".into()).result(&before);
+        };
+        let Some(golden) = self.golden() else {
+            return Stop::Failed("image builds aren't set up".into()).result(&before);
+        };
+        let command = match golden.command_for(self.ctx(), image_id).await {
+            Ok(command) => command,
+            Err(err) => {
+                return Stop::Failed(format!("image '{image}''s next version can't be built now: {err}"))
+                    .result(&before)
+            }
+        };
+        let job = match self.submit(row, run_id, due, command).await {
+            Ok(job) => job,
+            Err(stop) => return stop.result(&before),
+        };
+        jobs.push(job);
+        let (status, results) = self.finished(job).await;
+        let (name, error) = results
+            .values()
+            .next()
+            .map(|(_, name, error)| (name.clone(), error.clone()))
+            .unwrap_or_default();
+        let mut parts = before;
+        let outcome = match status {
+            JobStatus::Succeeded => {
+                parts.insert(0, format!("built {name}, image '{image}''s newest version"));
+                RunOutcome::Succeeded
+            }
+            JobStatus::Cancelled => {
+                parts.insert(0, format!("the build of {name} was cancelled"));
+                RunOutcome::Failed
+            }
+            _ => {
+                parts.insert(
+                    0,
+                    format!(
+                        "the build of {name} failed{}; image '{image}' keeps its versions",
+                        error.map(|e| format!(": {e}")).unwrap_or_default()
+                    ),
+                );
+                RunOutcome::Failed
+            }
+        };
+        RunResult::new(outcome, parts.join("; "))
+    }
+
     /// VM-14: start, shut down, suspend or resume, on the VMs in a state it applies to.
     #[allow(clippy::too_many_arguments)]
     async fn run_power(
@@ -1809,7 +1962,7 @@ impl Schedules {
             ScheduleAction::Stop => "shut down",
             ScheduleAction::Suspend => "suspended",
             ScheduleAction::Resume => "resumed",
-            ScheduleAction::Snapshot { .. } => "changed",
+            ScheduleAction::Snapshot { .. } | ScheduleAction::RebuildImage => "changed",
         };
         job_result(status, &targets, count, verb, before)
     }

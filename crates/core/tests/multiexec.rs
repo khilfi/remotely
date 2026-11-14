@@ -1740,8 +1740,11 @@ async fn a_saved_group_picks_its_terminals_and_a_line_reaches_each_of_them() {
     fleet.panes[3].settle().await;
     assert!(fleet.ran(3).is_empty(), "web04 is not in the group: {:?}", fleet.log(3));
 
-    // A member whose terminal closed is one to open again; the others stay picked.
-    fleet.core.terminals.close(fleet.id(0)).await;
+    // A member whose terminal closed is one to open again; the others stay picked. `close` only asks the pane to
+    // close; `close_these` waits for its task, which leaves the open terminals as it finishes (CI saw web01 still
+    // listed right after `close`).
+    fleet.core.terminals.close_these(&[fleet.id(0)]).await;
+    assert!(!fleet.core.terminals.open_ids().contains(&fleet.id(0)));
     let open = fleet
         .core
         .groups

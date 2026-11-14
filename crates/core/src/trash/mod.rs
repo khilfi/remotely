@@ -151,6 +151,8 @@ impl TrashKind {
                 // SS-14 (0.8.0 G3): its Files page bookmarks.
                 ("file_bookmarks", "session_id"),
             ],
+            // VM-30 (0.8.0 G7): an image Remotely built keeps its versions' records (their VMs stay as they are).
+            TrashKind::Image => &[("image_versions", "image_id")],
             _ => &[],
         }
     }
@@ -327,6 +329,11 @@ pub(crate) async fn move_to_trash(store: &Store, ctx: &Context, item: TrashItem<
         0 => {}
         n => came.push(plural(n, "bookmark")),
     }
+    match count("image_versions") {
+        0 => {}
+        1 => came.push("its version's record (the VM stays)".to_owned()),
+        n => came.push(format!("its {n} versions' records (their VMs stay)")),
+    }
     if note.is_some() {
         came.push("its note".to_owned());
     }
@@ -373,6 +380,14 @@ pub(crate) async fn move_to_trash(store: &Store, ctx: &Context, item: TrashItem<
             .execute(&mut *tx)
             .await?;
         sqlx::query("DELETE FROM health_checks WHERE workspace_id = ? AND target_kind = 'session' AND target_key = ?")
+            .bind(&ws)
+            .bind(item.item_id)
+            .execute(&mut *tx)
+            .await?;
+    }
+    if kind == TrashKind::Image {
+        // VM-30: no foreign key: the versions' rows go with the image (into the trash, above).
+        sqlx::query("DELETE FROM image_versions WHERE workspace_id = ? AND image_id = ?")
             .bind(&ws)
             .bind(item.item_id)
             .execute(&mut *tx)
@@ -750,7 +765,17 @@ impl Trash {
             }
             TrashKind::Template => notes.extend(self.template_notes(ctx, &snap.row).await?),
             TrashKind::Stack => notes.extend(self.stack_notes(ctx, &snap.row).await?),
-            TrashKind::Size | TrashKind::Image | TrashKind::InstallConfig => {}
+            TrashKind::Image => {
+                // VM-30: a built image's versions come back with it, under its id now.
+                for attached in &mut snap.attached {
+                    if attached.table == "image_versions" {
+                        attached
+                            .row
+                            .insert("image_id".into(), Value::String(item_id.to_string()));
+                    }
+                }
+            }
+            TrashKind::Size | TrashKind::InstallConfig => {}
         }
 
         // Everything back, and out of the trash, at once.

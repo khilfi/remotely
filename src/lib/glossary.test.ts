@@ -79,7 +79,15 @@ test("the palette finds a term by its old name, and choosing it shows the defini
   assert.equal(multiexec?.title, "Type in all tabs");
   assert.deepEqual(multiexec?.target, { define: "typeInAllTabs" });
   assert.equal(rankItems("do not touch", items)[0]?.item.title, "Protected");
-  assert.equal(rankItems("golden", items)[0]?.item.title, "Golden VM");
+  assert.deepEqual(
+    rankItems("golden", items)
+      .slice(0, 2)
+      .map((r) => r.item.title)
+      .sort(),
+    ["Golden VM", "Golden image"],
+  );
+  assert.equal(rankItems("golden vm", items)[0]?.item.title, "Golden VM");
+  assert.equal(rankItems("rebuild", items)[0]?.item.title, "Golden image");
   assert.ok(
     items.every((i) => i.provider === "glossary" && i.detail === glossaryEntry(i.id.slice(5) as TermKey).definition),
   );

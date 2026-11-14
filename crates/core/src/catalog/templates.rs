@@ -387,7 +387,7 @@ pub struct Problem {
 }
 
 impl Problem {
-    fn new(code: ProblemCode, message: impl Into<String>) -> Self {
+    pub(crate) fn new(code: ProblemCode, message: impl Into<String>) -> Self {
         Self {
             code,
             message: message.into(),
@@ -1181,6 +1181,8 @@ mod tests {
             updated_at: "2026-10-25T09:00:00Z".into(),
             problem: None,
             vm_name: None,
+            build: None,
+            version: None,
         }
     }
 

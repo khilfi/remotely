@@ -244,6 +244,12 @@ pub struct Image {
     pub problem: Option<String>,
     /// For a golden VM: the VM's name as the inventory knows it.
     pub vm_name: Option<String>,
+    /// VM-30: what Remotely builds the image from, for an image it builds (`None` for any other).
+    #[serde(default)]
+    pub build: Option<crate::golden::BuildRecipe>,
+    /// VM-30: the newest version's number, for an image Remotely built (its source is that version).
+    #[serde(default)]
+    pub version: Option<u32>,
 }
 
 impl Image {

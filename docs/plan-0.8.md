@@ -41,7 +41,7 @@ VM-32 (address pools) and CV-04 (a cloud server's disks imported as one VM).
 | Watching an install | One job step per VM with its stages: installer booted, installing, rebooted, first sign-in over SSH (or WinRM), done. The installer's log comes to Remotely through the VM's serial port (Workstation: a serial port to a file or named pipe; VirtualBox: `uartmode file`) where the installer writes to it. 60 minutes by default before it counts as failed; VirtualBox takes a screenshot when it fails. |
 | After an install | Seeds ejected and deleted, a "clean install" snapshot, the SSH session saved with the key (QL-01's link to the VM), and optionally commands from the command panel (rated like a Compare hosts run on the new VMs), health checks (MO-08) and a stack (VM-08). |
 | Addresses (VM-32) | DHCP, or a static address from a pool per network (range, gateway, DNS servers). An address is handed out only when nothing answers on it (the toolbox's ping) and stays the VM's until the VM is deleted. |
-| Golden images (VM-30) | "Build an image": an install from a config, then the VM made generic (`cloud-init clean`, a new machine id and SSH host keys on next boot, Windows' `sysprep`), shut down, snapshotted and registered as a VM-20 golden image with a version. A schedule (VM-14) can rebuild it, say monthly, so launch templates deploy patched systems; the old version stays until no linked clone needs it. |
+| Golden images (VM-30) | "Build an image": an install from a config, then the VM made generic (`cloud-init clean`, a new machine id and SSH host keys on next boot; Windows' `sysprep` was deferred to a later release, see G7), shut down, snapshotted and registered as a VM-20 golden image with a version. A schedule (VM-14) can rebuild it, say monthly, so launch templates deploy patched systems; the old version stays until no linked clone needs it. |
 | A cloud server's disks (CV-04, VM-31) | Import several disks as one VM: the system disk boots and the data disks are attached in order; picking one file of a pair named like `...System_Disk...` and `...Data_Disk...` offers the other. "Attach an existing disk" on a VM's Settings tab, copied into the VM's folder by default and converted when it is another format; never a disk another known VM uses. For a cloud export's first boot: a NoCloud seed with a user and an SSH key from the vault, so you can sign in without the cloud's root password, and DHCP on whatever the network card is called. SATA by default for disks built for KVM, whose boot image often lacks VMware's SCSI drivers. |
 | New dependencies | A YAML parser (a maintained crate, chosen in G5, passing `cargo deny`) and `sha-crypt` (RustCrypto) for the password hashes. The ISO copy uses the ISO 9660 code Remotely already has for seeds. |
 | Releases | **Agreed.** One 0.8.0 when every package is merged. |
@@ -153,6 +153,19 @@ G1, G2, G5 and the spikes can start at once. G3 and G4 both touch the file panel
 - "Build an image" from an install config, making it generic, the snapshot and the VM-20 image with versions (migration
   0037); a schedule action "Rebuild the image" under VM-27's standing approval; an old version kept while a linked clone
   depends on it (VM-04's guard).
+- **Windows golden images were deferred by the owner on 14 Nov 2026**: 0.8.0 builds Ubuntu and Debian images only. Why:
+  on real VMs (Windows Server 2025 on Workstation, 2022 on VirtualBox) the build sealed (sysprep `/quit` returned 0
+  with its tag, then the VM shut down), but a clone never read the `autounattend.xml` on its own seed CD after
+  sysprep. It ran specialize without it and stopped at OOBE's first page, so it got no name, one-time password or WinRM
+  certificate of its own, and the deploy waited to its time limit. The core refuses a Windows build, a rebuild, a
+  schedule of one and a clone of one, and says why. The Windows seal and the clone delivery are kept, with their tests
+  on the fakes. The later package needs:
+  - a delivery a sysprepped clone reads. For example, a generic answer file given to sysprep at build time
+    (`/unattend:`), whose specialize step runs the seed's work (the clone's own name, one-time password and WinRM
+    certificate), or the clone's file written into its disk before its first boot. Check each by hand on both
+    releases and both hypervisors.
+  - a reset for a clone's first boot that hangs on VirtualBox under Hyper-V. One clone hung at the firmware logo with
+    no disk writes for 17 minutes, until a reset by hand. G6's hang reset covers only an install's known points.
 
 ## Development safety for 0.8.0
 

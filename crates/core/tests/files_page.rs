@@ -514,7 +514,7 @@ async fn compare_then_sync_to_the_host_rates_uploads_replacements_and_deletes() 
     let SyncStart::Submitted { outcome } = start else {
         panic!("submitted")
     };
-    let (_, status, tier, asked) = run(&core, outcome).await;
+    let (_, status, tier, asked) = run(&core, *outcome).await;
     assert_eq!((status, tier), (JobStatus::Succeeded, Tier::Medium));
     assert_eq!(asked.unwrap().action, ActionKind::FileReplace);
     assert_eq!(server.sftp_file("/home/alice/www/old.html").unwrap(), b"new and longer");
@@ -541,7 +541,7 @@ async fn compare_then_sync_to_the_host_rates_uploads_replacements_and_deletes() 
     let SyncStart::Submitted { outcome } = start else {
         panic!("submitted")
     };
-    let (job, status, tier, asked) = run(&core, outcome).await;
+    let (job, status, tier, asked) = run(&core, *outcome).await;
     assert_eq!((status, tier), (JobStatus::Succeeded, Tier::High));
     let asked = asked.unwrap();
     assert_eq!(asked.action, ActionKind::FileSyncDelete);

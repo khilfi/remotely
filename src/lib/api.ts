@@ -6,6 +6,7 @@
 import { Channel, invoke as tauriInvoke, type InvokeArgs, type InvokeOptions } from "@tauri-apps/api/core";
 import { listen as tauriListen, type EventCallback, type UnlistenFn } from "@tauri-apps/api/event";
 import { learnFields, masker } from "@/lib/presentation";
+import type { BuildDetails, BuildRecipe } from "@/lib/golden-api";
 import type { DeployCapacity, StackDetails, StackMembership } from "@/lib/stacks-api";
 import type { HostNetworkOp } from "@/lib/vm-insight-api";
 
@@ -668,6 +669,8 @@ export interface ApprovalRequest {
   bundle?: BundleDetails | null;
   /** SS-14: a file change: where they go, the new mode or owner, whether it replaces, recurses or runs as root. */
   fileOp?: FileOpDetails | null;
+  /** VM-30: a golden image build (its VM's deploy preview is `deploy`, this PC after it `capacity`). */
+  imageBuild?: BuildDetails | null;
 }
 
 /** VM-14, VM-27: a schedule as its approval dialog shows it (the approval holds for each of its runs). */
@@ -1060,6 +1063,8 @@ export type ActionKind =
   | "vmDeploy"
   /** VM-08: delete a stack instance's VMs. */
   | "stackTeardown"
+  | "imageBuild"
+  | "imageBuildPrune"
   /** VM-17, CV-02: export a VM (writes new files). */
   | "vmExport"
   /** CV-03: convert a disk image (writes a new file). */
@@ -2395,6 +2400,10 @@ export interface Image {
   problem: string | null;
   /** A golden VM's name in the VM list. */
   vmName: string | null;
+  /** VM-30: what Remotely builds the image from; null for an image added by hand. */
+  build: BuildRecipe | null;
+  /** VM-30: the number of its newest version; null when it has none. */
+  version: number | null;
 }
 
 export type ImageSourceInput =

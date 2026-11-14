@@ -167,7 +167,7 @@ pub struct SyncRequest {
 #[serde(tag = "status", rename_all = "camelCase", rename_all_fields = "camelCase")]
 pub enum SyncStart {
     /// To the host: on the bus, queued or waiting for its approval.
-    Submitted { outcome: SubmitOutcome },
+    Submitted { outcome: Box<SubmitOutcome> },
     /// To this PC: downloads queued.
     Downloads { start: DownloadStart },
     /// Nothing picked needs to go.
@@ -624,7 +624,9 @@ impl FolderSyncs {
             delete: deletes,
         };
         let outcome = self.bus.submit(&ctx, command).await?;
-        Ok(SyncStart::Submitted { outcome })
+        Ok(SyncStart::Submitted {
+            outcome: Box::new(outcome),
+        })
     }
 
     async fn to_pc(
