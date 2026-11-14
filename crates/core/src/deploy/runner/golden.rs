@@ -856,7 +856,14 @@ impl Deployer {
         loop {
             match self.vbox(args.clone(), SHORT).await {
                 Err(err) if session_locked(&err) => match waits.next() {
-                    Some(wait) => tokio::time::sleep(*wait).await,
+                    Some(wait) => {
+                        tracing::info!(
+                            command = args.first().map(String::as_str).unwrap_or_default(),
+                            wait_ms = u64::try_from(wait.as_millis()).unwrap_or(u64::MAX),
+                            "VirtualBox still holds the build VM's session lock: asking again"
+                        );
+                        tokio::time::sleep(*wait).await;
+                    }
                     None => return Err(err),
                 },
                 other => return other,

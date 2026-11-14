@@ -2357,7 +2357,8 @@ seen on a real VM yet (the PR lists the checks).
   and `sealed` (`WINDOWS_STEPS`) fails the build; a wait that runs out says what COM1 showed last (nothing: see Task
   Scheduler; `sysprep`: sysprep's own log; `sealed`: the shutdown). *(hand check: sysprep as SYSTEM, its `/quit` exit
   code and tag, whether Panther holds an answer file after it, the listener's removal, timings on both hypervisors.)*
-- **A clone of a Windows image gets G6's delivery.** A template of a Windows image Remotely built (and no install config
+- **A clone of a Windows image gets G6's delivery: it doesn't work yet (hand checks 3 and 4 below).** A template of a
+  Windows image Remotely built (and no install config
   of its own) deploys with the config its newest version was built from (`catalog::Facts::golden_config`, by the
   version row's `config_id`, never the recipe's, which may name another since), and only while that config is as it
   was then (the row's `config_fingerprint`; a changed, deleted or broken config is the template's problem, and building
@@ -2369,9 +2370,14 @@ seen on a real VM yet (the PR lists the checks).
   certificate and write its fingerprint to COM1 (the starters' lines); windowsPE and offlineServicing don't run. The
   watcher is G6's with no Setup restarts to wait for (`SerialWatcher::sysprepped`: the clone's serial log is new), then
   G6's first sign-in replaces the one-time password with the vault's, deletes Panther's copy and signs the autologon
-  out; the seed is taken out. *(hand check: that the post-sysprep passes read `autounattend.xml` from the CD's root, as
-  Windows' implicit answer file search says; that a `LocalAccounts` account the build made doesn't stop OOBE; the
-  starters' `New-NetFirewallRule` failing harmlessly on a rule that is there.)*
+  out; the seed is taken out. **Seen by hand: the sysprepped clones don't read the seed CD's `autounattend.xml`.** On
+  both releases and both hypervisors the clone ran specialize without it (no `remotely-stage specialize` line on COM1)
+  and stopped at OOBE's first page ("Hi there", the region and keyboard), so it got no name, one-time password or WinRM
+  certificate of its own and the deploy waits to its time limit. Microsoft's implicit search table lists removable
+  read-only media for every pass, but it isn't used here; which delivery replaces it is open (a generic answer file
+  given to sysprep at build time whose specialize step points Setup at the clone's seed, or the clone's file written
+  into its disk before its first boot). *(Still to check by hand once it reads its file: that a `LocalAccounts` account
+  the build made doesn't stop OOBE; the starters' `New-NetFirewallRule` failing harmlessly on a rule that is there.)*
 - **Scheduled rebuilds** (`ScheduleAction::RebuildImage`, one `ScheduleTarget::Image`): the save asks the bus for a
   standing approval of the image's next build as it would be built then (VM-27; Medium, or Critical with `keep`). Each
   run builds the command from the recipe as it is then (`GoldenImages::command_for`) and submits it under the grant: a
@@ -2398,6 +2404,46 @@ seen on a real VM yet (the PR lists the checks).
   An FD-07 export carries a built image as a golden VM image at its newest version, without its recipe or versions
   (they name this PC's VMs and configs); an import never replaces an image Remotely builds here (the item's problem
   says to keep both).
+- **Hand checks on real VMs** (14 Nov 2026, at 3ea88e0; Workstation 26, VirtualBox 7.2.22 under Hyper-V, the owner's
+  ISOs read only, a core built like the app's with its own data folder, VMs named `g7-check-*`, all deleted after):
+  1. **Ubuntu 24.04.5 on Workstation (UEFI), `open-vm-tools` added: passed.** Making it generic began 24 s after the
+     installed system booted (`systemctl is-system-running`: running; `cloud-init status`: disabled, the installer's
+     marker), and `boot` waited 0 s although unattended-upgrades.service's `unattended-upgrade-shutdown
+     --wait-for-signal` was running (N1). `cloud.cfg.d` held `99-installer.cfg` and `90-installer-network.cfg` (both
+     removed; no `subiquity-disable-cloudinit-networking.cfg`) and keeps `05_logging.cfg`, `20-disable-cc-dpkg-grub.cfg`,
+     `90_dpkg.cfg`, `curtin-preserve-sources.cfg` and `README`; `/var/cache/debconf/passwords.dat` was empty. The version's
+     `.vmx` names no install CD and no `serial0` (only the empty SATA controller's `sata0.present` and its PCI slot), and
+     was the same 60 s later with Workstation no longer running the VM: vmware-vmx didn't write it again as it exited.
+     Two linked clones from a template with a guest user and key: each has its own hostname, machine-id and SSH host keys
+     (cloud-init's ssh module made them; `remotely-ssh-host-keys.service` is enabled, but its condition was false, so it
+     didn't run: Q4's order holds on Ubuntu), `cloud-init status` done, the guest user signs in with its key,
+     `/var/log/installer` gone. The install took about 8 minutes.
+  2. **Debian 12 netinst on VirtualBox (UEFI): passed.** Making it generic began 11 s after boot, `boot` waited 0 s;
+     no cloud-init; `passwords.dat` was 180 bytes with no answer holding a value (Q5: emptied all the same). After the
+     build: no medium in any drive, `uart1="off"`, no NAT rule. A full clone has its own machine-id and its own SSH host
+     keys, made by the unit (its condition held and it ran), sshd is up, and it keeps the build's hostname (as above).
+  3. **Windows Server 2025 on Workstation: the build passed, its clone failed.** COM1: `started`, `removed
+     winrm-https`, `removed C:\Windows\Panther\unattend.xml`, `cleared event-logs`, `sysprep`, then 46 s later
+     `sysprep-exit 0` and `sealed` (`/quit` returned 0 with its tag); no `after-sysprep` line (Panther held no answer file
+     after sysprep); Windows was off 3 s after `sealed`. Its `.vmx` names no install CD and no `serial0`. The clone: see
+     the Windows bullet above (no COM1 line; one restart after specialize, then OOBE).
+  4. **Windows Server 2022 on VirtualBox: the build passed, its clone failed.** The same COM1 lines; sysprep took 103 s,
+     `sysprep-exit 0`, `sealed`, off 2 s later; no `after-sysprep` line; no drive medium, serial port or NAT rule left.
+     The clone's first boot hung at the firmware logo (no disk writes for 17 minutes: S3's VirtualBox-under-Hyper-V hang,
+     which G6's hang reset doesn't cover for a clone's first boot); after a reset by hand it ran specialize and stopped
+     at OOBE's first page, as above.
+  5. **Retention (`keep` 1, on check 1's image): passed.** The v2 build's approval had no old version to delete and said
+     `version 1 stays: the linked clones ... use it`; the v3 build's approval named v2 as its second target (Critical);
+     once v3 was registered the job deleted v2's VM (9 files, 4.6 GB) and kept v1 for its clones.
+  6. **A scheduled rebuild (through the core, not the window): passed.** The standing approval was Medium with the
+     vault password; the vault was locked at the due time; the run started and waited (`waiting for the vault to be
+     unlocked to render the answer file`) with nothing made; unlocked 30 s later, it built v2, the newest. An edit of the
+     install config then paused the schedule at the next tick (NeedsApproval: the install config changed). The window's
+     notification wasn't looked at.
+  - **N2:** no VirtualBox seal (three) was refused for the session lock, so the retries weren't needed there;
+    VBoxSVC logged nothing of the kind. It logged one refusal each time the seed was forced out of a running VM's drive:
+    the `closemedium` that follows is refused ("locked for reading by another task"); `eject` ignores it, and the seed's
+    file was deleted all the same.
 - G6 fix: `Deployer::read_fingerprint` read the serial log with a fresh watcher, which counts no Setup restarts and so
   never took the fingerprint line: a deploy's saved WinRM session never had its certificate trusted from the VM's
   serial port. It now reads the whole log without waiting for restarts, and two different lines give none.
