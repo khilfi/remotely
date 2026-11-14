@@ -400,11 +400,14 @@ impl SerialWatcher {
         }
     }
 
+    /// `<hostname> login:` anywhere in the line: what the system logs to the console (cloud-init's last lines on
+    /// Ubuntu, seen in PR 98's hand check) can be written onto the prompt's line right after it.
     fn is_login(&self, line: &str) -> bool {
         let line = line.trim().to_ascii_lowercase();
         !self.hostname.is_empty()
-            && line.strip_suffix("login:").is_some_and(|rest| {
-                rest.trim_end() == self.hostname || rest.trim_end().ends_with(&format!(" {}", self.hostname))
+            && line.match_indices("login:").any(|(at, _)| {
+                let rest = line[..at].trim_end();
+                rest == self.hostname || rest.ends_with(&format!(" {}", self.hostname))
             })
     }
 
@@ -659,6 +662,26 @@ mod tests {
         // The live installer's own login prompt isn't the VM's.
         let mut live = SerialWatcher::new(Os::Ubuntu, "web-1");
         assert!(live.feed(b"ubuntu-server login: ").is_empty());
+    }
+
+    /// The hand check of PR 98: cloud-init's last lines went onto the console right after the getty's prompt, on the
+    /// same line, within one read.
+    #[test]
+    fn a_login_prompt_with_the_consoles_next_lines_written_onto_it() {
+        let mut w = SerialWatcher::new(Os::Ubuntu, "web-1");
+        w.feed(b"Command line: BOOT_IMAGE=/casper/vmlinuz autoinstall ---\nstart: subiquity/Install/install: x\n");
+        w.feed(b"reboot: Restarting system\nCommand line: BOOT_IMAGE=/vmlinuz-6.8.0-45-generic ro\n");
+        let events = w.feed(
+            b"\r\nUbuntu 24.04.5 LTS web-1 ttyS0\r\n\r\nweb-1 login: <14>Nov 13 23:59:26 cloud-init: ####\r\n\
+              <14>Nov 13 23:59:26 cloud-init: -----END SSH HOST KEY FINGERPRINTS-----\r\n",
+        );
+        assert!(events.contains(&WatchEvent::LoginPrompt), "{events:?}");
+        assert!(w.login_seen());
+        // Another host's prompt isn't it.
+        let mut other = SerialWatcher::new(Os::Ubuntu, "web-1");
+        other.feed(b"start: subiquity/Install/install: x\n");
+        assert!(other.feed(b"web-10 login: <14>Nov 13 cloud-init: x\r\n").is_empty());
+        assert!(!other.login_seen());
     }
 
     #[test]

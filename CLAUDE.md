@@ -2119,7 +2119,8 @@ VM-29 and VM-32, from 0.8.0 (`docs/plan-0.8.md`, G6), built only on what S1 to S
   the last line; Debian's partitioner as the last step title, since its dialog goes on drawing the frame and the
   progress numbers after the title) gets `controlvm reset`, at most 5 times; Windows' restart hang isn't detected (the
   time limit catches it). Debian's step titles count only whole (`Configuring apt-cdrom-setup`, a component the
-  installer loads, isn't `Configuring apt`). Done: Linux at `<hostname> login:` and an SSH banner on the guest; Windows at WinRM over HTTPS signing in.
+  installer loads, isn't `Configuring apt`). `<hostname> login:` counts anywhere in a line: Ubuntu's cloud-init writes
+  its last lines onto the prompt's line. Done: Linux at `<hostname> login:` and an SSH banner on the guest; Windows at WinRM over HTTPS signing in.
 - **A failure, the time limit or a cancel** (`CoreError::InstallFailed`, `InstallCancelled`, recorded as cancelled):
   the seed is taken out and deleted (Workstation's drive keeps an empty disc) and VirtualBox's NAT rule removed; the VM,
   its ISO copy, its serial log and (VirtualBox) `<vm>-install-failed.png` stay for a look, and its pool address stays
@@ -2157,7 +2158,10 @@ VM-29 and VM-32, from 0.8.0 (`docs/plan-0.8.md`, G6), built only on what S1 to S
   <vmx> runtimeConfig answer.msg.cdromdisconnect.locked Yes` (not written to the .vmx). Powered off and on with empty
   discs in both drives, the UEFI VM booted its `Ubuntu` entry and the BIOS VM (`hdd,cdrom`) its disk, each at the login
   prompt in 25 s with no question. Workstation asks `msg.serial.file.open` at each power-on (the serial log is there)
-  and appends to it.
+  and appends to it. One installed Ubuntu's getty prompt had cloud-init's `<14>... cloud-init: ####` lines written
+  onto it. Two VirtualBox Debian installs of three hung at the partitioner; the reset got past it each time. With the
+  fixes, one Ubuntu VM on Workstation and one Debian VM on VirtualBox (reset once) each ended with "the seed is taken
+  out and deleted".
 - **Address pools (VM-32, migration 0036)**: per workspace, a range on one hypervisor's network with a gateway and DNS
   servers; no tier, audited `address_pool_changed`, refused by the read-only lock. Each pool's network is resolved to
   this PC's (`resolve_network`, from VM-11's `networks_only`: NAT and vmnet8 are one; bridged is one for both
