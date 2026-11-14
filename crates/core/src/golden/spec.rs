@@ -106,44 +106,48 @@ impl BuildOs {
     pub fn generic_steps(self) -> Vec<&'static str> {
         match self {
             BuildOs::Windows => vec![
+                "the seed (the answer file) is taken out of the VM first",
                 "the build's WinRM over HTTPS listener and its certificate are deleted, so each clone makes its own at its first sign-in",
                 "Setup's copies of the answer file, PowerShell's history and the event logs are cleared",
                 "sysprep /generalize /oobe /shutdown",
             ],
             BuildOs::Ubuntu | BuildOs::Debian => vec![
+                "the seed (the answer file) is taken out of the VM first, then the first boot's own work is waited for",
                 "cloud-init is turned back on and cleaned (cloud-init clean), so each clone's first boot sets it up",
                 "/etc/machine-id is emptied and /var/lib/dbus/machine-id deleted, so each clone gets its own",
                 "the SSH host keys are deleted and made again at each clone's first boot",
-                "the installer's logs (which hold the answer file) are deleted, other logs, shell history and DHCP leases cleared",
+                "the installer's logs (which hold the answer file) are deleted and debconf's stored passwords emptied; other logs, shell history and DHCP leases cleared",
+                "every step must report it went, or the build fails and keeps the VM",
                 "the system is shut down",
             ],
         }
     }
 }
 
-/// The base of a version VM's name: the image's name as a hostname would have it, short enough for Windows' 15
-/// characters with `-v<N>` after it.
-pub fn vm_base(image_name: &str, os: BuildOs) -> String {
+/// The base of a version VM's name: the image's name as a hostname would have it, at most `max` characters.
+fn vm_base(image_name: &str, max: usize) -> String {
     let base = templates::hostname(image_name, 1);
-    let max = if os.windows() {
-        WINDOWS_NAME_CHARS - "-v999".len()
-    } else {
-        MAX_BASE_CHARS
-    };
-    let mut base: String = base.chars().take(max).collect();
+    let mut base: String = base.chars().take(max.max(1)).collect();
     while base.ends_with('-') {
         base.pop();
     }
     if base.is_empty() {
-        "golden".into()
+        "g".into()
     } else {
         base
     }
 }
 
-/// A version's VM: `ubuntu-golden-v3`.
+/// A version's VM: `ubuntu-golden-v3`; for Windows short enough for its 15-character computer names with the number
+/// after it, whatever the number (the build VM's hostname is its name).
 pub fn version_vm_name(image_name: &str, os: BuildOs, version: u32) -> String {
-    format!("{}-v{version}", vm_base(image_name, os))
+    let suffix = format!("-v{version}");
+    let max = if os.windows() {
+        WINDOWS_NAME_CHARS.saturating_sub(suffix.len())
+    } else {
+        MAX_BASE_CHARS
+    };
+    format!("{}{suffix}", vm_base(image_name, max))
 }
 
 /// A version's snapshot: `Remotely image v3`.
@@ -211,6 +215,17 @@ impl SignIn {
     }
 }
 
+/// An older version the build's retention deletes, as planned: its VM is one of the build's targets, so the approval
+/// names it and the policy engine rates it (a Prod one moves the build up, a protected one is skipped), and the job
+/// deletes it through R3's delete only once the build registered its new version.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PruneVm {
+    pub number: u32,
+    pub vm_key: String,
+    pub vm_name: String,
+}
+
 /// One build: version `version` of an image, as approved (what [`crate::command_bus::Command::ImageBuild`] carries).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -238,16 +253,67 @@ pub struct BuildSpec {
     pub sign_in: SignIn,
     /// The build VM: one VM, installed from the config through G6's path, no session, console or snapshot of its own.
     pub deploy: DeploySpec,
+    /// With `keep`: the older versions whose VMs the build deletes once it registered its own (each a target).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub prune: Vec<PruneVm>,
+    /// With `keep`: older versions it leaves past `keep`, and why (a linked clone uses one), for the approval.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub retained: Vec<String>,
 }
 
 fn invalid<T>(message: impl Into<String>) -> Result<T> {
     Err(CoreError::InvalidInput(message.into()))
 }
 
+/// B6 of PR 100's review: what the recipe's ids resolve to, as each build planned its VM: the size's CPU, memory and
+/// disk, the folder (the hypervisor's default as it was), the network and its adapter (VirtualBox's first one when the
+/// recipe names none), the OS profile's values, and the install's time limit and vault picks. The version's VM (a
+/// standing grant keeps its command without it) and the config's content and ISO (compared on their own) aside; the
+/// VM's install values are the recipe's, compared with it.
+fn planned_differences(now: &DeploySpec, then: &DeploySpec) -> Vec<String> {
+    let mut out = Vec::new();
+    if now.size != then.size {
+        out.push("the size's CPU, memory or disk changed".to_owned());
+    }
+    if now.folder != then.folder {
+        out.push(format!("its VM goes in {} now", now.folder));
+    }
+    if now.hypervisor != then.hypervisor || now.profile != then.profile {
+        out.push("the OS profile's settings changed".into());
+    }
+    if now.network != then.network || now.host_adapter != then.host_adapter {
+        out.push("its network or host adapter changed".into());
+    }
+    if now.environment != then.environment || now.tags != then.tags {
+        out.push("its VM's label or tags changed".into());
+    }
+    let install = |spec: &DeploySpec| {
+        spec.install.clone().map(|i| crate::deploy::spec::InstallSpec {
+            config_name: String::new(),
+            fingerprint: String::new(),
+            iso_seen: None,
+            ..i
+        })
+    };
+    if install(now) != install(then) {
+        out.push("its install's time limit or vault picks changed".into());
+    }
+    out
+}
+
 impl BuildSpec {
-    /// The build's one target: the version's new VM.
+    /// The build's targets: the version's new VM first, then each older version's VM its retention deletes.
     pub fn targets(&self) -> Vec<TargetRef> {
-        self.deploy.targets()
+        let mut targets = self.deploy.targets();
+        targets.extend(self.prune.iter().map(|p| TargetRef::Vm {
+            vmx_path: p.vm_key.clone(),
+        }));
+        targets
+    }
+
+    /// The older version a target names, when it is one the build's retention deletes.
+    pub fn pruned(&self, vm_key: &str) -> Option<&PruneVm> {
+        self.prune.iter().find(|p| p.vm_key.eq_ignore_ascii_case(vm_key))
     }
 
     /// The version's VM, as the deploy makes it.
@@ -299,6 +365,7 @@ impl BuildSpec {
         if settings != approved.recipe {
             out.push(format!("image '{}''s build settings changed", self.image_name));
         }
+        out.extend(planned_differences(&self.deploy, &approved.deploy));
         if out.is_empty() && self.fingerprint() != approved.fingerprint() {
             out.push(format!("image '{}''s build changed", self.image_name));
         }
@@ -341,6 +408,15 @@ impl BuildSpec {
                 "keeping the newest {keep} version{}: older versions' VMs are deleted unless a linked clone uses them",
                 if keep == 1 { "" } else { "s" }
             ));
+            if !self.prune.is_empty() {
+                let gone: Vec<String> = self
+                    .prune
+                    .iter()
+                    .map(|p| format!("version {} ({})", p.number, p.vm_name))
+                    .collect();
+                parts.push(format!("once it is registered, deletes {}", gone.join(", ")));
+            }
+            parts.extend(self.retained.iter().cloned());
         }
         parts.join("; ")
     }
@@ -411,6 +487,15 @@ impl BuildSpec {
                 }
             }
         }
+        if !self.prune.is_empty() && self.recipe.keep.is_none() {
+            return invalid("Only a build that keeps its newest versions deletes old ones.");
+        }
+        let mut keys = std::collections::HashSet::new();
+        for old in &self.prune {
+            if old.number >= self.version || !keys.insert(old.vm_key.to_lowercase()) {
+                return invalid("A build deletes older versions of its image, each once.");
+            }
+        }
         if !(1..=MAX_INSTALL_MINUTES).contains(&self.seal_minutes) {
             return invalid(format!(
                 "The wait for the VM to shut down is 1 to {MAX_INSTALL_MINUTES} minutes."
@@ -419,10 +504,19 @@ impl BuildSpec {
         Ok(())
     }
 
-    /// The same build for only these targets (BX-04's retry): a build's one VM, or nothing.
+    /// The same build for only these targets (BX-04's retry): its VM and the old versions named.
     pub fn only(&self, targets: &[TargetRef]) -> Self {
+        let keep: std::collections::HashSet<String> = targets.iter().map(TargetRef::key).collect();
         let mut spec = self.clone();
         spec.deploy = self.deploy.only(targets);
+        spec.prune.retain(|p| {
+            keep.contains(
+                &TargetRef::Vm {
+                    vmx_path: p.vm_key.clone(),
+                }
+                .key(),
+            )
+        });
         spec
     }
 }
@@ -446,6 +540,10 @@ pub struct BuildDetails {
     pub sign_in: String,
     /// The newest versions it keeps (`None`: every version).
     pub keep: Option<u32>,
+    /// The older versions it deletes once it is registered ("version 1 (ubuntu-golden-v1)").
+    pub deletes: Vec<String>,
+    /// Older versions it leaves past `keep`, and why.
+    pub retained: Vec<String>,
 }
 
 impl BuildDetails {
@@ -462,6 +560,12 @@ impl BuildDetails {
             steps: spec.os.generic_steps().into_iter().map(str::to_owned).collect(),
             sign_in: spec.sign_in.describe(),
             keep: spec.recipe.keep,
+            deletes: spec
+                .prune
+                .iter()
+                .map(|p| format!("version {} ({})", p.number, p.vm_name))
+                .collect(),
+            retained: spec.retained.clone(),
         }
     }
 }
@@ -493,8 +597,12 @@ mod tests {
             "ubuntu-24-04-golden-v3"
         );
         let windows = version_vm_name("Windows Server 2025 Datacenter", BuildOs::Windows, 12);
-        assert!(windows.len() <= 15, "{windows}");
-        assert_eq!(windows, "windows-se-v12");
+        assert_eq!(windows, "windows-ser-v12");
+        for n in [1, 99, 1000, MAX_VERSION] {
+            let name = version_vm_name("Windows Server 2025 Datacenter", BuildOs::Windows, n);
+            assert!(name.len() <= 15, "{name}");
+            assert!(name.ends_with(&format!("-v{n}")), "{name}");
+        }
         assert_eq!(version_vm_name("!!!", BuildOs::Debian, 1), "vm-1-v1");
         assert_eq!(snapshot_name(3), "Remotely image v3");
     }
@@ -582,6 +690,8 @@ mod tests {
                 sudo_password_id: Some(password),
             },
             deploy,
+            prune: Vec::new(),
+            retained: Vec::new(),
         }
     }
 
@@ -616,6 +726,37 @@ mod tests {
             "own key",
         );
         bad(&|s| s.os = BuildOs::Windows, "system");
+        // B3 of PR 100's review: the old versions it deletes are targets, only with keep, each older, each once.
+        let old = |n: u32, key: &str| PruneVm {
+            number: n,
+            vm_key: key.into(),
+            vm_name: format!("v{n}"),
+        };
+        let mut pruning = ok.clone();
+        pruning.version = 3;
+        pruning.deploy.vms[0].name = "ubuntu-golden-v3".into();
+        pruning.recipe.keep = Some(1);
+        pruning.prune = vec![old(1, r"C:\VMs\v1\v1.vmx"), old(2, r"C:\VMs\v2\v2.vmx")];
+        pruning.validate().unwrap();
+        let targets = pruning.targets();
+        assert_eq!(targets.len(), 3, "the new VM, then each old version's");
+        assert!(matches!(&targets[1], TargetRef::Vm { vmx_path } if vmx_path == r"C:\VMs\v1\v1.vmx"));
+        assert_eq!(pruning.pruned(r"c:\vms\v2\v2.vmx").map(|p| p.number), Some(2));
+        assert!(
+            pruning.describe().contains("deletes version 1 (v1), version 2 (v2)"),
+            "{}",
+            pruning.describe()
+        );
+        let only = pruning.only(&targets[..2]);
+        assert_eq!(only.prune.len(), 1, "a retry keeps only the old versions it names");
+        bad(&|s| s.prune = vec![old(1, "a.vmx")], "keeps its newest");
+        let bad_prune = |change: &dyn Fn(&mut BuildSpec)| {
+            let mut s = pruning.clone();
+            change(&mut s);
+            assert!(s.validate().unwrap_err().to_string().contains("each once"));
+        };
+        bad_prune(&|s| s.prune.push(old(3, "c.vmx")));
+        bad_prune(&|s| s.prune.push(old(1, r"C:\VMS\V1\V1.VMX")));
         // A round trip through the journal keeps it whole.
         let text = serde_json::to_string(&ok).unwrap();
         assert_eq!(serde_json::from_str::<BuildSpec>(&text).unwrap(), ok);
@@ -653,6 +794,37 @@ mod tests {
         changed(&|s| s.recipe.keep = Some(2), "keeps the newest 2 versions now");
         changed(&|s| s.recipe.size_id = "gp.large".into(), "build settings changed");
         changed(&|s| s.os_profile = "debian".into(), "OS profile changed");
+        // B6 of PR 100's review: what the recipe's ids resolve to, as planned now.
+        changed(
+            &|s| s.deploy.size.as_mut().unwrap().memory_mb += 1024,
+            "the size's CPU, memory or disk changed",
+        );
+        changed(&|s| s.deploy.folder = r"D:\VMs".into(), "its VM goes in D:\\VMs now");
+        changed(
+            &|s| s.deploy.host_adapter = Some("VirtualBox Host-Only Ethernet Adapter #2".into()),
+            "network or host adapter changed",
+        );
+        changed(
+            &|s| s.deploy.install.as_mut().unwrap().time_limit_minutes = 90,
+            "time limit or vault picks changed",
+        );
+        changed(
+            &|s| {
+                s.recipe.values.insert("timezone".into(), "UTC".into());
+            },
+            "build settings changed",
+        );
+        // The version's own VM name and hostname are no difference, nor a standing grant's copy without its VM.
+        let mut renamed = next.clone();
+        renamed.deploy.vms[0].hostname = "ubuntu-golden-v2".into();
+        assert!(renamed.differences(&approved).is_empty());
+        let mut template = approved.clone();
+        template.deploy.vms.clear();
+        assert!(
+            next.differences(&template).is_empty(),
+            "{:?}",
+            next.differences(&template)
+        );
     }
     #[test]
     fn os_by_config_kind() {

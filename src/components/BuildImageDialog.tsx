@@ -2,9 +2,10 @@
 // installs it unattended from an own install config (Ubuntu autoinstall, Debian preseed or Windows unattend: G6's
 // install), makes the system generic, shuts it down and keeps it with a snapshot: the image's next version, which its
 // launch templates deploy from then on. The fields are the recipe the image keeps: the ISO, the config with its own
-// variables, the size, the hypervisor, the network (and VirtualBox's adapter), the VM folder, an address pool for
-// `{{ip}}`, the install's time limit, and how many versions to keep (deleting older versions' VMs that no linked clone
-// uses, which makes the build Critical). The core checks it as it is filled in and shows what the build makes, the
+// variables, the size, the hypervisor, the network (and VirtualBox's adapter), the VM folder, the install's time
+// limit, and how many versions to keep (deleting older versions' VMs that no linked clone uses, which makes the build
+// Critical). No address pool (A2 of PR 100's review): the build VM takes its address by DHCP, since a fixed one would
+// go into every clone, so a config that sets `{{ip}}` says so here and the core refuses it. The core checks it as it is filled in and shows what the build makes, the
 // build VM's deploy preview and this PC after it. Build goes through the bus (the approval dialog, from the page's
 // onSubmitted), then the dialog closes; Save keeps the settings for the next rebuild (audited, refused by the read-only
 // lock) without building.
@@ -36,7 +37,6 @@ import { NetworkField, SizeField } from "@/components/TemplateFields";
 import { WhyDisabled } from "@/components/WhyDisabled";
 import { useDebounced } from "@/hooks/use-debounced";
 import { api, errorMessage, type Hypervisor, type Image, type Size, type SubmitOutcome } from "@/lib/api";
-import { addressPoolsApi, type AddressPool } from "@/lib/address-pools-api";
 import { HYPERVISOR_LABEL } from "@/lib/catalog";
 import { goldenApi, type BuildCheck, type BuildRequest } from "@/lib/golden-api";
 import {
@@ -61,9 +61,7 @@ import {
 } from "@/lib/golden";
 import { KIND_LABEL } from "@/lib/install-configs";
 import { installConfigsApi } from "@/lib/install-configs-api";
-import { poolsFor, rowVariables, usesPlaceholder } from "@/lib/unattended";
-
-const NO_POOL = "none";
+import { rowVariables, usesPlaceholder } from "@/lib/unattended";
 
 interface Props {
   /** An image Remotely builds, whose build settings are edited; without it, a new image is built. */
@@ -85,8 +83,6 @@ export function BuildImageDialog({ image, onSubmitted, onSaved, onAddImage, onNe
   const mode: BuildMode = image ? "settings" : "new";
   const [choices, setChoices] = useState<BuildChoices>({ images: [], configs: [], profiles: [] });
   const [sizes, setSizes] = useState<Size[]>([]);
-  // Null until read (or when they can't be): a saved pool is then kept as it is.
-  const [pools, setPools] = useState<AddressPool[] | null>(null);
   const [form, setForm] = useState<BuildForm | null>(null);
   const [adapters, setAdapters] = useState<string[]>([]);
   const [check, setCheck] = useState<{ key: string; check: BuildCheck } | null>(null);
@@ -112,10 +108,6 @@ export function BuildImageDialog({ image, onSubmitted, onSaved, onAddImage, onNe
       },
       (err) => !stopped && setError(errorMessage(err)),
     );
-    addressPoolsApi.list().then(
-      (list) => !stopped && setPools(list),
-      () => {},
-    );
     return () => {
       stopped = true;
     };
@@ -135,9 +127,6 @@ export function BuildImageDialog({ image, onSubmitted, onSaved, onAddImage, onNe
   const bridged = network.kind === "bridged";
   const variables = config ? rowVariables(config) : [];
   const usesIp = config ? usesPlaceholder(config.body, "ip") : false;
-  const fittingPools = usesIp
-    ? poolsFor(pools ?? [], hypervisor, network, needsAdapter ? form?.hostAdapter : null)
-    : [];
 
   // VirtualBox's host-only or bridged adapters, when the network needs one.
   useEffect(() => {
@@ -158,15 +147,8 @@ export function BuildImageDialog({ image, onSubmitted, onSaved, onAddImage, onNe
     };
   }, [needsAdapter, bridged]);
 
-  // What is sent: a pool only where the config takes `{{ip}}` and the pool is on the build's network (kept as saved
-  // while the pools can't be read).
-  const keptPool =
-    form && usesIp && (pools === null || fittingPools.some((p) => p.id === form.addressPoolId))
-      ? form.addressPoolId
-      : null;
-  const sent: BuildForm | null = form ? { ...form, addressPoolId: keptPool } : null;
   const problem = form ? formProblem(form, mode, choices) : "Reading the catalogue…";
-  const request: BuildRequest | null = sent && problem === null ? requestOf(sent, mode, image?.id) : null;
+  const request: BuildRequest | null = form && problem === null ? requestOf(form, mode, image?.id) : null;
   const requestKey = JSON.stringify(request);
   const checkedKey = useDebounced(requestKey, 300);
 
@@ -458,30 +440,6 @@ export function BuildImageDialog({ image, onSubmitted, onSaved, onAddImage, onNe
                       />
                     </div>
                   ))}
-                  {usesIp && (
-                    <div className="grid gap-2">
-                      <Label htmlFor="build-pool">Address from</Label>
-                      <Select
-                        value={sent?.addressPoolId ?? NO_POOL}
-                        onValueChange={(v) => set({ addressPoolId: v === NO_POOL ? null : v })}
-                      >
-                        <SelectTrigger id="build-pool" className="w-full">
-                          <SelectValue />
-                        </SelectTrigger>
-                        <SelectContent>
-                          <SelectItem value={NO_POOL}>No pool</SelectItem>
-                          {fittingPools.map((p) => (
-                            <SelectItem key={p.id} value={p.id}>
-                              The pool {p.name} ({p.free} free)
-                            </SelectItem>
-                          ))}
-                        </SelectContent>
-                      </Select>
-                      {pools !== null && fittingPools.length === 0 && (
-                        <p className="text-xs text-muted-foreground">No address pool is on this network.</p>
-                      )}
-                    </div>
-                  )}
                   <div className="grid gap-2">
                     <Label htmlFor="build-minutes">Time limit (minutes)</Label>
                     <Input
@@ -492,6 +450,12 @@ export function BuildImageDialog({ image, onSubmitted, onSaved, onAddImage, onNe
                     />
                   </div>
                 </div>
+                {usesIp && (
+                  <p className="text-xs text-destructive">
+                    This config gives the VM a fixed address ({"{{ip}}"}), which every clone of the image would take.
+                    Build from a config whose network is DHCP.
+                  </p>
+                )}
               </section>
             )}
 

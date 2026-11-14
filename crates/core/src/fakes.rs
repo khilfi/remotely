@@ -1560,6 +1560,15 @@ impl FakeVirtualBox {
         locks::lock(&self.vms).iter().find(|vm| vm.name == name).cloned()
     }
 
+    /// VM-30: the VM's process ends as a crash ends it (`VMState="aborted"`), not as a shutdown does.
+    pub fn abort(&self, uuid: &str) {
+        if let Some(vm) = locks::lock(&self.vms).iter_mut().find(|v| v.uuid == uuid) {
+            vm.state = "aborted".to_owned();
+            vm.state_changed_at = Some(OffsetDateTime::now_utc());
+            vm.additions_run_level = None;
+        }
+    }
+
     /// VM-21: the unattended installs asked so far: (VM uuid, user).
     pub fn unattended_installs(&self) -> Vec<(String, String)> {
         locks::lock(&self.unattended).clone()
@@ -1845,12 +1854,16 @@ impl FakeVirtualBox {
                 locked(&vm_now()?)?;
                 let opts = &args[2..];
                 // VM-29: COM1 to a file (`--uart1 <base> <irq>`, `--uartmode1 file <path>`) and a NAT rule take more
-                // or fewer words than a pair; the fake keeps them in `calls` only.
+                // or fewer words than a pair; the fake keeps them in `calls` only. VM-30: `--uart1 off` and
+                // `--natpf1 delete <name>` too.
                 let mut pairs: Vec<(&str, &str)> = Vec::new();
                 let mut at = 0;
                 while at < opts.len() {
+                    let next = opts.get(at + 1).map(String::as_str);
                     match opts[at].as_str() {
+                        "--uart1" if next == Some("off") => at += 2,
                         "--uart1" | "--uartmode1" => at += 3,
+                        "--natpf1" if next == Some("delete") => at += 3,
                         "--natpf1" => at += 2,
                         name => {
                             pairs.push((name, opts.get(at + 1).map(String::as_str).unwrap_or_default()));

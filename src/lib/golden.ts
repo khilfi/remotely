@@ -218,7 +218,8 @@ export function recipeOf(form: BuildForm): BuildRecipe | null {
     hostAdapter: needsHostAdapter(form.hypervisor, form.network) ? form.hostAdapter : null,
     vmFolder: form.vmFolder,
     values,
-    addressPoolId: form.addressPoolId,
+    // A2 of PR 100's review: never a pool; the build VM takes its address by DHCP (a saved one is dropped).
+    addressPoolId: null,
     installMinutes,
     keep,
   };

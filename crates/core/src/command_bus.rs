@@ -1907,6 +1907,20 @@ impl CommandBus {
                     }
                 ));
             }
+            // VM-30: a Linux build also gives its user's password to that VM's sudo, to make it generic.
+            if let Command::ImageBuild { spec: build, .. } = command {
+                if let crate::golden::SignIn::Ssh {
+                    user,
+                    sudo_password_id: Some(id),
+                    ..
+                } = &build.sign_in
+                {
+                    let what = self.bindings().describe(ctx, *id).await?;
+                    warnings.push(format!(
+                        "The build gives the {what} to sudo on {vms} over SSH, as {user}, to make it generic. Approving asks for the vault password"
+                    ));
+                }
+            }
             if let Some(unattended) = &spec.unattended {
                 let what = self.bindings().describe(ctx, unattended.password_id).await?;
                 warnings.push(format!(

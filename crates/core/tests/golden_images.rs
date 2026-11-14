@@ -31,7 +31,7 @@ use remotely_core::deploy::runner::{DeployTuning, GuestShell, LinuxGuest};
 use remotely_core::deploy::service::{DeployFrom, DeployRequest};
 use remotely_core::domain::{Environment, PowerState};
 use remotely_core::fakes::{install_isos, FakeVirtualBox, FakeVmware};
-use remotely_core::golden::{BuildRecipe, BuildRequest, BuildTarget, VersionState};
+use remotely_core::golden::{generic, BuildRecipe, BuildRequest, BuildTarget, VersionState};
 use remotely_core::jobs::{JobEvent, JobStatus};
 use remotely_core::known_hosts::HostKey;
 use remotely_core::policy::{ActionKind, ApprovalStep, Tier};
@@ -41,7 +41,16 @@ use remotely_core::{Core, CoreError};
 use uuid::Uuid;
 
 /// What a generalization prints when every step went (as `golden::generic::LINUX_SCRIPT`'s `say` lines).
-const LINUX_REPORT: &str = "remotely-generic cloud-init yes\nremotely-generic enabled cloud-init\nremotely-generic removed /etc/cloud/cloud.cfg.d/99-installer.cfg\nremotely-generic cleaned cloud-init\nremotely-generic emptied /etc/machine-id\nremotely-generic removed /var/lib/dbus/machine-id\nremotely-generic made remotely-ssh-host-keys.service\nremotely-generic removed ssh host keys\nremotely-generic removed /var/log/installer\nremotely-generic vm-tools yes\nremotely-generic done\n";
+fn linux_report() -> String {
+    let mut out = String::from(
+        "remotely-generic cloud-init yes\nremotely-generic removed /etc/cloud/cloud.cfg.d/99-installer.cfg\n",
+    );
+    for step in generic::LINUX_STEPS {
+        out.push_str(&format!("remotely-generic ok {step}\n"));
+    }
+    out.push_str("remotely-generic vm-tools yes\nremotely-generic done\n");
+    out
+}
 
 const FINGERPRINT: &str = "SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU";
 
@@ -59,13 +68,18 @@ async fn ssh_banner() -> u16 {
 }
 
 fn fast(core: &Core, ssh_port: u16) {
+    tuned(core, ssh_port, Duration::from_secs(20));
+}
+
+/// The deploy's waits made short; `cap` bounds the install's, the generalization's and the shutdown's.
+fn tuned(core: &Core, ssh_port: u16, cap: Duration) {
     core.set_deploy_tuning(DeployTuning {
         ip_poll: Duration::from_millis(10),
         ip_wait_cap: Some(Duration::from_millis(500)),
         cleanup_tries: 3,
         cleanup_pause: Duration::from_millis(10),
         install_poll: Duration::from_millis(20),
-        install_cap: Some(Duration::from_secs(20)),
+        install_cap: Some(cap),
         hang_silence: Duration::from_secs(60),
         connect_wait: Duration::from_millis(500),
         leases_file: None,
@@ -180,7 +194,11 @@ async fn approve(core: &Core, request: &ApprovalRequest) -> Uuid {
         confirmed: true,
         typed_target_count: Some(request.targets.len()),
         reason: Some("golden build".into()),
-        safety_snapshot: None,
+        safety_snapshot: request
+            .steps
+            .iter()
+            .any(|s| matches!(s, ApprovalStep::SafetySnapshot { .. }))
+            .then_some(false),
         vault_password: request
             .steps
             .contains(&ApprovalStep::VaultReauth)
@@ -225,6 +243,10 @@ fn installer(serial: PathBuf, lines: Vec<String>) -> tokio::task::JoinHandle<()>
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
+        if !serial.with_file_name("install-seed").exists() {
+            // The build never made its VM: the test's own assertions say why.
+            return;
+        }
         for line in lines {
             tokio::time::sleep(Duration::from_millis(40)).await;
             append(&serial, line.as_bytes());
@@ -264,17 +286,38 @@ fn debian_lines(host: &str) -> Vec<String> {
 /// One generalization run: (vm, user, sudo password given, script, power off).
 type GuestRun = (String, String, Option<String>, String, String);
 
+/// How the fake Linux build VM ends its generalization.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum GuestEnd {
+    /// It shuts itself down, as the script's power-off does.
+    #[default]
+    PowersOff,
+    /// VirtualBox: its process crashes (`aborted`) instead of shutting down (A4).
+    Aborts,
+    /// The run never answers (Q3).
+    Hangs,
+    /// It shuts down, and then Workstation can't write its settings (A6).
+    PowersOffSettingsLocked,
+}
+
 /// The Linux build VM as the test plays it: the generalization's report, then the guest powers itself off.
 struct FakeGuest {
-    report: String,
+    report: Mutex<String>,
     vmware: Arc<FakeVmware>,
     virtualbox: Arc<FakeVirtualBox>,
     /// The deploy's folder (each VM's is `<folder>\<name>`).
     folder: PathBuf,
     /// (vm, user, sudo password given, script, power off).
     runs: Mutex<Vec<GuestRun>>,
-    /// The guest doesn't power off (the build's wait runs out).
-    stays_on: bool,
+    end: Mutex<GuestEnd>,
+    /// Q2: for each run, whether the VM's seed was out of its drive, its answer file gone, as the run started.
+    seed_out: Mutex<Vec<bool>>,
+    /// C1: holds each run until notified (a build in progress).
+    gate: Mutex<Option<Arc<tokio::sync::Notify>>>,
+}
+
+fn holds(bytes: &[u8], text: &[u8]) -> bool {
+    bytes.windows(text.len()).any(|w| w == text)
 }
 
 #[async_trait]
@@ -289,6 +332,23 @@ impl GuestShell for FakeGuest {
             guest.key.expose().contains("PRIVATE KEY"),
             "the config's private key from the vault"
         );
+        let vmx = self.folder.join(guest.vm).join(format!("{}.vmx", guest.vm));
+        let workstation = self.vmware.has_vm(&vmx.display().to_string());
+        let seed = self
+            .folder
+            .join(guest.vm)
+            .join("install-seed")
+            .join(format!("{}-seed.iso", guest.vm));
+        let answers_gone = std::fs::read(&seed).map_or(true, |b| !holds(&b, b"autoinstall") && !holds(&b, b"d-i "));
+        let ejected = if workstation {
+            self.vmware
+                .calls()
+                .iter()
+                .any(|c| c.starts_with("vmrun disconnectNamedDevice") && c.contains(guest.vm))
+        } else {
+            !seed.exists()
+        };
+        self.seed_out.lock().unwrap().push(answers_gone && ejected);
         self.runs.lock().unwrap().push((
             guest.vm.to_owned(),
             guest.user.to_owned(),
@@ -296,21 +356,35 @@ impl GuestShell for FakeGuest {
             script.to_owned(),
             power_off.to_owned(),
         ));
-        if !self.stays_on {
-            let vmx = self.folder.join(guest.vm).join(format!("{}.vmx", guest.vm));
-            if self.vmware.has_vm(&vmx.display().to_string()) {
-                self.vmware
-                    .power(&vmx, PowerOp::Stop { mode: StopMode::Hard })
-                    .await
-                    .unwrap();
-            } else if let Some(vm) = self.virtualbox.vm_named(guest.vm) {
-                self.virtualbox
-                    .power(&vm.uuid, PowerOp::Stop { mode: StopMode::Hard })
-                    .await
-                    .unwrap();
+        let gate = self.gate.lock().unwrap().clone();
+        if let Some(gate) = gate {
+            gate.notified().await;
+        }
+        let end = *self.end.lock().unwrap();
+        match end {
+            GuestEnd::Hangs => tokio::time::sleep(Duration::from_secs(3600)).await,
+            GuestEnd::Aborts => {
+                let vm = self.virtualbox.vm_named(guest.vm).expect("a VirtualBox build VM");
+                self.virtualbox.abort(&vm.uuid);
+            }
+            GuestEnd::PowersOff | GuestEnd::PowersOffSettingsLocked => {
+                if workstation {
+                    self.vmware
+                        .power(&vmx, PowerOp::Stop { mode: StopMode::Hard })
+                        .await
+                        .unwrap();
+                    if end == GuestEnd::PowersOffSettingsLocked {
+                        self.vmware.set_failing_vmx_write(true);
+                    }
+                } else if let Some(vm) = self.virtualbox.vm_named(guest.vm) {
+                    self.virtualbox
+                        .power(&vm.uuid, PowerOp::Stop { mode: StopMode::Hard })
+                        .await
+                        .unwrap();
+                }
             }
         }
-        Ok(self.report.clone())
+        Ok(self.report.lock().unwrap().clone())
     }
 }
 
@@ -341,12 +415,14 @@ async fn lab(label: &str, vm_ips: &[&str]) -> Lab {
     let ssh = ssh_banner().await;
     fast(&core, ssh);
     let guest = Arc::new(FakeGuest {
-        report: LINUX_REPORT.into(),
+        report: Mutex::new(linux_report()),
         vmware: Arc::clone(&vmware),
         virtualbox: Arc::clone(&virtualbox),
         folder: vms.clone(),
         runs: Mutex::new(Vec::new()),
-        stays_on: false,
+        end: Mutex::default(),
+        seed_out: Mutex::default(),
+        gate: Mutex::default(),
     });
     core.set_guest_shell(guest.clone());
     Lab {
@@ -460,11 +536,18 @@ async fn an_ubuntu_build_on_workstation_makes_a_generic_versioned_image_and_a_re
     play.await.unwrap();
     let notes = notes_of(core, job).await;
     assert_eq!(status, JobStatus::Succeeded, "{notes}");
-    assert!(notes.contains("made generic: enabled cloud-init"), "{notes}");
+    assert!(notes.contains("turned cloud-init back on and cleaned it"), "{notes}");
+    assert!(notes.contains("emptied the machine id"), "{notes}");
     assert!(
         notes.contains("snapshot 'Remotely image v1' taken, powered off"),
         "{notes}"
     );
+    // Q2 of PR 100's review: the seed (the answer file) left the VM before it was made generic.
+    assert!(
+        notes.contains("its seed (the answer file) is taken out and emptied"),
+        "{notes}"
+    );
+    assert_eq!(*lab.guest.seed_out.lock().unwrap(), [true]);
 
     // Made generic as the config's user, through sudo with its vault password; then powered off on the same connection.
     let runs = lab.guest.runs.lock().unwrap().clone();
@@ -560,6 +643,36 @@ async fn an_ubuntu_build_on_workstation_makes_a_generic_versioned_image_and_a_re
     assert_eq!(versions[0].facts["cloudInit"], serde_json::json!(true));
     assert!(lab.vmware.has_vm(&vmx.display().to_string()), "version 1's VM stays");
     let _ = job;
+
+    // B4 of PR 100's review: a build of the image's next version builds from its saved settings, never others.
+    let mut other = rebuild.clone();
+    other.recipe.install_minutes = 90;
+    let refused = core.golden.submit(ctx, &other).await.unwrap_err().to_string();
+    assert!(refused.contains("build settings first"), "{refused}");
+
+    // C3 of PR 100's review: version 2's VM deleted by hand marks the version deleted, and the image (and its
+    // template) deploy version 1 again.
+    let v2 = lab.vms.join("ubuntu-golden-v2").join("ubuntu-golden-v2.vmx");
+    let delete = remotely_core::command_bus::Command::VmLifecycle {
+        targets: vec![remotely_core::domain::TargetRef::Vm {
+            vmx_path: v2.display().to_string(),
+        }],
+        op: remotely_core::vm_settings::VmLifecycleOp::Delete,
+    };
+    let asked = needs_approval(core.bus.submit(ctx, delete).await.unwrap());
+    let job = approve(core, &asked).await;
+    let status = wait(core, job).await;
+    assert_eq!(status, JobStatus::Succeeded, "{}", notes_of(core, job).await);
+    let versions = core.golden.versions(ctx, image.id).await.unwrap();
+    assert_eq!(
+        versions.iter().map(|v| (v.number, v.state)).collect::<Vec<_>>(),
+        [(2, VersionState::Deleted), (1, VersionState::Newest)]
+    );
+    let image = core.catalog.image(ctx, image.id).await.unwrap();
+    assert_eq!(image.version, Some(1));
+    assert!(
+        matches!(&image.source, ImageSource::GoldenVm { snapshot_name, .. } if snapshot_name == "Remotely image v1")
+    );
     let _ = std::fs::remove_dir_all(&lab.dir);
 }
 
@@ -621,7 +734,10 @@ async fn retention_keeps_the_newest_and_any_version_a_linked_clone_uses() {
     // Version 3: version 2 (no clone) goes with its VM, version 1 still stays for its clone.
     let (_, status, notes) = build(&lab, &rebuild, debian_lines("deb-golden-v3")).await;
     assert_eq!(status, JobStatus::Succeeded, "{notes}");
-    assert!(notes.contains("version 2 deleted with its VM deb-golden-v2"), "{notes}");
+    assert!(
+        notes.contains("version 2 deleted with its VM 'deb-golden-v2'"),
+        "{notes}"
+    );
     assert!(notes.contains("version 1 stays"), "{notes}");
     let v2 = lab.vms.join("deb-golden-v2").join("deb-golden-v2.vmx");
     assert!(
@@ -771,8 +887,53 @@ async fn builds_refuse_what_they_cant_make_generic() {
         .await
         .unwrap();
     assert!(!check.problems.is_empty(), "no key: {check:?}");
-    // The UI never builds the command.
     let config = config_from(core, "starter.ubuntu-24.04-minimal", pw, Some(key), |_| {}).await;
+    // B5 of PR 100's review: a folder on a share is refused by its text, never looked at.
+    let mut shared = recipe(&iso, config, Hypervisor::Vmware, &lab.vms, "gp.medium");
+    shared.vm_folder = Some(r"\\files.example.com\vms".into());
+    let check = core
+        .golden
+        .check(
+            ctx,
+            &BuildRequest {
+                target: BuildTarget::New { name: "Shared".into() },
+                recipe: shared,
+            },
+        )
+        .await
+        .unwrap();
+    assert!(check.preview.is_none() && !check.problems.is_empty(), "{check:?}");
+    // A2 of PR 100's review: a fixed address ({{ip}}) or an address pool would go into every clone.
+    let fixed = config_from(core, "starter.ubuntu-24.04-minimal", pw, Some(key), |c| {
+        c.body = c
+            .body
+            .replacen("\n  network:", "\n  # the address: {{ip}}\n  network:", 1);
+    })
+    .await;
+    let mut pooled = recipe(&iso, config, Hypervisor::Vmware, &lab.vms, "gp.medium");
+    pooled.address_pool_id = Some(Uuid::new_v4());
+    for (name, recipe, want) in [
+        (
+            "Fixed",
+            recipe(&iso, fixed, Hypervisor::Vmware, &lab.vms, "gp.medium"),
+            "fixed address",
+        ),
+        ("Pooled", pooled, "address pool"),
+    ] {
+        let check = core
+            .golden
+            .check(
+                ctx,
+                &BuildRequest {
+                    target: BuildTarget::New { name: name.into() },
+                    recipe,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(check.problems.iter().any(|p| p.contains(want)), "{want}: {check:?}");
+    }
+    // The UI never builds the command.
     let request = BuildRequest {
         target: BuildTarget::New { name: "Ok".into() },
         recipe: recipe(&iso, config, Hypervisor::Vmware, &lab.vms, "gp.medium"),
@@ -787,8 +948,9 @@ async fn builds_refuse_what_they_cant_make_generic() {
 }
 
 /// A fake WinRM client playing a Windows build VM and its clones: it shows `fingerprint`'s certificate, takes any
-/// password until `Set-LocalUser` sets one and only that one after; the generalization's task "runs sysprep", which
-/// powers the VM off (`sysprep` names the VM to power off) and forgets the password, as OOBE sets a clone's again.
+/// password until `Set-LocalUser` sets one and only that one after; the generalization's task "runs sysprep": it writes
+/// `task_says` to the VM's COM1 (its serial log), then powers the VM off (`sysprep` names the VM to power off) and
+/// forgets the password, as OOBE sets a clone's again.
 struct FakeWinrm {
     fingerprint: String,
     password: Arc<Mutex<Option<String>>>,
@@ -796,13 +958,18 @@ struct FakeWinrm {
     scripts: Arc<Mutex<Vec<String>>>,
     vmware: Arc<FakeVmware>,
     sysprep: Arc<Mutex<Option<PathBuf>>>,
+    task_says: Arc<Mutex<Vec<&'static str>>>,
 }
+
+/// What the real task writes to COM1 when every step goes.
+const TASK_SAYS: [&str; 4] = ["started", "removed winrm-https", "cleared event-logs", "sysprep"];
 
 struct FakeWinrmSession {
     scripts: Arc<Mutex<Vec<String>>>,
     password: Arc<Mutex<Option<String>>>,
     vmware: Arc<FakeVmware>,
     sysprep: Arc<Mutex<Option<PathBuf>>>,
+    task_says: Arc<Mutex<Vec<&'static str>>>,
 }
 
 #[async_trait]
@@ -839,6 +1006,7 @@ impl WinrmAdapter for FakeWinrm {
             password: Arc::clone(&self.password),
             vmware: Arc::clone(&self.vmware),
             sysprep: Arc::clone(&self.sysprep),
+            task_says: Arc::clone(&self.task_says),
         }))
     }
 }
@@ -858,8 +1026,14 @@ impl ExecSession for FakeWinrmSession {
             let vmx = self.sysprep.lock().unwrap().clone();
             if let Some(vmx) = vmx {
                 let (vmware, password) = (Arc::clone(&self.vmware), Arc::clone(&self.password));
+                let says = self.task_says.lock().unwrap().clone();
                 tokio::spawn(async move {
                     tokio::time::sleep(Duration::from_millis(100)).await;
+                    let stem = vmx.file_stem().unwrap().to_string_lossy().into_owned();
+                    let serial = vmx.with_file_name(format!("{stem}-serial.log"));
+                    for line in says {
+                        append(&serial, format!("remotely-generic {line}\r\n").as_bytes());
+                    }
                     *password.lock().unwrap() = None;
                     vmware
                         .power(&vmx, PowerOp::Stop { mode: StopMode::Hard })
@@ -946,6 +1120,7 @@ async fn a_windows_image_is_sysprepped_and_its_clones_get_g6s_one_time_password_
         scripts: Arc::default(),
         vmware: Arc::clone(&lab.vmware),
         sysprep: Arc::new(Mutex::new(Some(lab.vms.join("winsrv-v1").join("winsrv-v1.vmx")))),
+        task_says: Arc::new(Mutex::new(TASK_SAYS.to_vec())),
     });
     core.set_deploy_winrm(winrm.clone());
     let pw = vault_password(core, &lab.secret).await;
@@ -1040,6 +1215,521 @@ async fn a_windows_image_is_sysprepped_and_its_clones_get_g6s_one_time_password_
     assert!(!web.join("web-1-install.iso").exists(), "a clone has no ISO copy");
     let audit = format!("{:?}", core.store.recent_audit(ctx, 300).await.unwrap());
     assert!(!audit.contains(lab.secret.as_str()));
+
+    // C5 of PR 100's review: the clones read the passes of the config version 1 was built from, as it was then; once
+    // that config is edited, the template says to build the image again instead of deploying other passes.
+    let mut edited = core
+        .catalog
+        .install_config(ctx, &config.to_string())
+        .await
+        .unwrap()
+        .spec;
+    assert!(
+        edited.body.contains("<TimeZone>UTC</TimeZone>"),
+        "the starter's time zone"
+    );
+    edited.body = edited.body.replace(
+        "<TimeZone>UTC</TimeZone>",
+        "<TimeZone>W. Europe Standard Time</TimeZone>",
+    );
+    core.catalog.update_install_config(ctx, config, edited).await.unwrap();
+    let problems = core.catalog.plan(ctx, template, 1).await.unwrap().unwrap_err();
+    assert!(
+        problems.iter().any(|p| p.message.contains("changed since version 1")),
+        "{problems:?}"
+    );
+    let _ = std::fs::remove_dir_all(&lab.dir);
+}
+
+/// A Windows build up to its sysprep task, whose COM1 lines are `task_says`. Returns the job's status and notes.
+async fn windows_build(lab: &Lab, vm: &str, name: &str, task_says: Vec<&'static str>) -> (JobStatus, String) {
+    let core = &lab.core;
+    let ctx = &core.ctx();
+    let vmx = lab.vms.join(vm).join(format!("{vm}.vmx"));
+    core.set_deploy_winrm(Arc::new(FakeWinrm {
+        fingerprint: FINGERPRINT.into(),
+        password: Arc::default(),
+        signins: Mutex::default(),
+        scripts: Arc::default(),
+        vmware: Arc::clone(&lab.vmware),
+        sysprep: Arc::new(Mutex::new(Some(vmx))),
+        task_says: Arc::new(Mutex::new(task_says)),
+    }));
+    let pw = vault_password(core, &lab.secret).await;
+    let config = config_from(core, "starter.windows-server-2025", pw, None, |_| {}).await;
+    let iso = iso_image(
+        core,
+        &lab.dir,
+        &format!("{vm}.iso"),
+        &install_isos::windows_server(),
+        "windows-server",
+    )
+    .await;
+    let request = BuildRequest {
+        target: BuildTarget::New { name: name.into() },
+        recipe: recipe(&iso, config, Hypervisor::Vmware, &lab.vms, "gp.large"),
+    };
+    let approval = needs_approval(core.golden.submit(ctx, &request).await.unwrap());
+    let play = windows_setup(
+        &lab.vms.join(vm),
+        vm,
+        2,
+        vec![format!("remotely-winrm {FINGERPRINT}\r\n")],
+    );
+    let job = approve(core, &approval).await;
+    let status = wait(core, job).await;
+    play.await.unwrap();
+    (status, notes_of(core, job).await)
+}
+
+#[tokio::test]
+async fn a_windows_build_vm_that_goes_off_before_its_task_started_sysprep_isnt_sealed() {
+    // A4 of PR 100's review: a power-off counts as sysprep's only once the task said it removed the build's WinRM
+    // listener and started sysprep.
+    let lab = lab("golden-win-early", &["early-v1"]).await;
+    let (status, notes) = windows_build(&lab, "early-v1", "Early", vec!["started"]).await;
+    assert_eq!(status, JobStatus::Failed, "{notes}");
+    assert!(
+        notes.contains("went off before the task that runs sysprep said 'removed winrm-https' and 'sysprep'"),
+        "{notes}"
+    );
+    let vmx = lab.vms.join("early-v1").join("early-v1.vmx");
+    assert!(lab.vmware.snapshot_names(&vmx.display().to_string()).is_empty());
+    let ctx = &lab.core.ctx();
+    assert!(lab
+        .core
+        .catalog
+        .images(ctx)
+        .await
+        .unwrap()
+        .iter()
+        .all(|i| i.name != "Early"));
+    let _ = std::fs::remove_dir_all(&lab.dir);
+}
+
+#[tokio::test]
+async fn a_build_whose_steps_dont_all_go_or_dont_end_fails_and_keeps_its_vm() {
+    let lab = lab("golden-steps", &["steps-golden-v1", "hung-golden-v1"]).await;
+    let core = &lab.core;
+    let ctx = &core.ctx();
+    let pw = vault_password(core, &lab.secret).await;
+    let key = build_key(core).await;
+    let config = config_from(core, "starter.ubuntu-24.04-minimal", pw, Some(key), |_| {}).await;
+    let iso = iso_image(core, &lab.dir, "noble.iso", &install_isos::ubuntu_24_04(), "ubuntu").await;
+
+    // A1, A3 of PR 100's review: the first step that fails ends the script, and the build fails naming it.
+    *lab.guest.report.lock().unwrap() = "remotely-generic cloud-init yes\nremotely-generic ok boot\nremotely-generic ok cloud_init\nremotely-generic failed machine_id\n".into();
+    let request = BuildRequest {
+        target: BuildTarget::New {
+            name: "Steps golden".into(),
+        },
+        recipe: recipe(&iso, config, Hypervisor::Vmware, &lab.vms, "gp.medium"),
+    };
+    let (_, status, notes) = build(&lab, &request, ubuntu_lines("steps-golden-v1")).await;
+    assert_eq!(status, JobStatus::Failed, "{notes}");
+    assert!(notes.contains("the step that emptied the machine id failed"), "{notes}");
+    assert!(notes.contains("the VM is kept for a look"), "{notes}");
+    let vmx = lab.vms.join("steps-golden-v1").join("steps-golden-v1.vmx");
+    assert!(lab.vmware.has_vm(&vmx.display().to_string()), "kept for a look");
+    assert!(lab.vmware.snapshot_names(&vmx.display().to_string()).is_empty());
+    assert!(core
+        .catalog
+        .images(ctx)
+        .await
+        .unwrap()
+        .iter()
+        .all(|i| i.name != "Steps golden"));
+
+    // Q3 of PR 100's review: a run that never answers fails at its time limit.
+    *lab.guest.report.lock().unwrap() = linux_report();
+    *lab.guest.end.lock().unwrap() = GuestEnd::Hangs;
+    tuned(core, lab.ssh, Duration::from_secs(3));
+    let request = BuildRequest {
+        target: BuildTarget::New {
+            name: "Hung golden".into(),
+        },
+        recipe: recipe(&iso, config, Hypervisor::Vmware, &lab.vms, "gp.medium"),
+    };
+    let (_, status, notes) = build(&lab, &request, ubuntu_lines("hung-golden-v1")).await;
+    assert_eq!(status, JobStatus::Failed, "{notes}");
+    assert!(
+        notes.contains("the steps that make it generic didn't end within"),
+        "{notes}"
+    );
+    assert!(core
+        .catalog
+        .images(ctx)
+        .await
+        .unwrap()
+        .iter()
+        .all(|i| i.name != "Hung golden"));
+    let _ = std::fs::remove_dir_all(&lab.dir);
+}
+
+#[tokio::test]
+async fn a_virtualbox_build_vm_that_aborts_isnt_sealed() {
+    // A4 of PR 100's review: VirtualBox's `aborted` is a crash, not the guest's own shutdown.
+    let lab = lab("golden-abort", &[]).await;
+    let core = &lab.core;
+    let ctx = &core.ctx();
+    let pw = vault_password(core, &lab.secret).await;
+    let key = build_key(core).await;
+    let config = config_from(core, "starter.debian-12-minimal", pw, Some(key), |_| {}).await;
+    let iso = iso_image(core, &lab.dir, "bookworm.iso", &install_isos::debian(), "debian").await;
+    *lab.guest.end.lock().unwrap() = GuestEnd::Aborts;
+    let request = BuildRequest {
+        target: BuildTarget::New {
+            name: "Deb crash".into(),
+        },
+        recipe: recipe(&iso, config, Hypervisor::VirtualBox, &lab.vms, "gp.medium"),
+    };
+    let (_, status, notes) = build(&lab, &request, debian_lines("deb-crash-v1")).await;
+    assert_eq!(status, JobStatus::Failed, "{notes}");
+    assert!(notes.contains("aborted instead of shutting down"), "{notes}");
+    let vm = lab.virtualbox.vm_named("deb-crash-v1").expect("kept for a look");
+    assert!(lab.virtualbox.snapshot_names(&vm.uuid).is_empty());
+    // Q2: the seed was out of its drive (ejected, its file deleted) before the steps ran.
+    assert_eq!(*lab.guest.seed_out.lock().unwrap(), [true]);
+    assert!(core
+        .catalog
+        .images(ctx)
+        .await
+        .unwrap()
+        .iter()
+        .all(|i| i.name != "Deb crash"));
+    let _ = std::fs::remove_dir_all(&lab.dir);
+}
+
+#[tokio::test]
+async fn a_build_whose_settings_change_fails_takes_no_snapshot() {
+    // A6 of PR 100's review: the install's drives and serial port must leave the VM's settings before the snapshot.
+    let lab = lab("golden-seal", &["seal-golden-v1"]).await;
+    let core = &lab.core;
+    let ctx = &core.ctx();
+    let pw = vault_password(core, &lab.secret).await;
+    let key = build_key(core).await;
+    let config = config_from(core, "starter.ubuntu-24.04-minimal", pw, Some(key), |_| {}).await;
+    let iso = iso_image(core, &lab.dir, "noble.iso", &install_isos::ubuntu_24_04(), "ubuntu").await;
+    *lab.guest.end.lock().unwrap() = GuestEnd::PowersOffSettingsLocked;
+    let request = BuildRequest {
+        target: BuildTarget::New {
+            name: "Seal golden".into(),
+        },
+        recipe: recipe(&iso, config, Hypervisor::Vmware, &lab.vms, "gp.medium"),
+    };
+    let (_, status, notes) = build(&lab, &request, ubuntu_lines("seal-golden-v1")).await;
+    lab.vmware.set_failing_vmx_write(false);
+    assert_eq!(status, JobStatus::Failed, "{notes}");
+    assert!(notes.contains("are still in its settings"), "{notes}");
+    assert!(notes.contains("without a snapshot"), "{notes}");
+    let vmx = lab.vms.join("seal-golden-v1").join("seal-golden-v1.vmx");
+    assert!(lab.vmware.snapshot_names(&vmx.display().to_string()).is_empty());
+    assert!(core
+        .catalog
+        .images(ctx)
+        .await
+        .unwrap()
+        .iter()
+        .all(|i| i.name != "Seal golden"));
+    let _ = std::fs::remove_dir_all(&lab.dir);
+}
+
+#[tokio::test]
+async fn one_build_of_an_image_runs_at_a_time_and_never_registers_an_older_version() {
+    // C1 of PR 100's review.
+    let lab = lab("golden-once", &["once-golden-v1", "once-golden-v2"]).await;
+    let core = &lab.core;
+    let ctx = &core.ctx();
+    let pw = vault_password(core, &lab.secret).await;
+    let key = build_key(core).await;
+    let config = config_from(core, "starter.ubuntu-24.04-minimal", pw, Some(key), |_| {}).await;
+    let iso = iso_image(core, &lab.dir, "noble.iso", &install_isos::ubuntu_24_04(), "ubuntu").await;
+    let request = BuildRequest {
+        target: BuildTarget::New {
+            name: "Once golden".into(),
+        },
+        recipe: recipe(&iso, config, Hypervisor::Vmware, &lab.vms, "gp.medium"),
+    };
+    let (_, status, notes) = build(&lab, &request, ubuntu_lines("once-golden-v1")).await;
+    assert_eq!(status, JobStatus::Succeeded, "{notes}");
+    let image = core
+        .catalog
+        .images(ctx)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|i| i.name == "Once golden")
+        .unwrap();
+    // Three builds of version 2, each approved before any ran.
+    let rebuild = core.golden.rebuild_request(ctx, image.id).await.unwrap();
+    let asked: Vec<ApprovalRequest> = three_approvals(core, &rebuild).await;
+    for a in &asked {
+        assert_eq!(a.image_build.as_ref().unwrap().version, 2);
+    }
+    let gate = Arc::new(tokio::sync::Notify::new());
+    *lab.guest.gate.lock().unwrap() = Some(Arc::clone(&gate));
+    let play = installer(
+        lab.vms.join("once-golden-v2").join("once-golden-v2-serial.log"),
+        ubuntu_lines("once-golden-v2"),
+    );
+    let first = approve(core, &asked[0]).await;
+    let reached = tokio::time::timeout(Duration::from_secs(20), async {
+        while lab.guest.runs.lock().unwrap().len() < 2 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    assert!(reached.is_ok(), "the first rebuild reached its generalization");
+    // While it runs, another build of the image is refused before it makes anything.
+    let second = approve(core, &asked[1]).await;
+    assert_eq!(wait(core, second).await, JobStatus::Failed);
+    let notes = notes_of(core, second).await;
+    assert!(notes.contains("is being built by job"), "{notes}");
+    gate.notify_one();
+    let status = wait(core, first).await;
+    play.await.unwrap();
+    assert_eq!(status, JobStatus::Succeeded, "{}", notes_of(core, first).await);
+    // Once it registered version 2, a build approved for version 2 is refused rather than registered over it.
+    let third = approve(core, &asked[2]).await;
+    assert_eq!(wait(core, third).await, JobStatus::Failed);
+    let notes = notes_of(core, third).await;
+    assert!(notes.contains("was built since this build was approved"), "{notes}");
+    let versions = core.golden.versions(ctx, image.id).await.unwrap();
+    assert_eq!(
+        versions.iter().map(|v| (v.number, v.state)).collect::<Vec<_>>(),
+        [(2, VersionState::Newest), (1, VersionState::Kept)]
+    );
+    assert_eq!(core.catalog.image(ctx, image.id).await.unwrap().version, Some(2));
+    let _ = std::fs::remove_dir_all(&lab.dir);
+}
+
+/// Three approvals of the same build.
+async fn three_approvals(core: &Core, request: &BuildRequest) -> Vec<ApprovalRequest> {
+    let mut out = Vec::new();
+    for _ in 0..3 {
+        out.push(needs_approval(core.golden.submit(&core.ctx(), request).await.unwrap()));
+    }
+    out
+}
+
+#[tokio::test]
+async fn retention_leaves_a_version_whose_vm_went_to_another_workspace() {
+    // B2 of PR 100's review: an old version's VM is deleted only while it is this workspace's.
+    let lab = lab(
+        "golden-moved",
+        &["moved-golden-v1", "moved-golden-v2", "moved-golden-v3"],
+    )
+    .await;
+    let core = &lab.core;
+    let ctx = &core.ctx();
+    let pw = vault_password(core, &lab.secret).await;
+    let key = build_key(core).await;
+    let config = config_from(core, "starter.ubuntu-24.04-minimal", pw, Some(key), |_| {}).await;
+    let iso = iso_image(core, &lab.dir, "noble.iso", &install_isos::ubuntu_24_04(), "ubuntu").await;
+    let mut request = BuildRequest {
+        target: BuildTarget::New {
+            name: "Moved golden".into(),
+        },
+        recipe: recipe(&iso, config, Hypervisor::Vmware, &lab.vms, "gp.medium"),
+    };
+    request.recipe.keep = Some(1);
+    let (_, status, notes) = build(&lab, &request, ubuntu_lines("moved-golden-v1")).await;
+    assert_eq!(status, JobStatus::Succeeded, "{notes}");
+    let image = core
+        .catalog
+        .images(ctx)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|i| i.name == "Moved golden")
+        .unwrap();
+    let other = core
+        .workspaces
+        .create(remotely_core::workspaces::WorkspaceInput {
+            name: "Other".into(),
+            color: None,
+        })
+        .await
+        .unwrap();
+    let elsewhere = remotely_core::domain::Context {
+        workspace_id: other.id,
+        user_id: ctx.user_id,
+    };
+    let v1 = lab
+        .vms
+        .join("moved-golden-v1")
+        .join("moved-golden-v1.vmx")
+        .display()
+        .to_string();
+    let move_v1 = |from: remotely_core::domain::Context, to: remotely_core::domain::Context| {
+        let v1 = v1.clone();
+        async move {
+            core.inventory.release(&from, std::slice::from_ref(&v1)).await.unwrap();
+            core.inventory.claim(&to, &[v1]).await.unwrap();
+        }
+    };
+    // Planned while version 1's VM is another workspace's: not a target, and the approval says why.
+    move_v1(*ctx, elsewhere).await;
+    let rebuild = core.golden.rebuild_request(ctx, image.id).await.unwrap();
+    let asked = needs_approval(core.golden.submit(ctx, &rebuild).await.unwrap());
+    assert_eq!(asked.targets.len(), 1, "only the new VM: {:?}", asked.targets);
+    let details = asked.image_build.as_ref().unwrap();
+    assert!(details.deletes.is_empty(), "{details:?}");
+    assert!(
+        details.retained.iter().any(|r| r.starts_with("version 1 stays")),
+        "{details:?}"
+    );
+    let play = installer(
+        lab.vms.join("moved-golden-v2").join("moved-golden-v2-serial.log"),
+        ubuntu_lines("moved-golden-v2"),
+    );
+    let job = approve(core, &asked).await;
+    assert_eq!(wait(core, job).await, JobStatus::Succeeded);
+    play.await.unwrap();
+    assert!(lab.vmware.has_vm(&v1), "another workspace's VM stays");
+
+    // Planned while it is here again, then moved before the old versions go: left alone, version 2 deleted.
+    move_v1(elsewhere, *ctx).await;
+    let asked = needs_approval(core.golden.submit(ctx, &rebuild).await.unwrap());
+    assert_eq!(
+        asked.targets.len(),
+        3,
+        "the new VM and both old versions: {:?}",
+        asked.targets
+    );
+    assert_eq!(asked.action, ActionKind::ImageBuildPrune);
+    let deletes = &asked.image_build.as_ref().unwrap().deletes;
+    assert!(
+        deletes.iter().any(|d| d.starts_with("version 2")) && deletes.iter().any(|d| d.starts_with("version 1")),
+        "{deletes:?}"
+    );
+    let play = installer(
+        lab.vms.join("moved-golden-v3").join("moved-golden-v3-serial.log"),
+        ubuntu_lines("moved-golden-v3"),
+    );
+    let job = approve(core, &asked).await;
+    move_v1(*ctx, elsewhere).await;
+    assert_eq!(wait(core, job).await, JobStatus::Succeeded);
+    play.await.unwrap();
+    let notes = notes_of(core, job).await;
+    assert!(notes.contains("version 1 stays"), "{notes}");
+    assert!(notes.contains("version 2 deleted with its VM"), "{notes}");
+    assert!(lab.vmware.has_vm(&v1));
+    let _ = std::fs::remove_dir_all(&lab.dir);
+}
+
+#[tokio::test]
+async fn an_export_doesnt_replace_an_image_remotely_builds() {
+    // C6 of PR 100's review: FD-07's Replace would drop the image's build settings and orphan its versions.
+    use remotely_core::catalog::ImageEdit;
+    use remotely_core::transfer::{CatalogChoices, ExportRequest, ItemAction, ItemChoice, TransferCommit};
+    let lab = lab("golden-export", &["export-golden-v1"]).await;
+    let core = &lab.core;
+    let ctx = &core.ctx();
+    let pw = vault_password(core, &lab.secret).await;
+    let key = build_key(core).await;
+    let config = config_from(core, "starter.ubuntu-24.04-minimal", pw, Some(key), |_| {}).await;
+    let iso = iso_image(core, &lab.dir, "noble.iso", &install_isos::ubuntu_24_04(), "ubuntu").await;
+    let request = BuildRequest {
+        target: BuildTarget::New {
+            name: "Export golden".into(),
+        },
+        recipe: recipe(&iso, config, Hypervisor::Vmware, &lab.vms, "gp.medium"),
+    };
+    let (_, status, notes) = build(&lab, &request, ubuntu_lines("export-golden-v1")).await;
+    assert_eq!(status, JobStatus::Succeeded, "{notes}");
+    let image = core
+        .catalog
+        .images(ctx)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|i| i.name == "Export golden")
+        .unwrap();
+    let file = lab.dir.join("catalog.remotely");
+    let passphrase = password();
+    core.transfer
+        .export(
+            ctx,
+            &file,
+            ExportRequest {
+                passphrase: SecretString::new(passphrase.clone()),
+                include_known_hosts: false,
+                include_secrets: false,
+                vault_password: None,
+            },
+            &core.vault,
+            "Remotely test",
+        )
+        .await
+        .unwrap();
+    // The image here changes, so the export's is a conflict, and Replace is asked for.
+    core.catalog
+        .update_image(
+            ctx,
+            image.id,
+            ImageEdit {
+                name: image.name.clone(),
+                hypervisors: image.hypervisors.clone(),
+                os_profile: image.os_profile.clone(),
+                notes: Some("changed here".into()),
+            },
+        )
+        .await
+        .unwrap();
+    let preview = core
+        .transfer
+        .open(ctx, &file, SecretString::new(passphrase), &core.vault)
+        .await
+        .unwrap();
+    let row = preview
+        .catalog
+        .images
+        .iter()
+        .find(|r| r.name == "Export golden")
+        .expect("the built image is in the export");
+    let mut choices = CatalogChoices::default();
+    choices.images.push(ItemChoice {
+        index: row.index,
+        action: ItemAction::Replace,
+    });
+    let report = core
+        .transfer
+        .commit(
+            ctx,
+            TransferCommit {
+                preview_id: preview.id,
+                catalog: choices,
+                sessions: vec![],
+                known_hosts: vec![],
+                secrets: vec![],
+                favourites: vec![],
+                keep_startup: vec![],
+                keep_forwards: vec![],
+                vault_password: None,
+                folder_defaults: vec![],
+                groups: vec![],
+                checks: vec![],
+            },
+            &core.sessions,
+            &core.vault,
+            &core.known_hosts,
+            &core.snippets,
+        )
+        .await
+        .unwrap();
+    assert!(
+        report
+            .problems
+            .iter()
+            .any(|p| p.reason.contains("is one Remotely builds here")),
+        "{:?}",
+        report.problems
+    );
+    let kept = core.catalog.image(ctx, image.id).await.unwrap();
+    assert!(kept.build.is_some(), "its build settings stay");
+    assert_eq!(kept.version, Some(1));
+    assert_eq!(core.golden.versions(ctx, image.id).await.unwrap().len(), 1);
     let _ = std::fs::remove_dir_all(&lab.dir);
 }
 
@@ -1104,12 +1794,16 @@ async fn a_scheduled_rebuild_runs_under_its_standing_approval_and_asks_again_onc
         "{}",
         request.summary
     );
+    // B1 of PR 100's review: the rebuilds give the vault's sudo password to each new VM, so the standing approval asks
+    // for the vault password, as the dialog's build does.
+    assert!(
+        request.steps.contains(&ApprovalStep::VaultReauth),
+        "{:?}",
+        request.steps
+    );
     let answers = ApprovalAnswers {
         confirmed: true,
-        vault_password: request
-            .steps
-            .contains(&ApprovalStep::VaultReauth)
-            .then(|| SecretString::new(VAULT_PASSWORD)),
+        vault_password: Some(SecretString::new(VAULT_PASSWORD)),
         ..Default::default()
     };
     let view = core.schedules().approve(request.id, answers).await.unwrap();
@@ -1156,5 +1850,202 @@ async fn a_scheduled_rebuild_runs_under_its_standing_approval_and_asks_again_onc
         "{:?}",
         view.state_reason
     );
+    let _ = std::fs::remove_dir_all(&lab.dir);
+}
+
+#[tokio::test]
+async fn a_scheduled_rebuild_waiting_for_the_vault_builds_nothing_once_its_schedule_is_deleted() {
+    // Q1 of PR 100's review: each round of the vault wait asks whether the schedule's approval still stands.
+    use remotely_core::fakes::clock::{FakeClock, FakeZone};
+    use remotely_core::schedules::{ScheduleAction, ScheduleInput, ScheduleSpec, ScheduleTarget, Timing, WallTime};
+    let lab = lab("golden-withdrawn", &["gone-golden-v1", "gone-golden-v2"]).await;
+    let core = &lab.core;
+    let ctx = &core.ctx();
+    let pw = vault_password(core, &lab.secret).await;
+    let key = build_key(core).await;
+    let config = config_from(core, "starter.ubuntu-24.04-minimal", pw, Some(key), |_| {}).await;
+    let iso = iso_image(core, &lab.dir, "noble.iso", &install_isos::ubuntu_24_04(), "ubuntu").await;
+    let request = BuildRequest {
+        target: BuildTarget::New {
+            name: "Gone golden".into(),
+        },
+        recipe: recipe(&iso, config, Hypervisor::Vmware, &lab.vms, "gp.medium"),
+    };
+    let (_, status, notes) = build(&lab, &request, ubuntu_lines("gone-golden-v1")).await;
+    assert_eq!(status, JobStatus::Succeeded, "{notes}");
+    let image = core
+        .catalog
+        .images(ctx)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|i| i.name == "Gone golden")
+        .unwrap();
+    let clock = Arc::new(FakeClock::new(
+        time::macros::datetime!(2026-06-10 10:00 UTC),
+        FakeZone::central_europe(),
+    ));
+    core.schedules().set_clock(clock.clone());
+    let saved = core
+        .schedules()
+        .save(ScheduleInput {
+            id: None,
+            name: "nightly rebuild".into(),
+            spec: ScheduleSpec {
+                action: ScheduleAction::RebuildImage,
+                targets: vec![ScheduleTarget::Image { image_id: image.id }],
+                timing: Timing::Daily {
+                    at: WallTime::new(3, 0).unwrap(),
+                },
+            },
+        })
+        .await
+        .unwrap();
+    let request = saved.approval.expect("a Medium build asks");
+    let answers = ApprovalAnswers {
+        confirmed: true,
+        vault_password: Some(SecretString::new(VAULT_PASSWORD)),
+        ..Default::default()
+    };
+    let view = core.schedules().approve(request.id, answers).await.unwrap();
+    let at = &view.next_run.as_ref().unwrap().at;
+    let due = time::OffsetDateTime::parse(at, &time::format_description::well_known::Rfc3339).unwrap();
+
+    let mut events = core.jobs.subscribe();
+    core.vault.lock(ctx).await.unwrap();
+    clock.set(due);
+    let report = core.schedules().tick().await.unwrap();
+    assert_eq!(report.started, 1);
+    let job = tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            if let Ok(JobEvent::TargetProgress { job_id, step, .. }) = events.recv().await {
+                if step.starts_with("waiting for the vault to be unlocked") {
+                    return job_id;
+                }
+            }
+        }
+    })
+    .await;
+    let Ok(job) = job else {
+        core.schedules().wait_runs().await;
+        let run = core.schedules().get(view.id).await.unwrap().last_run;
+        panic!("the run didn't wait for the vault: {run:?}");
+    };
+    core.schedules().delete(view.id).await.unwrap();
+    assert_eq!(wait(core, job).await, JobStatus::Failed);
+    let notes = notes_of(core, job).await;
+    assert!(
+        notes.contains("approval was withdrawn while the build waited"),
+        "{notes}"
+    );
+    assert!(!lab.vms.join("gone-golden-v2").exists(), "nothing was made");
+    core.vault
+        .unlock(ctx, UnlockMethod::MasterPassword(SecretString::new(VAULT_PASSWORD)))
+        .await
+        .unwrap();
+    core.schedules().wait_runs().await;
+    assert_eq!(core.golden.versions(ctx, image.id).await.unwrap().len(), 1);
+    let _ = std::fs::remove_dir_all(&lab.dir);
+}
+
+#[tokio::test]
+async fn a_scheduled_rebuild_asks_again_before_it_deletes_an_old_version_labelled_prod_since() {
+    // B3 of PR 100's review: a run's old versions are its own targets, with their labels at the run.
+    use remotely_core::fakes::clock::{FakeClock, FakeZone};
+    use remotely_core::schedules::{
+        ScheduleAction, ScheduleInput, ScheduleSpec, ScheduleState, ScheduleTarget, Timing, WallTime,
+    };
+    let lab = lab("golden-prod", &["prod-golden-v1", "prod-golden-v2"]).await;
+    let core = &lab.core;
+    let ctx = &core.ctx();
+    let pw = vault_password(core, &lab.secret).await;
+    let key = build_key(core).await;
+    let config = config_from(core, "starter.ubuntu-24.04-minimal", pw, Some(key), |_| {}).await;
+    let iso = iso_image(core, &lab.dir, "noble.iso", &install_isos::ubuntu_24_04(), "ubuntu").await;
+    let mut request = BuildRequest {
+        target: BuildTarget::New {
+            name: "Prod golden".into(),
+        },
+        recipe: recipe(&iso, config, Hypervisor::Vmware, &lab.vms, "gp.medium"),
+    };
+    request.recipe.keep = Some(1);
+    let (_, status, notes) = build(&lab, &request, ubuntu_lines("prod-golden-v1")).await;
+    assert_eq!(status, JobStatus::Succeeded, "{notes}");
+    let image = core
+        .catalog
+        .images(ctx)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|i| i.name == "Prod golden")
+        .unwrap();
+    let clock = Arc::new(FakeClock::new(
+        time::macros::datetime!(2026-06-10 10:00 UTC),
+        FakeZone::central_europe(),
+    ));
+    core.schedules().set_clock(clock.clone());
+    let saved = core
+        .schedules()
+        .save(ScheduleInput {
+            id: None,
+            name: "nightly rebuild".into(),
+            spec: ScheduleSpec {
+                action: ScheduleAction::RebuildImage,
+                targets: vec![ScheduleTarget::Image { image_id: image.id }],
+                timing: Timing::Daily {
+                    at: WallTime::new(3, 0).unwrap(),
+                },
+            },
+        })
+        .await
+        .unwrap();
+    let request = saved.approval.expect("a rebuild that deletes VMs asks");
+    assert_eq!(request.tier, Tier::Critical);
+    assert!(
+        request
+            .image_build
+            .as_ref()
+            .unwrap()
+            .deletes
+            .iter()
+            .any(|d| d.starts_with("version 1")),
+        "{:?}",
+        request.image_build
+    );
+    let answers = ApprovalAnswers {
+        confirmed: true,
+        typed_target_count: Some(request.targets.len()),
+        reason: Some("nightly".into()),
+        vault_password: Some(SecretString::new(VAULT_PASSWORD)),
+        ..Default::default()
+    };
+    let view = core.schedules().approve(request.id, answers).await.unwrap();
+    assert_eq!(view.state, ScheduleState::Active);
+    let due = time::OffsetDateTime::parse(
+        &view.next_run.as_ref().unwrap().at,
+        &time::format_description::well_known::Rfc3339,
+    )
+    .unwrap();
+
+    // Version 1's VM is labelled Prod after the approval: the run asks again, and nothing is built or deleted.
+    let v1 = lab
+        .vms
+        .join("prod-golden-v1")
+        .join("prod-golden-v1.vmx")
+        .display()
+        .to_string();
+    core.inventory
+        .set_environment(ctx, std::slice::from_ref(&v1), Environment::Prod)
+        .await
+        .unwrap();
+    clock.set(due);
+    core.schedules().tick().await.unwrap();
+    core.schedules().wait_runs().await;
+    let view = core.schedules().get(view.id).await.unwrap();
+    assert_eq!(view.state, ScheduleState::NeedsApproval, "{:?}", view.last_run);
+    let reason = format!("{:?} {:?}", view.state_reason, view.last_run);
+    assert!(reason.contains("is labelled Prod"), "{reason}");
+    assert!(!lab.vms.join("prod-golden-v2").exists(), "nothing was built");
+    assert!(lab.vmware.has_vm(&v1));
     let _ = std::fs::remove_dir_all(&lab.dir);
 }

@@ -45,6 +45,8 @@ pub(super) fn build(keep: Option<u32>) -> (Command, Vec<Target>) {
             sudo_password_id: None,
         },
         deploy: *spec,
+        prune: Vec::new(),
+        retained: Vec::new(),
     };
     (
         Command::ImageBuild {
@@ -95,4 +97,51 @@ fn the_build_tiers_are_rules_like_any() {
     assert_eq!(engine.evaluate(&command, &targets).tier, Tier::High);
     assert!(ActionKind::ALL.contains(&ActionKind::ImageBuild));
     assert!(ActionKind::ALL.contains(&ActionKind::ImageBuildPrune));
+}
+
+#[test]
+fn the_old_versions_a_build_deletes_are_its_targets_and_rated_with_their_labels() {
+    // B3 of PR 100's review: each old version's VM is a target the approval names, and a protected one is skipped.
+    let engine = PolicyEngine::new(PolicyRules::default()).expect("default rules are valid");
+    let (command, mut targets) = build(Some(1));
+    let Command::ImageBuild { spec, .. } = command else {
+        unreachable!()
+    };
+    let mut spec = *spec;
+    spec.prune = vec![
+        crate::golden::PruneVm {
+            number: 1,
+            vm_key: "C:/VMs/golden-v1/golden-v1.vmx".into(),
+            vm_name: "golden-v1".into(),
+        },
+        crate::golden::PruneVm {
+            number: 2,
+            vm_key: "C:/VMs/golden-v2/golden-v2.vmx".into(),
+            vm_name: "golden-v2".into(),
+        },
+    ];
+    let command = Command::ImageBuild {
+        targets: spec.targets(),
+        spec: Box::new(spec),
+    };
+    let refs = command.targets();
+    assert_eq!(refs.len(), 3);
+    targets.push(Target {
+        name: "golden-v1".into(),
+        target: refs[1].clone(),
+        environment: Environment::Prod,
+        protected: false,
+    });
+    targets.push(Target {
+        name: "golden-v2".into(),
+        target: refs[2].clone(),
+        environment: Environment::None,
+        protected: true,
+    });
+    let d = engine.evaluate(&command, &targets);
+    assert_eq!(d.action, ActionKind::ImageBuildPrune);
+    assert_eq!(d.tier, Tier::Critical);
+    let names: Vec<&str> = d.targets.iter().map(|t| t.name.as_str()).collect();
+    assert!(names.contains(&"golden-v1"), "{names:?}");
+    assert!(!names.contains(&"golden-v2"), "a protected VM is skipped: {names:?}");
 }

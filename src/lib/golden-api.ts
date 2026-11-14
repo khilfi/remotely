@@ -65,6 +65,10 @@ export interface BuildDetails {
   signIn: string;
   /** The newest versions it keeps; null: every version. */
   keep: number | null;
+  /** The older versions it deletes once it is registered ("version 1 (ubuntu-golden-v1)"), each a target. */
+  deletes: string[];
+  /** Older versions it leaves past `keep`, and why. */
+  retained: string[];
 }
 
 export interface BuildPreview {

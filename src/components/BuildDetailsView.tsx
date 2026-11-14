@@ -39,6 +39,19 @@ export function BuildDetailsView({ details }: { details: BuildDetails }) {
               {keepText(details.keep)}: older versions&apos; VMs are deleted after the build, unless a linked clone uses
               them
             </dd>
+            {/* B3 of PR 100's review: each old version it deletes is named, as a target of the approval. */}
+            <dt className="text-muted-foreground">Deletes</dt>
+            <dd className="break-words">{details.deletes.length > 0 ? details.deletes.join(", ") : "nothing now"}</dd>
+            {details.retained.length > 0 && (
+              <>
+                <dt className="text-muted-foreground">Keeps</dt>
+                <dd className="grid gap-0.5 break-words">
+                  {details.retained.map((r) => (
+                    <span key={r}>{r}</span>
+                  ))}
+                </dd>
+              </>
+            )}
           </>
         )}
       </dl>

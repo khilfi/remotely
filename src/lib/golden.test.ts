@@ -211,6 +211,8 @@ test("the request carries the recipe as the core reads it", () => {
   assert.equal(recipeOf({ ...form, minutes: "x" }), null);
   assert.deepEqual(requestOf(form, "settings", "img-golden")?.target, { kind: "image", id: "img-golden" });
   assert.equal(requestOf(form, "settings"), null);
+  // A2 of PR 100's review: a fixed address would go into every clone, so no build sends a pool.
+  assert.equal(recipeOf({ ...form, addressPoolId: "p1" })?.addressPoolId, null);
 });
 
 test("saved build settings come back as they were saved", () => {

@@ -1458,12 +1458,13 @@ impl DeployActions for Deployer {
         ctx: &Context,
         job_id: Uuid,
         spec: &crate::golden::BuildSpec,
+        approved: &dyn crate::golden::StillApproved,
         progress: &DeployProgress<'_>,
         token: &CancellationToken,
     ) -> Result<crate::golden::Built> {
         // VM-30: the build's ISO copy is its own job's, as a deploy's.
         self.isos.enter(job_id).await;
-        let result = self.build_one(ctx, job_id, spec, progress, token).await;
+        let result = self.build_one(ctx, job_id, spec, approved, progress, token).await;
         if self.isos.leave(job_id).await {
             self.release_job_claims(ctx, job_id).await;
         }

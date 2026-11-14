@@ -1,16 +1,21 @@
 //! VM-30 (0.8.0 G7): the deploy runner's part of a golden image build. The build VM is made and installed exactly as
 //! G6's unattended deploy makes and installs a VM ([`Deployer::make`], [`Deployer::watch_install`]: the config as
-//! approved, the seed in a private folder, the watcher, Windows' first sign-in that sets the vault's password). Then it
-//! is made generic ([`crate::golden::generic`]): Linux over SSH as the config's first user with its vault key, the
-//! steps as root through sudo; Windows over WinRM with the vault's password and the certificate the VM wrote to COM1,
-//! sysprep from a scheduled task. The guest powers itself off; then its install CDs come out of its settings (the
-//! drives themselves), its serial port and VirtualBox's NAT rule go, the seed, the ISO link and the serial log are
-//! deleted, and the snapshot is taken (powered off: no memory). Its clones copy none of the install.
+//! approved, the seed in a private folder, the watcher, Windows' first sign-in that sets the vault's password). Its
+//! seed (the answer file) is taken out and emptied as soon as the install is done, before anything is made generic
+//! (Q2 of PR 100's review). Then it is made generic ([`crate::golden::generic`]): Linux over SSH as the config's first
+//! user with its vault key, the steps as root through sudo, within [`LINUX_RUN_LIMIT`], every step reporting `ok`;
+//! Windows over WinRM with the vault's password and the certificate the VM wrote to COM1, sysprep from a scheduled
+//! task. The guest powers itself off (a VirtualBox VM that aborted, or a Windows one that went off before its task
+//! said it removed the listener and started sysprep, fails the build); then its install CDs come out of its settings
+//! (the drives themselves), its serial port and VirtualBox's NAT rule go, the seed, the ISO link and the serial log are
+//! deleted, and the snapshot is taken (powered off: no memory). A settings change that fails there fails the build
+//! before the snapshot (A6). Its clones copy none of the install.
 //!
 //! A failure before the VM is made removes what this build made (G6's cleanup); after that the VM is kept for a look,
 //! its seed taken out (G6's `abandon_install`), and the error says so. The vault: a build needs it for the answer
 //! file's passwords and to sign in; while it is locked the step waits ([`super::install::VAULT_WAIT`], which the window
-//! turns into a notification) for up to 4 hours, and nothing is sent anywhere meanwhile.
+//! turns into a notification) for up to 4 hours, and nothing is sent anywhere meanwhile; each round of the wait asks
+//! whether the build's approval still stands (Q1: a schedule edited, paused or deleted meanwhile builds nothing).
 //!
 //! Rule 7: the key, the passwords and the rendered file never reach a note, an error, the journal or a log.
 
@@ -22,7 +27,7 @@ use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use super::install::{self, Drive, InstallMade, PinnedCertificate, MAX_VAULT_WAIT, VAULT_WAIT};
+use super::install::{self, empty_link, Drive, InstallMade, PinnedCertificate, MAX_VAULT_WAIT, VAULT_WAIT};
 use super::{Deployer, Made, SHORT};
 use crate::adapters::hypervisor::Hypervisor;
 use crate::adapters::remote::{
@@ -36,13 +41,16 @@ use crate::deploy::{virtualbox as vb, DeployProgress};
 use crate::domain::{Context, Environment, PowerState};
 use crate::error::{CoreError, Result};
 use crate::golden::generic::{self, Report};
-use crate::golden::{BuildSpec, Built, SignIn};
+use crate::golden::{BuildSpec, Built, SignIn, StillApproved};
 use crate::known_hosts::HostKey;
 use crate::sessions::kinds::{WinrmCertificate, WinrmOptions, WinrmSignIn, WinrmTransport};
 use crate::vault::{SecretString, VaultStatus};
 
 /// What a generalization run may print.
 const MAX_REPORT: usize = 64 * 1024;
+/// Q3 of PR 100's review: the longest the Linux steps may run over SSH. Their `boot` step waits at most 10 minutes
+/// each for systemd, cloud-init and package jobs; the rest takes seconds.
+const LINUX_RUN_LIMIT: Duration = Duration::from_secs(45 * 60);
 
 /// The build VM as Linux's generalization reaches it: its address, the config's user, its key and sudo's password.
 pub struct LinuxGuest<'a> {
@@ -159,9 +167,12 @@ impl GuestShell for SshGuestShell {
 }
 
 impl Deployer {
-    /// Waits while the vault is locked, saying so, for up to [`MAX_VAULT_WAIT`]; a cancel stops the wait.
+    /// Waits while the vault is locked, saying so, for up to [`MAX_VAULT_WAIT`]; a cancel stops the wait. Q1 of PR 100's
+    /// review: the build's approval is asked before the wait and after each round of it, so a scheduled build whose
+    /// schedule was edited, paused or deleted (its standing approval withdrawn) while it waited goes no further.
     async fn wait_for_vault(
         &self,
+        approved: &dyn StillApproved,
         progress: &DeployProgress<'_>,
         at: f64,
         why: &str,
@@ -169,7 +180,11 @@ impl Deployer {
     ) -> Result<()> {
         let poll = self.tuning().install_poll;
         let deadline = tokio::time::Instant::now() + MAX_VAULT_WAIT;
-        while self.vault.status() == VaultStatus::Locked {
+        loop {
+            approved.check().await?;
+            if self.vault.status() != VaultStatus::Locked {
+                return Ok(());
+            }
             progress(at, &format!("{VAULT_WAIT} to {why}"));
             if tokio::time::Instant::now() >= deadline {
                 return Err(CoreError::InvalidInput(format!(
@@ -182,7 +197,6 @@ impl Deployer {
                 _ = tokio::time::sleep(poll) => {}
             }
         }
-        Ok(())
     }
 
     /// A vault item, waiting while the vault is locked.
@@ -190,12 +204,13 @@ impl Deployer {
         &self,
         ctx: &Context,
         id: crate::vault::SecretId,
+        approved: &dyn StillApproved,
         progress: &DeployProgress<'_>,
         why: &str,
         token: &CancellationToken,
     ) -> Result<SecretString> {
         loop {
-            self.wait_for_vault(progress, 88.0, why, token).await?;
+            self.wait_for_vault(approved, progress, 88.0, why, token).await?;
             match self.vault.get(ctx, id).await {
                 Err(CoreError::VaultLocked) => continue,
                 other => return other,
@@ -209,6 +224,7 @@ impl Deployer {
         ctx: &Context,
         job_id: Uuid,
         build: &BuildSpec,
+        approved: &dyn StillApproved,
         progress: &DeployProgress<'_>,
         token: &CancellationToken,
     ) -> Result<Built> {
@@ -219,7 +235,7 @@ impl Deployer {
             ));
         };
         // The answer file takes the vault's passwords as it is rendered: nothing is made while the vault is locked.
-        self.wait_for_vault(progress, 0.0, "render the answer file", token)
+        self.wait_for_vault(approved, progress, 0.0, "render the answer file", token)
             .await?;
         let mut made = Made::default();
         let outcome = {
@@ -268,11 +284,13 @@ impl Deployer {
                 ));
             };
             notes.push(format!("installed, reached at {}", address.0));
+            // Q2 of PR 100's review: the seed (the answer file's hashes, or Windows' one-time password, already
+            // replaced by the vault's) leaves the VM before anything is made generic.
+            notes.push(self.seed_out(spec, &key, &m).await);
             let report = self
-                .make_generic(ctx, build, vm, &m, &address, progress, token)
+                .make_generic(ctx, build, vm, &m, &address, approved, progress, token)
                 .await?;
             notes.push(format!("made generic: {}", report.done_text()));
-            notes.extend(report.failures());
             if build.os != crate::golden::BuildOs::Windows {
                 if report.cloud_init() == Some(false) {
                     notes.push("it has no cloud-init: its clones keep this build's hostname, users and keys".into());
@@ -313,7 +331,22 @@ impl Deployer {
             }
         };
         progress(96.0, "taking the install's CDs and serial port out");
-        notes.extend(self.seal(job_id, spec, &key, &m).await);
+        // A6 of PR 100's review: a change to its settings that didn't go fails the build before the snapshot, so no
+        // version's clones carry the install's drives or serial port.
+        match self.seal(job_id, spec, &key, &m).await {
+            Ok(said) => notes.extend(said),
+            Err(problems) => {
+                notes.extend(problems);
+                notes.push(
+                    "the VM is kept, generic and shut down, without a snapshot: fix its settings, then build the image again"
+                        .into(),
+                );
+                return Err(CoreError::InstallFailed {
+                    vm: vm.name.clone(),
+                    message: notes.join("; "),
+                });
+            }
+        }
         progress(98.0, "taking the snapshot");
         let snapshot_name = crate::golden::spec::snapshot_name(build.version);
         let taken = self
@@ -366,6 +399,26 @@ impl Deployer {
             .ok_or_else(|| CoreError::UnknownTarget(format!("snapshot '{name}'")))
     }
 
+    /// Q2 of PR 100's review: the seed out of its drive (G6's eject: Workstation's disconnected, VirtualBox's emptied)
+    /// and its file emptied (Workstation's drive keeps an empty disc until [`Self::seal`] removes the drive). Says what
+    /// it did; a seed it couldn't take out still goes when the VM is off (the seal deletes the file and the drive).
+    async fn seed_out(&self, spec: &DeploySpec, key: &str, m: &InstallMade) -> String {
+        let workstation = spec.hypervisor == Hypervisor::Vmware;
+        let ejected = match &m.seed_drive {
+            Some(drive) => self.eject(key, drive, &m.seed).await,
+            None => Ok(()),
+        };
+        match ejected {
+            Err(err) => {
+                format!("its seed couldn't be taken out of its drive while it runs ({err}): it goes once the VM is off")
+            }
+            Ok(()) => match empty_link(&m.seed, workstation).await {
+                Ok(()) => "its seed (the answer file) is taken out and emptied".into(),
+                Err(err) => format!("its seed is taken out, but its file couldn't be emptied yet ({err})"),
+            },
+        }
+    }
+
     /// Makes the installed system generic (see [`crate::golden::generic`]); Windows' sysprep then runs from its task.
     #[allow(clippy::too_many_arguments)]
     async fn make_generic(
@@ -375,6 +428,7 @@ impl Deployer {
         vm: &DeployVm,
         m: &InstallMade,
         (host, port): &(String, u16),
+        approved: &dyn StillApproved,
         progress: &DeployProgress<'_>,
         token: &CancellationToken,
     ) -> Result<Report> {
@@ -391,11 +445,11 @@ impl Deployer {
                     None => (host.clone(), *port),
                 };
                 let ssh_key = self
-                    .vault_item(ctx, *key_id, progress, "sign in to make it generic", token)
+                    .vault_item(ctx, *key_id, approved, progress, "sign in to make it generic", token)
                     .await?;
                 let sudo = match sudo_password_id {
                     Some(id) => Some(
-                        self.vault_item(ctx, *id, progress, "sign in to make it generic", token)
+                        self.vault_item(ctx, *id, approved, progress, "sign in to make it generic", token)
                             .await?,
                     ),
                     None => None,
@@ -409,16 +463,41 @@ impl Deployer {
                     key: ssh_key,
                     sudo_password: sudo,
                 };
+                // Q3 of PR 100's review: the run has a time limit (a hung step fails the build, keeping the VM).
+                let limit = tuning
+                    .install_cap
+                    .map_or(LINUX_RUN_LIMIT, |cap| LINUX_RUN_LIMIT.min(cap));
+                let run = tokio::time::timeout(
+                    limit,
+                    shell.linux(&guest, generic::LINUX_SCRIPT, generic::LINUX_POWER_OFF),
+                );
                 let out = tokio::select! {
                     _ = token.cancelled() => return Err(CoreError::Cancelled),
-                    out = shell.linux(&guest, generic::LINUX_SCRIPT, generic::LINUX_POWER_OFF) => out?,
+                    out = run => match out {
+                        Ok(out) => out?,
+                        Err(_) => {
+                            return Err(CoreError::InvalidInput(format!(
+                                "the steps that make it generic didn't end within {} minutes",
+                                limit.as_secs().div_ceil(60)
+                            )))
+                        }
+                    },
                 };
                 drop(guest);
+                // A3 of PR 100's review: every step must say ok, else the build fails and the VM stays as it is.
                 let report = Report::parse(&out);
-                if !report.finished() {
-                    return Err(CoreError::InvalidInput(
-                        "the steps that make it generic didn't run to their end".into(),
-                    ));
+                let problems = report.linux_problems();
+                if !problems.is_empty() {
+                    let done = report.done_text();
+                    return Err(CoreError::InvalidInput(format!(
+                        "it wasn't made generic: {}{}",
+                        problems.join(", "),
+                        if done.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" (done before: {done})")
+                        }
+                    )));
                 }
                 progress(92.0, "shutting down");
                 Ok(report)
@@ -428,7 +507,14 @@ impl Deployer {
                     CoreError::InvalidInput("its serial port holds no WinRM certificate to check".into())
                 })?;
                 let password = self
-                    .vault_item(ctx, *password_id, progress, "sign in to make it generic", token)
+                    .vault_item(
+                        ctx,
+                        *password_id,
+                        approved,
+                        progress,
+                        "sign in to make it generic",
+                        token,
+                    )
                     .await?;
                 let (probe_host, probe_port) = match &tuning.probe {
                     Some((h, _, winrm)) => (h.clone(), *winrm),
@@ -488,9 +574,11 @@ impl Deployer {
             .ok_or(CoreError::NotImplemented("signing in to a build VM"))
     }
 
-    /// Whether the VM is powered off now (a VM the hypervisor can't say about counts as on).
-    async fn powered_off(&self, hypervisor: Hypervisor, key: &str) -> bool {
-        match hypervisor {
+    /// Whether the VM is powered off now (a VM the hypervisor can't say about counts as on). A4 of PR 100's review: a
+    /// VirtualBox VM that aborted (its process crashed or was killed) didn't shut down, so it is an error: its disk
+    /// may hold a half-written system. Workstation's list of running VMs can't tell the two apart.
+    async fn powered_off(&self, hypervisor: Hypervisor, key: &str) -> Result<bool> {
+        Ok(match hypervisor {
             Hypervisor::Vmware => match self.hypervisors.vmware().list_running().await {
                 Ok(running) => {
                     let wanted = crate::adapters::vmware::path_key(Path::new(key));
@@ -498,17 +586,22 @@ impl Deployer {
                 }
                 Err(_) => false,
             },
-            Hypervisor::VirtualBox => self
-                .hypervisors
-                .virtualbox()
-                .vm_info(key)
-                .await
-                .is_ok_and(|info| info.power_state() == PowerState::NotRunning),
-        }
+            Hypervisor::VirtualBox => match self.hypervisors.virtualbox().vm_info(key).await {
+                Ok(info) if info.state.trim().eq_ignore_ascii_case("aborted") => {
+                    return Err(CoreError::InvalidInput(
+                        "VirtualBox says the VM aborted instead of shutting down: it isn't sealed".into(),
+                    ))
+                }
+                Ok(info) => info.power_state() == PowerState::NotRunning,
+                Err(_) => false,
+            },
+        })
     }
 
     /// Waits for the guest to power itself off once it is generic, at most the build's `seal_minutes`. Windows'
-    /// task writes its steps to COM1: a sysprep that stops without shutting down fails the build at once.
+    /// task writes its steps to COM1: a sysprep that stops with an error fails the build at once, and (A4 of PR 100's
+    /// review) a power-off counts as sysprep's only once the task said it removed the build's listener and started
+    /// sysprep ([`generic::WINDOWS_STEPS`]).
     async fn wait_powered_off(
         &self,
         build: &BuildSpec,
@@ -524,19 +617,28 @@ impl Deployer {
         let mut at = 0u64;
         let mut seen = String::new();
         loop {
-            if self.powered_off(build.deploy.hypervisor, key).await {
-                return Ok(());
-            }
+            let off = self.powered_off(build.deploy.hypervisor, key).await?;
             if build.os.windows() {
+                // Read after the power state, so lines the task wrote before Windows went down are in.
                 let bytes = install::read_to_end_now(&m.serial, &mut at).await;
                 seen.push_str(&crate::deploy::watch::strip_escapes(&bytes));
                 let report = Report::parse(&seen);
-                if let Some(failed) = report.failures().into_iter().next() {
+                if let Some(failed) = report.sysprep_failed() {
                     return Err(CoreError::InvalidInput(failed));
+                }
+                let missing = report.windows_missing();
+                if off && !missing.is_empty() {
+                    return Err(CoreError::InvalidInput(format!(
+                        "Windows went off before the task that runs sysprep said '{}': it isn't sealed",
+                        missing.join("' and '")
+                    )));
                 }
                 if report.has("sysprep") {
                     progress(92.0, "sysprep runs (it shuts Windows down)");
                 }
+            }
+            if off {
+                return Ok(());
             }
             if tokio::time::Instant::now() >= deadline {
                 return Err(CoreError::InvalidInput(format!(
@@ -611,10 +713,19 @@ impl Deployer {
     }
 
     /// The powered-off VM keeps nothing of its install: the ISO copy's and the seed's drives out of its settings, its
-    /// serial port off, VirtualBox's NAT rule gone, and the seed, the ISO link and the serial log deleted. Says what
-    /// it couldn't do.
-    async fn seal(&self, job_id: Uuid, spec: &DeploySpec, key: &str, m: &InstallMade) -> Vec<String> {
+    /// serial port off, VirtualBox's NAT rule gone, and the seed, the ISO link and the serial log deleted. Every step is
+    /// tried; `Err` (A6 of PR 100's review) when a change to the VM's settings didn't go, with what it couldn't do, so
+    /// the build stops before the snapshot. A file that couldn't be deleted is only noted: the settings no longer
+    /// name it, so no clone copies it.
+    async fn seal(
+        &self,
+        job_id: Uuid,
+        spec: &DeploySpec,
+        key: &str,
+        m: &InstallMade,
+    ) -> std::result::Result<Vec<String>, Vec<String>> {
         let mut out = Vec::new();
+        let mut settings_failed = false;
         self.isos.forget(job_id, &m.iso).await;
         match spec.hypervisor {
             Hypervisor::Vmware => {
@@ -632,6 +743,7 @@ impl Deployer {
                 }
                 .await;
                 if let Err(err) = changed {
+                    settings_failed = true;
                     out.push(format!(
                         "its install drives and serial port are still in its settings ({err}): remove them in Settings"
                     ));
@@ -642,6 +754,7 @@ impl Deployer {
                     if let Drive::VirtualBox(controller, port) = drive {
                         let args = vb::attach_named(key, controller, *port, 0, true, "none");
                         if let Err(err) = self.vbox(args, SHORT).await {
+                            settings_failed = true;
                             out.push(format!("its drive {controller} port {port} stays ({err})"));
                         }
                     }
@@ -657,6 +770,7 @@ impl Deployer {
                     )
                     .await
                 {
+                    settings_failed = true;
                     out.push(format!("its serial port stays on ({err})"));
                 }
                 if m.nat_port.is_some() {
@@ -668,6 +782,7 @@ impl Deployer {
                         crate::deploy::install::NAT_RULE.into(),
                     ];
                     if let Err(err) = self.vbox(rule, SHORT).await {
+                        settings_failed = true;
                         out.push(format!(
                             "its NAT rule {} stays ({err})",
                             crate::deploy::install::NAT_RULE
@@ -687,6 +802,10 @@ impl Deployer {
             }
         }
         let _ = tokio::fs::remove_dir(&m.seed_folder).await;
-        out
+        if settings_failed {
+            Err(out)
+        } else {
+            Ok(out)
+        }
     }
 }

@@ -23,6 +23,8 @@ pub struct VersionRow {
     pub vm_name: String,
     pub snapshot_id: String,
     pub snapshot_name: String,
+    /// The install config it was built from (C5 of PR 100's review: a Windows image's clones read that one).
+    pub config_id: Uuid,
     pub config_name: String,
     pub config_fingerprint: String,
     pub facts: serde_json::Value,
@@ -40,6 +42,7 @@ pub(crate) struct NewVersion<'a> {
     pub vm_name: &'a str,
     pub snapshot_id: &'a str,
     pub snapshot_name: &'a str,
+    pub config_id: Uuid,
     pub config_name: &'a str,
     pub config_fingerprint: &'a str,
     pub facts: &'a serde_json::Value,
@@ -51,6 +54,7 @@ fn version(row: &sqlx::sqlite::SqliteRow) -> Result<VersionRow> {
     let image_id: String = row.try_get("image_id")?;
     let number: i64 = row.try_get("number")?;
     let hypervisor: String = row.try_get("hypervisor")?;
+    let config_id: String = row.try_get("config_id")?;
     let facts: String = row.try_get("facts")?;
     let job_id: Option<String> = row.try_get("job_id")?;
     Ok(VersionRow {
@@ -62,6 +66,7 @@ fn version(row: &sqlx::sqlite::SqliteRow) -> Result<VersionRow> {
         vm_name: row.try_get("vm_name")?,
         snapshot_id: row.try_get("snapshot_id")?,
         snapshot_name: row.try_get("snapshot_name")?,
+        config_id: parse_uuid(&config_id)?,
         config_name: row.try_get("config_name")?,
         config_fingerprint: row.try_get("config_fingerprint")?,
         facts: serde_json::from_str(&facts).unwrap_or(serde_json::Value::Null),
@@ -73,9 +78,53 @@ fn version(row: &sqlx::sqlite::SqliteRow) -> Result<VersionRow> {
 
 macro_rules! version_columns {
     () => {
-        "id, image_id, number, hypervisor, vm_key, vm_name, snapshot_id, snapshot_name, config_name,
+        "id, image_id, number, hypervisor, vm_key, vm_name, snapshot_id, snapshot_name, config_id, config_name,
          config_fingerprint, facts, job_id, built_at, deleted_at"
     };
+}
+
+/// The image's newest version still there, inside a transaction.
+async fn newest_in(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    ws: &str,
+    image_id: &str,
+) -> Result<Option<VersionRow>> {
+    let row = sqlx::query(concat!(
+        "SELECT ",
+        version_columns!(),
+        " FROM image_versions WHERE workspace_id = ? AND image_id = ? AND deleted_at IS NULL
+          ORDER BY number DESC LIMIT 1"
+    ))
+    .bind(ws)
+    .bind(image_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+    row.as_ref().map(version).transpose()
+}
+
+/// The image's own source moved to `v` (a golden VM at its snapshot).
+async fn point_image_at(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    ctx: &Context,
+    image_id: &str,
+    v: &VersionRow,
+) -> Result<bool> {
+    let done = sqlx::query(
+        "UPDATE catalog_images SET vm_key = ?, snapshot_id = ?, snapshot_name = ?, hypervisors = ?, user_id = ?,
+             updated_at = ?
+         WHERE workspace_id = ? AND id = ? AND kind = 'golden_vm'",
+    )
+    .bind(&v.vm_key)
+    .bind(&v.snapshot_id)
+    .bind(&v.snapshot_name)
+    .bind(v.hypervisor.as_str())
+    .bind(ctx.user_id.to_string())
+    .bind(now_rfc3339())
+    .bind(ctx.workspace_id.to_string())
+    .bind(image_id)
+    .execute(&mut **tx)
+    .await?;
+    Ok(done.rows_affected() > 0)
 }
 
 impl Store {
@@ -93,22 +142,20 @@ impl Store {
         rows.iter().map(version).collect()
     }
 
-    /// Each built image's newest version's number (deleted ones aside), by image.
-    pub(crate) async fn newest_image_versions(&self, ctx: &Context) -> Result<HashMap<Uuid, u32>> {
-        let rows = sqlx::query(
-            "SELECT image_id, MAX(number) AS newest FROM image_versions
-             WHERE workspace_id = ? AND deleted_at IS NULL GROUP BY image_id",
-        )
+    /// Each built image's newest version still there, by image.
+    pub(crate) async fn newest_image_versions(&self, ctx: &Context) -> Result<HashMap<Uuid, VersionRow>> {
+        let rows = sqlx::query(concat!(
+            "SELECT ",
+            version_columns!(),
+            " FROM image_versions WHERE workspace_id = ? AND deleted_at IS NULL ORDER BY number"
+        ))
         .bind(ctx.workspace_id.to_string())
         .fetch_all(&self.pool)
         .await?;
         let mut out = HashMap::new();
-        for row in rows {
-            let id: String = row.try_get("image_id")?;
-            let newest: i64 = row.try_get("newest")?;
-            if let (Ok(id), Ok(newest)) = (Uuid::parse_str(&id), u32::try_from(newest)) {
-                out.insert(id, newest);
-            }
+        for row in &rows {
+            let v = version(row)?;
+            out.insert(v.image_id, v);
         }
         Ok(out)
     }
@@ -124,50 +171,38 @@ impl Store {
         Ok(max.and_then(|m| u32::try_from(m).ok()).unwrap_or(0) + 1)
     }
 
-    /// The version a VM is, by its key, in this workspace (letter case aside on Workstation's paths).
-    pub async fn image_version_of_vm(&self, ctx: &Context, vm_key: &str) -> Result<Option<VersionRow>> {
-        let rows = sqlx::query(concat!(
-            "SELECT ",
-            version_columns!(),
-            " FROM image_versions WHERE workspace_id = ? AND vm_key = ? COLLATE NOCASE AND deleted_at IS NULL"
-        ))
-        .bind(ctx.workspace_id.to_string())
-        .bind(vm_key)
-        .fetch_all(&self.pool)
-        .await?;
-        rows.first().map(version).transpose()
-    }
-
-    /// A build's version, and the image pointing at it, in one transaction: a first build makes the image (a golden VM
-    /// image with its recipe), a rebuild moves the image's source to the new version.
+    /// A build's version, in one transaction with the image: a first build makes the image (a golden VM image with
+    /// its recipe); a rebuild moves the image's source to the new version only when it is the image's newest (C1 of
+    /// PR 100's review: an older one registering late never moves it back) and leaves its recipe as it is now (B4: a
+    /// settings edit made during the build stays). True when the image now deploys this version.
     pub(crate) async fn record_image_version(
         &self,
         ctx: &Context,
         v: &NewVersion<'_>,
-        first: Option<(&str, &str)>,
-        recipe: &BuildRecipe,
-    ) -> Result<Uuid> {
+        first: Option<(&str, &str, &BuildRecipe)>,
+    ) -> Result<bool> {
         let id = Uuid::new_v4();
         let now = now_rfc3339();
         let ws = ctx.workspace_id.to_string();
-        let recipe = serde_json::to_string(recipe)?;
+        let image_id = v.image_id.to_string();
         let mut tx = self.pool.begin().await?;
         sqlx::query(
             "INSERT INTO image_versions (id, workspace_id, user_id, image_id, number, hypervisor, vm_key, vm_name,
-                                         snapshot_id, snapshot_name, config_name, config_fingerprint, facts, job_id,
-                                         built_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                                         snapshot_id, snapshot_name, config_id, config_name, config_fingerprint, facts,
+                                         job_id, built_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(id.to_string())
         .bind(&ws)
         .bind(ctx.user_id.to_string())
-        .bind(v.image_id.to_string())
+        .bind(&image_id)
         .bind(i64::from(v.number))
         .bind(v.hypervisor.as_str())
         .bind(v.vm_key)
         .bind(v.vm_name)
         .bind(v.snapshot_id)
         .bind(v.snapshot_name)
+        .bind(v.config_id.to_string())
         .bind(v.config_name)
         .bind(v.config_fingerprint)
         .bind(serde_json::to_string(v.facts)?)
@@ -175,15 +210,15 @@ impl Store {
         .bind(&now)
         .execute(&mut *tx)
         .await?;
-        match first {
-            Some((name, os_profile)) => {
+        let newest = match first {
+            Some((name, os_profile, recipe)) => {
                 sqlx::query(
                     "INSERT INTO catalog_images (id, workspace_id, user_id, name, kind, vm_key, snapshot_id,
                                                  snapshot_name, hypervisors, os_profile, notes, created_at, updated_at,
                                                  build)
                      VALUES (?, ?, ?, ?, 'golden_vm', ?, ?, ?, ?, ?, NULL, ?, ?, ?)",
                 )
-                .bind(v.image_id.to_string())
+                .bind(&image_id)
                 .bind(&ws)
                 .bind(ctx.user_id.to_string())
                 .bind(name)
@@ -194,37 +229,29 @@ impl Store {
                 .bind(os_profile)
                 .bind(&now)
                 .bind(&now)
-                .bind(&recipe)
+                .bind(serde_json::to_string(recipe)?)
                 .execute(&mut *tx)
                 .await?;
+                true
             }
             None => {
-                let done = sqlx::query(
-                    "UPDATE catalog_images SET vm_key = ?, snapshot_id = ?, snapshot_name = ?, hypervisors = ?,
-                         build = ?, user_id = ?, updated_at = ?
-                     WHERE workspace_id = ? AND id = ? AND kind = 'golden_vm'",
-                )
-                .bind(v.vm_key)
-                .bind(v.snapshot_id)
-                .bind(v.snapshot_name)
-                .bind(v.hypervisor.as_str())
-                .bind(&recipe)
-                .bind(ctx.user_id.to_string())
-                .bind(&now)
-                .bind(&ws)
-                .bind(v.image_id.to_string())
-                .execute(&mut *tx)
-                .await?;
-                if done.rows_affected() == 0 {
-                    return Err(crate::error::CoreError::UnknownTarget(format!(
-                        "image {} (deleted while it was built)",
-                        v.image_id
-                    )));
+                let newest = newest_in(&mut tx, &ws, &image_id).await?;
+                match newest {
+                    Some(n) if n.id == id => {
+                        if !point_image_at(&mut tx, ctx, &image_id, &n).await? {
+                            return Err(crate::error::CoreError::UnknownTarget(format!(
+                                "image {} (deleted while it was built)",
+                                v.image_id
+                            )));
+                        }
+                        true
+                    }
+                    _ => false,
                 }
             }
-        }
+        };
         tx.commit().await?;
-        Ok(id)
+        Ok(newest)
     }
 
     /// A version's VM is gone (deleted by retention or by hand): the row stays, so its number is never used again.
@@ -238,6 +265,62 @@ impl Store {
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    /// C3 of PR 100's review: the VM `vm_key` was deleted: every version it was is marked deleted, and an image that
+    /// deployed it deploys its newest version left (or none, said so). Returns what changed, in words, for the delete's
+    /// note.
+    pub(crate) async fn forget_version_vm(&self, ctx: &Context, vm_key: &str) -> Result<Vec<String>> {
+        let ws = ctx.workspace_id.to_string();
+        let mut tx = self.pool.begin().await?;
+        let rows = sqlx::query(concat!(
+            "SELECT ",
+            version_columns!(),
+            " FROM image_versions WHERE workspace_id = ? AND vm_key = ? COLLATE NOCASE AND deleted_at IS NULL"
+        ))
+        .bind(&ws)
+        .bind(vm_key)
+        .fetch_all(&mut *tx)
+        .await?;
+        let mut out = Vec::new();
+        for row in &rows {
+            let gone = version(row)?;
+            sqlx::query("UPDATE image_versions SET deleted_at = ? WHERE workspace_id = ? AND id = ?")
+                .bind(now_rfc3339())
+                .bind(&ws)
+                .bind(gone.id.to_string())
+                .execute(&mut *tx)
+                .await?;
+            let image = sqlx::query("SELECT name, vm_key FROM catalog_images WHERE workspace_id = ? AND id = ?")
+                .bind(&ws)
+                .bind(gone.image_id.to_string())
+                .fetch_optional(&mut *tx)
+                .await?;
+            let Some(image) = image else {
+                continue;
+            };
+            let name: String = image.try_get("name")?;
+            let source: Option<String> = image.try_get("vm_key")?;
+            if !source.is_some_and(|s| s.eq_ignore_ascii_case(&gone.vm_key)) {
+                out.push(format!("version {} of image '{name}' is gone with it", gone.number));
+                continue;
+            }
+            match newest_in(&mut tx, &ws, &gone.image_id.to_string()).await? {
+                Some(back) => {
+                    point_image_at(&mut tx, ctx, &gone.image_id.to_string(), &back).await?;
+                    out.push(format!(
+                        "version {} of image '{name}' is gone with it: the image deploys version {} again",
+                        gone.number, back.number
+                    ));
+                }
+                None => out.push(format!(
+                    "version {} of image '{name}' is gone with it, and the image has no version left: build it again",
+                    gone.number
+                )),
+            }
+        }
+        tx.commit().await?;
+        Ok(out)
     }
 
     /// An image's recipe, as its build settings say now.

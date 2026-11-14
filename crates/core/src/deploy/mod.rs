@@ -64,12 +64,14 @@ pub trait DeployActions: Send + Sync {
 
     /// VM-30: one golden image version's VM: made and installed as a deploy's (G6), made generic, shut down, its
     /// install CDs, serial port and NAT rule taken out, and snapshotted powered off. A failure before the VM is made
-    /// removes what this call made; a later one keeps the VM for a look and is the error.
+    /// removes what this call made; a later one keeps the VM for a look and is the error. While it waits for the vault
+    /// it asks `approved`, and stops once that says the approval it runs under was withdrawn.
     async fn build_image(
         &self,
         _ctx: &Context,
         _job_id: Uuid,
         _spec: &crate::golden::BuildSpec,
+        _approved: &dyn crate::golden::StillApproved,
         _progress: &DeployProgress<'_>,
         _token: &CancellationToken,
     ) -> Result<crate::golden::Built> {

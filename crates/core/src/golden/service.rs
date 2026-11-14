@@ -15,7 +15,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use super::spec::{self, BuildOs, BuildRecipe, BuildSpec, SignIn, DEFAULT_SEAL_MINUTES, MAX_KEEP_VERSIONS};
+use super::spec::{self, BuildOs, BuildRecipe, BuildSpec, PruneVm, SignIn, DEFAULT_SEAL_MINUTES, MAX_KEEP_VERSIONS};
 use crate::adapters::hypervisor::{Hypervisor, Hypervisors};
 use crate::catalog::install::{self, SecretRefKind};
 use crate::catalog::templates::{AfterDeploy, CloneMode, TemplateInput};
@@ -120,13 +120,86 @@ pub struct ImageVersion {
 /// VM-30: the job runner's side of a build.
 #[async_trait]
 pub trait ImageBuildActions: Send + Sync {
-    /// The built VM recorded as the image's newest version (a first build makes the image), audited. Returns what
-    /// the job says about it.
+    /// C1 of PR 100's review: the build of `spec` starts: refused while another build of its image (or of a new image
+    /// of its name) runs, or when a version at least as new as its own, or an image of its new name, was made since it
+    /// was planned. The image counts as being built until the guard is dropped.
+    async fn begin(&self, ctx: &Context, job_id: Uuid, spec: &BuildSpec) -> Result<BuildGuard>;
+    /// The built VM recorded as one of the image's versions (a first build makes the image), audited; the image
+    /// moves to it only when it is the newest. Returns what the job says about it.
     async fn register(&self, ctx: &Context, job_id: Uuid, spec: &BuildSpec, built: &Built) -> Result<String>;
-    /// The image's versions past its newest `keep` whose VMs are still there, oldest last.
-    async fn prunable(&self, ctx: &Context, image_id: Uuid, keep: u32) -> Result<Vec<VersionRow>>;
     /// A version's VM was deleted (or found gone): recorded and audited.
     async fn version_deleted(&self, ctx: &Context, version: &VersionRow, job_id: Uuid, why: &str) -> Result<()>;
+}
+
+/// The builds running now: the job, by `image:<id>` and a new image's `name:<lower-case name>`.
+type Building = Arc<std::sync::Mutex<std::collections::HashMap<String, Uuid>>>;
+
+/// An image being built: its keys leave [`Building`] when this is dropped (the build's step ended).
+pub struct BuildGuard {
+    building: Building,
+    keys: Vec<String>,
+}
+
+impl Drop for BuildGuard {
+    fn drop(&mut self) {
+        let mut building = crate::locks::lock(&self.building);
+        for key in &self.keys {
+            building.remove(key);
+        }
+    }
+}
+
+fn building_keys(image_id: Uuid, name: &str) -> [String; 2] {
+    [format!("image:{image_id}"), format!("name:{}", name.to_lowercase())]
+}
+
+/// Q1 of PR 100's review: whether the approval a build runs under still stands. A scheduled build asks it while it
+/// waits for the vault, so a schedule edited, paused or deleted meanwhile (its standing approval withdrawn) builds
+/// nothing.
+#[async_trait]
+pub trait StillApproved: Send + Sync {
+    async fn check(&self) -> Result<()>;
+}
+
+/// The job runner's [`StillApproved`]: a build approved in the dialog always stands; a scheduled one while its grant
+/// isn't withdrawn and its schedule is active.
+pub struct StandingCheck {
+    store: Store,
+    ctx: Context,
+    standing: Option<crate::command_bus::StandingUse>,
+}
+
+impl StandingCheck {
+    pub fn new(store: Store, ctx: Context, standing: Option<crate::command_bus::StandingUse>) -> Self {
+        Self { store, ctx, standing }
+    }
+}
+
+#[async_trait]
+impl StillApproved for StandingCheck {
+    async fn check(&self) -> Result<()> {
+        let Some(standing) = &self.standing else {
+            return Ok(());
+        };
+        let withdrawn = || {
+            CoreError::ApprovalRejected(format!(
+                "{}'s approval was withdrawn while the build waited (the schedule was edited, paused or deleted): nothing was built",
+                standing.label
+            ))
+        };
+        if self
+            .store
+            .standing_approval(&self.ctx, standing.approval_id)
+            .await?
+            .is_none()
+        {
+            return Err(withdrawn());
+        }
+        match self.store.schedule(&self.ctx, standing.schedule_id).await? {
+            Some(row) if row.state == crate::schedules::ScheduleState::Active => Ok(()),
+            _ => Err(withdrawn()),
+        }
+    }
 }
 
 /// The golden image service (`Core.golden`).
@@ -137,6 +210,7 @@ pub struct GoldenImages {
     deploys: Deploys,
     bus: Arc<CommandBus>,
     hypervisors: Hypervisors,
+    building: Building,
 }
 
 /// The config's own vault id for a `{{password.<name>}}` or `{{ssh_key.<name>}}` placeholder.
@@ -236,7 +310,16 @@ impl GoldenImages {
             deploys,
             bus,
             hypervisors,
+            building: Arc::default(),
         }
+    }
+
+    /// The job building the image (or a new image of this name) now, if one is.
+    fn building(&self, image_id: Uuid, name: &str) -> Option<Uuid> {
+        let building = crate::locks::lock(&self.building);
+        building_keys(image_id, name)
+            .iter()
+            .find_map(|key| building.get(key).copied())
     }
 
     /// The build a request makes, or why it can't make one (in words).
@@ -311,6 +394,20 @@ impl GoldenImages {
                 config.spec.kind.label()
             )]));
         };
+        // A2 of PR 100's review: an address of the build VM's own would go into every clone (and stay leased to the
+        // version's VM), so a build takes its address by DHCP.
+        if recipe.address_pool_id.is_some() {
+            problems.push(
+                "A golden image's VM takes its address by DHCP: an address from a pool would go into every clone. Leave the address pool out."
+                    .into(),
+            );
+        }
+        if install::render::uses_ip(&config.spec) {
+            problems.push(format!(
+                "The install config '{}' gives the VM a fixed address ({{{{ip}}}}), which every clone would take: build from a config whose network is DHCP.",
+                config.spec.name
+            ));
+        }
         // The next version, and a VM name and folder nothing has yet.
         let mut version = if image_new {
             1
@@ -323,6 +420,11 @@ impl GoldenImages {
                 .to_string(),
             None => self.deploys.default_folder(recipe.hypervisor).await?,
         };
+        // B5 of PR 100's review: a share or device path never reaches the file system (A3).
+        if let Some(problem) = crate::catalog::images::folder_problem(&folder) {
+            problems.push(problem);
+            return Ok(Err(problems));
+        }
         let names: Vec<String> = self
             .store
             .list_vms(ctx)
@@ -342,6 +444,18 @@ impl GoldenImages {
         if version > spec::MAX_VERSION {
             problems.push(format!("Image '{image_name}' has had {} versions.", spec::MAX_VERSION));
         }
+        // C1 of PR 100's review: one build of an image at a time.
+        if let Some(job) = self.building(image_id, &image_name) {
+            problems.push(format!(
+                "Image '{image_name}' is being built now (job {}): build it again once that build ends.",
+                &job.to_string()[..8]
+            ));
+        }
+        // B3 of PR 100's review: the versions its retention would delete are planned now, each a target of the build.
+        let (prune, retained) = match recipe.keep {
+            Some(keep) if !image_new => self.plan_prune(ctx, image_id, keep).await?,
+            _ => (Vec::new(), Vec::new()),
+        };
         let input = TemplateInput {
             name: image_name.clone(),
             image_id: iso.id,
@@ -424,9 +538,55 @@ impl GoldenImages {
             seal_minutes: DEFAULT_SEAL_MINUTES,
             sign_in,
             deploy,
+            prune,
+            retained,
         };
         spec.validate()?;
         Ok(Ok(spec))
+    }
+
+    /// The older versions a build that keeps the newest `keep` would delete once it registered its own (its own is
+    /// then the newest, so `keep - 1` of the others stay), and why it leaves others past `keep`: a VM that isn't
+    /// this workspace's any more or is gone, or one a linked clone uses (VM-04: R3's delete would refuse it anyway).
+    async fn plan_prune(&self, ctx: &Context, image_id: Uuid, keep: u32) -> Result<(Vec<PruneVm>, Vec<String>)> {
+        let stay = usize::try_from(keep.saturating_sub(1)).unwrap_or(0);
+        let versions = self.store.image_versions(ctx, image_id).await?;
+        let linked = crate::linked_clones::LinkedClones::new(self.hypervisors.clone());
+        let mut media = crate::linked_clones::VboxMedia::default();
+        let (mut prune, mut retained) = (Vec::new(), Vec::new());
+        for version in versions.into_iter().filter(|v| v.deleted_at.is_none()).skip(stay) {
+            let n = version.number;
+            if let Err(err) = self.store.require_vm_here(ctx, &version.vm_key).await {
+                retained.push(format!("version {n} stays: {err}"));
+                continue;
+            }
+            let Some(vm) = self.store.find_vm(ctx, &version.vm_key).await? else {
+                retained.push(format!(
+                    "version {n}'s VM {} is no longer in the VM list",
+                    version.vm_name
+                ));
+                continue;
+            };
+            match linked.of_vm(&vm.vmx_path, &mut media).await {
+                Ok(found) if found.iter().any(|s| !s.clones.is_empty()) => {
+                    let names: Vec<String> = found
+                        .iter()
+                        .flat_map(|s| s.clones.iter().map(|c| c.name.clone()))
+                        .collect();
+                    retained.push(format!(
+                        "version {n} stays: the linked clones {} use it",
+                        names.join(", ")
+                    ));
+                }
+                Ok(_) => prune.push(PruneVm {
+                    number: n,
+                    vm_key: vm.vmx_path.clone(),
+                    vm_name: vm.display_name.clone(),
+                }),
+                Err(err) => retained.push(format!("version {n} stays: its linked clones couldn't be read ({err})")),
+            }
+        }
+        Ok((prune, retained))
     }
 
     /// What a build's preview warns about: a clone's first boot that won't set the guest up, and retention.
@@ -513,8 +673,18 @@ impl GoldenImages {
         })
     }
 
-    /// Submits a build to the bus: Medium (Critical while it keeps only the newest versions), then one job.
+    /// Submits a build to the bus: Medium (Critical while it keeps only the newest versions), then one job. An image's
+    /// next version builds from its build settings as saved (B4 of PR 100's review: a build never changes them).
     pub async fn submit(&self, ctx: &Context, request: &BuildRequest) -> Result<SubmitOutcome> {
+        if let BuildTarget::Image { id } = &request.target {
+            let image = self.catalog.image(ctx, *id).await?;
+            if image.build.as_ref() != Some(&request.recipe) {
+                return Err(CoreError::InvalidInput(format!(
+                    "Save image '{}''s build settings first: a build of its next version builds from them.",
+                    image.name
+                )));
+            }
+        }
         let command = self.command(ctx, request).await?;
         self.bus.submit(ctx, command).await
     }
@@ -588,6 +758,9 @@ impl GoldenImages {
             seal_minutes: approved.seal_minutes,
             sign_in: approved.sign_in.clone(),
             deploy: approved.deploy.clone(),
+            // Planned again at each run (the versions there then); the bus checks each one's labels (B3).
+            prune: approved.prune.clone(),
+            retained: approved.retained.clone(),
         };
         // The first build approved for a schedule is a rebuild of an image that exists by then.
         let mut approved = approved.clone();
@@ -709,8 +882,53 @@ impl GoldenImages {
 
 #[async_trait]
 impl ImageBuildActions for GoldenImages {
+    async fn begin(&self, ctx: &Context, job_id: Uuid, spec: &BuildSpec) -> Result<BuildGuard> {
+        let keys: Vec<String> = building_keys(spec.image_id, &spec.image_name)
+            .into_iter()
+            .filter(|k| spec.image_new || k.starts_with("image:"))
+            .collect();
+        {
+            let mut building = crate::locks::lock(&self.building);
+            if let Some(job) = keys.iter().find_map(|k| building.get(k).copied()) {
+                return Err(CoreError::InvalidInput(format!(
+                    "image '{}' is being built by job {} now: build it again once that build ends",
+                    spec.image_name,
+                    &job.to_string()[..8]
+                )));
+            }
+            for key in &keys {
+                building.insert(key.clone(), job_id);
+            }
+        }
+        let guard = BuildGuard {
+            building: Arc::clone(&self.building),
+            keys,
+        };
+        if spec.image_new {
+            let taken = self
+                .store
+                .list_catalog_images(ctx)
+                .await?
+                .into_iter()
+                .any(|i| i.id == spec.image_id || i.name.eq_ignore_ascii_case(&spec.image_name));
+            if taken {
+                return Err(CoreError::InvalidInput(format!(
+                    "an image named '{}' was made since this build was approved: build it again under another name",
+                    spec.image_name
+                )));
+            }
+        } else if self.store.next_image_version(ctx, spec.image_id).await? > spec.version {
+            return Err(CoreError::InvalidInput(format!(
+                "a version of image '{}' at least as new as {} was built since this build was approved: rebuild it",
+                spec.image_name, spec.version
+            )));
+        }
+        Ok(guard)
+    }
+
     async fn register(&self, ctx: &Context, job_id: Uuid, spec: &BuildSpec, built: &Built) -> Result<String> {
-        self.store
+        let newest = self
+            .store
             .record_image_version(
                 ctx,
                 &NewVersion {
@@ -721,18 +939,18 @@ impl ImageBuildActions for GoldenImages {
                     vm_name: &built.vm_name,
                     snapshot_id: &built.snapshot_id,
                     snapshot_name: &built.snapshot_name,
+                    config_id: spec.recipe.install_config_id,
                     config_name: &spec.config_name,
                     config_fingerprint: &spec.config_fingerprint,
                     facts: &built.facts,
                     job_id,
                 },
                 spec.image_new
-                    .then_some((spec.image_name.as_str(), spec.os_profile.as_str())),
-                &spec.recipe,
+                    .then_some((spec.image_name.as_str(), spec.os_profile.as_str(), &spec.recipe)),
             )
             .await?;
         let action = if spec.image_new {
-            format!("Built image '{}' (version 1)", spec.image_name)
+            format!("Built image '{}' (version {})", spec.image_name, spec.version)
         } else {
             format!("Built version {} of image '{}'", spec.version, spec.image_name)
         };
@@ -745,8 +963,13 @@ impl ImageBuildActions for GoldenImages {
         }
         Ok(if spec.image_new {
             format!(
-                "registered as image '{}' version 1 (snapshot '{}')",
-                spec.image_name, built.snapshot_name
+                "registered as image '{}' version {} (snapshot '{}')",
+                spec.image_name, spec.version, built.snapshot_name
+            )
+        } else if !newest {
+            format!(
+                "registered as version {} of image '{}' (snapshot '{}'); the image stays on its newer version",
+                spec.version, spec.image_name, built.snapshot_name
             )
         } else {
             format!(
@@ -754,18 +977,6 @@ impl ImageBuildActions for GoldenImages {
                 spec.version, spec.image_name, built.snapshot_name
             )
         })
-    }
-
-    async fn prunable(&self, ctx: &Context, image_id: Uuid, keep: u32) -> Result<Vec<VersionRow>> {
-        let keep = usize::try_from(keep.max(1)).unwrap_or(1);
-        Ok(self
-            .store
-            .image_versions(ctx, image_id)
-            .await?
-            .into_iter()
-            .filter(|v| v.deleted_at.is_none())
-            .skip(keep)
-            .collect())
     }
 
     async fn version_deleted(&self, ctx: &Context, version: &VersionRow, job_id: Uuid, why: &str) -> Result<()> {

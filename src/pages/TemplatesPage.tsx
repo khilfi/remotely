@@ -428,7 +428,10 @@ export function TemplatesPage({ active, request, onDeploy, onSubmitted, onImport
                                 onSelect={() => setDialog({ kind: "buildSettings", image: i })}
                               >
                                 <SlidersHorizontalIcon />
-                                Build settings…
+                                <span>
+                                  Build settings…
+                                  <ReasonLine reason={readOnly} />
+                                </span>
                               </DropdownMenuItem>
                               <DropdownMenuItem onSelect={() => setDialog({ kind: "versions", image: i })}>
                                 <HistoryIcon />
@@ -442,7 +445,11 @@ export function TemplatesPage({ active, request, onDeploy, onSubmitted, onImport
                             onSelect={() => setDialog({ kind: "image", existing: i })}
                           >
                             <PencilIcon />
-                            Edit…
+                            {/* C8 of PR 100's review: a built image's menu opens under the lock, so each says why. */}
+                            <span>
+                              Edit…
+                              {i.build && <ReasonLine reason={readOnly} />}
+                            </span>
                           </DropdownMenuItem>
                           <DropdownMenuSeparator />
                           <DropdownMenuItem
@@ -451,7 +458,10 @@ export function TemplatesPage({ active, request, onDeploy, onSubmitted, onImport
                             onSelect={() => setDialog({ kind: "deleteImage", image: i })}
                           >
                             <Trash2Icon />
-                            Delete…
+                            <span>
+                              Delete…
+                              {i.build && <ReasonLine reason={readOnly} />}
+                            </span>
                           </DropdownMenuItem>
                         </RowMenu>
                       </TableCell>

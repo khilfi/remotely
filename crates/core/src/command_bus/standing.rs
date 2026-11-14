@@ -201,6 +201,11 @@ impl CommandBus {
         }
         // AP-08: a schedule's High or Critical approval takes a change ID like any, and each run carries it.
         self.apply_change_id_rule(ctx, &mut decision).await?;
+        // SS-04, AP-06 (VM-30): a rebuild gives vault passwords to each run's new VM (its answer file, its sudo), new
+        // places as for a one-off build, so the save asks for the vault password and says so.
+        for command in &draft.commands {
+            self.ask_for_guest_password(ctx, command, &mut decision).await?;
+        }
         decision.add_warnings(draft.warnings.clone());
         if decision.steps.is_empty() {
             // Low: nothing to ask, as when it runs now; the approval is still recorded and audited.
@@ -464,13 +469,27 @@ impl CommandBus {
             _ => None,
         };
         if let Some(now) = rebuild {
-            let approved = grant.commands.iter().find_map(|c| match c {
+            let granted = grant.commands.iter().find_map(|c| match c {
                 Command::ImageBuild { spec, .. } if spec.image_id == now.image_id => Some(spec),
                 _ => None,
             });
-            match approved {
-                Some(approved) => changes.extend(now.differences(approved)),
+            match granted {
+                Some(granted) => changes.extend(now.differences(granted)),
                 None => changes.push(format!("image '{}' was not the approved one", now.image_name)),
+            }
+            // B3 of PR 100's review: the old versions a rebuild's retention deletes are planned at each run (a
+            // version is old once newer ones are built), each a target with its labels now. One labelled Prod that
+            // wasn't approved as Prod asks again; a protected one is left alone (AP-04), as the job leaves it.
+            for target in targets.iter().filter(|t| matches!(t.target, TargetRef::Vm { .. })) {
+                let was_prod = approved
+                    .get(&key(target))
+                    .is_some_and(|was| was.environment == Environment::Prod);
+                if !target.protected && target.environment == Environment::Prod && !was_prod {
+                    changes.push(format!(
+                        "{} (an old version the build deletes) is labelled Prod",
+                        target.name
+                    ));
+                }
             }
         }
         for target in targets.iter().filter(|_| rebuild.is_none()) {

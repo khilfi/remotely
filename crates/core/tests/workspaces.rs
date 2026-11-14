@@ -457,28 +457,62 @@ async fn install_configs_are_per_workspace() {
 /// VM-30: a Linux build VM as a fake guest plays it: the generalization's report, then the guest powers itself off.
 struct GoldenGuest {
     vmware: Arc<FakeVmware>,
-    vmx: std::path::PathBuf,
+    /// The build's folder: each version's VM is `<folder>/<vm>/<vm>.vmx`.
+    folder: std::path::PathBuf,
 }
 
 #[async_trait::async_trait]
 impl remotely_core::deploy::runner::GuestShell for GoldenGuest {
     async fn linux(
         &self,
-        _: &remotely_core::deploy::runner::LinuxGuest<'_>,
+        guest: &remotely_core::deploy::runner::LinuxGuest<'_>,
         _: &str,
         _: &str,
     ) -> remotely_core::error::Result<String> {
         use remotely_core::adapters::vmware::VmwareAdapter;
+        let vmx = self.folder.join(guest.vm).join(format!("{}.vmx", guest.vm));
         self.vmware
             .power(
-                &self.vmx,
+                &vmx,
                 PowerOp::Stop {
                     mode: remotely_core::command_bus::StopMode::Hard,
                 },
             )
             .await?;
-        Ok("remotely-generic cloud-init yes\nremotely-generic done\n".into())
+        let mut report = String::from("remotely-generic cloud-init yes\n");
+        for step in remotely_core::golden::generic::LINUX_STEPS {
+            report.push_str(&format!("remotely-generic ok {step}\n"));
+        }
+        report.push_str("remotely-generic done\n");
+        Ok(report)
     }
+}
+
+/// Plays Ubuntu's installer into the VM's serial log once its seed is there.
+fn ubuntu_install(serial: std::path::PathBuf, vm: &'static str) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        for _ in 0..3000 {
+            if serial.with_file_name("install-seed").exists() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        for line in [
+            "[    0.000000] Command line: BOOT_IMAGE=/casper/vmlinuz autoinstall ---\r\n".to_owned(),
+            "start: subiquity/Shutdown/shutdown: mode=REBOOT\r\n[  400.1] reboot: Restarting system\r\n".to_owned(),
+            "[    0.000000] Command line: BOOT_IMAGE=/vmlinuz-6.8.0-45-generic root=/dev/sda2 ro\r\n".to_owned(),
+            format!("\r\n{vm} login: "),
+        ] {
+            tokio::time::sleep(Duration::from_millis(40)).await;
+            use std::io::Write;
+            let mut file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&serial)
+                .unwrap();
+            file.write_all(line.as_bytes()).unwrap();
+        }
+    })
 }
 
 #[tokio::test]
@@ -490,8 +524,13 @@ async fn golden_images_and_their_versions_are_per_workspace() {
     let dir = common::temp_folder("golden-workspaces");
     let vms = dir.join("vms");
     let vmx_path = vms.join("acme-golden-v1").join("acme-golden-v1.vmx");
-    let setup =
-        Setup::new(FakeVmware::default().with_ip(&vmx_path.display().to_string(), "192.0.2.61")).with_real_vault();
+    let v2_path = vms.join("acme-golden-v2").join("acme-golden-v2.vmx");
+    let setup = Setup::new(
+        FakeVmware::default()
+            .with_ip(&vmx_path.display().to_string(), "192.0.2.61")
+            .with_ip(&v2_path.display().to_string(), "192.0.2.62"),
+    )
+    .with_real_vault();
     let fake = Arc::clone(&setup.vmware);
     let core = setup.build().await;
     let acme = core.ctx();
@@ -514,7 +553,7 @@ async fn golden_images_and_their_versions_are_per_workspace() {
     });
     core.set_guest_shell(Arc::new(GoldenGuest {
         vmware: Arc::clone(&fake),
-        vmx: vmx_path.clone(),
+        folder: vms.clone(),
     }));
     let secret = format!("Pw-{}-x", Uuid::new_v4().simple());
     let pw = core
@@ -587,30 +626,7 @@ async fn golden_images_and_their_versions_are_per_workspace() {
     let SubmitOutcome::NeedsApproval { request: approval } = core.golden.submit(&acme, &request).await.unwrap() else {
         panic!("a build asks")
     };
-    let serial = vmx_path.with_file_name("acme-golden-v1-serial.log");
-    let play = tokio::spawn(async move {
-        for _ in 0..3000 {
-            if serial.with_file_name("install-seed").exists() {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        for line in [
-            "[    0.000000] Command line: BOOT_IMAGE=/casper/vmlinuz autoinstall ---\r\n",
-            "start: subiquity/Shutdown/shutdown: mode=REBOOT\r\n[  400.1] reboot: Restarting system\r\n",
-            "[    0.000000] Command line: BOOT_IMAGE=/vmlinuz-6.8.0-45-generic root=/dev/sda2 ro\r\n",
-            "\r\nacme-golden-v1 login: ",
-        ] {
-            tokio::time::sleep(Duration::from_millis(40)).await;
-            use std::io::Write;
-            let mut file = std::fs::OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&serial)
-                .unwrap();
-            file.write_all(line.as_bytes()).unwrap();
-        }
-    });
+    let play = ubuntu_install(vmx_path.with_file_name("acme-golden-v1-serial.log"), "acme-golden-v1");
     let mut events = core.jobs.subscribe();
     let job = core
         .bus
@@ -643,6 +659,45 @@ async fn golden_images_and_their_versions_are_per_workspace() {
         .require_vm_here(&acme, &vmx_path.display().to_string())
         .await
         .unwrap();
+    // B7 of PR 100's review: a nightly rebuild of Acme's image, approved while Acme is shown.
+    let clock = Arc::new(remotely_core::fakes::clock::FakeClock::new(
+        time::macros::datetime!(2026-10-26 10:00 UTC),
+        remotely_core::fakes::clock::FakeZone::central_europe(),
+    ));
+    core.schedules().set_clock(clock.clone());
+    let nightly = core
+        .schedules()
+        .save(remotely_core::schedules::ScheduleInput {
+            id: None,
+            name: "nightly rebuild".into(),
+            spec: remotely_core::schedules::ScheduleSpec {
+                action: remotely_core::schedules::ScheduleAction::RebuildImage,
+                targets: vec![remotely_core::schedules::ScheduleTarget::Image { image_id: image.id }],
+                timing: remotely_core::schedules::Timing::Daily {
+                    at: remotely_core::schedules::WallTime::new(3, 0).unwrap(),
+                },
+            },
+        })
+        .await
+        .unwrap();
+    let asked = nightly.approval.expect("a rebuild asks");
+    let nightly = core
+        .schedules()
+        .approve(
+            asked.id,
+            remotely_core::command_bus::ApprovalAnswers {
+                confirmed: true,
+                vault_password: Some(SecretString::new(VAULT_PASSWORD)),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let due = time::OffsetDateTime::parse(
+        &nightly.next_run.as_ref().unwrap().at,
+        &time::format_description::well_known::Rfc3339,
+    )
+    .unwrap();
 
     let globex = create(&core, "Globex").await;
     switch(&core, &globex).await;
@@ -672,6 +727,29 @@ async fn golden_images_and_their_versions_are_per_workspace() {
         .await;
     assert!(saved.is_err(), "{saved:?}");
 
+    // Acme's rebuild runs while Globex is shown: in Acme's workspace, its VM Acme's, audited there.
+    let play = ubuntu_install(v2_path.with_file_name("acme-golden-v2-serial.log"), "acme-golden-v2");
+    clock.set(due);
+    let report = core.schedules().tick().await.unwrap();
+    assert_eq!(report.started, 1, "Acme's rebuild ran while Globex is shown");
+    core.schedules().wait_runs().await;
+    play.await.unwrap();
+    let versions = core.golden.versions(&acme, image.id).await.unwrap();
+    assert_eq!(versions.len(), 2, "{versions:?}");
+    core.store
+        .require_vm_here(&acme, &v2_path.display().to_string())
+        .await
+        .unwrap();
+    assert!(core.catalog.images(&b).await.unwrap().iter().all(|i| i.id != image.id));
+    assert!(audit_of(&core, &acme)
+        .await
+        .iter()
+        .any(|e| e.action.contains("Built version 2 of image 'Acme golden'")));
+    assert!(audit_of(&core, &b)
+        .await
+        .iter()
+        .all(|e| !e.action.contains("Acme golden")));
+
     let home = core
         .workspaces
         .list()
@@ -681,7 +759,7 @@ async fn golden_images_and_their_versions_are_per_workspace() {
         .find(|w| !w.current)
         .unwrap();
     switch(&core, &home).await;
-    assert_eq!(core.golden.versions(&acme, image.id).await.unwrap().len(), 1);
+    assert_eq!(core.golden.versions(&acme, image.id).await.unwrap().len(), 2);
     let _ = std::fs::remove_dir_all(&dir);
 }
 

@@ -17,7 +17,7 @@ mod service;
 pub mod spec;
 
 pub use self::service::{
-    BuildCheck, BuildPreview, BuildRequest, BuildTarget, Built, GoldenImages, ImageBuildActions, ImageVersion,
-    VersionState,
+    BuildCheck, BuildGuard, BuildPreview, BuildRequest, BuildTarget, Built, GoldenImages, ImageBuildActions,
+    ImageVersion, StandingCheck, StillApproved, VersionState,
 };
-pub use self::spec::{BuildDetails, BuildOs, BuildRecipe, BuildSpec, SignIn};
+pub use self::spec::{BuildDetails, BuildOs, BuildRecipe, BuildSpec, PruneVm, SignIn};
