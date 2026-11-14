@@ -10,8 +10,13 @@ import { networkKinds, profileHypervisors } from "./catalog.ts";
 import { plural } from "./format.ts";
 import { DEFAULT_INSTALL_MINUTES, MAX_INSTALL_MINUTES, parseMinutes } from "./unattended.ts";
 
-/** The config kinds Remotely builds images from (the core refuses the others with a problem). */
-export const BUILD_KINDS: readonly InstallKind[] = ["autoinstall", "preseed", "unattend"];
+/**
+ * The config kinds Remotely builds images from (the core refuses the others with a problem). 0.8.0 builds no Windows
+ * image: the owner deferred them, and the core refuses unattend configs with this reason (golden::WINDOWS_DEFERRED).
+ */
+export const BUILD_KINDS: readonly InstallKind[] = ["autoinstall", "preseed"];
+export const WINDOWS_DEFERRED =
+  "Windows golden images come in a later release: a clone of a sysprepped image doesn't read its answer file yet.";
 /** The core's limits (golden/spec.rs, catalog/images.rs). */
 export const MAX_KEEP_VERSIONS = 20;
 export const MAX_IMAGE_NAME = 80;
@@ -73,7 +78,7 @@ export function isoFamily(iso: Image | undefined, profiles: OsProfile[]): OsProf
   return profiles.find((p) => p.id === iso?.osProfile)?.family;
 }
 
-/** Own configs a build can install from: Ubuntu autoinstall, Debian preseed and Windows unattend, for the ISO's family. */
+/** Own configs a build can install from: Ubuntu autoinstall and Debian preseed, for the ISO's family (none for Windows). */
 export function buildConfigs(configs: InstallConfig[], family?: OsProfile["family"]): InstallConfig[] {
   return configs.filter(
     (c) =>
@@ -102,7 +107,10 @@ function firstOf<T>(items: T[], usable: (item: T) => boolean): T | undefined {
   return items.find(usable) ?? items[0];
 }
 
-/** A new build's defaults from what there is: the first ISO image and config that can be used, NAT, an hour. */
+/**
+ * A new build's defaults from what there is: the first ISO image that can be used (a Linux one before a Windows one,
+ * which 0.8.0 doesn't build) and config, NAT, an hour.
+ */
 export function defaultForm(choices: BuildChoices): BuildForm {
   const blank: BuildForm = {
     name: "",
@@ -119,7 +127,10 @@ export function defaultForm(choices: BuildChoices): BuildForm {
     keepOn: false,
     keep: String(DEFAULT_KEEP),
   };
-  const iso = firstOf(isoImages(choices.images), (i) => i.problem === null);
+  const isos = isoImages(choices.images);
+  const iso =
+    isos.find((i) => i.problem === null && isoFamily(i, choices.profiles) !== "windows") ??
+    firstOf(isos, (i) => i.problem === null);
   return iso ? withIso(blank, iso.id, choices) : blank;
 }
 
@@ -152,7 +163,10 @@ export function withIso(form: BuildForm, isoImageId: string, choices: BuildChoic
   const config = configs.find((c) => c.id === form.installConfigId) ?? firstOf(configs, (c) => !hasErrors(c));
   const hypervisors = buildHypervisors(iso, choices.profiles);
   const hypervisor = hypervisors.includes(form.hypervisor) ? form.hypervisor : (hypervisors[0] ?? form.hypervisor);
-  const next = config ? withConfig({ ...form, isoImageId }, config) : { ...form, isoImageId, installConfigId: "" };
+  // No config for the ISO's system (a Windows ISO in 0.8.0): the old config's values go with it.
+  const next = config
+    ? withConfig({ ...form, isoImageId }, config)
+    : { ...form, isoImageId, installConfigId: "", values: {} };
   return withHypervisor(next, hypervisor);
 }
 
@@ -177,8 +191,19 @@ export function parseKeep(text: string): number | null {
   return n >= 1 && n <= MAX_KEEP_VERSIONS ? n : null;
 }
 
+/** 0.8.0: the form would build a Windows image (a Windows ISO, or a Windows unattend config), which isn't built yet. */
+export function windowsBuild(form: BuildForm, choices: Pick<BuildChoices, "images" | "configs" | "profiles">): boolean {
+  const iso = choices.images.find((i) => i.id === form.isoImageId);
+  const config = choices.configs.find((c) => c.id === form.installConfigId);
+  return isoFamily(iso, choices.profiles) === "windows" || config?.kind === "unattend";
+}
+
 /** QL-08: what the form still needs before the core is asked, or null. */
-export function formProblem(form: BuildForm, mode: BuildMode, choices: Pick<BuildChoices, "images">): string | null {
+export function formProblem(
+  form: BuildForm,
+  mode: BuildMode,
+  choices: Pick<BuildChoices, "images" | "configs" | "profiles">,
+): string | null {
   if (mode === "new") {
     const name = form.name.trim();
     if (!name) return "Give the image a name";
@@ -189,8 +214,9 @@ export function formProblem(form: BuildForm, mode: BuildMode, choices: Pick<Buil
       ? "Add an ISO image first: a build installs from one"
       : "Pick an ISO image";
   }
+  if (windowsBuild(form, choices)) return WINDOWS_DEFERRED;
   if (!form.installConfigId) {
-    return "Make an install config first: Ubuntu autoinstall, Debian preseed or Windows unattend";
+    return "Make an install config first: Ubuntu autoinstall or Debian preseed";
   }
   if (parseMinutes(form.minutes) === null) {
     return `Give the install's time limit in whole minutes, 1 to ${MAX_INSTALL_MINUTES}`;

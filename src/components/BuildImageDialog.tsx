@@ -1,7 +1,7 @@
 // VM-30 (0.8.0 G7): builds a golden image, or edits an image's build settings. A build makes one VM from an ISO image,
-// installs it unattended from an own install config (Ubuntu autoinstall, Debian preseed or Windows unattend: G6's
-// install), makes the system generic, shuts it down and keeps it with a snapshot: the image's next version, which its
-// launch templates deploy from then on. The fields are the recipe the image keeps: the ISO, the config with its own
+// installs it unattended from an own install config (Ubuntu autoinstall or Debian preseed: G6's install; 0.8.0 builds
+// no Windows image, so a Windows ISO's config field and Build say why), makes the system generic, shuts it down and
+// keeps it with a snapshot: the image's next version, which its launch templates deploy from then on. The fields are the recipe the image keeps: the ISO, the config with its own
 // variables, the size, the hypervisor, the network (and VirtualBox's adapter), the VM folder, the install's time
 // limit, and how many versions to keep (deleting older versions' VMs that no linked clone uses, which makes the build
 // Critical). No address pool (A2 of PR 100's review): the build VM takes its address by DHCP, since a fixed one would
@@ -53,6 +53,7 @@ import {
   needsHostAdapter,
   requestOf,
   withConfig,
+  WINDOWS_DEFERRED,
   withHypervisor,
   withIso,
   type BuildChoices,
@@ -118,7 +119,10 @@ export function BuildImageDialog({ image, onSubmitted, onSaved, onAddImage, onNe
   const set = (change: Partial<BuildForm>) => setForm((f) => (f ? { ...f, ...change } : f));
   const isos = isoImages(choices.images);
   const iso = choices.images.find((i) => i.id === form?.isoImageId);
-  const configChoices = buildConfigs(choices.configs, isoFamily(iso, choices.profiles));
+  const family = (i: Image | undefined) => isoFamily(i, choices.profiles);
+  // 0.8.0 builds no Windows image: a Windows ISO stays in the list, marked, and the config field says why.
+  const windowsIso = family(iso) === "windows";
+  const configChoices = buildConfigs(choices.configs, family(iso));
   const config = choices.configs.find((c) => c.id === form?.installConfigId) ?? null;
   const hypervisors = buildHypervisors(iso, choices.profiles);
   const hypervisor = form?.hypervisor ?? "vmware";
@@ -282,7 +286,11 @@ export function BuildImageDialog({ image, onSubmitted, onSaved, onAddImage, onNe
                       {isos.map((i) => (
                         <SelectItem key={i.id} value={i.id}>
                           {i.name}
-                          {i.problem ? " (can't be used now)" : ""}
+                          {i.problem
+                            ? " (can't be used now)"
+                            : family(i) === "windows"
+                              ? " (Windows: a later release)"
+                              : ""}
                         </SelectItem>
                       ))}
                       {form.isoImageId && !iso && (
@@ -299,7 +307,9 @@ export function BuildImageDialog({ image, onSubmitted, onSaved, onAddImage, onNe
                 <Label htmlFor="build-config">
                   <Term id="installConfig">Install config</Term>
                 </Label>
-                {configChoices.length === 0 && !config ? (
+                {windowsIso ? (
+                  <p className="text-sm text-muted-foreground">{WINDOWS_DEFERRED}</p>
+                ) : configChoices.length === 0 && !config ? (
                   <div className="flex min-h-9 items-center gap-2 text-sm text-muted-foreground">
                     None for this system yet.
                     {onNewConfig && (

@@ -404,12 +404,14 @@ crates/core/          remotely-core: all app logic
                       fingerprint a standing approval compares, `differences` with the planned VM's), BuildDetails for
                       the approval, version_vm_name and snapshot_name; generic.rs LINUX_SCRIPT (LINUX_STEPS, each must
                       say `ok`), LINUX_POWER_OFF, windows_script (WINDOWS_STEPS before its power-off counts) and Report
-                      (`remotely-generic` lines); service.rs GoldenImages (Core.golden: check, submit, rebuild,
-                      rebuild_request, command_for and changes_since for schedules, set_recipe, versions with their
-                      linked clones), its ImageBuildActions for the job runner (begin: one build of an image at a time,
-                      BuildGuard; register, version_deleted) and StandingCheck (StillApproved: a scheduled build's
-                      grant and schedule asked during vault waits); store/golden.rs image_versions (each with its
-                      config's id and SHA-256), the recipe, forget_version_vm (R3's delete of a version's VM)
+                      (`remotely-generic` lines); mod.rs WINDOWS_DEFERRED and WindowsImages (0.8.0 refuses Windows
+                      images; only tests turn them on); service.rs GoldenImages (Core.golden: check, submit, rebuild,
+                      rebuild_request, command_for and changes_since for schedules, refuse_windows before a schedule's
+                      save, set_recipe, versions with their linked clones), its ImageBuildActions for the job runner
+                      (begin: one build of an image at a time, BuildGuard; register, version_deleted) and StandingCheck
+                      (StillApproved: a scheduled build's grant and schedule asked during vault waits); store/golden.rs
+                      image_versions (each with its config's id and SHA-256), the recipe, forget_version_vm (R3's delete
+                      of a version's VM)
     convert/          CV-01 to CV-03, VM-17 conversion (other hypervisors' formats read and written, never managed).
                       formats.rs DiskFormat and OutputKind (VMDK sparse, flat, stream-optimized, ESXi's vmfs; VDI,
                       VHD, VHDX dynamic or fixed; qcow2; raw); inspect.rs CV-03 Inspect from each header (MO-13's
@@ -2228,6 +2230,20 @@ scripts, the service), `deploy/runner/golden.rs` (the job's work on the VM), `st
 per-system facts below come from the tools' own documentation and G6's spikes; the ones marked *(hand check)* weren't
 seen on a real VM yet (the PR lists the checks).
 
+- **0.8.0 builds no Windows image** (the owner deferred them on 14 Nov 2026, after hand checks 3 and 4 below: the
+  builds sealed, their clones never read their answer file). Every way in refuses with `golden::WINDOWS_DEFERRED`
+  ("Windows golden images come in a later release: a clone of a sysprepped image doesn't read its answer file yet."):
+  `GoldenImages::spec_for`, which every build comes through (the build dialog's check, submit, Rebuild, `set_recipe`,
+  a schedule's ask and each scheduled run's `command_for`, which fails the run with it), `GoldenImages::refuse_windows`
+  before a rebuild schedule is saved (nothing is stored), and `catalog::Facts::golden_config` for a template of a
+  Windows image Remotely built (the deploy's check and submit, stacks, the template editor, which can't save it:
+  `InstallConfigMismatch`), so no clone waits at OOBE to its time limit. Only a build of this PR's earlier commits made
+  such an image; FD-07 doesn't carry an image's recipe, so an import is a plain golden VM. The build dialog offers no
+  unattend config (`golden.ts` `BUILD_KINDS`), marks a Windows ISO, and its config field and Build say why
+  (`windowsBuild`, QL-08). The Windows seal (`WINDOWS_TASK_BODY`, `WINDOWS_STEPS`, the watcher) and the clone delivery
+  below are kept, and their tests run on the fakes as the later release would run them: `WindowsImages` (the
+  catalogue's, shared with `GoldenImages`) is always off outside tests, and only `set_allowed_for_tests` (`fakes`)
+  turns it on. `docs/plan-0.8.md` G7 says what the later package needs.
 - **A build is G6's deploy of one VM, then more.** "Build an image" (the Templates page's Images tab) plans the build VM
   as the Deploy dialog's Custom plans a VM (`Deploys::spec_for_taken`): a launch template's fields made from the recipe
   (the catalogue's ISO image, the size, the hypervisor and its network, the folder, the install config; no session,
@@ -2338,46 +2354,48 @@ seen on a real VM yet (the PR lists the checks).
   passwords. They can't take a hostname (every clone is named like the build VM), a template's guest user, SSH key or
   packages, or a seed's network-config: nothing reads VM-22's seed or guestinfo. `cloud-init` in the preseed's
   `pkgsel/include` gives what Ubuntu's images get; the build dialog says so.
-- **Windows, made generic** (`golden::generic::windows_script`): one WinRM run (`$ErrorActionPreference = 'Stop'`,
-  which under `-Command -` ends only the line that fails) writes `C:\Windows\Temp\remotely-generalize.ps1` (from base64:
-  a WinRM console ends a statement at an empty line) and registers the task `Remotely generalize` as SYSTEM 15 seconds
-  later (on battery power too), since a process started from a WinRM shell is killed with the shell; its last line says
-  `scheduled` only when both the script's file and the task are there. The task deletes itself and its script, deletes
-  the build's WinRM over HTTPS listener (`Transport=HTTPS`) and its certificate with its private key
-  (`Cert:\LocalMachine\My`, `-DeleteKey`: else every clone would share the build's key, and its listener would point
-  at it), Setup's `Panther\unattend.xml` and `unattend-original.xml`, PowerShell's history and the event logs; each
-  removal is said only once `Test-Path` shows it gone, else the task says `failed <what>` and stops before sysprep
-  (the build fails at once, Windows left running). Then `sysprep.exe /generalize /oobe /quit /quiet` (`Start-Process
-  -Wait -PassThru`: sysprep is a GUI program), its old `Sysprep_succeeded.tag` deleted first; only an exit code 0 with
-  a new `Sysprep_succeeded.tag` is `sealed`, after which the task looks at Panther again (`after-sysprep <file>`, for
-  the record, deleted) and shuts Windows down itself (`Stop-Computer -Force`); otherwise it says `sysprep-failed
-  <code>` and leaves Windows running, and the build fails at once. Not `/shutdown`: the shutdown could end
-  sysprep.exe before its code was read (or have the task's PowerShell report a code from the kill), and a power-off
-  while sysprep runs would look like sysprep's own. A power-off before the task said `removed winrm-https`, `sysprep`
-  and `sealed` (`WINDOWS_STEPS`) fails the build; a wait that runs out says what COM1 showed last (nothing: see Task
-  Scheduler; `sysprep`: sysprep's own log; `sealed`: the shutdown). *(hand check: sysprep as SYSTEM, its `/quit` exit
-  code and tag, whether Panther holds an answer file after it, the listener's removal, timings on both hypervisors.)*
-- **A clone of a Windows image gets G6's delivery: it doesn't work yet (hand checks 3 and 4 below).** A template of a
-  Windows image Remotely built (and no install config
-  of its own) deploys with the config its newest version was built from (`catalog::Facts::golden_config`, by the
-  version row's `config_id`, never the recipe's, which may name another since), and only while that config is as it
-  was then (the row's `config_fingerprint`; a changed, deleted or broken config is the template's problem, and building
-  the image again fixes it): `DeploySpec.install` on a `GoldenVm` source (`validate_install`, `install_spec`: no ISO, no disk
-  layout check). Each clone's file is rendered for it (its hostname, a one-time password) onto a seed in its private
-  folder, in a CD drive added to the clone (Workstation: the first free `sata0:N`; VirtualBox: `dvd_slot`) with COM1 to
-  `<vm>-serial.log` (and VirtualBox's NAT rule). After sysprep, specialize sets the computer name and oobeSystem the
-  one-time password, the autologon and its FirstLogonCommands, which turn WinRM over HTTPS on with a new self-signed
-  certificate and write its fingerprint to COM1 (the starters' lines); windowsPE and offlineServicing don't run. The
-  watcher is G6's with no Setup restarts to wait for (`SerialWatcher::sysprepped`: the clone's serial log is new), then
-  G6's first sign-in replaces the one-time password with the vault's, deletes Panther's copy and signs the autologon
-  out; the seed is taken out. **Seen by hand: the sysprepped clones don't read the seed CD's `autounattend.xml`.** On
-  both releases and both hypervisors the clone ran specialize without it (no `remotely-stage specialize` line on COM1)
-  and stopped at OOBE's first page ("Hi there", the region and keyboard), so it got no name, one-time password or WinRM
-  certificate of its own and the deploy waits to its time limit. Microsoft's implicit search table lists removable
-  read-only media for every pass, but it isn't used here; which delivery replaces it is open (a generic answer file
-  given to sysprep at build time whose specialize step points Setup at the clone's seed, or the clone's file written
-  into its disk before its first boot). *(Still to check by hand once it reads its file: that a `LocalAccounts` account
-  the build made doesn't stop OOBE; the starters' `New-NetFirewallRule` failing harmlessly on a rule that is there.)*
+- **Windows, made generic** (kept, refused in 0.8.0; `golden::generic::windows_script`): one WinRM run
+  (`$ErrorActionPreference = 'Stop'`, which under `-Command -` ends only the line that fails) writes
+  `C:\Windows\Temp\remotely-generalize.ps1` (from base64: a WinRM console ends a statement at an empty line) and
+  registers the task `Remotely generalize` as SYSTEM 15 seconds later (on battery power too), since a process started
+  from a WinRM shell is killed with the shell; its last line says `scheduled` only when both the script's file and the
+  task are there. The task deletes itself and its script, deletes the build's WinRM over HTTPS listener
+  (`Transport=HTTPS`) and its certificate with its private key (`Cert:\LocalMachine\My`, `-DeleteKey`: else every clone
+  would share the build's key, and its listener would point at it), Setup's `Panther\unattend.xml` and
+  `unattend-original.xml`, PowerShell's history and the event logs; each removal is said only once `Test-Path` shows it
+  gone, else the task says `failed <what>` and stops before sysprep (the build fails at once, Windows left running).
+  Then `sysprep.exe /generalize /oobe /quit /quiet` (`Start-Process -Wait -PassThru`: sysprep is a GUI program), its old
+  `Sysprep_succeeded.tag` deleted first; only an exit code 0 with a new `Sysprep_succeeded.tag` is `sealed`, after which
+  the task looks at Panther again (`after-sysprep <file>`, for the record, deleted) and shuts Windows down itself
+  (`Stop-Computer -Force`); otherwise it says `sysprep-failed <code>` and leaves Windows running, and the build fails at
+  once. Not `/shutdown`: the shutdown could end sysprep.exe before its code was read (or have the task's PowerShell
+  report a code from the kill), and a power-off while sysprep runs would look like sysprep's own. A power-off before the
+  task said `removed winrm-https`, `sysprep` and `sealed` (`WINDOWS_STEPS`) fails the build; a wait that runs out says
+  what COM1 showed last (nothing: see Task Scheduler; `sysprep`: sysprep's own log; `sealed`: the shutdown). Seen by
+  hand (checks 3 and 4 below): sysprep as SYSTEM returned 0 with its tag, Panther held no answer file after it, the
+  listener's removal was said, and Windows was off seconds after `sealed` on both hypervisors.
+- **A clone of a Windows image gets G6's delivery: it doesn't work yet (hand checks 3 and 4 below), so 0.8.0 refuses it
+  (the first bullet) and the rest of this bullet runs only in tests.** A template of a Windows image Remotely built (and
+  no install config of its own) deploys with the config its newest version was built from
+  (`catalog::Facts::golden_config`, by the version row's `config_id`, never the recipe's, which may name another since),
+  and only while that config is as it was then (the row's `config_fingerprint`; a changed, deleted or broken config is
+  the template's problem, and building the image again fixes it): `DeploySpec.install` on a `GoldenVm` source
+  (`validate_install`, `install_spec`: no ISO, no disk layout check). Each clone's file is rendered for it (its
+  hostname, a one-time password) onto a seed in its private folder, in a CD drive added to the clone (Workstation: the
+  first free `sata0:N`; VirtualBox: `dvd_slot`) with COM1 to `<vm>-serial.log` (and VirtualBox's NAT rule). After
+  sysprep, specialize sets the computer name and oobeSystem the one-time password, the autologon and its
+  FirstLogonCommands, which turn WinRM over HTTPS on with a new self-signed certificate and write its fingerprint to
+  COM1 (the starters' lines); windowsPE and offlineServicing don't run. The watcher is G6's with no Setup restarts to
+  wait for (`SerialWatcher::sysprepped`: the clone's serial log is new), then G6's first sign-in replaces the one-time
+  password with the vault's, deletes Panther's copy and signs the autologon out; the seed is taken out. **Seen by hand:
+  the sysprepped clones don't read the seed CD's `autounattend.xml`.** On both releases and both hypervisors the clone
+  ran specialize without it (no `remotely-stage specialize` line on COM1) and stopped at OOBE's first page ("Hi there",
+  the region and keyboard), so it got no name, one-time password or WinRM certificate of its own and the deploy waits to
+  its time limit. Microsoft's implicit search table lists removable read-only media for every pass, but it isn't used
+  here; which delivery replaces it is open (a generic answer file given to sysprep at build time whose specialize step
+  points Setup at the clone's seed, or the clone's file written into its disk before its first boot). *(Still to check
+  by hand once it reads its file: that a `LocalAccounts` account the build made doesn't stop OOBE; the starters'
+  `New-NetFirewallRule` failing harmlessly on a rule that is there.)*
 - **Scheduled rebuilds** (`ScheduleAction::RebuildImage`, one `ScheduleTarget::Image`): the save asks the bus for a
   standing approval of the image's next build as it would be built then (VM-27; Medium, or Critical with `keep`). Each
   run builds the command from the recipe as it is then (`GoldenImages::command_for`) and submits it under the grant: a

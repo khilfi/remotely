@@ -1081,6 +1081,12 @@ impl Schedules {
                 "No VM has that tag now. Tag the VMs first, or choose them by name.".into(),
             ));
         }
+        // VM-30: 0.8.0 rebuilds no Windows image (golden::WINDOWS_DEFERRED); refused before anything is saved.
+        if spec.action == ScheduleAction::RebuildImage {
+            if let (Some((image_id, _)), Some(golden)) = (resolved.images.first(), self.golden()) {
+                golden.refuse_windows(self.ctx(), *image_id).await?;
+            }
+        }
         let targets = resolved.targets();
         let summary = match resolved.images.first() {
             Some((_, image)) => spec.rebuild_summary(&name, image),

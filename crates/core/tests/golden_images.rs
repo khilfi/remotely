@@ -1162,6 +1162,10 @@ async fn a_windows_image_is_sysprepped_and_its_clones_get_g6s_one_time_password_
     let lab = lab("golden-windows", &["winsrv-v1", "web-1"]).await;
     let core = &lab.core;
     let ctx = &core.ctx();
+    // 0.8.0 refuses Windows images (windows_golden_images_are_refused_in_0_8_0_with_why); the kept seal and clone code
+    // runs here as the later release would run it. The hand checks proved the build half on real VMs; their clones
+    // didn't read the seed's answer file, which these fakes can't show.
+    core.catalog.windows_images().set_allowed_for_tests(true);
     let winrm = Arc::new(FakeWinrm {
         fingerprint: FINGERPRINT.into(),
         password: Arc::default(),
@@ -1309,6 +1313,8 @@ async fn windows_build(
 ) -> (JobStatus, String, Arc<FakeWinrm>) {
     let core = &lab.core;
     let ctx = &core.ctx();
+    // The kept Windows seal, which 0.8.0 refuses to run (see the test above).
+    core.catalog.windows_images().set_allowed_for_tests(true);
     let vmx = lab.vms.join(vm).join(format!("{vm}.vmx"));
     let winrm = Arc::new(FakeWinrm {
         fingerprint: FINGERPRINT.into(),
@@ -1435,6 +1441,149 @@ async fn a_windows_build_whose_sysprep_fails_or_whose_seed_stays_in_fails_and_le
         "no sysprep task"
     );
     nothing_registered(&lab, "stuck-v1", "Stuck").await;
+    let _ = std::fs::remove_dir_all(&lab.dir);
+}
+
+#[tokio::test]
+async fn windows_golden_images_are_refused_in_0_8_0_with_why() {
+    // The owner deferred Windows images on 14 Nov 2026: every way to build one, or to deploy a clone of one Remotely
+    // built, says why, instead of a clone that waits at OOBE to its time limit.
+    use remotely_core::fakes::clock::{FakeClock, FakeZone};
+    use remotely_core::golden::WINDOWS_DEFERRED;
+    use remotely_core::schedules::{
+        RunOutcome, ScheduleAction, ScheduleInput, ScheduleSpec, ScheduleState, ScheduleTarget, Timing, WallTime,
+    };
+    let lab = lab("golden-win-deferred", &["deferred-v1", "web-1"]).await;
+    let core = &lab.core;
+    let ctx = &core.ctx();
+    let says = |err: &CoreError| err.to_string().contains(WINDOWS_DEFERRED);
+
+    // A new Windows image: the dialog's check says why, and a submit is refused before anything is asked.
+    let pw = vault_password(core, &lab.secret).await;
+    let config = config_from(core, "starter.windows-server-2025", pw, None, |_| {}).await;
+    let iso = iso_image(
+        core,
+        &lab.dir,
+        "server.iso",
+        &install_isos::windows_server(),
+        "windows-server",
+    )
+    .await;
+    let request = BuildRequest {
+        target: BuildTarget::New { name: "Never".into() },
+        recipe: recipe(&iso, config, Hypervisor::Vmware, &lab.vms, "gp.large"),
+    };
+    let check = core.golden.check(ctx, &request).await.unwrap();
+    assert!(check.preview.is_none());
+    assert!(
+        check.problems.iter().any(|p| p.contains(WINDOWS_DEFERRED)),
+        "{:?}",
+        check.problems
+    );
+    let Err(err) = core.golden.submit(ctx, &request).await else {
+        panic!("a Windows build was submitted");
+    };
+    assert!(says(&err), "{err}");
+
+    // An image built while they were allowed (only a build of this PR's earlier commits made one), with a template and
+    // a scheduled rebuild approved then.
+    let (status, notes, _) = windows_build(&lab, "deferred-v1", "Deferred", TASK_SAYS.to_vec(), None).await;
+    assert_eq!(status, JobStatus::Succeeded, "{notes}");
+    let image = core
+        .catalog
+        .images(ctx)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|i| i.name == "Deferred")
+        .unwrap();
+    let template = template_of(core, &image, Hypervisor::Vmware, &lab.vms, CloneMode::Full).await;
+    let clock = Arc::new(FakeClock::new(
+        time::macros::datetime!(2026-06-10 10:00 UTC),
+        FakeZone::central_europe(),
+    ));
+    core.schedules().set_clock(clock.clone());
+    let input = |name: &str| ScheduleInput {
+        id: None,
+        name: name.into(),
+        spec: ScheduleSpec {
+            action: ScheduleAction::RebuildImage,
+            targets: vec![ScheduleTarget::Image { image_id: image.id }],
+            timing: Timing::Daily {
+                at: WallTime::new(3, 0).unwrap(),
+            },
+        },
+    };
+    let saved = core.schedules().save(input("nightly rebuild")).await.unwrap();
+    let request = saved.approval.expect("a build asks");
+    let answers = ApprovalAnswers {
+        confirmed: true,
+        vault_password: Some(SecretString::new(VAULT_PASSWORD)),
+        ..Default::default()
+    };
+    let view = core.schedules().approve(request.id, answers).await.unwrap();
+    assert_eq!(view.state, ScheduleState::Active);
+
+    // 0.8.0: no rebuild, no build settings, no new schedule (nothing saved), no clone.
+    core.catalog.windows_images().set_allowed_for_tests(false);
+    let Err(err) = core.golden.rebuild(ctx, image.id).await else {
+        panic!("a Windows image was rebuilt");
+    };
+    assert!(says(&err), "{err}");
+    let Err(err) = core
+        .golden
+        .set_recipe(ctx, image.id, image.build.clone().unwrap())
+        .await
+    else {
+        panic!("a Windows image's build settings were saved");
+    };
+    assert!(says(&err), "{err}");
+    let Err(err) = core.schedules().save(input("weekly rebuild")).await else {
+        panic!("a Windows rebuild was scheduled");
+    };
+    assert!(says(&err), "{err}");
+    assert_eq!(core.schedules().list().await.unwrap().len(), 1, "nothing was saved");
+    let problems = core.catalog.plan(ctx, template, 1).await.unwrap().unwrap_err();
+    assert!(
+        problems.iter().any(|p| p.message.contains(WINDOWS_DEFERRED)),
+        "{problems:?}"
+    );
+    let deploy = DeployRequest {
+        from: DeployFrom::Template { id: template },
+        count: 1,
+        naming_pattern: None,
+        host_adapter: None,
+        guest_password_id: None,
+        vm_values: vec![],
+        address_pool_id: None,
+        install_minutes: None,
+    };
+    let check = core.deploy.check(ctx, &deploy).await.unwrap();
+    assert!(
+        check.problems.iter().any(|p| p.message.contains(WINDOWS_DEFERRED)),
+        "{:?}",
+        check.problems
+    );
+    assert!(core.deploy.submit(ctx, &deploy).await.is_err());
+    assert!(!lab.vms.join("web-1").exists(), "no clone was made");
+
+    // The schedule approved before: its run fails with why and builds nothing.
+    let at = &view.next_run.as_ref().unwrap().at;
+    let due = time::OffsetDateTime::parse(at, &time::format_description::well_known::Rfc3339).unwrap();
+    clock.set(due);
+    let report = core.schedules().tick().await.unwrap();
+    assert_eq!(report.started, 1);
+    core.schedules().wait_runs().await;
+    let view = core.schedules().get(view.id).await.unwrap();
+    let last = view.last_run.as_ref().unwrap();
+    assert_eq!(last.outcome, RunOutcome::Failed, "{:?}", last.detail);
+    assert!(
+        last.detail.as_deref().unwrap_or_default().contains(WINDOWS_DEFERRED),
+        "{:?}",
+        last.detail
+    );
+    assert_eq!(core.catalog.image(ctx, image.id).await.unwrap().version, Some(1));
+    assert!(!lab.vms.join("deferred-v2").exists(), "no version 2");
     let _ = std::fs::remove_dir_all(&lab.dir);
 }
 

@@ -38,7 +38,8 @@ const MAX_BASE_CHARS: usize = 40;
 pub struct BuildRecipe {
     /// The catalogue's ISO image the system is installed from; its OS profile is the image's.
     pub iso_image_id: Uuid,
-    /// An own install config of a kind Remotely delivers (Ubuntu autoinstall, Debian preseed, Windows unattend).
+    /// An own install config of a kind Remotely delivers (Ubuntu autoinstall, Debian preseed; a Windows unattend is
+    /// refused in 0.8.0: [`super::WINDOWS_DEFERRED`]).
     pub install_config_id: Uuid,
     /// A built-in size's name or an own size's id: the build VM's, and so its clones' disk.
     pub size_id: String,

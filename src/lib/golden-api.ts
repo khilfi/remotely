@@ -17,7 +17,7 @@ import type { DeployCapacity } from "@/lib/stacks-api";
 export interface BuildRecipe {
   /** The catalogue's ISO image the system installs from; its OS profile is the image's. */
   isoImageId: string;
-  /** An own install config of a kind Remotely delivers: Ubuntu autoinstall, Debian preseed or Windows unattend. */
+  /** An own install config Remotely builds from: Ubuntu autoinstall or Debian preseed (no Windows unattend in 0.8.0). */
   installConfigId: string;
   /** A built-in size's name or an own size's id. */
   sizeId: string;

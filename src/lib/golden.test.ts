@@ -23,6 +23,7 @@ import {
   requestOf,
   versionStateText,
   versionText,
+  WINDOWS_DEFERRED,
   withConfig,
   withHypervisor,
   withIso,
@@ -125,16 +126,17 @@ test("only ISO images are built from, and only images with a recipe are rebuilt"
   );
 });
 
-test("a build takes own configs of the three kinds Remotely delivers, for the ISO's system", () => {
+test("a build takes own configs of the two kinds Remotely builds from, for the ISO's system", () => {
   assert.deepEqual(
     buildConfigs(choices.configs, "linux").map((c) => c.id),
     ["c-broken", "c-ubuntu", "c-debian"],
   );
   assert.deepEqual(
     buildConfigs(choices.configs, "windows").map((c) => c.id),
-    ["c-win"],
+    [],
+    "0.8.0 offers no Windows unattend config",
   );
-  assert.equal(buildConfigs(choices.configs).length, 4, "an ISO of no known system takes any of them");
+  assert.equal(buildConfigs(choices.configs).length, 3, "an ISO of no known system takes any of them");
   assert.deepEqual(buildHypervisors(win11Iso, choices.profiles), ["virtualbox"], "Windows 11: VirtualBox only");
   assert.deepEqual(buildHypervisors(image({ hypervisors: ["vmware"] }), choices.profiles), ["vmware"]);
 });
@@ -152,7 +154,7 @@ test("a new build starts from the first ISO and config that can be used, on NAT,
   const empty = defaultForm({ images: [], configs: [], profiles: [] });
   assert.equal(empty.isoImageId, "");
   assert.equal(
-    formProblem({ ...empty, name: "x" }, "new", { images: [] }),
+    formProblem({ ...empty, name: "x" }, "new", { images: [], configs: [], profiles: [] }),
     "Add an ISO image first: a build installs from one",
   );
 });
@@ -160,7 +162,7 @@ test("a new build starts from the first ISO and config that can be used, on NAT,
 test("another ISO keeps what still fits and picks what must change", () => {
   const ubuntu = { ...defaultForm(choices), values: { team: "web" } };
   const windows = withIso(ubuntu, "iso-win", choices);
-  assert.equal(windows.installConfigId, "c-win", "a Windows ISO takes a Windows unattend");
+  assert.equal(windows.installConfigId, "", "a Windows ISO takes no config in 0.8.0");
   assert.deepEqual(windows.values, {}, "the Linux config's variables go");
   const vbox = withHypervisor({ ...ubuntu, network: { kind: "vmnet", number: 3 }, addressPoolId: "p1" }, "virtualbox");
   assert.deepEqual(vbox.network, { kind: "nat" }, "VirtualBox has no vmnets");
@@ -171,6 +173,20 @@ test("another ISO keeps what still fits and picks what must change", () => {
     team: "web",
   });
   assert.equal(withIso(ubuntu, "iso-ubuntu", choices).installConfigId, "c-ubuntu");
+});
+
+test("0.8.0 builds no Windows image, and Build says why (QL-08)", () => {
+  const first = defaultForm({ ...choices, images: [windowsIso, image({})] });
+  assert.equal(first.isoImageId, "iso-ubuntu", "a Linux ISO before a Windows one");
+  const named = { ...defaultForm(choices), name: "WinSrv" };
+  assert.equal(formProblem(withIso(named, "iso-win", choices), "new", choices), WINDOWS_DEFERRED);
+  assert.equal(formProblem(withIso(named, "iso-win11", choices), "new", choices), WINDOWS_DEFERRED);
+  // An image's saved settings that name a Windows unattend config (none can be saved in 0.8.0) aren't saved either.
+  const saved = formOfRecipe("WinSrv", recipe({ isoImageId: "iso-win", installConfigId: "c-win" }));
+  assert.equal(formProblem(saved, "settings", choices), WINDOWS_DEFERRED);
+  const unattendOnLinux = { ...named, installConfigId: "c-win" };
+  assert.equal(formProblem(unattendOnLinux, "new", choices), WINDOWS_DEFERRED, "by the config's kind too");
+  assert.match(WINDOWS_DEFERRED, /later release/);
 });
 
 test("the form's checks come before the core is asked", () => {

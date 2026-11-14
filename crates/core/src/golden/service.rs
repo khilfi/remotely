@@ -389,11 +389,20 @@ impl GoldenImages {
         };
         let Some(os) = BuildOs::of(config.spec.kind) else {
             return Ok(Err(vec![format!(
-                "The install config '{}' is {}: Remotely builds images from Ubuntu autoinstall, Debian preseed and Windows unattend configs.",
+                "The install config '{}' is {}: Remotely builds images from Ubuntu autoinstall and Debian preseed configs.",
                 config.spec.name,
                 config.spec.kind.label()
             )]));
         };
+        // 0.8.0: no Windows image, new or a rebuild (the build dialog, Rebuild, build settings, a schedule's save and its
+        // runs all come through here). The seal is kept for the later release, which needs a delivery clones read.
+        if os.windows() && !self.catalog.windows_images().allowed() {
+            return Ok(Err(vec![format!(
+                "The install config '{}' is a Windows unattend config. {}",
+                config.spec.name,
+                super::WINDOWS_DEFERRED
+            )]));
+        }
         // A2 of PR 100's review: an address of the build VM's own would go into every clone (and stay leased to the
         // version's VM), so a build takes its address by DHCP.
         if recipe.address_pool_id.is_some() {
@@ -699,6 +708,32 @@ impl GoldenImages {
             target: BuildTarget::Image { id: image_id },
             recipe,
         })
+    }
+
+    /// 0.8.0: refuses a Windows image (its recipe installs from a Windows unattend config), read cheaply from the store,
+    /// before a schedule that rebuilds it is saved ([`super::WINDOWS_DEFERRED`]). Its builds are refused by
+    /// [`Self::spec_for`] too, a scheduled run's included.
+    pub async fn refuse_windows(&self, ctx: &Context, image_id: Uuid) -> Result<()> {
+        if self.catalog.windows_images().allowed() {
+            return Ok(());
+        }
+        let Some(image) = self.store.catalog_image(ctx, image_id).await? else {
+            return Ok(());
+        };
+        let Some(recipe) = &image.build else {
+            return Ok(());
+        };
+        let Some(config) = self.store.install_config_row(ctx, recipe.install_config_id).await? else {
+            return Ok(());
+        };
+        if BuildOs::of(config.spec.kind).is_some_and(BuildOs::windows) {
+            return Err(CoreError::InvalidInput(format!(
+                "Image '{}' is a Windows image. {}",
+                image.name,
+                super::WINDOWS_DEFERRED
+            )));
+        }
+        Ok(())
     }
 
     /// "Rebuild": the image's next version from its recipe as it is saved.

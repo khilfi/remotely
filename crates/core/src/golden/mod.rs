@@ -21,3 +21,36 @@ pub use self::service::{
     ImageVersion, StandingCheck, StillApproved, VersionState,
 };
 pub use self::spec::{BuildDetails, BuildOs, BuildRecipe, BuildSpec, PruneVm, SignIn};
+
+/// Why 0.8.0 builds no Windows image and deploys no clone of one Remotely built (the owner deferred them on 14 Nov 2026):
+/// the hand checks' builds sealed, but their clones never read their answer file after sysprep and stopped at OOBE.
+pub const WINDOWS_DEFERRED: &str =
+    "Windows golden images come in a later release: a clone of a sysprepped image doesn't read its answer file yet.";
+
+/// Whether this core builds Windows golden images and deploys their clones: never in 0.8.0 ([`WINDOWS_DEFERRED`]). The
+/// catalogue keeps it, shared by its clones and [`GoldenImages`]; only tests of the kept Windows seal and clone code
+/// turn it on (`fakes`).
+#[derive(Clone, Default)]
+pub struct WindowsImages {
+    #[cfg(feature = "fakes")]
+    allowed: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl WindowsImages {
+    pub fn allowed(&self) -> bool {
+        #[cfg(feature = "fakes")]
+        {
+            self.allowed.load(std::sync::atomic::Ordering::SeqCst)
+        }
+        #[cfg(not(feature = "fakes"))]
+        {
+            false
+        }
+    }
+
+    /// Tests only: builds and deploys Windows golden images as the later release will.
+    #[cfg(feature = "fakes")]
+    pub fn set_allowed_for_tests(&self, allowed: bool) {
+        self.allowed.store(allowed, std::sync::atomic::Ordering::SeqCst);
+    }
+}
