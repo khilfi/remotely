@@ -2237,17 +2237,22 @@ seen on a real VM yet (the PR lists the checks).
   fingerprint, the ISO's size and time, how the build signs in (`SignIn`) and the version. The job makes and installs
   the VM exactly as G6 does (`Deployer::make`, `watch_install`: the seed in a private folder, the watcher, Windows'
   password swap), takes the seed out as soon as the install is done (G6's `eject` and `empty_link`: the answer file's
-  hashes are gone before anything else runs; `Deployer::seed_out`), makes it generic, waits for the guest to power
+  hashes are gone before anything else runs; `Deployer::seed_out`; a Windows build whose seed won't leave its drive
+  fails there, before sysprep could run with `autounattend.xml` attached), makes it generic, waits for the guest to power
   itself off (`seal_minutes`, 30), takes the ISO copy's and the seed's drives out of its settings (Workstation: their
   `sataX:Y.*` keys out of the `.vmx`; VirtualBox: `storageattach --medium none`, `closemedium`), turns its serial port
   off (`serial0.*` out; `--uart1 off`), deletes VirtualBox's NAT rule (`modifyvm --natpf1 delete`), the seed, the ISO
   link and the serial log, and takes the snapshot `Remotely image v<N>` powered off (no memory). Its clones copy nothing
   of the install: a settings change of that seal that fails fails the build before the snapshot (the VM is kept,
-  generic and off; nothing is registered). A VirtualBox VM that `aborted` instead of shutting down fails it too
+  generic and off; nothing is registered; its seed, ISO link and serial log stay, as its settings still name them).
+  VirtualBox's changes are asked again (`Deployer::vbox_unlocked`, up to five more times over about 8 seconds) while
+  it says the VM's session lock is held, as VBoxHeadless does for a moment after the guest powered off. A
+  VirtualBox VM that `aborted` instead of shutting down fails it too
   (Workstation's list of running VMs can't tell the two apart). A failure before the VM is made removes what the build
   made; after that the VM is kept for a look with its seed taken out (G6's `abandon_install`). The build VM takes its
   address by DHCP: a config that uses `{{ip}}` (`install::render::uses_ip`) or a recipe with an address pool is refused,
-  since every clone would take that address. The recipe's folder is checked by its text first
+  since every clone would take that address (and `BuildSpec::validate` refuses an install pool or a VM address on the
+  bus). The recipe's folder is checked by its text first
   (`catalog::images::folder_problem`: no share or device path is ever looked at).
 - **Versions: a new VM per build.** A reinstall over a VM that has snapshots was never seen to work (UEFI boots the
   installed system's entry, BIOS `hdd,cdrom` its disk: S1, S2), and a version that is its own VM is deleted without
@@ -2286,17 +2291,25 @@ seen on a real VM yet (the PR lists the checks).
 - **Linux, made generic** (`golden::generic::LINUX_SCRIPT`): each step is a function that says `remotely-generic ok
   <step>` or `failed <step>`, the script stops at the first that fails (and still exits 0, so its report comes back),
   and the build fails, keeping the VM, unless every step of `LINUX_STEPS` said `ok` and the script said `done`
-  (`Report::linux_problems`). The steps, in order:
+  (`Report::linux_problems`). Only then does `SshGuestShell` power it off: a VM whose steps didn't all go is left
+  running (for a look, and so the work a step waited for isn't cut short), and the error says so. The steps, in
+  order:
   - `boot`: the first boot's own work is waited for, each with `timeout 600` (a time-out fails the step): `systemctl
-    is-system-running --wait`, `cloud-init status --wait`, and no `apt`, `apt-get`, `dpkg` or `unattended-upgr`
-    process (polled), so nothing writes keys, IDs or logs after they are cleaned.
+    is-system-running --wait`, `cloud-init status --wait` (any status but 0 is a note), and no package work (polled
+    every 5 s, 10 minutes at most): `apt`, `apt-get` and `dpkg` by name (`pgrep -x`), `unattended-upgrade` by its
+    command line (`pgrep -f '^/usr/bin/python3(\.[0-9]+)? /usr/bin/unattended-upgrade( |$)'`), never by the name
+    `unattended-upgr`, which unattended-upgrades.service's `unattended-upgrade-shutdown --wait-for-signal` also has
+    (a python script, its name cut to 15 characters) for as long as the system is up. It says how long it waited
+    (`waited <s>`, kept in the version's facts), so nothing writes keys, IDs or logs after they are cleaned.
   - `cloud_init`: back on and as if it never ran, so VM-22's first boot works on each clone:
     `/etc/cloud/cloud-init.disabled` deleted (S1: Ubuntu's installed system has it), then the installer's own
     `cloud.cfg.d` files if there (`99-installer.cfg`, which pins the datasource to `None` and holds the config it ran
     with; `subiquity-disable-cloudinit-networking.cfg`, which turns a seed's network-config off;
     `90-installer-network.cfg`) *(hand check: which of them 24.04 and 26.04 write)*, `cloud-init clean --logs` (its
-    instance state, semaphores and logs) and `/var/lib/cloud/seed`; then checked: no `cloud-init.disabled`, no
-    `/var/lib/cloud/instance`, `/var/lib/cloud/instances` empty.
+    instance state, semaphores and logs) and `/var/lib/cloud/seed`; each file checked gone after its `rm` (a leftover
+    `99-installer.cfg` would keep every clone from reading its seed), then: no `cloud-init.disabled`, no
+    `/var/lib/cloud/seed` or `/var/lib/cloud/instance`, `/var/lib/cloud/instances` empty. The files it removed are
+    in the version's facts (`removed`).
   - `machine_id`: `/etc/machine-id` emptied, never deleted (systemd makes a new one at the next boot and treats it as a
     first boot); `/var/lib/dbus/machine-id` deleted (on Ubuntu and Debian a link to it; D-Bus falls back to
     `/etc/machine-id`).
@@ -2314,7 +2327,7 @@ seen on a real VM yet (the PR lists the checks).
     `/var/cache/debconf/passwords.dat` emptied when there (where a preseed's password answers can stay *(hand check:
     what Debian 12 leaves in it)*). Kickstart isn't delivered (no spike), so its `/root/*-ks.cfg` only go if there.
   - `logs`, `history`, `leases`: the journal vacuumed, rotated logs deleted and the rest of `/var/log` truncated, root's
-    and the users' `.bash_history` deleted, DHCP leases deleted (`/var/lib/dhcp/*.leases`, `/var/lib/dhcpcd/*`, NetworkManager's). The shutdown logs a
+    and the users' `.bash_history` deleted (each checked gone on its own), DHCP leases deleted (`/var/lib/dhcp/*.leases`, `/var/lib/dhcpcd/*`, NetworkManager's). The shutdown logs a
     few lines again, into the build's own (old machine-id's) journal folder.
   - It says whether the system has cloud-init and open-vm-tools (`facts` of the version): Workstation's first boot reads
     cloud-init's guestinfo through open-vm-tools, which `ubuntu-server-minimal` leaves out (S1), so the dialog warns and
@@ -2325,19 +2338,25 @@ seen on a real VM yet (the PR lists the checks).
   passwords. They can't take a hostname (every clone is named like the build VM), a template's guest user, SSH key or
   packages, or a seed's network-config: nothing reads VM-22's seed or guestinfo. `cloud-init` in the preseed's
   `pkgsel/include` gives what Ubuntu's images get; the build dialog says so.
-- **Windows, made generic** (`golden::generic::windows_script`): one WinRM run (`$ErrorActionPreference = 'Stop'`)
-  writes `C:\Windows\Temp\remotely-generalize.ps1` (from base64: a WinRM console ends a statement at an empty line) and
-  registers the task `Remotely generalize` as SYSTEM 15 seconds later (on battery power too), since a process started
-  from a WinRM shell is killed with the shell; it says `scheduled` only once `Get-ScheduledTask` finds the task. The
-  task deletes itself and its script, deletes the build's WinRM over HTTPS listener (`Transport=HTTPS`) and its
-  certificate with its private key (`Cert:\LocalMachine\My`, `-DeleteKey`: else every clone would share the build's
-  key, and its listener would point at it), Setup's `Panther\unattend.xml` and `unattend-original.xml`, PowerShell's
-  history and the event logs, then runs `sysprep.exe /generalize /oobe /shutdown /quiet` (`Start-Process -Wait
-  -PassThru`: sysprep is a GUI program). Its steps go to COM1 as `remotely-generic ...`; a non-zero exit code
-  (`sysprep-failed <code>`) fails the build at once, a power-off before the task said `removed winrm-https` and
-  `sysprep` (`WINDOWS_STEPS`) fails it too, else the wait for the power-off says where sysprep's log is. *(hand check:
-  sysprep as SYSTEM, the listener's removal, whether sysprep returns before it shuts Windows down, timings on both
-  hypervisors.)*
+- **Windows, made generic** (`golden::generic::windows_script`): one WinRM run (`$ErrorActionPreference = 'Stop'`,
+  which under `-Command -` ends only the line that fails) writes `C:\Windows\Temp\remotely-generalize.ps1` (from base64:
+  a WinRM console ends a statement at an empty line) and registers the task `Remotely generalize` as SYSTEM 15 seconds
+  later (on battery power too), since a process started from a WinRM shell is killed with the shell; its last line says
+  `scheduled` only when both the script's file and the task are there. The task deletes itself and its script, deletes
+  the build's WinRM over HTTPS listener (`Transport=HTTPS`) and its certificate with its private key
+  (`Cert:\LocalMachine\My`, `-DeleteKey`: else every clone would share the build's key, and its listener would point
+  at it), Setup's `Panther\unattend.xml` and `unattend-original.xml`, PowerShell's history and the event logs; each
+  removal is said only once `Test-Path` shows it gone, else the task says `failed <what>` and stops before sysprep
+  (the build fails at once, Windows left running). Then `sysprep.exe /generalize /oobe /quit /quiet` (`Start-Process
+  -Wait -PassThru`: sysprep is a GUI program), its old `Sysprep_succeeded.tag` deleted first; only an exit code 0 with
+  a new `Sysprep_succeeded.tag` is `sealed`, after which the task looks at Panther again (`after-sysprep <file>`, for
+  the record, deleted) and shuts Windows down itself (`Stop-Computer -Force`); otherwise it says `sysprep-failed
+  <code>` and leaves Windows running, and the build fails at once. Not `/shutdown`: the shutdown could end
+  sysprep.exe before its code was read (or have the task's PowerShell report a code from the kill), and a power-off
+  while sysprep runs would look like sysprep's own. A power-off before the task said `removed winrm-https`, `sysprep`
+  and `sealed` (`WINDOWS_STEPS`) fails the build; a wait that runs out says what COM1 showed last (nothing: see Task
+  Scheduler; `sysprep`: sysprep's own log; `sealed`: the shutdown). *(hand check: sysprep as SYSTEM, its `/quit` exit
+  code and tag, whether Panther holds an answer file after it, the listener's removal, timings on both hypervisors.)*
 - **A clone of a Windows image gets G6's delivery.** A template of a Windows image Remotely built (and no install config
   of its own) deploys with the config its newest version was built from (`catalog::Facts::golden_config`, by the
   version row's `config_id`, never the recipe's, which may name another since), and only while that config is as it

@@ -4,8 +4,10 @@
 //!
 //! * Linux ([`LINUX_SCRIPT`], run as root through the config user's sudo over SSH): each step a function that says
 //!   `ok <step>` or `failed <step>`, and the script stops at the first that fails ([`LINUX_STEPS`]: every one must say
-//!   `ok`, else the build fails and keeps the VM). `boot` waits (time-limited) for the first boot's own work: systemd's
-//!   start-up, cloud-init's stages and any package job. `cloud_init` turns cloud-init back on and makes it as if it
+//!   `ok`, else the build fails and keeps the VM, running). `boot` waits (time-limited) for the first boot's own work:
+//!   systemd's start-up, cloud-init's stages and any package job (`apt`, `apt-get` and `dpkg` by name, and
+//!   `unattended-upgrade` by its command line: unattended-upgrades.service's shutdown helper runs for as long as the
+//!   system is up and has the same 15-character name). `cloud_init` turns cloud-init back on and makes it as if it
 //!   never ran (Ubuntu's installer turns it off with `/etc/cloud/cloud-init.disabled` and pins its datasource to `None`
 //!   in `cloud.cfg.d/99-installer.cfg`, which would keep VM-22's seed from ever being read), then checks the marker and
 //!   the instance state are gone. `machine_id` empties `/etc/machine-id` (systemd makes a new one at the next boot;
@@ -21,9 +23,12 @@
 //!   VM wrote to COM1): a scheduled task, as SYSTEM, a few seconds after the WinRM run ends (a process started from a
 //!   WinRM shell is killed with the shell), deletes the build's WinRM over HTTPS listener and its certificate with its
 //!   private key (each clone makes its own at its first sign-in and writes its fingerprint to COM1, as G6 checks),
-//!   Setup's copies of the answer file, PowerShell's history and the event logs, then runs
-//!   `sysprep /generalize /oobe /shutdown /quiet`. Its steps go to COM1 as `remotely-generic ...` lines; the build
-//!   takes the power-off as sealed only after `sysprep`, and a sysprep that returns an error says so.
+//!   Setup's copies of the answer file, PowerShell's history and the event logs, each checked gone (else it stops
+//!   with `failed <what>`), then runs `sysprep /generalize /oobe /quit /quiet` and shuts Windows down itself only once
+//!   sysprep returned 0 and left `Sysprep_succeeded.tag` (`sealed`). With `/shutdown` the shutdown could end
+//!   sysprep.exe before its exit code was read, and a power-off during sysprep would look like its own. Its steps go
+//!   to COM1 as `remotely-generic ...` lines; the build takes the power-off as sealed only after `sealed`
+//!   ([`WINDOWS_STEPS`]).
 
 use base64::Engine;
 
@@ -46,20 +51,31 @@ pub const LINUX_STEPS: [&str; 8] = [
     "history",
     "leases",
 ];
-/// Windows: what the task must say on COM1 before the power-off counts as sysprep's.
-pub const WINDOWS_STEPS: [&str; 2] = ["removed winrm-https", "sysprep"];
+/// Windows: what the task must say on COM1 before the power-off counts as sysprep's: the build's listener gone,
+/// sysprep started, and sysprep done (exit 0 and its `Sysprep_succeeded.tag`) before the task shut Windows down.
+pub const WINDOWS_STEPS: [&str; 3] = ["removed winrm-https", "sysprep", "sealed"];
 
 /// Linux: run as root (`sudo sh -c`). Each step says `ok` or `failed`; the first that fails ends it (exit 0, so its
 /// report comes back), and `done` comes only when every step went.
 pub const LINUX_SCRIPT: &str = r#"say() { printf 'remotely-generic %s\n' "$*"; }
 run() { if "$1"; then say ok "$1"; else say failed "$1"; exit 0; fi; }
+packages() {
+  pgrep -x 'apt|apt-get|dpkg' >/dev/null 2>&1 && return 0
+  pgrep -f '^/usr/bin/python3(\.[0-9]+)? /usr/bin/unattended-upgrade( |$)' >/dev/null 2>&1
+}
 boot() {
+  t0=$(date +%s)
   if command -v systemctl >/dev/null 2>&1; then timeout 600 systemctl is-system-running --wait >/dev/null 2>&1; [ $? -ne 124 ] || return 1; fi
-  if command -v cloud-init >/dev/null 2>&1; then timeout 600 cloud-init status --wait >/dev/null 2>&1; [ $? -ne 124 ] || return 1; fi
+  if command -v cloud-init >/dev/null 2>&1; then
+    timeout 600 cloud-init status --wait >/dev/null 2>&1; rc=$?
+    [ $rc -ne 124 ] || return 1
+    [ $rc -eq 0 ] || say note "cloud-init's first boot ended with status $rc"
+  fi
   n=0
-  while pgrep -x 'apt|apt-get|dpkg|unattended-upgr' >/dev/null 2>&1; do
+  while packages; do
     n=$((n+1)); [ $n -lt 120 ] || return 1; sleep 5
   done
+  say waited $(( $(date +%s) - t0 ))
   return 0
 }
 cloud_init() {
@@ -67,10 +83,11 @@ cloud_init() {
   say cloud-init yes
   rm -f /etc/cloud/cloud-init.disabled
   for f in /etc/cloud/cloud.cfg.d/99-installer.cfg /etc/cloud/cloud.cfg.d/subiquity-disable-cloudinit-networking.cfg /etc/cloud/cloud.cfg.d/90-installer-network.cfg; do
-    if [ -e "$f" ]; then rm -f "$f" && say removed "$f"; fi
+    if [ -e "$f" ]; then rm -f "$f"; [ ! -e "$f" ] || return 1; say removed "$f"; fi
   done
   cloud-init clean --logs >/dev/null 2>&1 || return 1
   rm -rf /var/lib/cloud/seed
+  [ ! -e /var/lib/cloud/seed ] || return 1
   [ ! -e /etc/cloud/cloud-init.disabled ] || return 1
   [ ! -e /var/lib/cloud/instance ] || return 1
   [ -z "$(ls -A /var/lib/cloud/instances 2>/dev/null)" ]
@@ -114,8 +131,11 @@ logs() {
   return 0
 }
 history() {
-  rm -f /root/.bash_history /home/*/.bash_history
-  ! ls /root/.bash_history /home/*/.bash_history >/dev/null 2>&1
+  for f in /root/.bash_history /home/*/.bash_history; do
+    [ -e "$f" ] || continue
+    rm -f "$f" && [ ! -e "$f" ] || return 1
+  done
+  return 0
 }
 leases() {
   rm -f /var/lib/dhcp/*.leases /var/lib/dhcpcd/*.lease /var/lib/dhcpcd/*.lease6 /var/lib/NetworkManager/*.lease 2>/dev/null
@@ -141,31 +161,54 @@ pub const LINUX_POWER_OFF: &str = "systemctl --no-block poweroff";
 /// sent to a console that ends a statement there).
 const WINDOWS_TASK_BODY: &str = r#"$ErrorActionPreference = 'Continue'
 function Say($t) { try { $p = New-Object System.IO.Ports.SerialPort COM1,115200; $p.Open(); $p.WriteLine('remotely-generic ' + $t); $p.Close() } catch { } }
+function Stop-Here($t) { Say ('failed ' + $t); exit 1 }
 Unregister-ScheduledTask -TaskName 'Remotely generalize' -Confirm:$false -ErrorAction SilentlyContinue
 Say 'started'
 foreach ($l in @(Get-ChildItem WSMan:\localhost\Listener)) {
   if ($l.Keys -contains 'Transport=HTTPS') {
     $thumb = (Get-ChildItem -LiteralPath $l.PSPath | Where-Object { $_.Name -eq 'CertificateThumbprint' }).Value
-    Remove-Item -LiteralPath $l.PSPath -Recurse -Force
-    if ($thumb) { Remove-Item -LiteralPath ('Cert:\LocalMachine\My\' + $thumb) -DeleteKey -Force -ErrorAction SilentlyContinue }
+    Remove-Item -LiteralPath $l.PSPath -Recurse -Force -ErrorAction SilentlyContinue
+    if (Test-Path -LiteralPath $l.PSPath) { Stop-Here 'winrm-https' }
+    if ($thumb) {
+      $cert = 'Cert:\LocalMachine\My\' + $thumb
+      Remove-Item -LiteralPath $cert -DeleteKey -Force -ErrorAction SilentlyContinue
+      if (Test-Path -LiteralPath $cert) { Stop-Here 'winrm-certificate' }
+    }
     Say 'removed winrm-https'
   }
 }
-foreach ($f in @('C:\Windows\Panther\unattend.xml', 'C:\Windows\Panther\unattend-original.xml')) {
-  if (Test-Path -LiteralPath $f) { Remove-Item -LiteralPath $f -Force; Say ('removed ' + $f) }
+$panther = @('C:\Windows\Panther\unattend.xml', 'C:\Windows\Panther\unattend-original.xml')
+foreach ($f in $panther) {
+  if (Test-Path -LiteralPath $f) {
+    Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue
+    if (Test-Path -LiteralPath $f) { Stop-Here ('answer-file ' + $f) }
+    Say ('removed ' + $f)
+  }
 }
 Get-ChildItem -Path 'C:\Users\*\AppData\Roaming\Microsoft\Windows\PowerShell\PSReadLine\ConsoleHost_history.txt' -Force -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue
 foreach ($log in @(wevtutil el)) { wevtutil cl "$log" 2>$null }
 Say 'cleared event-logs'
 Remove-Item -LiteralPath 'C:\Windows\Temp\remotely-generalize.ps1' -Force -ErrorAction SilentlyContinue
+$tag = "$env:SystemRoot\System32\Sysprep\Sysprep_succeeded.tag"
+Remove-Item -LiteralPath $tag -Force -ErrorAction SilentlyContinue
 Say 'sysprep'
-$s = Start-Process -FilePath "$env:SystemRoot\System32\Sysprep\sysprep.exe" -ArgumentList '/generalize', '/oobe', '/shutdown', '/quiet' -Wait -PassThru
-if ($s.ExitCode -ne 0) { Say ('sysprep-failed ' + $s.ExitCode) }
+$s = Start-Process -FilePath "$env:SystemRoot\System32\Sysprep\sysprep.exe" -ArgumentList '/generalize', '/oobe', '/quit', '/quiet' -Wait -PassThru
+Say ('sysprep-exit ' + $s.ExitCode)
+if (($s.ExitCode -ne 0) -or -not (Test-Path -LiteralPath $tag)) { Say ('sysprep-failed ' + $s.ExitCode); exit 1 }
+foreach ($f in $panther) {
+  if (Test-Path -LiteralPath $f) {
+    Say ('after-sysprep ' + $f)
+    Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue
+    if (Test-Path -LiteralPath $f) { Stop-Here ('answer-file ' + $f) }
+  }
+}
+Say 'sealed'
+Stop-Computer -Force
 "#;
 
-/// Windows: run over WinRM (one `powershell -Command -`, one line per statement). It writes the task's script and
-/// registers the task to run a few seconds later (on battery power too), then reports `remotely-generic scheduled`
-/// only once the task is there.
+/// Windows: run over WinRM (one `powershell -Command -`, one line per statement: `Stop` ends only the line that
+/// fails). It writes the task's script and registers the task to run a few seconds later (on battery power too), then
+/// reports `remotely-generic scheduled` only once both the script's file and the task are there.
 pub fn windows_script() -> String {
     let body = base64::engine::general_purpose::STANDARD.encode(WINDOWS_TASK_BODY.as_bytes());
     format!(
@@ -175,7 +218,7 @@ pub fn windows_script() -> String {
          $t = New-ScheduledTaskTrigger -Once -At ((Get-Date).AddSeconds(15))\n\
          $o = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries\n\
          Register-ScheduledTask -TaskName '{WINDOWS_TASK}' -Action $a -Trigger $t -Settings $o -User 'SYSTEM' -RunLevel Highest -Force | Out-Null\n\
-         if (Get-ScheduledTask -TaskName '{WINDOWS_TASK}') {{ '{REPORT_MARKER} scheduled' }}\n"
+         if ((Test-Path -LiteralPath '{WINDOWS_TASK_SCRIPT}') -and (Get-ScheduledTask -TaskName '{WINDOWS_TASK}')) {{ '{REPORT_MARKER} scheduled' }}\n"
     )
 }
 
@@ -242,14 +285,53 @@ impl Report {
         self.starts("vm-tools ").map(|v| v == "yes")
     }
 
-    /// Windows: sysprep's own error (`sysprep-failed <code>`, a code other than 0).
-    pub fn sysprep_failed(&self) -> Option<String> {
+    /// Windows: why the task stopped before it shut Windows down, if it said so: a step whose item it couldn't remove
+    /// (`failed <what>`), or sysprep's own failure (`sysprep-failed <code>`: an exit code other than 0, or 0 without
+    /// `Sysprep_succeeded.tag`). With `/quit` sysprep always returns, so any such line is its own.
+    pub fn windows_failure(&self) -> Option<String> {
+        if let Some(what) = self.starts("failed ") {
+            let what = match what {
+                "winrm-https" => "the build's WinRM over HTTPS listener".to_owned(),
+                "winrm-certificate" => "the listener's certificate and its private key".to_owned(),
+                other => match other.strip_prefix("answer-file ") {
+                    Some(file) => format!("Setup's copy of the answer file {file}"),
+                    None => other.to_owned(),
+                },
+            };
+            return Some(format!(
+                "the task that runs sysprep couldn't remove {what}, so it didn't run sysprep: the VM is left running"
+            ));
+        }
         let code = self.starts("sysprep-failed")?;
-        (code != "0").then(|| {
-            format!(
-                "sysprep stopped with exit code {code} without shutting Windows down: its log is C:\\Windows\\System32\\Sysprep\\Panther\\setuperr.log"
-            )
-        })
+        let what = if code == "0" {
+            "sysprep returned 0 but left no Sysprep_succeeded.tag".to_owned()
+        } else {
+            format!("sysprep stopped with exit code {code}")
+        };
+        Some(format!(
+            "{what}, so Windows wasn't shut down as sealed: its log is C:\\Windows\\System32\\Sysprep\\Panther\\setuperr.log"
+        ))
+    }
+
+    /// The last line the task wrote, for a wait that ran out.
+    pub fn last(&self) -> Option<&str> {
+        self.lines.last().map(String::as_str)
+    }
+
+    /// Linux: what the build's note adds (`note <text>`: cloud-init's first boot ended with an error, say), and how
+    /// long `boot` waited, in seconds (`waited <s>`).
+    pub fn notes(&self) -> Vec<String> {
+        let mut out: Vec<String> = self
+            .lines
+            .iter()
+            .filter_map(|l| l.strip_prefix("note ").map(str::to_owned))
+            .collect();
+        if let Some(s) = self.starts("waited ").and_then(|s| s.parse::<u64>().ok()) {
+            if s > 0 {
+                out.push(format!("it waited {s} s for the first boot's own work"));
+            }
+        }
+        out
     }
 
     /// What was done, in words, for the build's note.
@@ -289,6 +371,8 @@ pub fn facts(report: &Report) -> serde_json::Value {
     serde_json::json!({
         "cloudInit": report.cloud_init(),
         "vmTools": report.vm_tools(),
+        "bootWaitedSeconds": report.starts("waited ").and_then(|s| s.parse::<u64>().ok()),
+        "removed": report.lines.iter().filter_map(|l| l.strip_prefix("removed ")).collect::<Vec<_>>(),
     })
 }
 
@@ -296,19 +380,34 @@ pub fn facts(report: &Report) -> serde_json::Value {
 mod tests {
     use super::*;
 
+    /// A function's body in [`LINUX_SCRIPT`], from `name() {` to its closing line.
+    fn function(name: &str) -> &'static str {
+        let start = LINUX_SCRIPT.find(&format!("\n{name}() {{\n")).expect(name) + 1;
+        let end = LINUX_SCRIPT[start..].find("\n}\n").expect(name) + start;
+        &LINUX_SCRIPT[start..end]
+    }
+
+    /// The quoted pattern after `pgrep <flag> '` in `text`.
+    fn pgrep_pattern<'a>(text: &'a str, flag: &str) -> &'a str {
+        let at = text.find(&format!("pgrep {flag} '")).expect(flag) + flag.len() + 8;
+        let end = text[at..].find('\'').expect(flag) + at;
+        &text[at..end]
+    }
+
     #[test]
     fn the_linux_script_covers_every_step_and_says_each() {
         for step in [
             "timeout 600 systemctl is-system-running --wait",
             "timeout 600 cloud-init status --wait",
-            "pgrep -x 'apt|apt-get|dpkg|unattended-upgr'",
+            "say note \"cloud-init's first boot ended with status $rc\"",
             "rm -f /etc/cloud/cloud-init.disabled",
             "99-installer.cfg",
             "subiquity-disable-cloudinit-networking.cfg",
+            "rm -f \"$f\"; [ ! -e \"$f\" ] || return 1; say removed \"$f\"",
             "cloud-init clean --logs >/dev/null 2>&1 || return 1",
+            "[ ! -e /var/lib/cloud/seed ] || return 1",
             "[ ! -e /etc/cloud/cloud-init.disabled ] || return 1",
             "[ -z \"$(ls -A /var/lib/cloud/instances 2>/dev/null)\" ]",
-            "rm -rf /var/lib/cloud/seed",
             ": > /etc/machine-id || return 1",
             "rm -f /var/lib/dbus/machine-id",
             "ExecStart=/usr/bin/ssh-keygen -A",
@@ -320,7 +419,6 @@ mod tests {
             ": > /var/cache/debconf/passwords.dat",
             "journalctl --vacuum-time=1s",
             "truncate -s 0",
-            "/root/.bash_history /home/*/.bash_history",
             "/var/lib/dhcp/*.leases",
             "say done",
         ] {
@@ -342,6 +440,62 @@ mod tests {
     }
 
     #[test]
+    fn boot_waits_for_package_work_but_not_for_unattended_upgrades_shutdown_helper() {
+        // N1 of PR 100's second review. procps' pgrep -x matches `^(pattern)$` against the process name (at most 15
+        // characters), pgrep -f the pattern against the whole command line, both as extended regular expressions.
+        let packages = function("packages");
+        let by_name = regex::Regex::new(&format!("^({})$", pgrep_pattern(packages, "-x"))).unwrap();
+        let by_line = regex::Regex::new(pgrep_pattern(packages, "-f")).unwrap();
+        let busy = |name: &str, line: &str| by_name.is_match(name) || by_line.is_match(line);
+        // unattended-upgrades.service's helper, a python script whose name is cut to `unattended-upgr`, runs for as
+        // long as the system is up: never package work.
+        assert!(!busy(
+            "unattended-upgr",
+            "/usr/bin/python3 /usr/share/unattended-upgrades/unattended-upgrade-shutdown --wait-for-signal"
+        ));
+        assert!(!busy("sshd", "sshd: /usr/sbin/sshd -D [listener] 0 of 10-100 startups"));
+        assert!(!busy(
+            "apt.systemd.dai",
+            "/bin/sh /usr/lib/apt/apt.systemd.daily update"
+        ));
+        // Real package work.
+        for (name, line) in [
+            ("apt-get", "apt-get -qq -y update"),
+            ("apt", "apt install -y nginx"),
+            ("dpkg", "/usr/bin/dpkg --status-fd 23 --configure --pending"),
+            ("unattended-upgr", "/usr/bin/python3 /usr/bin/unattended-upgrade"),
+            (
+                "unattended-upgr",
+                "/usr/bin/python3 /usr/bin/unattended-upgrade --download-only",
+            ),
+        ] {
+            assert!(busy(name, line), "{line}");
+        }
+        let boot = function("boot");
+        assert!(boot.contains("while packages; do"), "{boot}");
+        assert!(boot.contains("say waited"), "{boot}");
+        assert!(!LINUX_SCRIPT.contains("unattended-upgr'"), "never by its cut name");
+    }
+
+    #[test]
+    fn each_linux_step_checks_what_it_removed() {
+        // N7 of PR 100's second review: a leftover is the step's failure, each file looked at on its own.
+        let history = function("history");
+        assert!(
+            history.contains("for f in /root/.bash_history /home/*/.bash_history; do"),
+            "{history}"
+        );
+        assert!(
+            history.contains("rm -f \"$f\" && [ ! -e \"$f\" ] || return 1"),
+            "{history}"
+        );
+        assert!(!history.contains("! ls"), "{history}");
+        let cloud = function("cloud_init");
+        assert!(cloud.contains("[ ! -e \"$f\" ] || return 1"), "{cloud}");
+        assert!(cloud.contains("[ ! -e /var/lib/cloud/seed ] || return 1"), "{cloud}");
+    }
+
+    #[test]
     fn the_windows_script_writes_a_task_that_runs_sysprep_after_the_winrm_run() {
         let script = windows_script();
         assert!(script.contains("Register-ScheduledTask -TaskName 'Remotely generalize'"));
@@ -349,10 +503,12 @@ mod tests {
         assert!(script.contains("-AllowStartIfOnBatteries -DontStopIfGoingOnBatteries"));
         assert!(
             script.starts_with("$ErrorActionPreference = 'Stop'\n"),
-            "a failed registration stops the run"
+            "a failed registration stops its line"
         );
-        assert!(script
-            .ends_with("if (Get-ScheduledTask -TaskName 'Remotely generalize') { 'remotely-generic scheduled' }\n"));
+        // N6 of PR 100's second review: `Stop` ends only the line that fails, so the last line looks at both.
+        assert!(script.ends_with(
+            "if ((Test-Path -LiteralPath 'C:\\Windows\\Temp\\remotely-generalize.ps1') -and (Get-ScheduledTask -TaskName 'Remotely generalize')) { 'remotely-generic scheduled' }\n"
+        ));
         // One statement a line, and no empty line (a WinRM console ends a statement there).
         assert!(!script.contains("\n\n"));
         let encoded = script.split('\'').nth(3).unwrap();
@@ -365,21 +521,36 @@ mod tests {
             "C:\\Windows\\Panther\\unattend-original.xml",
             "ConsoleHost_history.txt",
             "wevtutil cl",
-            "'/generalize', '/oobe', '/shutdown', '/quiet'",
             "-Wait -PassThru",
-            "if ($s.ExitCode -ne 0) { Say ('sysprep-failed '",
+            // N5: each removal said only once it is gone, else the task stops.
+            "if (Test-Path -LiteralPath $l.PSPath) { Stop-Here 'winrm-https' }",
+            "if (Test-Path -LiteralPath $cert) { Stop-Here 'winrm-certificate' }",
+            "if (Test-Path -LiteralPath $f) { Stop-Here ('answer-file ' + $f) }",
+            // N8: sysprep returns (/quit); sealed only on 0 and its tag; then the task shuts Windows down.
+            "'/generalize', '/oobe', '/quit', '/quiet'",
+            "Remove-Item -LiteralPath $tag",
+            "Say ('sysprep-exit ' + $s.ExitCode)",
+            "if (($s.ExitCode -ne 0) -or -not (Test-Path -LiteralPath $tag)) { Say ('sysprep-failed ' + $s.ExitCode); exit 1 }",
+            "Say ('after-sysprep ' + $f)",
+            "Say 'sealed'\nStop-Computer -Force\n",
         ] {
             assert!(body.contains(step), "{step}");
         }
+        assert!(!body.contains("/shutdown"));
         assert!(!body.contains("\n\n"));
         let unregister = body.find("Unregister-ScheduledTask").unwrap();
         let sysprep = body.find("Sysprep\\sysprep.exe").unwrap();
+        let sealed = body.find("Say 'sealed'").unwrap();
+        let removed = body.find("Say 'removed winrm-https'").unwrap();
         assert!(unregister < sysprep, "the task is gone before sysprep runs");
+        assert!(removed < sysprep && sysprep < sealed);
     }
 
     #[test]
     fn a_linux_report_is_whole_only_when_every_step_said_ok() {
-        let mut whole = String::from("remotely-generic cloud-init yes\n");
+        let mut whole = String::from("remotely-generic cloud-init yes\nremotely-generic waited 42\n");
+        whole.push_str("remotely-generic note cloud-init's first boot ended with status 2\n");
+        whole.push_str("remotely-generic removed /etc/cloud/cloud.cfg.d/99-installer.cfg\n");
         for step in LINUX_STEPS {
             whole.push_str(&format!("remotely-generic ok {step}\n"));
         }
@@ -393,6 +564,13 @@ mod tests {
             "{}",
             report.done_text()
         );
+        assert_eq!(
+            report.notes(),
+            [
+                "cloud-init's first boot ended with status 2",
+                "it waited 42 s for the first boot's own work"
+            ]
+        );
         // A failed step: the build fails, naming it.
         let failed = Report::parse(
             "remotely-generic ok boot\nremotely-generic ok cloud_init\nremotely-generic failed machine_id\n",
@@ -405,21 +583,41 @@ mod tests {
             "{:?}",
             short.linux_problems()
         );
-        assert_eq!(facts(&report), serde_json::json!({"cloudInit": true, "vmTools": false}));
+        assert_eq!(
+            facts(&report),
+            serde_json::json!({
+                "cloudInit": true,
+                "vmTools": false,
+                "bootWaitedSeconds": 42,
+                "removed": ["/etc/cloud/cloud.cfg.d/99-installer.cfg"],
+            })
+        );
     }
 
     #[test]
-    fn a_windows_report_needs_the_listener_gone_and_sysprep_started_and_only_an_error_code_fails() {
-        let windows = Report::parse(
-            "\u{1b}[0mremotely-generic started\r\nremotely-generic removed winrm-https\r\nremotely-generic sysprep\r\n",
+    fn a_windows_report_is_sealed_only_after_sysprep_returned_0_and_any_failure_says_why() {
+        let sealed = Report::parse(
+            "\u{1b}[0mremotely-generic started\r\nremotely-generic removed winrm-https\r\nremotely-generic sysprep\r\nremotely-generic sysprep-exit 0\r\nremotely-generic sealed\r\n",
         );
-        assert!(windows.windows_missing().is_empty());
-        assert_eq!(windows.sysprep_failed(), None);
+        assert!(sealed.windows_missing().is_empty());
+        assert_eq!(sealed.windows_failure(), None);
         let early = Report::parse("remotely-generic started\r\n");
-        assert_eq!(early.windows_missing(), ["removed winrm-https", "sysprep"]);
-        let zero = Report::parse("remotely-generic sysprep\r\nremotely-generic sysprep-failed 0\r\n");
-        assert_eq!(zero.sysprep_failed(), None, "0 is sysprep's own success");
+        assert_eq!(early.windows_missing(), ["removed winrm-https", "sysprep", "sealed"]);
+        // A power-off while sysprep runs (N8): sysprep started, never sealed.
+        let cut = Report::parse("remotely-generic removed winrm-https\r\nremotely-generic sysprep\r\n");
+        assert_eq!(cut.windows_missing(), ["sealed"]);
+        assert_eq!(cut.last(), Some("sysprep"));
+        // With /quit any sysprep-failed is sysprep's own: a code, or 0 without its tag.
         let failed = Report::parse("remotely-generic sysprep\r\nremotely-generic sysprep-failed 1\r\n");
-        assert!(failed.sysprep_failed().unwrap().contains("exit code 1"));
+        assert!(failed.windows_failure().unwrap().contains("exit code 1"));
+        let untagged = Report::parse("remotely-generic sysprep\r\nremotely-generic sysprep-failed 0\r\n");
+        assert!(untagged.windows_failure().unwrap().contains("no Sysprep_succeeded.tag"));
+        // A removal that didn't go stops the task before sysprep (N5).
+        let kept = Report::parse("remotely-generic started\r\nremotely-generic failed winrm-certificate\r\n");
+        let why = kept.windows_failure().unwrap();
+        assert!(
+            why.contains("certificate") && why.contains("didn't run sysprep"),
+            "{why}"
+        );
     }
 }

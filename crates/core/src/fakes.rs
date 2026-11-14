@@ -1280,6 +1280,9 @@ pub struct FakeVirtualBox {
     /// VM-04, VM-21: linked clones: (golden VM, its snapshot's UUID, the clone), as `clonevm --options=Link` leaves
     /// them; `media` reads them as VirtualBox's media list would show them.
     links: Mutex<Vec<(String, String, String)>>,
+    /// VM-30: VMs whose session lock VBoxHeadless still holds a moment after they powered off: how many more
+    /// VBoxManage changes on each are refused as locked.
+    held_sessions: Mutex<HashMap<String, u32>>,
 }
 
 /// The value after `--name` in a VBoxManage call.
@@ -1558,6 +1561,12 @@ impl FakeVirtualBox {
     /// VM-21: the VM named `name`, if one is registered.
     pub fn vm_named(&self, name: &str) -> Option<VboxVmInfo> {
         locks::lock(&self.vms).iter().find(|vm| vm.name == name).cloned()
+    }
+
+    /// VM-30: the next `changes` VBoxManage changes on the VM are refused as VirtualBox refuses them while
+    /// VBoxHeadless still holds its session lock (a moment after the guest powered off).
+    pub fn hold_session(&self, uuid: &str, changes: u32) {
+        locks::lock(&self.held_sessions).insert(uuid.to_owned(), changes);
     }
 
     /// VM-30: the VM's process ends as a crash ends it (`VMState="aborted"`), not as a shutdown does.
@@ -2570,6 +2579,17 @@ impl VirtualBoxAdapter for FakeVirtualBox {
     async fn change(&self, args: Vec<String>, _timeout: Duration) -> Result<String> {
         self.installed()?;
         self.record(format!("change {}", args.join(" ")));
+        if let Some(uuid) = args.get(1) {
+            let mut held = locks::lock(&self.held_sessions);
+            if let Some(left) = held.get_mut(uuid).filter(|n| **n > 0) {
+                *left -= 1;
+                let name = self.find(uuid).map(|vm| vm.name).unwrap_or_default();
+                return Err(Self::failed(
+                    args.first().map(String::as_str).unwrap_or_default(),
+                    &format!("The machine '{name}' is already locked for a session (or being unlocked)"),
+                ));
+            }
+        }
         self.apply_change(&args)
     }
 

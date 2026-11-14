@@ -66,9 +66,11 @@ pub struct LinuxGuest<'a> {
 /// VM-30: how Linux's generalization reaches a build VM (tests give their own).
 #[async_trait]
 pub trait GuestShell: Send + Sync {
-    /// Runs `script` as root (sudo) on the guest and returns its stdout, then `power_off` as root on the same
-    /// connection without waiting for its answer (the guest's sshd stops, and its host keys are gone, so a new
-    /// connection couldn't sign in).
+    /// Runs `script` as root (sudo) on the guest and returns its stdout. Then, only when that report says every step
+    /// went ([`Report::linux_problems`] is empty), `power_off` as root on the same connection without waiting for its
+    /// answer (the guest's sshd stops, and its host keys are gone, so a new connection couldn't sign in). A VM whose
+    /// steps didn't all go is left running, for a look and so the work a step waited for isn't cut short (N4 of
+    /// PR 100's second review).
     async fn linux(&self, guest: &LinuxGuest<'_>, script: &str, power_off: &str) -> Result<String>;
 }
 
@@ -157,7 +159,10 @@ impl GuestShell for SshGuestShell {
             ))),
             Err(err) => Err(err),
         };
-        if out.is_ok() {
+        let whole = out
+            .as_ref()
+            .is_ok_and(|stdout| Report::parse(stdout).linux_problems().is_empty());
+        if whole {
             // Its answer may never come: the guest goes down.
             let _ = tokio::time::timeout(Duration::from_secs(15), connected.run_sudo(power_off, password, 1024)).await;
         }
@@ -285,12 +290,22 @@ impl Deployer {
             };
             notes.push(format!("installed, reached at {}", address.0));
             // Q2 of PR 100's review: the seed (the answer file's hashes, or Windows' one-time password, already
-            // replaced by the vault's) leaves the VM before anything is made generic.
-            notes.push(self.seed_out(spec, &key, &m).await);
+            // replaced by the vault's) leaves the VM before anything is made generic. N3: Windows isn't generalized
+            // with its answer file still attached (Setup's implicit search reads a removable drive's).
+            match self.seed_out(spec, &key, &m).await {
+                Ok(said) => notes.push(said),
+                Err(said) if build.os.windows() => {
+                    return Err(CoreError::InvalidInput(format!(
+                        "{said}, so Windows wasn't generalized with its answer file attached"
+                    )))
+                }
+                Err(said) => notes.push(format!("{said}: it goes once the VM is off")),
+            }
             let report = self
                 .make_generic(ctx, build, vm, &m, &address, approved, progress, token)
                 .await?;
             notes.push(format!("made generic: {}", report.done_text()));
+            notes.extend(report.notes());
             if build.os != crate::golden::BuildOs::Windows {
                 if report.cloud_init() == Some(false) {
                     notes.push("it has no cloud-init: its clones keep this build's hostname, users and keys".into());
@@ -400,22 +415,21 @@ impl Deployer {
     }
 
     /// Q2 of PR 100's review: the seed out of its drive (G6's eject: Workstation's disconnected, VirtualBox's emptied)
-    /// and its file emptied (Workstation's drive keeps an empty disc until [`Self::seal`] removes the drive). Says what
-    /// it did; a seed it couldn't take out still goes when the VM is off (the seal deletes the file and the drive).
-    async fn seed_out(&self, spec: &DeploySpec, key: &str, m: &InstallMade) -> String {
+    /// and its file emptied (Workstation's drive keeps an empty disc until [`Self::seal`] removes the drive). `Ok`
+    /// with what it did once the seed is out of its drive (a file not emptied yet goes with the seal); `Err` while the
+    /// drive still holds it.
+    async fn seed_out(&self, spec: &DeploySpec, key: &str, m: &InstallMade) -> std::result::Result<String, String> {
         let workstation = spec.hypervisor == Hypervisor::Vmware;
         let ejected = match &m.seed_drive {
             Some(drive) => self.eject(key, drive, &m.seed).await,
             None => Ok(()),
         };
         match ejected {
-            Err(err) => {
-                format!("its seed couldn't be taken out of its drive while it runs ({err}): it goes once the VM is off")
-            }
-            Ok(()) => match empty_link(&m.seed, workstation).await {
+            Err(err) => Err(format!("its seed couldn't be taken out of its drive ({err})")),
+            Ok(()) => Ok(match empty_link(&m.seed, workstation).await {
                 Ok(()) => "its seed (the answer file) is taken out and emptied".into(),
                 Err(err) => format!("its seed is taken out, but its file couldn't be emptied yet ({err})"),
-            },
+            }),
         }
     }
 
@@ -484,18 +498,25 @@ impl Deployer {
                     },
                 };
                 drop(guest);
-                // A3 of PR 100's review: every step must say ok, else the build fails and the VM stays as it is.
+                // A3 of PR 100's review: every step must say ok, else the build fails and the VM stays as it is,
+                // running (N4: the shell powers off only a VM whose steps all went).
                 let report = Report::parse(&out);
                 let problems = report.linux_problems();
                 if !problems.is_empty() {
                     let done = report.done_text();
+                    let said = report.notes();
                     return Err(CoreError::InvalidInput(format!(
-                        "it wasn't made generic: {}{}",
+                        "it wasn't made generic: {}{}{}; it is left running, so the work a step waited for goes on",
                         problems.join(", "),
                         if done.is_empty() {
                             String::new()
                         } else {
                             format!(" (done before: {done})")
+                        },
+                        if said.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" ({})", said.join("; "))
                         }
                     )));
                 }
@@ -599,9 +620,10 @@ impl Deployer {
     }
 
     /// Waits for the guest to power itself off once it is generic, at most the build's `seal_minutes`. Windows'
-    /// task writes its steps to COM1: a sysprep that stops with an error fails the build at once, and (A4 of PR 100's
-    /// review) a power-off counts as sysprep's only once the task said it removed the build's listener and started
-    /// sysprep ([`generic::WINDOWS_STEPS`]).
+    /// task writes its steps to COM1: a task that stopped (a removal that didn't go, or sysprep's failure) fails the
+    /// build at once, and (A4, N8 of PR 100's reviews) a power-off counts as sysprep's only once the task said it
+    /// removed the build's listener, ran sysprep and found it sealed ([`generic::WINDOWS_STEPS`]): a power-off while
+    /// sysprep runs isn't.
     async fn wait_powered_off(
         &self,
         build: &BuildSpec,
@@ -616,14 +638,16 @@ impl Deployer {
         let deadline = tokio::time::Instant::now() + limit;
         let mut at = 0u64;
         let mut seen = String::new();
+        let mut report = Report::default();
         loop {
             let off = self.powered_off(build.deploy.hypervisor, key).await?;
             if build.os.windows() {
                 // Read after the power state, so lines the task wrote before Windows went down are in.
                 let bytes = install::read_to_end_now(&m.serial, &mut at).await;
                 seen.push_str(&crate::deploy::watch::strip_escapes(&bytes));
-                let report = Report::parse(&seen);
-                if let Some(failed) = report.sysprep_failed() {
+                report = Report::parse(&seen);
+                // With /quit, sysprep's failure is its own (no shutdown ends it first), so it comes first.
+                if let Some(failed) = report.windows_failure() {
                     return Err(CoreError::InvalidInput(failed));
                 }
                 let missing = report.windows_missing();
@@ -633,23 +657,37 @@ impl Deployer {
                         missing.join("' and '")
                     )));
                 }
-                if report.has("sysprep") {
-                    progress(92.0, "sysprep runs (it shuts Windows down)");
+                if report.has("sealed") {
+                    progress(94.0, "sealed: the task shuts Windows down");
+                } else if report.has("sysprep") {
+                    progress(92.0, "sysprep runs");
                 }
             }
             if off {
                 return Ok(());
             }
             if tokio::time::Instant::now() >= deadline {
-                return Err(CoreError::InvalidInput(format!(
-                    "it didn't shut down within {} minutes of being made generic{}",
-                    limit.as_secs().div_ceil(60),
-                    if build.os.windows() {
-                        ": sysprep's log is C:\\Windows\\System32\\Sysprep\\Panther\\setupact.log"
-                    } else {
-                        ""
+                let minutes = limit.as_secs().div_ceil(60);
+                return Err(CoreError::InvalidInput(if !build.os.windows() {
+                    format!("it didn't shut down within {minutes} minutes of being made generic")
+                } else {
+                    // N6 of PR 100's second review: worded by what COM1 showed last.
+                    match report.last() {
+                        None => format!(
+                            "the task that runs sysprep wrote nothing to COM1 within {minutes} minutes: see Task Scheduler's history for '{}'",
+                            generic::WINDOWS_TASK
+                        ),
+                        Some("sysprep") => format!(
+                            "sysprep didn't finish within {minutes} minutes: its log is C:\\Windows\\System32\\Sysprep\\Panther\\setupact.log"
+                        ),
+                        Some("sealed") => format!(
+                            "sysprep finished, but Windows didn't shut down within {minutes} minutes"
+                        ),
+                        Some(last) => format!(
+                            "it didn't shut down within {minutes} minutes; the task's last word on COM1 was '{last}'"
+                        ),
                     }
-                )));
+                }));
             }
             tokio::select! {
                 _ = token.cancelled() => return Err(CoreError::Cancelled),
@@ -713,10 +751,12 @@ impl Deployer {
     }
 
     /// The powered-off VM keeps nothing of its install: the ISO copy's and the seed's drives out of its settings, its
-    /// serial port off, VirtualBox's NAT rule gone, and the seed, the ISO link and the serial log deleted. Every step is
-    /// tried; `Err` (A6 of PR 100's review) when a change to the VM's settings didn't go, with what it couldn't do, so
-    /// the build stops before the snapshot. A file that couldn't be deleted is only noted: the settings no longer
-    /// name it, so no clone copies it.
+    /// serial port off, VirtualBox's NAT rule gone, and the seed, the ISO link and the serial log deleted. Every change
+    /// to its settings is tried (VirtualBox's asked again while VBoxHeadless still holds the VM's session lock just
+    /// after the power-off: N2 of PR 100's second review); `Err` (A6) when one didn't go, with what it couldn't do, so
+    /// the build stops before the snapshot, and then the files stay, since the settings still name them and the serial
+    /// log is what to look at. A file that couldn't be deleted after the settings went is only noted: the settings no
+    /// longer name it, so no clone copies it.
     async fn seal(
         &self,
         job_id: Uuid,
@@ -753,7 +793,7 @@ impl Deployer {
                 for drive in m.iso_drive.iter().chain(&m.seed_drive) {
                     if let Drive::VirtualBox(controller, port) = drive {
                         let args = vb::attach_named(key, controller, *port, 0, true, "none");
-                        if let Err(err) = self.vbox(args, SHORT).await {
+                        if let Err(err) = self.vbox_unlocked(args).await {
                             settings_failed = true;
                             out.push(format!("its drive {controller} port {port} stays ({err})"));
                         }
@@ -764,10 +804,7 @@ impl Deployer {
                     let _ = self.vbox(close, SHORT).await;
                 }
                 if let Err(err) = self
-                    .vbox(
-                        vec!["modifyvm".into(), key.into(), "--uart1".into(), "off".into()],
-                        SHORT,
-                    )
+                    .vbox_unlocked(vec!["modifyvm".into(), key.into(), "--uart1".into(), "off".into()])
                     .await
                 {
                     settings_failed = true;
@@ -781,7 +818,7 @@ impl Deployer {
                         "delete".into(),
                         crate::deploy::install::NAT_RULE.into(),
                     ];
-                    if let Err(err) = self.vbox(rule, SHORT).await {
+                    if let Err(err) = self.vbox_unlocked(rule).await {
                         settings_failed = true;
                         out.push(format!(
                             "its NAT rule {} stays ({err})",
@@ -790,6 +827,13 @@ impl Deployer {
                     }
                 }
             }
+        }
+        if settings_failed {
+            out.push(format!(
+                "its seed, its ISO link and its serial log {} stay with it, as its settings still name them",
+                m.serial.display()
+            ));
+            return Err(out);
         }
         for file in [&m.seed, &m.iso, &m.serial] {
             if let Err(err) = tokio::fs::remove_file(file).await {
@@ -802,10 +846,42 @@ impl Deployer {
             }
         }
         let _ = tokio::fs::remove_dir(&m.seed_folder).await;
-        if settings_failed {
-            Err(out)
-        } else {
-            Ok(out)
+        Ok(out)
+    }
+
+    /// A VBoxManage change asked again while VirtualBox says the VM's session lock is held (VBoxHeadless lets go of
+    /// it a moment after the guest powered off: N2 of PR 100's second review).
+    async fn vbox_unlocked(&self, args: Vec<String>) -> Result<String> {
+        let mut waits = SESSION_RETRIES.iter();
+        loop {
+            match self.vbox(args.clone(), SHORT).await {
+                Err(err) if session_locked(&err) => match waits.next() {
+                    Some(wait) => tokio::time::sleep(*wait).await,
+                    None => return Err(err),
+                },
+                other => return other,
+            }
         }
     }
+}
+
+/// How long to wait before each new try while VirtualBox holds the VM's session lock.
+const SESSION_RETRIES: [Duration; 5] = [
+    Duration::from_millis(200),
+    Duration::from_millis(500),
+    Duration::from_secs(1),
+    Duration::from_secs(2),
+    Duration::from_secs(4),
+];
+
+/// VirtualBox's answer while another process holds the VM's session lock, or is letting go of it.
+fn session_locked(err: &CoreError) -> bool {
+    if crate::adapters::host_networks::vbox_busy(err) {
+        return true;
+    }
+    let CoreError::VboxManage { message, .. } = err else {
+        return false;
+    };
+    let message = message.to_ascii_lowercase();
+    message.contains("already locked for a session") || message.contains("is already locked by a session")
 }

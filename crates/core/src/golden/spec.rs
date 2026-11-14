@@ -424,6 +424,17 @@ impl BuildSpec {
     /// Checked on the bus, whoever built it: one VM installed from the config as G6 installs it, with no session,
     /// console or snapshot of its own, agreeing with the recipe.
     pub fn validate(&self) -> Result<()> {
+        // A2 of PR 100's review, again on the bus (before the deploy's own checks, so it says why): a fixed address
+        // would go into every clone.
+        let fixed = self
+            .deploy
+            .vms
+            .iter()
+            .any(|vm| vm.install.as_ref().is_some_and(|i| i.ip.is_some()));
+        let pool = self.deploy.install.as_ref().is_some_and(|i| i.pool.is_some());
+        if pool || self.recipe.address_pool_id.is_some() || fixed {
+            return invalid("A build's VM takes its address by DHCP: no address pool or fixed address.");
+        }
         self.deploy.validate()?;
         crate::catalog::images::clean_image_name(&self.image_name)?;
         if self.deploy.vms.len() != 1 {
@@ -726,6 +737,26 @@ mod tests {
             "own key",
         );
         bad(&|s| s.os = BuildOs::Windows, "system");
+        // A2: no address pool or fixed address, even in a command the dialog never made.
+        bad(
+            &|s| {
+                s.deploy.install.as_mut().unwrap().pool = Some(crate::deploy::spec::PoolRef {
+                    id: Uuid::from_u128(7),
+                    name: "lab".into(),
+                })
+            },
+            "by DHCP",
+        );
+        bad(&|s| s.recipe.address_pool_id = Some(Uuid::from_u128(7)), "by DHCP");
+        bad(
+            &|s| {
+                s.deploy.vms[0].install = Some(crate::deploy::spec::VmInstall {
+                    ip: Some("192.0.2.10".into()),
+                    values: Default::default(),
+                })
+            },
+            "by DHCP",
+        );
         // B3 of PR 100's review: the old versions it deletes are targets, only with keep, each older, each once.
         let old = |n: u32, key: &str| PruneVm {
             number: n,

@@ -98,7 +98,7 @@ async fn vault_password(core: &Core, value: &str) -> SecretId {
         .add(
             &core.ctx(),
             SecretKind::Password,
-            "build admin",
+            &format!("build admin {}", &Uuid::new_v4().simple().to_string()[..6]),
             SecretString::new(value),
         )
         .await
@@ -298,6 +298,8 @@ enum GuestEnd {
     Hangs,
     /// It shuts down, and then Workstation can't write its settings (A6).
     PowersOffSettingsLocked,
+    /// VirtualBox: it shuts down, and VBoxHeadless holds its session lock for this many more changes (N2).
+    PowersOffSessionHeld(u32),
 }
 
 /// The Linux build VM as the test plays it: the generalization's report, then the guest powers itself off.
@@ -361,13 +363,17 @@ impl GuestShell for FakeGuest {
             gate.notified().await;
         }
         let end = *self.end.lock().unwrap();
+        let report = self.report.lock().unwrap().clone();
+        // N4 of PR 100's second review: as SshGuestShell, the power-off only after every step went.
+        let whole = generic::Report::parse(&report).linux_problems().is_empty();
         match end {
             GuestEnd::Hangs => tokio::time::sleep(Duration::from_secs(3600)).await,
             GuestEnd::Aborts => {
                 let vm = self.virtualbox.vm_named(guest.vm).expect("a VirtualBox build VM");
                 self.virtualbox.abort(&vm.uuid);
             }
-            GuestEnd::PowersOff | GuestEnd::PowersOffSettingsLocked => {
+            _ if !whole => {}
+            GuestEnd::PowersOff | GuestEnd::PowersOffSettingsLocked | GuestEnd::PowersOffSessionHeld(_) => {
                 if workstation {
                     self.vmware
                         .power(&vmx, PowerOp::Stop { mode: StopMode::Hard })
@@ -381,10 +387,13 @@ impl GuestShell for FakeGuest {
                         .power(&vm.uuid, PowerOp::Stop { mode: StopMode::Hard })
                         .await
                         .unwrap();
+                    if let GuestEnd::PowersOffSessionHeld(changes) = end {
+                        self.virtualbox.hold_session(&vm.uuid, changes);
+                    }
                 }
             }
         }
-        Ok(self.report.lock().unwrap().clone())
+        Ok(report)
     }
 }
 
@@ -773,8 +782,18 @@ async fn a_debian_build_on_virtualbox_takes_out_its_drives_serial_port_and_nat_r
         target: BuildTarget::New { name: "Deb box".into() },
         recipe: recipe(&iso, config, Hypervisor::VirtualBox, &lab.vms, "gp.medium"),
     };
+    // N2 of PR 100's second review: VBoxHeadless still holds the session lock for a moment after the power-off.
+    *lab.guest.end.lock().unwrap() = GuestEnd::PowersOffSessionHeld(2);
     let (_, status, notes) = build(&lab, &request, debian_lines("deb-box-v1")).await;
     assert_eq!(status, JobStatus::Succeeded, "{notes}");
+    // The seal's two drives out (`--medium none`), the first asked twice more while the lock was held.
+    let detaches = lab
+        .virtualbox
+        .calls()
+        .iter()
+        .filter(|c| c.starts_with("change storageattach") && c.contains("--medium none"))
+        .count();
+    assert_eq!(detaches, 4, "the seal asked again");
     let vm = lab.virtualbox.vm_named("deb-box-v1").expect("the version's VM");
     assert_eq!(lab.virtualbox.power_state(&vm.uuid), PowerState::NotRunning);
     assert_eq!(lab.virtualbox.snapshot_names(&vm.uuid), ["Remotely image v1"]);
@@ -959,10 +978,21 @@ struct FakeWinrm {
     vmware: Arc<FakeVmware>,
     sysprep: Arc<Mutex<Option<PathBuf>>>,
     task_says: Arc<Mutex<Vec<&'static str>>>,
+    /// Whether the task's Windows goes off after its lines: by itself once `sealed`, or as a hard power-off.
+    task_powers_off: Arc<Mutex<Option<bool>>>,
+    /// Q2, N3: whether the build VM's seed was out of its drive, its answer file gone, when the task was registered.
+    seed_out_at_task: Arc<Mutex<Vec<bool>>>,
 }
 
 /// What the real task writes to COM1 when every step goes.
-const TASK_SAYS: [&str; 4] = ["started", "removed winrm-https", "cleared event-logs", "sysprep"];
+const TASK_SAYS: [&str; 6] = [
+    "started",
+    "removed winrm-https",
+    "cleared event-logs",
+    "sysprep",
+    "sysprep-exit 0",
+    "sealed",
+];
 
 struct FakeWinrmSession {
     scripts: Arc<Mutex<Vec<String>>>,
@@ -970,6 +1000,8 @@ struct FakeWinrmSession {
     vmware: Arc<FakeVmware>,
     sysprep: Arc<Mutex<Option<PathBuf>>>,
     task_says: Arc<Mutex<Vec<&'static str>>>,
+    task_powers_off: Arc<Mutex<Option<bool>>>,
+    seed_out_at_task: Arc<Mutex<Vec<bool>>>,
 }
 
 #[async_trait]
@@ -1007,6 +1039,8 @@ impl WinrmAdapter for FakeWinrm {
             vmware: Arc::clone(&self.vmware),
             sysprep: Arc::clone(&self.sysprep),
             task_says: Arc::clone(&self.task_says),
+            task_powers_off: Arc::clone(&self.task_powers_off),
+            seed_out_at_task: Arc::clone(&self.seed_out_at_task),
         }))
     }
 }
@@ -1027,6 +1061,19 @@ impl ExecSession for FakeWinrmSession {
             if let Some(vmx) = vmx {
                 let (vmware, password) = (Arc::clone(&self.vmware), Arc::clone(&self.password));
                 let says = self.task_says.lock().unwrap().clone();
+                let stem = vmx.file_stem().unwrap().to_string_lossy().into_owned();
+                let seed = vmx.with_file_name("install-seed").join(format!("{stem}-seed.iso"));
+                let answers_gone = std::fs::read(&seed).map_or(true, |b| !holds(&b, b"unattend"));
+                let ejected = vmware
+                    .calls()
+                    .iter()
+                    .any(|c| c.starts_with("vmrun disconnectNamedDevice") && c.contains(&stem));
+                self.seed_out_at_task.lock().unwrap().push(answers_gone && ejected);
+                let powers_off = self
+                    .task_powers_off
+                    .lock()
+                    .unwrap()
+                    .unwrap_or_else(|| says.contains(&"sealed"));
                 tokio::spawn(async move {
                     tokio::time::sleep(Duration::from_millis(100)).await;
                     let stem = vmx.file_stem().unwrap().to_string_lossy().into_owned();
@@ -1034,11 +1081,13 @@ impl ExecSession for FakeWinrmSession {
                     for line in says {
                         append(&serial, format!("remotely-generic {line}\r\n").as_bytes());
                     }
-                    *password.lock().unwrap() = None;
-                    vmware
-                        .power(&vmx, PowerOp::Stop { mode: StopMode::Hard })
-                        .await
-                        .unwrap();
+                    if powers_off {
+                        *password.lock().unwrap() = None;
+                        vmware
+                            .power(&vmx, PowerOp::Stop { mode: StopMode::Hard })
+                            .await
+                            .unwrap();
+                    }
                 });
             }
             "remotely-generic scheduled\r\n".to_owned()
@@ -1121,6 +1170,8 @@ async fn a_windows_image_is_sysprepped_and_its_clones_get_g6s_one_time_password_
         vmware: Arc::clone(&lab.vmware),
         sysprep: Arc::new(Mutex::new(Some(lab.vms.join("winsrv-v1").join("winsrv-v1.vmx")))),
         task_says: Arc::new(Mutex::new(TASK_SAYS.to_vec())),
+        task_powers_off: Arc::default(),
+        seed_out_at_task: Arc::default(),
     });
     core.set_deploy_winrm(winrm.clone());
     let pw = vault_password(core, &lab.secret).await;
@@ -1158,6 +1209,12 @@ async fn a_windows_image_is_sysprepped_and_its_clones_get_g6s_one_time_password_
     let signins = winrm.signins.lock().unwrap().clone();
     assert!(signins.len() >= 3, "{signins:?}");
     assert_eq!(signins.last().unwrap().1, lab.secret);
+    // Q2, N3 of PR 100's reviews: the seed was out of its drive, its answer file gone, before the task was made.
+    assert_eq!(*winrm.seed_out_at_task.lock().unwrap(), [true]);
+    assert!(
+        notes.contains("sealed") || notes.contains("snapshot 'Remotely image v1' taken"),
+        "{notes}"
+    );
     let scripts = winrm.scripts.lock().unwrap().clone();
     assert!(scripts
         .last()
@@ -1241,12 +1298,19 @@ async fn a_windows_image_is_sysprepped_and_its_clones_get_g6s_one_time_password_
     let _ = std::fs::remove_dir_all(&lab.dir);
 }
 
-/// A Windows build up to its sysprep task, whose COM1 lines are `task_says`. Returns the job's status and notes.
-async fn windows_build(lab: &Lab, vm: &str, name: &str, task_says: Vec<&'static str>) -> (JobStatus, String) {
+/// A Windows build up to its sysprep task, whose COM1 lines are `task_says` (and whose Windows goes off as
+/// `powers_off` says: `None`, by itself once `sealed`). Returns the job's status, its notes and the fake WinRM.
+async fn windows_build(
+    lab: &Lab,
+    vm: &str,
+    name: &str,
+    task_says: Vec<&'static str>,
+    powers_off: Option<bool>,
+) -> (JobStatus, String, Arc<FakeWinrm>) {
     let core = &lab.core;
     let ctx = &core.ctx();
     let vmx = lab.vms.join(vm).join(format!("{vm}.vmx"));
-    core.set_deploy_winrm(Arc::new(FakeWinrm {
+    let winrm = Arc::new(FakeWinrm {
         fingerprint: FINGERPRINT.into(),
         password: Arc::default(),
         signins: Mutex::default(),
@@ -1254,7 +1318,10 @@ async fn windows_build(lab: &Lab, vm: &str, name: &str, task_says: Vec<&'static 
         vmware: Arc::clone(&lab.vmware),
         sysprep: Arc::new(Mutex::new(Some(vmx))),
         task_says: Arc::new(Mutex::new(task_says)),
-    }));
+        task_powers_off: Arc::new(Mutex::new(powers_off)),
+        seed_out_at_task: Arc::default(),
+    });
+    core.set_deploy_winrm(winrm.clone());
     let pw = vault_password(core, &lab.secret).await;
     let config = config_from(core, "starter.windows-server-2025", pw, None, |_| {}).await;
     let iso = iso_image(
@@ -1279,21 +1346,23 @@ async fn windows_build(lab: &Lab, vm: &str, name: &str, task_says: Vec<&'static 
     let job = approve(core, &approval).await;
     let status = wait(core, job).await;
     play.await.unwrap();
-    (status, notes_of(core, job).await)
+    (status, notes_of(core, job).await, winrm)
 }
 
-#[tokio::test]
-async fn a_windows_build_vm_that_goes_off_before_its_task_started_sysprep_isnt_sealed() {
-    // A4 of PR 100's review: a power-off counts as sysprep's only once the task said it removed the build's WinRM
-    // listener and started sysprep.
-    let lab = lab("golden-win-early", &["early-v1"]).await;
-    let (status, notes) = windows_build(&lab, "early-v1", "Early", vec!["started"]).await;
-    assert_eq!(status, JobStatus::Failed, "{notes}");
-    assert!(
-        notes.contains("went off before the task that runs sysprep said 'removed winrm-https' and 'sysprep'"),
-        "{notes}"
-    );
-    let vmx = lab.vms.join("early-v1").join("early-v1.vmx");
+/// Whether the fake Workstation runs the VM now.
+async fn running(lab: &Lab, vmx: &Path) -> bool {
+    let wanted = vmx.display().to_string().to_lowercase();
+    lab.vmware
+        .list_running()
+        .await
+        .unwrap()
+        .iter()
+        .any(|p| p.display().to_string().to_lowercase() == wanted)
+}
+
+/// No snapshot on the VM and no image of that name: nothing was registered.
+async fn nothing_registered(lab: &Lab, vm: &str, image: &str) {
+    let vmx = lab.vms.join(vm).join(format!("{vm}.vmx"));
     assert!(lab.vmware.snapshot_names(&vmx.display().to_string()).is_empty());
     let ctx = &lab.core.ctx();
     assert!(lab
@@ -1303,13 +1372,79 @@ async fn a_windows_build_vm_that_goes_off_before_its_task_started_sysprep_isnt_s
         .await
         .unwrap()
         .iter()
-        .all(|i| i.name != "Early"));
+        .all(|i| i.name != image));
+}
+
+#[tokio::test]
+async fn a_windows_build_vm_that_goes_off_before_sysprep_sealed_it_isnt_sealed() {
+    // A4 of PR 100's review: a power-off before the task removed the build's listener and started sysprep.
+    let lab = lab("golden-win-early", &["early-v1", "cut-v1"]).await;
+    let (status, notes, _) = windows_build(&lab, "early-v1", "Early", vec!["started"], Some(true)).await;
+    assert_eq!(status, JobStatus::Failed, "{notes}");
+    assert!(
+        notes.contains(
+            "went off before the task that runs sysprep said 'removed winrm-https' and 'sysprep' and 'sealed'"
+        ),
+        "{notes}"
+    );
+    nothing_registered(&lab, "early-v1", "Early").await;
+    // N8 of PR 100's second review: a hard power-off while sysprep runs (after its line, before `sealed`) isn't
+    // sysprep's either.
+    let cut = vec!["started", "removed winrm-https", "cleared event-logs", "sysprep"];
+    let (status, notes, _) = windows_build(&lab, "cut-v1", "Cut", cut, Some(true)).await;
+    assert_eq!(status, JobStatus::Failed, "{notes}");
+    assert!(notes.contains("said 'sealed': it isn't sealed"), "{notes}");
+    nothing_registered(&lab, "cut-v1", "Cut").await;
+    let _ = std::fs::remove_dir_all(&lab.dir);
+}
+
+#[tokio::test]
+async fn a_windows_build_whose_sysprep_fails_or_whose_seed_stays_in_fails_and_leaves_windows_running() {
+    let lab = lab("golden-win-fail", &["failed-v1", "stuck-v1"]).await;
+    // N8: sysprep /quit returned 1: the task says so and doesn't shut Windows down; the build fails at once.
+    let says = vec![
+        "started",
+        "removed winrm-https",
+        "sysprep",
+        "sysprep-exit 1",
+        "sysprep-failed 1",
+    ];
+    let (status, notes, winrm) = windows_build(&lab, "failed-v1", "Failed", says, None).await;
+    assert_eq!(status, JobStatus::Failed, "{notes}");
+    assert!(notes.contains("sysprep stopped with exit code 1"), "{notes}");
+    assert!(
+        running(&lab, &lab.vms.join("failed-v1").join("failed-v1.vmx")).await,
+        "left running for a look"
+    );
+    // Q2: the seed was out of its drive, its answer file gone, before the task was registered.
+    assert_eq!(*winrm.seed_out_at_task.lock().unwrap(), [true]);
+    nothing_registered(&lab, "failed-v1", "Failed").await;
+
+    // N3: a seed that won't leave its drive: no task, no sysprep with the answer file attached.
+    lab.vmware.set_failing("disconnectNamedDevice", true);
+    let (status, notes, winrm) = windows_build(&lab, "stuck-v1", "Stuck", TASK_SAYS.to_vec(), None).await;
+    lab.vmware.set_failing("disconnectNamedDevice", false);
+    assert_eq!(status, JobStatus::Failed, "{notes}");
+    assert!(
+        notes.contains("wasn't generalized with its answer file attached"),
+        "{notes}"
+    );
+    let scripts = winrm.scripts.lock().unwrap().clone();
+    assert!(
+        scripts.iter().all(|s| !s.contains("Register-ScheduledTask")),
+        "no sysprep task"
+    );
+    nothing_registered(&lab, "stuck-v1", "Stuck").await;
     let _ = std::fs::remove_dir_all(&lab.dir);
 }
 
 #[tokio::test]
 async fn a_build_whose_steps_dont_all_go_or_dont_end_fails_and_keeps_its_vm() {
-    let lab = lab("golden-steps", &["steps-golden-v1", "hung-golden-v1"]).await;
+    let lab = lab(
+        "golden-steps",
+        &["steps-golden-v1", "short-golden-v1", "hung-golden-v1"],
+    )
+    .await;
     let core = &lab.core;
     let ctx = &core.ctx();
     let pw = vault_password(core, &lab.secret).await;
@@ -1331,14 +1466,28 @@ async fn a_build_whose_steps_dont_all_go_or_dont_end_fails_and_keeps_its_vm() {
     assert!(notes.contains("the VM is kept for a look"), "{notes}");
     let vmx = lab.vms.join("steps-golden-v1").join("steps-golden-v1.vmx");
     assert!(lab.vmware.has_vm(&vmx.display().to_string()), "kept for a look");
-    assert!(lab.vmware.snapshot_names(&vmx.display().to_string()).is_empty());
-    assert!(core
-        .catalog
-        .images(ctx)
-        .await
-        .unwrap()
-        .iter()
-        .all(|i| i.name != "Steps golden"));
+    // N4 of PR 100's second review: left running, so the work the step waited for isn't cut short.
+    assert!(running(&lab, &vmx).await, "left running");
+    assert!(notes.contains("it is left running"), "{notes}");
+    nothing_registered(&lab, "steps-golden-v1", "Steps golden").await;
+
+    // A report that ends (exit 0) without a word about some steps is no better.
+    *lab.guest.report.lock().unwrap() =
+        "remotely-generic cloud-init yes\nremotely-generic ok boot\nremotely-generic ok cloud_init\n".into();
+    let request = BuildRequest {
+        target: BuildTarget::New {
+            name: "Short golden".into(),
+        },
+        recipe: recipe(&iso, config, Hypervisor::Vmware, &lab.vms, "gp.medium"),
+    };
+    let (_, status, notes) = build(&lab, &request, ubuntu_lines("short-golden-v1")).await;
+    assert_eq!(status, JobStatus::Failed, "{notes}");
+    assert!(
+        notes.contains("the step that emptied the machine id didn't run"),
+        "{notes}"
+    );
+    assert!(running(&lab, &lab.vms.join("short-golden-v1").join("short-golden-v1.vmx")).await);
+    nothing_registered(&lab, "short-golden-v1", "Short golden").await;
 
     // Q3 of PR 100's review: a run that never answers fails at its time limit.
     *lab.guest.report.lock().unwrap() = linux_report();
@@ -1431,6 +1580,48 @@ async fn a_build_whose_settings_change_fails_takes_no_snapshot() {
         .unwrap()
         .iter()
         .all(|i| i.name != "Seal golden"));
+    // The rest of A6: the files its settings still name stay, the serial log above all.
+    assert!(
+        notes.contains("stay with it, as its settings still name them"),
+        "{notes}"
+    );
+    let folder = lab.vms.join("seal-golden-v1");
+    assert!(folder.join("seal-golden-v1-serial.log").exists());
+    assert!(folder.join("install-seed").join("seal-golden-v1-seed.iso").exists());
+    let _ = std::fs::remove_dir_all(&lab.dir);
+}
+
+#[tokio::test]
+async fn a_virtualbox_build_whose_seal_cant_change_its_settings_fails() {
+    // A6 of PR 100's review on VirtualBox: a lock that outlasts every try.
+    let lab = lab("golden-vbox-seal", &[]).await;
+    let core = &lab.core;
+    let pw = vault_password(core, &lab.secret).await;
+    let key = build_key(core).await;
+    let config = config_from(core, "starter.debian-12-minimal", pw, Some(key), |_| {}).await;
+    let iso = iso_image(core, &lab.dir, "bookworm.iso", &install_isos::debian(), "debian").await;
+    *lab.guest.end.lock().unwrap() = GuestEnd::PowersOffSessionHeld(6);
+    let request = BuildRequest {
+        target: BuildTarget::New {
+            name: "Deb held".into(),
+        },
+        recipe: recipe(&iso, config, Hypervisor::VirtualBox, &lab.vms, "gp.medium"),
+    };
+    let (_, status, notes) = build(&lab, &request, debian_lines("deb-held-v1")).await;
+    assert_eq!(status, JobStatus::Failed, "{notes}");
+    assert!(notes.contains("already locked for a session"), "{notes}");
+    assert!(notes.contains("without a snapshot"), "{notes}");
+    let vm = lab.virtualbox.vm_named("deb-held-v1").expect("kept");
+    assert!(lab.virtualbox.snapshot_names(&vm.uuid).is_empty());
+    assert!(lab.vms.join("deb-held-v1").join("deb-held-v1-serial.log").exists());
+    let ctx = &core.ctx();
+    assert!(core
+        .catalog
+        .images(ctx)
+        .await
+        .unwrap()
+        .iter()
+        .all(|i| i.name != "Deb held"));
     let _ = std::fs::remove_dir_all(&lab.dir);
 }
 
