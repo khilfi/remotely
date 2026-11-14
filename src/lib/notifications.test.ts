@@ -115,6 +115,29 @@ test("finished commands, updates and skipped targets", () => {
   assert.equal(fromSkipped(["db01", "db02"]).body, "db01, db02");
 });
 
+test("an install waiting for the vault says so once per VM", () => {
+  const notes = new JobNotes();
+  notes.note({
+    event: "queued",
+    jobId: "j9",
+    summary: "Deploy 2 VMs from 'win'",
+    tier: "medium",
+    targets: 2,
+    quiet: false,
+  });
+  const progress = (target: string, step: string) =>
+    notes.note({ event: "targetProgress", jobId: "j9", target, percent: 90, step });
+  assert.equal(progress("new-vm/vmware/win-1", "installing: specialize"), null);
+  const waiting = progress("new-vm/vmware/win-1", "waiting for the vault to be unlocked to set the new VM's password");
+  assert.equal(waiting?.title, "Unlock the vault to finish an install");
+  assert.match(waiting?.body ?? "", /Deploy 2 VMs from 'win'/);
+  assert.equal(
+    progress("new-vm/vmware/win-1", "waiting for the vault to be unlocked to set the new VM's password"),
+    null,
+  );
+  assert.notEqual(progress("new-vm/vmware/win-2", "waiting for the vault to be unlocked"), null);
+});
+
 test("jobs: the end of each job with its summary, nothing for MultiExec lines", () => {
   const notes = new JobNotes();
   assert.equal(

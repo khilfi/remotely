@@ -112,6 +112,34 @@ pub struct DeployPreview {
     pub warnings: Vec<String>,
     /// Why the deploy can't run as it is (a folder that is there already, thick disks that don't fit).
     pub refusals: Vec<String>,
+    /// VM-29: an install from an install config.
+    pub install: Option<InstallPreview>,
+}
+
+/// VM-29: what an install from an install config does, for the approval and the Deploy dialog.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InstallPreview {
+    pub config_name: String,
+    /// Its kind, in words.
+    pub kind: String,
+    /// How the answer files get to the installers.
+    pub delivery: String,
+    /// The ISO copy the deploy makes once (each VM links it), deleted once the installs are done.
+    pub iso_copy_bytes: Option<u64>,
+    pub time_limit_minutes: u32,
+    /// VM-32: the address pool's name.
+    pub pool: Option<String>,
+    pub vms: Vec<InstallPreviewVm>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct InstallPreviewVm {
+    pub name: String,
+    pub hostname: String,
+    pub ip: Option<String>,
+    pub values: std::collections::BTreeMap<String, String>,
 }
 
 /// The nearest folder of `path` that is there (the deploy's folder may not be yet), for its drive's free space.
@@ -243,8 +271,30 @@ pub async fn preview(spec: &DeploySpec, hypervisors: &Hypervisors, host: &dyn Ho
             None
         }
     };
-    if let Some(free) = free_bytes {
-        if thick_bytes > free {
+    // VM-29: one copy of the install ISO for the whole deploy (each VM's is a hard link to it) on the same drive.
+    let iso_copy_bytes = match (&spec.install, &spec.source) {
+        (Some(_), DeploySource::Iso { path }) => tokio::fs::metadata(path).await.ok().map(|m| m.len()),
+        _ => None,
+    };
+    if let (Some(free), Some(copy)) = (free_bytes, iso_copy_bytes) {
+        if thick_bytes.saturating_add(copy) > free {
+            refusals.push(format!(
+                "The install ISO's copy needs {} on the drive of {}{}, and it has {} free.",
+                size_text(copy),
+                spec.folder,
+                if thick_bytes > 0 {
+                    format!(" besides {} of thick disks", size_text(thick_bytes))
+                } else {
+                    String::new()
+                },
+                size_text(free)
+            ));
+        }
+    }
+    // The disks get what is left once the copy is made (its own refusal above covers thick disks with it).
+    let room = free_bytes.map(|free| free.saturating_sub(iso_copy_bytes.unwrap_or(0)));
+    if let Some(free) = room {
+        if thick_bytes > free && iso_copy_bytes.is_none() {
             refusals.push(format!(
                 "The thick disks need {}, and the drive of {} has {} free.",
                 size_text(thick_bytes),
@@ -313,9 +363,37 @@ pub async fn preview(spec: &DeploySpec, hypervisors: &Hypervisors, host: &dyn Ho
                 ));
             }
         }
+        DeploySource::Iso { .. } if spec.install.is_some() => {
+            if let Some(install) = &spec.install {
+                notes.push(format!(
+                    "Each VM installs by itself from the install config '{}': the deploy watches each install on the VM's serial port for up to {} minutes, then signs in to it ({}), takes the ISO and the seed out{}{}.",
+                    install.config_name,
+                    install.time_limit_minutes,
+                    if install.kind.windows() {
+                        "WinRM over HTTPS, where the one-time password becomes the vault's"
+                    } else {
+                        "SSH"
+                    },
+                    if spec.after_deploy.clean_snapshot {
+                        ", takes the snapshot 'clean install'"
+                    } else {
+                        ""
+                    },
+                    if spec.after_deploy.create_session {
+                        " and saves its session"
+                    } else {
+                        ""
+                    }
+                ));
+                notes.push(
+                    "An install that fails, runs out of time or is cancelled keeps its VM, its ISO copy, its serial log and (VirtualBox) a screenshot, for a look at why; its seed is taken out. The serial port stays on the VM, so its log grows a little on every boot."
+                        .into(),
+                );
+            }
+        }
         DeploySource::Iso { .. } => notes.push(match &spec.unattended {
             Some(unattended) => format!(
-                "VirtualBox installs the OS by itself, as user {} with the vault password chosen; that goes on for 10 to 30 minutes after the job ends. Steps that need the guest's IP are left out: make the session once it is installed.",
+                "VirtualBox installs the OS by itself, as user {} with the vault password chosen; that goes on for 10 to 30 minutes after the job ends. VirtualBox's install files beside the VM (one with the password's hash) are deleted once it ejects its install ISO or the VM is shut down, while Remotely runs. Steps that need the guest's IP are left out: make the session once it is installed.",
                 unattended.user
             ),
             None => "An ISO install starts with no OS: install it from the console. Steps that need the guest's IP wait for an OS, so they are left out."
@@ -323,6 +401,18 @@ pub async fn preview(spec: &DeploySpec, hypervisors: &Hypervisors, host: &dyn Ho
         }),
         DeploySource::BulkClone => {
             notes.push("Each clone is a full copy of its VM as it is now, with its CPU, memory, disks and network, and stays off like it.".into())
+        }
+    }
+    // S2: a Workstation BIOS VM boots its disk first; a disk an interrupted install already partitioned doesn't fall
+    // through to the ISO.
+    if let (Hypervisor::Vmware, DeploySource::Iso { .. }, Some(profile)) =
+        (spec.hypervisor, &spec.source, &spec.profile)
+    {
+        if profile.firmware == crate::catalog::profiles::Firmware::Bios {
+            notes.push(
+                "The VM boots its disk first, then the ISO: if an install stops after it has partitioned the disk, try again with a new VM."
+                    .into(),
+            );
         }
     }
     if let (Some(profile), None) = (&spec.profile, &spec.first_boot) {
@@ -387,6 +477,26 @@ pub async fn preview(spec: &DeploySpec, hypervisors: &Hypervisors, host: &dyn Ho
         notes,
         warnings,
         refusals,
+        install: spec.install.as_ref().map(|install| InstallPreview {
+            config_name: install.config_name.clone(),
+            kind: install.kind.label().to_owned(),
+            delivery: super::install::Flavor::of(install.kind)
+                .map_or("", super::install::Flavor::delivery)
+                .to_owned(),
+            iso_copy_bytes,
+            time_limit_minutes: install.time_limit_minutes,
+            pool: install.pool.as_ref().map(|p| p.name.clone()),
+            vms: spec
+                .vms
+                .iter()
+                .map(|vm| InstallPreviewVm {
+                    name: vm.name.clone(),
+                    hostname: vm.hostname.clone(),
+                    ip: vm.install.as_ref().and_then(|v| v.ip.clone()),
+                    values: vm.install.as_ref().map(|v| v.values.clone()).unwrap_or_default(),
+                })
+                .collect(),
+        }),
     }
 }
 

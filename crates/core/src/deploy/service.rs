@@ -50,6 +50,15 @@ pub struct DeployRequest {
     /// ISO and the OS is installed from the console.
     #[serde(default)]
     pub guest_password_id: Option<crate::vault::SecretId>,
+    /// VM-29: with an install config, each VM's row (in the order the VMs are named): `{{ip}}` and own variables.
+    #[serde(default)]
+    pub vm_values: Vec<super::spec::VmInstall>,
+    /// VM-32: the address pool each VM's `{{ip}}` comes from.
+    #[serde(default)]
+    pub address_pool_id: Option<Uuid>,
+    /// VM-29: how long the install watcher waits for each VM (`None`: an hour).
+    #[serde(default)]
+    pub install_minutes: Option<u32>,
 }
 
 /// VM-10: what the VMs page's Clone sends.
@@ -76,6 +85,9 @@ pub struct DeployCheck {
     pub preview: Option<DeployPreview>,
     /// VM-26: RAM, CPU and disk on this PC after the deploy, next to now; with the preview.
     pub capacity: Option<crate::capacity_plan::DeployCapacity>,
+    /// VM-29: the VMs the deploy names, also while it has problems (the Deploy dialog's rows of values per VM).
+    #[serde(default)]
+    pub vm_names: Vec<String>,
 }
 
 /// The VMs page's default naming pattern for a bulk clone.
@@ -100,6 +112,8 @@ pub struct Deploys {
     capacity: Arc<crate::capacity::CapacityChecker>,
     /// CV-01: the conversion tools, for imports.
     converter: Option<Arc<crate::convert::Converter>>,
+    /// VM-32: where a deploy's addresses come from.
+    pools: Option<Arc<crate::address_pools::AddressPools>>,
 }
 
 impl Deploys {
@@ -123,7 +137,14 @@ impl Deploys {
             bus,
             capacity,
             converter: None,
+            pools: None,
         }
+    }
+
+    /// VM-32: deploys with an install config take their addresses from these pools.
+    pub fn with_address_pools(mut self, pools: Arc<crate::address_pools::AddressPools>) -> Self {
+        self.pools = Some(pools);
+        self
     }
 
     /// CV-01: imports read their disks' formats and plans with these tools.
@@ -278,6 +299,16 @@ impl Deploys {
             Err(problem) => return Ok(Err(vec![problem])),
         };
         let mut spec = DeploySpec::from_plan(&plan, origin, folder, host_adapter);
+        // VM-29: an install config's install: what it delivers, each VM's values and address.
+        if let Some(config) = &plan.install_config {
+            if let Err(problems) = self.install_spec(ctx, &plan, config, request, &mut spec).await? {
+                return Ok(Err(problems));
+            }
+        } else if request.address_pool_id.is_some() {
+            return Ok(Err(vec![install_problem(
+                "An address pool gives addresses to an install config's VMs: the template has no install config.",
+            )]));
+        }
         if let Some(password_id) = request.guest_password_id {
             match self
                 .unattended(ctx, &spec, password_id, plan.guest_user.as_deref())
@@ -317,7 +348,7 @@ impl Deploys {
             Some(_) => return Ok(Err(problem("The guest password must be a vault password."))),
             None => return Ok(Err(problem("That guest password is not in the vault."))),
         }
-        let (supported, _) = self
+        let (supported, detected) = self
             .hypervisors
             .virtualbox()
             .unattended_detect(Path::new(path))
@@ -327,6 +358,15 @@ impl Deploys {
             return Ok(Err(problem(format!(
                 "VirtualBox can't install {path} by itself: deploy it without a guest password and install it from the console."
             ))));
+        }
+        // VM-21: the OS VirtualBox reads on the ISO must be the image's OS profile's (Ubuntu24_64 is Ubuntu_64's).
+        if let (Some(detected), Some(profile)) = (detected.as_deref(), &spec.profile) {
+            if os_family(detected) != os_family(&profile.guest_os) {
+                return Ok(Err(problem(format!(
+                    "VirtualBox reads {path} as {detected}, and the image's OS profile is {} ({}): fix the image's profile, or pick the right ISO.",
+                    profile.name, profile.guest_os
+                ))));
+            }
         }
         Ok(Ok(super::spec::UnattendedSpec {
             user: user.to_owned(),
@@ -341,16 +381,42 @@ impl Deploys {
                 problems,
                 preview: None,
                 capacity: None,
+                vm_names: self.planned_names(ctx, request).await,
             }),
             Ok(spec) => {
                 spec.require_sources_here(&self.store, ctx).await?;
                 let (preview, capacity) = self.preview_spec(ctx, &spec).await;
                 Ok(DeployCheck {
                     problems: Vec::new(),
+                    vm_names: spec.vms.iter().map(|vm| vm.name.clone()).collect(),
                     preview: Some(preview),
                     capacity: Some(capacity),
                 })
             }
+        }
+    }
+
+    /// VM-29: the names a request's plan gives its VMs, when it resolves (its install's values aside).
+    async fn planned_names(&self, ctx: &Context, request: &DeployRequest) -> Vec<String> {
+        let (id, mut input) = match &request.from {
+            DeployFrom::Template { id } => match self.catalog.template(ctx, *id).await {
+                Ok(t) => (*id, t.spec),
+                Err(_) => return Vec::new(),
+            },
+            DeployFrom::Custom { input } => (Uuid::nil(), (**input).clone()),
+        };
+        if let Some(pattern) = request
+            .naming_pattern
+            .as_deref()
+            .map(str::trim)
+            .filter(|p| !p.is_empty())
+        {
+            input.naming_pattern = pattern.to_owned();
+        }
+        input.default_count = request.count;
+        match self.catalog.plan_input(ctx, id, &input, request.count).await {
+            Ok(Ok(plan)) => plan.vms.into_iter().map(|vm| vm.name).collect(),
+            _ => Vec::new(),
         }
     }
 
@@ -453,6 +519,7 @@ impl Deploys {
                     hostname: templates::hostname(&name, n),
                     name,
                     clone_of: Some((source.vmx_path.clone(), source.display_name.clone())),
+                    install: None,
                 }),
                 None => problems.push(Problem {
                     code: ProblemCode::NameTaken,
@@ -508,6 +575,7 @@ impl Deploys {
             },
             ip_wait_secs: DEFAULT_IP_WAIT_SECS,
             unattended: None,
+            install: None,
             vms,
             stack: None,
         };
@@ -522,6 +590,7 @@ impl Deploys {
                 problems,
                 preview: None,
                 capacity: None,
+                vm_names: Vec::new(),
             }),
             Ok(spec) => {
                 let (preview, capacity) = self.preview_spec(ctx, &spec).await;
@@ -529,6 +598,7 @@ impl Deploys {
                     problems: Vec::new(),
                     preview: Some(preview),
                     capacity: Some(capacity),
+                    vm_names: Vec::new(),
                 })
             }
         }
@@ -545,4 +615,239 @@ impl Deploys {
 
 fn refused(reasons: Vec<String>) -> CoreError {
     CoreError::InvalidInput(reasons.join(" "))
+}
+
+fn install_problem(message: impl Into<String>) -> Problem {
+    Problem {
+        code: ProblemCode::InstallConfigProblems,
+        message: message.into(),
+    }
+}
+
+/// VirtualBox's OS type id without its version and bits: `Ubuntu24_64` and `Ubuntu_64` are both `ubuntu`.
+fn os_family(os_type: &str) -> String {
+    os_type
+        .chars()
+        .take_while(char::is_ascii_alphabetic)
+        .collect::<String>()
+        .to_ascii_lowercase()
+}
+
+/// VM-32: an address pool's gateway, DNS servers and prefix fill the config's own variables of those names, where a
+/// VM's row leaves them empty.
+fn pool_values(
+    config: &crate::catalog::install::InstallConfigInput,
+    address: &crate::address_pools::PoolAddress,
+    values: &mut std::collections::BTreeMap<String, String>,
+) {
+    let netmask = u32::MAX
+        .checked_shl(32 - u32::from(address.prefix.min(32)))
+        .map_or(std::net::Ipv4Addr::UNSPECIFIED, std::net::Ipv4Addr::from);
+    let dns: Vec<String> = address.dns.iter().map(ToString::to_string).collect();
+    for (name, value) in [
+        ("gateway", address.gateway.map(|g| g.to_string())),
+        ("dns", (!dns.is_empty()).then(|| dns.join(","))),
+        ("prefix", Some(address.prefix.to_string())),
+        ("netmask", Some(netmask.to_string())),
+    ] {
+        if let Some(value) = value {
+            if config.variables.iter().any(|v| v.name == name) && !values.contains_key(name) {
+                values.insert(name.to_owned(), value);
+            }
+        }
+    }
+}
+
+impl Deploys {
+    /// VM-29: the install a template's install config makes, into `spec`: what Remotely delivers, the firmware and
+    /// disk layout agreeing, the ISO's layout what the spikes saw, and each VM's values and address (VM-32: from the
+    /// pool, checked free now). Problems in words when it can't.
+    async fn install_spec(
+        &self,
+        ctx: &Context,
+        plan: &crate::catalog::templates::DeployPlan,
+        config: &crate::catalog::install::InstallConfig,
+        request: &DeployRequest,
+        spec: &mut DeploySpec,
+    ) -> Result<std::result::Result<(), Vec<Problem>>> {
+        use super::install::Flavor;
+        use crate::catalog::install::{render, unattend, SecretRefKind};
+        use crate::catalog::profiles::Firmware;
+        let kind = config.spec.kind;
+        let Some(flavor) = Flavor::of(kind) else {
+            return Ok(Err(vec![install_problem(format!(
+                "Remotely doesn't install from {} configs yet: only Ubuntu autoinstall, Debian preseed and Windows unattend were tried by hand.",
+                kind.label()
+            ))]));
+        };
+        let DeploySource::Iso { path } = &spec.source else {
+            return Ok(Err(vec![install_problem(
+                "An install config installs from an ISO image.",
+            )]));
+        };
+        let path = path.clone();
+        let mut problems = Vec::new();
+        if request.guest_password_id.is_some() {
+            problems.push(install_problem(
+                "The install config installs the VMs: leave VirtualBox's own unattended install (the guest password) out.",
+            ));
+        }
+        // S3: Setup on UEFI wants a GPT layout, and on BIOS stops at the disk page with one.
+        if flavor.windows() {
+            match (unattend::disk_style(&config.spec.body), plan.profile.firmware) {
+                (Some(unattend::DiskStyle::Gpt), Firmware::Bios) => problems.push(install_problem(format!(
+                    "The install config lays the disk out for UEFI (GPT), and the OS profile {} starts with BIOS: Setup would stop at the disk page.",
+                    plan.profile.name
+                ))),
+                (Some(unattend::DiskStyle::Mbr), Firmware::Efi | Firmware::EfiSecureBoot) => problems.push(install_problem(format!(
+                    "The install config lays the disk out for BIOS (no EFI partition), and the OS profile {} starts with UEFI: Setup would stop at the disk page.",
+                    plan.profile.name
+                ))),
+                _ => {}
+            }
+            if !config.spec.body.contains(unattend::WINRM_FINGERPRINT_MARKER) {
+                problems.push(install_problem(
+                    "The install config doesn't write its WinRM certificate's fingerprint to COM1, so Remotely can't check the certificate before it sets the Administrator's password: copy the starter's first sign-in commands.",
+                ));
+            }
+        }
+        // Remotely must reach the installed system to say it is done (Windows: to set its password).
+        let uses_ip = render::uses_ip(&config.spec);
+        // Workstation leases its NAT and host-only addresses itself (vmnetdhcp.leases); VirtualBox's NAT gets a rule.
+        let reachable_without_pool = matches!(
+            (plan.hypervisor, &plan.network),
+            (
+                Hypervisor::Vmware,
+                Network::Nat | Network::HostOnly | Network::Vmnet { .. }
+            ) | (Hypervisor::VirtualBox, Network::Nat)
+        );
+        let mut addresses = Vec::new();
+        let mut pool_ref = None;
+        match request.address_pool_id {
+            Some(pool_id) => {
+                let Some(pools) = &self.pools else {
+                    return Err(CoreError::NotImplemented("address pools"));
+                };
+                let fitting = pools
+                    .pools_for_adapter(ctx, plan.hypervisor, &plan.network, spec.host_adapter.as_deref())
+                    .await?;
+                match fitting.iter().find(|p| p.id == pool_id) {
+                    None => problems.push(install_problem(format!(
+                        "That address pool isn't for {} on {}.",
+                        templates::hypervisor_label(plan.hypervisor),
+                        plan.network.describe()
+                    ))),
+                    Some(pool) => {
+                        if !uses_ip {
+                            problems.push(install_problem(format!(
+                                "The install config doesn't use {{{{ip}}}}, so the VMs wouldn't take the address pool '{}''s addresses.",
+                                pool.name
+                            )));
+                        }
+                        pool_ref = Some(super::spec::PoolRef {
+                            id: pool.id,
+                            name: pool.name.clone(),
+                        });
+                        match pools.pick(ctx, pool_id, spec.vms.len(), &[]).await {
+                            Ok(picked) => addresses = picked,
+                            Err(err) => problems.push(install_problem(err.to_string())),
+                        }
+                    }
+                }
+            }
+            None if flavor.windows() && !reachable_without_pool => problems.push(install_problem(format!(
+                "On {} Remotely can't learn a new Windows VM's address before it is reached, so it couldn't set its password: give the VMs addresses from an address pool.",
+                plan.network.describe()
+            ))),
+            None => {}
+        }
+        let template = match &spec.origin {
+            super::spec::DeployOrigin::Template { name, .. } | super::spec::DeployOrigin::Custom { name } => {
+                name.clone()
+            }
+            _ => String::new(),
+        };
+        for (i, vm) in spec.vms.iter_mut().enumerate() {
+            let row = request.vm_values.get(i).cloned().unwrap_or_default();
+            let mut values: std::collections::BTreeMap<String, String> = row
+                .values
+                .into_iter()
+                .map(|(k, v)| (k.trim().to_owned(), v.trim().to_owned()))
+                .filter(|(k, v)| !k.is_empty() && !v.is_empty())
+                .collect();
+            let ip = match addresses.get(i) {
+                Some(address) => {
+                    pool_values(&config.spec, address, &mut values);
+                    Some(address.ip.to_string())
+                }
+                None => {
+                    let typed = row.ip.map(|ip| ip.trim().to_owned()).filter(|ip| !ip.is_empty());
+                    if typed.is_some() && !uses_ip {
+                        problems.push(install_problem(format!(
+                            "{}: the install config doesn't use {{{{ip}}}}, so a typed address would go nowhere.",
+                            vm.name
+                        )));
+                    }
+                    typed
+                }
+            };
+            let check = render::VmValues {
+                hostname: vm.hostname.clone(),
+                ip: ip.clone(),
+                n: vm.number,
+                template: template.clone(),
+                date: crate::catalog::today(),
+                values: values.clone(),
+            };
+            if let Err(err) = render::check_values(&config.spec, &check) {
+                problems.push(install_problem(format!("{}: {err}", vm.name)));
+            }
+            vm.install = Some(super::spec::VmInstall { ip, values });
+        }
+        let password_ids: Vec<crate::vault::SecretId> = config
+            .spec
+            .secrets
+            .iter()
+            .filter(|s| s.kind == SecretRefKind::Password)
+            .filter_map(|s| s.secret_id)
+            .collect();
+        let key_id = config
+            .spec
+            .secrets
+            .iter()
+            .find(|s| s.kind == SecretRefKind::SshKey)
+            .and_then(|s| s.secret_id);
+        // The ISO's layout must be what the spikes saw, read now (the copy is made by the job).
+        let iso_flavor = flavor.iso();
+        let iso_path = path.clone();
+        let planned = tokio::task::spawn_blocking(move || super::iso::plan_file(Path::new(&iso_path), iso_flavor))
+            .await
+            .map_err(|err| CoreError::InvalidInput(format!("the ISO couldn't be read: {err}")))?;
+        if let Err(err) = planned {
+            problems.push(install_problem(format!("The ISO {path} can't be prepared: {err}")));
+        }
+        if !problems.is_empty() {
+            return Ok(Err(problems));
+        }
+        let minutes = request
+            .install_minutes
+            .unwrap_or(super::spec::DEFAULT_INSTALL_MINUTES)
+            .clamp(1, super::spec::MAX_INSTALL_MINUTES);
+        spec.install = Some(super::spec::InstallSpec {
+            config_id: Uuid::parse_str(&config.id)
+                .map_err(|_| CoreError::InvalidInput("A starter is copied before it deploys.".into()))?,
+            config_name: config.spec.name.clone(),
+            kind,
+            fingerprint: super::spec::config_fingerprint(&config.spec),
+            password_ids,
+            key_id,
+            time_limit_minutes: minutes,
+            pool: pool_ref,
+            iso_seen: super::spec::IsoSeen::of(Path::new(&path)).await,
+        });
+        if key_id.is_some() {
+            spec.ssh_key_id = key_id;
+        }
+        Ok(Ok(()))
+    }
 }

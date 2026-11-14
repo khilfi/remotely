@@ -1834,24 +1834,54 @@ impl CommandBus {
         Ok(())
     }
 
-    /// SS-04, AP-06 (VM-21): an unattended install gives a vault password to new VMs, which no saved session reaches
-    /// yet, so the approval asks for the vault password, and says so.
+    /// SS-04, AP-06 (VM-21, VM-29): an unattended install gives a vault password to new VMs, which no saved session
+    /// reaches yet, so the approval asks for the vault password, and says so. Every deploy spec of the command counts:
+    /// a deploy's, and each step of a stack's (D1 of PR 98's review).
     async fn ask_for_guest_password(&self, ctx: &Context, command: &Command, decision: &mut Decision) -> Result<()> {
-        let Command::Deploy { spec, .. } = command else {
+        let specs: Vec<&crate::deploy::DeploySpec> = match command {
+            Command::Deploy { spec, .. } => vec![spec.as_ref()],
+            Command::Stack {
+                op: crate::stacks::StackOp::Deploy { spec },
+                ..
+            } => spec.steps.iter().map(|step| &step.spec).collect(),
+            _ => return Ok(()),
+        };
+        let mut warnings = Vec::new();
+        for spec in specs {
+            let vms = match spec.vms.len() {
+                1 => "the new VM".to_owned(),
+                n => format!("{n} new VMs"),
+            };
+            // VM-29: an install config's answer files take vault passwords (as hashes, or Windows' one-time password
+            // the deploy replaces with the vault's): new places for each.
+            if let Some(install) = spec.install.as_ref().filter(|i| !i.password_ids.is_empty()) {
+                let mut what = Vec::new();
+                for id in &install.password_ids {
+                    what.push(self.bindings().describe(ctx, *id).await?);
+                }
+                warnings.push(format!(
+                    "The install config '{}' gives the {} to {vms}: {}. The vault items are read as each VM's file is made. Approving asks for the vault password",
+                    install.config_name,
+                    what.join(" and the "),
+                    if install.kind.windows() {
+                        "Setup gets a one-time password, which the deploy replaces with the vault's over WinRM once Windows is installed"
+                    } else {
+                        "each answer file holds it as a SHA-512 hash, on a seed only this Windows user can open, taken out once the install is done"
+                    }
+                ));
+            }
+            if let Some(unattended) = &spec.unattended {
+                let what = self.bindings().describe(ctx, unattended.password_id).await?;
+                warnings.push(format!(
+                    "VirtualBox's unattended install gives the {what} to {vms} (user {}), and writes it into their install files in each VM's folder. Approving asks for the vault password",
+                    unattended.user
+                ));
+            }
+        }
+        if warnings.is_empty() {
             return Ok(());
-        };
-        let Some(unattended) = &spec.unattended else {
-            return Ok(());
-        };
-        let what = self.bindings().describe(ctx, unattended.password_id).await?;
-        let vms = match spec.vms.len() {
-            1 => "the new VM".to_owned(),
-            n => format!("{n} new VMs"),
-        };
-        decision.add_warnings(vec![format!(
-            "VirtualBox's unattended install gives the {what} to {vms} (user {}), and writes it into their install files in each VM's folder. Approving asks for the vault password",
-            unattended.user
-        )]);
+        }
+        decision.add_warnings(warnings);
         if !decision.steps.contains(&ApprovalStep::VaultReauth) {
             decision.steps.push(ApprovalStep::VaultReauth);
         }

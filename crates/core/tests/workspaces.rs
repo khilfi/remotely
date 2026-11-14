@@ -520,6 +520,134 @@ async fn file_bookmarks_are_per_workspace() {
 }
 
 #[tokio::test]
+async fn address_pools_and_their_leases_are_per_workspace() {
+    use remotely_core::address_pools::AddressPoolInput;
+    // VM-32: this PC has Workstation's NAT adapter on 192.0.2.0/24; every address answers the fake's ping unless made
+    // silent.
+    let tools = Arc::new(remotely_core::fakes::FakeNetworkTools::new().with_adapter(
+        "VMware Network Adapter VMnet8",
+        "192.0.2.1",
+        24,
+        &[],
+    ));
+    for n in 10..=20 {
+        tools.set_silent(&format!("192.0.2.{n}"), true);
+    }
+    let core = Setup::new(FakeVmware::default())
+        .with_network_tools(tools.clone())
+        .build()
+        .await;
+    let acme = core.ctx();
+    let input = AddressPoolInput {
+        name: "lab".into(),
+        hypervisor: remotely_core::adapters::hypervisor::Hypervisor::Vmware,
+        network: remotely_core::catalog::templates::Network::Nat,
+        host_adapter: None,
+        first_ip: "192.0.2.10".into(),
+        last_ip: "192.0.2.20".into(),
+        prefix: 24,
+        gateway: Some("192.0.2.1".into()),
+        dns: vec![],
+        notes: None,
+    };
+    let lab = core.address_pools.add(&acme, input.clone()).await.unwrap();
+    let ten: std::net::Ipv4Addr = "192.0.2.10".parse().unwrap();
+    // Acme's deploy made a VM with 192.0.2.10 (off now, or a guest that drops pings: nothing answers there).
+    let job = Uuid::new_v4();
+    sqlx::query(
+        "INSERT INTO jobs (id, workspace_id, user_id, summary, action, tier, command_json, status, created_at)
+         VALUES (?, ?, ?, 'Deploy', 'vm_deploy', 'medium', '{}', 'running', '2026-11-14T00:00:00Z')",
+    )
+    .bind(job.to_string())
+    .bind(acme.workspace_id.0.to_string())
+    .bind(acme.user_id.0.to_string())
+    .execute(core.store.pool())
+    .await
+    .unwrap();
+    core.address_pools
+        .claim(&acme, lab.id, ten, "acme-web-1", job)
+        .await
+        .unwrap();
+    core.address_pools
+        .assign(&acme, lab.id, ten, job, r"C:\VMs\acme-web-1\acme-web-1.vmx")
+        .await
+        .unwrap();
+
+    let globex = create(&core, "Globex").await;
+    switch(&core, &globex).await;
+    let b = core.ctx();
+    assert!(core.address_pools.list(&b).await.unwrap().is_empty());
+    // Another workspace's pool can't be read, changed, deleted, picked from or claimed in from here.
+    assert!(core.address_pools.leases(&b, lab.id).await.is_err());
+    assert!(core.address_pools.update(&b, lab.id, input.clone()).await.is_err());
+    assert!(core.address_pools.delete(&b, lab.id).await.is_err());
+    assert!(core.address_pools.pick(&b, lab.id, 1, &[]).await.is_err());
+    assert!(core
+        .address_pools
+        .claim(&b, lab.id, "192.0.2.11".parse().unwrap(), "web-2", Uuid::new_v4())
+        .await
+        .is_err());
+    assert!(core
+        .address_pools
+        .assign(&b, lab.id, ten, job, r"C:\VMs\x\x.vmx")
+        .await
+        .is_err());
+    assert_eq!(core.address_pools.release_job_claims(&b, job).await.unwrap(), 0);
+    // Pools are per workspace: the same name and range on this PC's NAT are Globex's own. But the network is this PC's,
+    // so the address Acme's VM holds is never handed out here, and nothing of Acme shows.
+    let own = core.address_pools.add(&b, input).await.unwrap();
+    assert_eq!((own.used, own.held_elsewhere, own.free), (0, 1, 10));
+    let picked = core.address_pools.pick(&b, own.id, 1, &[]).await.unwrap();
+    assert_eq!(picked[0].ip, "192.0.2.11".parse::<std::net::Ipv4Addr>().unwrap());
+    let err = core
+        .address_pools
+        .claim(&b, own.id, ten, "globex-web-1", Uuid::new_v4())
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("192.0.2.10 is held in another workspace"), "{err}");
+    assert!(!err.contains("acme"), "nothing of the other workspace: {err}");
+    let err = core
+        .address_pools
+        .pick(&b, own.id, 11, &[])
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("1 of them is held in another workspace"), "{err}");
+    assert!(core.address_pools.leases(&b, own.id).await.unwrap().is_empty());
+    assert!(audit_of(&core, &b)
+        .await
+        .iter()
+        .any(|e| e.event == "address_pool_changed"));
+
+    let home = core
+        .workspaces
+        .list()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|w| !w.current)
+        .unwrap();
+    switch(&core, &home).await;
+    let back = core.address_pools.list(&acme).await.unwrap();
+    assert_eq!(back.len(), 1);
+    assert_eq!(
+        (back[0].used, back[0].held_elsewhere),
+        (1, 0),
+        "its VM's address is still its own"
+    );
+    assert_eq!(
+        audit_of(&core, &acme)
+            .await
+            .iter()
+            .filter(|e| e.event == "address_pool_changed")
+            .count(),
+        1,
+        "each workspace audits its own"
+    );
+}
+
+#[tokio::test]
 async fn notes_stars_recents_and_the_trash_are_per_workspace() {
     let core = Setup::new(FakeVmware::default()).build().await;
     let acme = core.ctx();

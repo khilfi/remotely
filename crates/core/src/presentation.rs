@@ -138,11 +138,14 @@ pub enum Change {
     HealthChecks,
     /// SS-14 (0.8.0 G3): adding, renaming and removing the Files page's bookmarks.
     FileBookmarks,
+    /// VM-32 (0.8.0 G6): adding, changing and deleting address pools, and freeing an address by hand. (A deploy's
+    /// claims are part of its job, which the bus refuses anyway.)
+    AddressPools,
 }
 
 impl Change {
     /// Every kind of edit, for tests.
-    pub const ALL: [Change; 26] = [
+    pub const ALL: [Change; 27] = [
         Change::Sessions,
         Change::VmLabels,
         Change::VmLinks,
@@ -169,6 +172,7 @@ impl Change {
         Change::Trash,
         Change::HealthChecks,
         Change::FileBookmarks,
+        Change::AddressPools,
     ];
 
     pub fn label(self) -> &'static str {
@@ -199,6 +203,7 @@ impl Change {
             Change::Trash => "Restore or delete items in the trash",
             Change::HealthChecks => "Add, change, pause or delete health checks",
             Change::FileBookmarks => "Edit file bookmarks",
+            Change::AddressPools => "Edit address pools",
         }
     }
 }

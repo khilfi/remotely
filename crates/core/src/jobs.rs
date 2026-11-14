@@ -1543,6 +1543,8 @@ impl JobRunner {
                 }
             }
             Err(Stop::Cancelled | Stop::Error(CoreError::Cancelled)) => Finished::cancelled(None),
+            // VM-29: an install cancelled while it was watched says what it kept.
+            Err(Stop::Error(err @ CoreError::InstallCancelled { .. })) => Finished::cancelled(Some(&err)),
             Err(Stop::Halted) => Finished::skipped(
                 tally
                     .halted
@@ -1737,7 +1739,10 @@ impl JobRunner {
                     .spec
                     .vm(name)
                     .ok_or_else(|| CoreError::UnknownTarget(target.target.key()))?;
-                let note = deployer.deploy_vm(&spec.ctx, job_id, &step.spec, vm, token).await?;
+                let progress = self.progress_for(job_id, target);
+                let note = deployer
+                    .deploy_vm(&spec.ctx, job_id, &step.spec, vm, &progress, token)
+                    .await?;
                 let output = OutputCollector::collect(note.as_bytes(), b"", &[], MAX_OUTPUT_PER_STREAM);
                 Ok(TargetOutcome {
                     output: Some(output),
@@ -2107,7 +2112,10 @@ impl JobRunner {
                 let vm = deploy
                     .vm(name)
                     .ok_or_else(|| CoreError::UnknownTarget(target.target.key()))?;
-                let note = deployer.deploy_vm(&spec.ctx, job_id, deploy, vm, token).await?;
+                let progress = self.progress_for(job_id, target);
+                let note = deployer
+                    .deploy_vm(&spec.ctx, job_id, deploy, vm, &progress, token)
+                    .await?;
                 // Activity shows each VM's result as its output.
                 let output = OutputCollector::collect(note.as_bytes(), b"", &[], MAX_OUTPUT_PER_STREAM);
                 Ok(TargetOutcome {
@@ -2987,9 +2995,16 @@ impl JobRunner {
             | Command::WakeOnLan { .. }
             | Command::FileServer { .. } => 1,
             // VM-21: each VM copies or writes whole disks, so two at a time keep this PC's disk usable.
+            // VM-29: an unattended install writes a blank disk, then waits for its installer.
+            Command::Deploy { spec, .. } if spec.install.is_some() => {
+                limits.vm_ops.min(crate::deploy::PARALLEL_INSTALLS)
+            }
             Command::Deploy { .. } => limits.vm_ops.min(crate::deploy::PARALLEL_VMS),
             // VM-08: within a step, as the commands it stands for.
             Command::Stack { op, .. } => match op {
+                crate::stacks::StackOp::Deploy { spec } if spec.steps.iter().any(|s| s.spec.install.is_some()) => {
+                    limits.vm_ops.min(crate::deploy::PARALLEL_INSTALLS)
+                }
                 crate::stacks::StackOp::Deploy { .. } => limits.vm_ops.min(crate::deploy::PARALLEL_VMS),
                 crate::stacks::StackOp::Power { spec } if spec.starts() => limits.power_on,
                 crate::stacks::StackOp::Power { .. } | crate::stacks::StackOp::Teardown { .. } => limits.vm_ops,

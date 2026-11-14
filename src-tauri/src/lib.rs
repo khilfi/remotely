@@ -2,6 +2,7 @@
 //! reaches it only through the commands in [`ipc`], [`terminal`], [`multiexec`], [`command_panel`], [`navigation`],
 //! [`files`], [`clipboard`] and [`dashboard`], never vmrun or SSH directly.
 
+mod address_pools;
 mod catalog;
 mod checks;
 mod clipboard;
@@ -760,6 +761,12 @@ fn commands() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         catalog::install_config_add,
         catalog::install_config_update,
         catalog::install_config_delete,
+        address_pools::address_pools_list,
+        address_pools::address_pool_leases,
+        address_pools::address_pool_add,
+        address_pools::address_pool_update,
+        address_pools::address_pool_delete,
+        address_pools::address_pool_free,
         deploy::deploy_check,
         deploy::deploy_submit,
         deploy::deploy_clone_check,

@@ -675,6 +675,10 @@ const FIELD_KINDS: Record<string, MaskKind | "address"> = {
   serverName: "host",
   queryName: "host",
   hosts: "host",
+  // VM-32: an address pool's range, gateway and (a list) DNS servers.
+  firstIp: "ip",
+  gateway: "ip",
+  dnsServers: "ip",
 };
 
 /**

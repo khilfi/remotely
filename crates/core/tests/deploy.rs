@@ -138,6 +138,9 @@ fn request(template: Uuid, count: u32) -> DeployRequest {
         naming_pattern: None,
         host_adapter: None,
         guest_password_id: None,
+        vm_values: Vec::new(),
+        address_pool_id: None,
+        install_minutes: None,
     }
 }
 
@@ -175,6 +178,7 @@ fn fast(core: &Core) {
         ip_wait_cap: Some(Duration::from_millis(200)),
         cleanup_tries: 3,
         cleanup_pause: Duration::from_millis(10),
+        ..DeployTuning::default()
     });
 }
 
@@ -974,7 +978,7 @@ async fn iso_installs_boot_the_iso_and_virtualbox_installs_by_itself_with_a_vaul
     let calls = vb.calls().join("\n");
     assert!(calls.contains("--password-file"), "{calls}");
     assert!(!calls.contains("guest-pw-Example-1"), "never on a command line");
-    assert!(calls.contains("--boot1 dvd"), "{calls}");
+    assert!(calls.contains("--boot1 disk --boot2 dvd"), "the disk first: {calls}");
     assert!(
         vm.dvds.iter().any(|d| d.image.as_deref() == Some(iso.as_path())),
         "{:?}",

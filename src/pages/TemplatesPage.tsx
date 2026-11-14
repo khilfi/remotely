@@ -26,6 +26,7 @@ import {
   HardDriveIcon,
   LayersIcon,
   LockIcon,
+  NetworkIcon,
   PencilIcon,
   PlusIcon,
   ServerIcon,
@@ -37,6 +38,7 @@ import { DropdownMenuItem, DropdownMenuSeparator } from "@/components/ui/dropdow
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { AddressPoolsTab } from "@/components/AddressPoolsTab";
 import { EnvBadge } from "@/components/Badges";
 import { EmptyState } from "@/components/EmptyState";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
@@ -88,6 +90,7 @@ const TAB_ICON: Record<TemplatesTab, typeof DiscIcon> = {
   images: DiscIcon,
   sizes: HardDriveIcon,
   installConfigs: FileCodeIcon,
+  addressPools: NetworkIcon,
   templates: LayersIcon,
   stacks: BoxesIcon,
   disks: FileCogIcon,
@@ -128,6 +131,9 @@ export function TemplatesPage({ active, request, onDeploy, onSubmitted, onImport
   const [configCreate, setConfigCreate] = useState(0);
   // The Stacks tab's count, once read (null before): its empty state carries New stack.
   const [stackCount, setStackCount] = useState<number | null>(null);
+  // VM-32: the same for the Address pools tab.
+  const [poolCreate, setPoolCreate] = useState(0);
+  const [poolCount, setPoolCount] = useState<number | null>(null);
   const [sizes, setSizes] = useState<Size[]>([]);
   const [images, setImages] = useState<Image[]>([]);
   const [templates, setTemplates] = useState<LaunchTemplate[]>([]);
@@ -182,6 +188,7 @@ export function TemplatesPage({ active, request, onDeploy, onSubmitted, onImport
       else if (request.tab === "images") setDialog({ kind: "image" });
       else if (request.tab === "stacks") setStackCreate((n) => n + 1);
       else if (request.tab === "installConfigs") setConfigCreate((n) => n + 1);
+      else if (request.tab === "addressPools") setPoolCreate((n) => n + 1);
       else if (images.length > 0) setDialog({ kind: "template" });
     }
   }
@@ -246,6 +253,14 @@ export function TemplatesPage({ active, request, onDeploy, onSubmitted, onImport
         </Button>
       </WhyDisabled>
     ),
+    addressPools: poolCount ? (
+      <WhyDisabled reason={readOnly}>
+        <Button disabled={readOnly !== null} onClick={() => setPoolCreate((n) => n + 1)}>
+          <PlusIcon data-icon="inline-start" />
+          New address pool
+        </Button>
+      </WhyDisabled>
+    ) : null,
     templates: loaded && templates.length > 0 ? newTemplateButton : null,
     stacks: stackCount ? (
       <WhyDisabled reason={stackOff}>
@@ -632,6 +647,16 @@ export function TemplatesPage({ active, request, onDeploy, onSubmitted, onImport
             createRequest={configCreate}
             lit={lit}
             onChanged={load}
+          />
+        </TabsContent>
+
+        {/* VM-32: address pools, the static addresses deployed VMs get on each network. */}
+        <TabsContent value="addressPools" className="flex min-w-0 flex-col gap-3">
+          <AddressPoolsTab
+            active={active && tab === "addressPools"}
+            readOnly={readOnly}
+            createRequest={poolCreate}
+            onCount={setPoolCount}
           />
         </TabsContent>
 

@@ -3,6 +3,7 @@
 //!
 //! Queries are checked at runtime, not with `query!`, so building needs no `DATABASE_URL`.
 
+mod address_pools;
 mod alerts;
 mod audit;
 mod bookmarks;

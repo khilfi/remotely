@@ -223,8 +223,97 @@ fn asks(root: &Element) -> Vec<ConfigProblem> {
             "WinRM over HTTPS isn't turned on: Remotely can't reach the VM, or set its password, after the install.",
         ));
     }
+    // VM-29 (S3): a windowsPE command that exits with anything but 0 stops Setup (0x80070001 - 0x40030), and WinPE has
+    // no COM1, so an echo to it fails there.
+    if let Some(setup) = setup {
+        if let Some(run) = setup.child("RunSynchronous") {
+            for command in run.children_named("RunSynchronousCommand") {
+                let Some(path) = command.child("Path") else { continue };
+                let text = path.trimmed().to_ascii_lowercase();
+                let ends_well = text
+                    .trim_end()
+                    .strip_suffix("exit 0")
+                    .is_some_and(|rest| rest.trim_end().ends_with('&'));
+                if !ends_well {
+                    out.push(ConfigProblem::warning(
+                        Some(path.line),
+                        "A windowsPE command that fails stops Setup: end it with & exit 0, as in cmd /c (...) 2>nul & exit 0.",
+                    ));
+                }
+            }
+        }
+    }
+    if !commands.iter().any(|c| c.contains(WINRM_FINGERPRINT_MARKER)) {
+        out.push(ConfigProblem::warning(
+            None,
+            "Nothing writes the WinRM certificate's fingerprint to COM1, so a deploy can't check the certificate before it signs in: copy the starter's first sign-in command that does.",
+        ));
+    }
     out.sort_by_key(|p| (p.line.unwrap_or(u32::MAX), p.severity == Severity::Warning));
     out
+}
+
+/// VM-29: the line a Windows answer file writes to COM1 with its WinRM certificate's SHA-256 (`remotely-winrm
+/// SHA256:<base64>`), which the deploy's install watcher reads from the VM's serial log to trust that certificate
+/// (S3: the same text as [`crate::adapters::winrm::http::fingerprint`]).
+pub const WINRM_FINGERPRINT_MARKER: &str = "remotely-winrm";
+/// VM-29: the lines a Windows answer file writes to COM1 as Setup goes (`remotely-stage <stage> <time>`).
+pub const STAGE_MARKER: &str = "remotely-stage";
+
+/// VM-29: which account each `{{password.<name>}}` of a file is: the Administrator's, or a local account's (by its
+/// `Name`). The deploy signs in with the first and sets each to the vault's password once Windows is installed.
+pub fn password_accounts(text: &str) -> Vec<(String, String)> {
+    let Ok(root) = xml::parse(text) else {
+        return Vec::new();
+    };
+    let name_in = |value: &str| -> Option<String> {
+        let inner = value.trim().strip_prefix("{{password.")?.strip_suffix("}}")?;
+        super::vars::valid_name(inner).then(|| inner.to_owned())
+    };
+    let mut out: Vec<(String, String)> = Vec::new();
+    for component in components(&root, SHELL) {
+        if let Some(value) = component.at(&["UserAccounts", "AdministratorPassword", "Value"]) {
+            if let Some(name) = name_in(value.trimmed()) {
+                out.push((name, "Administrator".to_owned()));
+            }
+        }
+        if let Some(accounts) = component.at(&["UserAccounts", "LocalAccounts"]) {
+            for account in accounts.children_named("LocalAccount") {
+                let (Some(user), Some(value)) = (account.child("Name"), account.at(&["Password", "Value"])) else {
+                    continue;
+                };
+                if let Some(name) = name_in(value.trimmed()) {
+                    out.push((name, user.trimmed().to_owned()));
+                }
+            }
+        }
+    }
+    let mut seen = std::collections::HashSet::new();
+    out.retain(|(_, account)| seen.insert(account.to_ascii_lowercase()));
+    out
+}
+
+/// How DiskConfiguration lays out the disk: GPT (an EFI or MSR partition) or MBR (an Active one), for the firmware
+/// check: Setup on UEFI wants GPT, and on BIOS stops at the disk page with GPT (S3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiskStyle {
+    Gpt,
+    Mbr,
+}
+
+/// The layout's style, when the file has one.
+pub fn disk_style(text: &str) -> Option<DiskStyle> {
+    let root = xml::parse(text).ok()?;
+    let partitions = all(&root, "CreatePartition");
+    if partitions.is_empty() {
+        return None;
+    }
+    let gpt = partitions.iter().any(|p| {
+        p.child("Type")
+            .is_some_and(|t| matches!(t.trimmed().to_ascii_uppercase().as_str(), "EFI" | "MSR"))
+    });
+    // No EFI system partition: a layout UEFI can't boot, as BIOS's MBR one (Primary, Active, "System Reserved").
+    Some(if gpt { DiskStyle::Gpt } else { DiskStyle::Mbr })
 }
 
 /// The partitions DiskConfiguration sizes (MB), the one that extends left out.
@@ -644,7 +733,7 @@ mod tests {
       <FirstLogonCommands>
         <SynchronousCommand wcm:action="add">
           <Order>1</Order>
-          <CommandLine>powershell -Command "winrm quickconfig -transport:https"</CommandLine>
+          <CommandLine>powershell -Command "winrm quickconfig -transport:https; [IO.File]::WriteAllText('COM1', 'remotely-winrm SHA256:x')"</CommandLine>
           <Description>WinRM over HTTPS</Description>
         </SynchronousCommand>
       </FirstLogonCommands>
@@ -694,6 +783,40 @@ mod tests {
     }
 
     #[test]
+    fn g6_reads_accounts_layouts_and_lints_windows_pe_commands() {
+        // Which account each password is, for the deploy's first sign-in.
+        let body = file("{{password.admin}}");
+        assert_eq!(
+            password_accounts(&body),
+            [("admin".to_owned(), "Administrator".to_owned())]
+        );
+        let local = r#"<unattend xmlns="urn:schemas-microsoft-com:unattend"><settings pass="oobeSystem"><component name="Microsoft-Windows-Shell-Setup"><UserAccounts><LocalAccounts><LocalAccount><Name>alice</Name><Password><Value>{{password.ops}}</Value><PlainText>true</PlainText></Password></LocalAccount></LocalAccounts></UserAccounts></component></settings></unattend>"#;
+        assert_eq!(password_accounts(local), [("ops".to_owned(), "alice".to_owned())]);
+        assert!(password_accounts("<not xml").is_empty());
+        // GPT for UEFI (an EFI partition), MBR for BIOS.
+        assert_eq!(disk_style(&body), Some(DiskStyle::Gpt));
+        let mbr = body
+            .replace("<Type>EFI</Type>", "<Type>Primary</Type>")
+            .replace("<Type>MSR</Type>", "<Type>Primary</Type>");
+        assert_eq!(disk_style(&mbr), Some(DiskStyle::Mbr));
+        assert_eq!(disk_style("<unattend/>"), None);
+        // A windowsPE command that may fail stops Setup.
+        let pe = body.replace(
+            "<DiskConfiguration>",
+            "<RunSynchronous><RunSynchronousCommand><Order>1</Order><Path>cmd /c echo x&gt;COM1</Path></RunSynchronousCommand><RunSynchronousCommand><Order>2</Order><Path>cmd /c (echo x) 2&gt;nul &amp; exit 0</Path></RunSynchronousCommand></RunSynchronous><DiskConfiguration>",
+        );
+        let warnings: Vec<String> = check(&pe.replace("{{password.admin}}", SAMPLE_ONE_TIME))
+            .into_iter()
+            .map(|p| p.message)
+            .collect();
+        assert_eq!(
+            warnings.iter().filter(|w| w.contains("& exit 0")).count(),
+            1,
+            "only the first: {warnings:?}"
+        );
+    }
+
+    #[test]
     fn the_form_changes_single_elements() {
         let body = file("{{password.admin}}").replace("<ComputerName>vm-1", "<ComputerName>{{hostname}}");
         let read = read_form(&body);
@@ -705,7 +828,7 @@ mod tests {
         assert_eq!(form.users[0].password.as_deref(), Some("{{password.admin}}"));
         assert_eq!(
             form.late_commands,
-            ["powershell -Command \"winrm quickconfig -transport:https\""]
+            ["powershell -Command \"winrm quickconfig -transport:https; [IO.File]::WriteAllText('COM1', 'remotely-winrm SHA256:x')\""]
         );
         let mut after = form.clone();
         after.timezone = Some("W. Europe Standard Time".into());

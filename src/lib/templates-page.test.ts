@@ -8,7 +8,7 @@ import { newStackReason, newTemplateReason, openingTab, TEMPLATE_TABS } from "./
 test("the tabs follow a first deploy's steps, Disk images last", () => {
   assert.deepEqual(
     TEMPLATE_TABS.map((t) => t.label),
-    ["Images", "Sizes", "Install configs", "Launch templates", "Stacks", "Disk images"],
+    ["Images", "Sizes", "Install configs", "Address pools", "Launch templates", "Stacks", "Disk images"],
   );
 });
 

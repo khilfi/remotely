@@ -158,6 +158,9 @@ export function fromSkipped(names: string[]): NotificationInput {
   };
 }
 
+/** VM-29: the start of a deploy step's progress while an install waits for the vault (the core's `VAULT_WAIT`). */
+export const VAULT_WAIT = "waiting for the vault to be unlocked";
+
 const FINISHED: Record<Exclude<JobStatus, "queued" | "countdown" | "running">, [NotificationLevel, string]> = {
   succeeded: ["success", "Job succeeded"],
   failed: ["error", "Job failed"],
@@ -173,6 +176,7 @@ const FINISHED: Record<Exclude<JobStatus, "queued" | "countdown" | "running">, [
 export class JobNotes {
   private summaries = new Map<string, string>();
   private quiet = new Set<string>();
+  private vaultWaits = new Set<string>();
 
   /** The entry for this event, or null when it adds none. */
   note(event: JobEvent): NotificationInput | null {
@@ -194,6 +198,21 @@ export class JobNotes {
           link,
           group,
         };
+      case "targetProgress": {
+        // VM-29: a new Windows VM's install waits for the vault to set its password; said once a VM.
+        if (!event.step.startsWith(VAULT_WAIT)) return null;
+        const key = `${id}|${event.target}`;
+        if (this.vaultWaits.has(key)) return null;
+        this.vaultWaits.add(key);
+        return {
+          source: "job",
+          level: "warning",
+          title: "Unlock the vault to finish an install",
+          body: `A new VM's install waits for the vault to set its password: ${this.summary(id)}`,
+          link,
+          group,
+        };
+      }
       case "stillRunning":
         if (this.quiet.has(id)) return null;
         return {

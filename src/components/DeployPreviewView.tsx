@@ -53,6 +53,46 @@ export function DeployPreviewView({ preview, showWarnings = true }: Props) {
             </dd>
           </>
         )}
+        {preview.install && (
+          <>
+            <dt className="text-muted-foreground">Installs</dt>
+            <dd>
+              unattended from &apos;{preview.install.configName}&apos; ({preview.install.kind}):{" "}
+              {preview.install.delivery}
+              {preview.install.isoCopyBytes !== null
+                ? `; the ISO's copy takes ${bytesText(preview.install.isoCopyBytes)} until the installs are done`
+                : ""}
+              ; watched for up to {preview.install.timeLimitMinutes} minutes
+            </dd>
+            {preview.install.vms.some((vm) => vm.ip || Object.keys(vm.values).length > 0) && (
+              <>
+                <dt className="text-muted-foreground">Values</dt>
+                <dd className="grid gap-0.5">
+                  {/* Everything that goes into each VM's file besides its name and the vault's secrets. */}
+                  {preview.install.vms.map((vm) => (
+                    <span key={vm.name} className="break-words">
+                      <span className="font-medium">{vm.name}</span>
+                      {vm.ip && (
+                        <>
+                          {" "}
+                          ip <span data-mask="ip">{vm.ip}</span>
+                        </>
+                      )}
+                      {Object.entries(vm.values).map(([name, value]) => (
+                        <span key={name}>
+                          , {name} <span className="font-mono">{value}</span>
+                        </span>
+                      ))}
+                    </span>
+                  ))}
+                  {preview.install.pool && (
+                    <span className="text-muted-foreground">Addresses from the pool {preview.install.pool}</span>
+                  )}
+                </dd>
+              </>
+            )}
+          </>
+        )}
         <dt className="text-muted-foreground">Environment</dt>
         <dd className="flex flex-wrap items-center gap-2">
           <EnvBadge env={preview.environment} />

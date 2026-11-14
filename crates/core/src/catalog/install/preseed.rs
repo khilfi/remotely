@@ -226,10 +226,52 @@ pub fn check(text: &str) -> Vec<ConfigProblem> {
             "No SSH server: add openssh-server to the packages, or ssh-server to tasksel/first.",
         ));
     }
-    if scan.get("finish-install/reboot_in_progress").is_none() {
+    // VM-29 (S2): each of these was seen to stop a Debian 13 install at auto=true priority=critical, asking on its
+    // console where an unattended deploy has no one to answer.
+    if make_user && scan.get("passwd/user-fullname").is_none() {
+        out.push(ConfigProblem::error(
+            None,
+            "The installer stops to ask for the user's full name: set passwd/user-fullname.",
+        ));
+    }
+    for (question, ask, fix) in [
+        (
+            "debian-installer/locale",
+            "to pick a language",
+            "d-i debian-installer/locale string en_US.UTF-8",
+        ),
+        (
+            "keyboard-configuration/xkb-keymap",
+            "to pick a keyboard",
+            "d-i keyboard-configuration/xkb-keymap select us",
+        ),
+        (
+            "grub-installer/only_debian",
+            "where to install GRUB on a BIOS VM",
+            "d-i grub-installer/only_debian boolean true",
+        ),
+        (
+            "grub-installer/bootdev",
+            "where to install GRUB on a BIOS VM",
+            "d-i grub-installer/bootdev string default",
+        ),
+        (
+            "finish-install/reboot_in_progress",
+            "before it restarts, once the install is done",
+            "d-i finish-install/reboot_in_progress note",
+        ),
+    ] {
+        if scan.get(question).is_none() {
+            out.push(ConfigProblem::error(
+                None,
+                format!("The installer stops {ask}: add {fix}."),
+            ));
+        }
+    }
+    if scan.get("tasksel/first").is_none() {
         out.push(ConfigProblem::warning(
             None,
-            "The installer asks before it restarts: add d-i finish-install/reboot_in_progress note.",
+            "No tasksel/first: Debian 13 then installs a desktop (over a thousand packages). Add tasksel tasksel/first multiselect standard, ssh-server.",
         ));
     }
     if scan.get("partman-auto/method").is_some() {
@@ -620,7 +662,7 @@ mod tests {
     }
 
     fn good() -> String {
-        format!("d-i debian-installer/locale string en_US.UTF-8\nd-i keyboard-configuration/xkb-keymap select us\nd-i netcfg/choose_interface select auto\nd-i netcfg/get_hostname string vm-1\nd-i passwd/root-login boolean false\nd-i passwd/username string alice\nd-i passwd/user-password-crypted password {SAMPLE_HASH}\nd-i time/zone string Etc/UTC\nd-i partman-auto/method string lvm\nd-i partman-lvm/confirm boolean true\nd-i partman/confirm boolean true\nd-i partman/confirm_nooverwrite boolean true\nd-i partman-partitioning/confirm_write_new_label boolean true\ntasksel tasksel/first multiselect standard, ssh-server\nd-i pkgsel/include string curl\nd-i preseed/late_command string \\\n    in-target true; echo done\nd-i finish-install/reboot_in_progress note\n")
+        format!("d-i debian-installer/locale string en_US.UTF-8\nd-i keyboard-configuration/xkb-keymap select us\nd-i netcfg/choose_interface select auto\nd-i netcfg/get_hostname string vm-1\nd-i passwd/root-login boolean false\nd-i passwd/user-fullname string Alice\nd-i passwd/username string alice\nd-i passwd/user-password-crypted password {SAMPLE_HASH}\nd-i time/zone string Etc/UTC\nd-i partman-auto/method string lvm\nd-i partman-lvm/confirm boolean true\nd-i partman/confirm boolean true\nd-i partman/confirm_nooverwrite boolean true\nd-i partman-partitioning/confirm_write_new_label boolean true\ntasksel tasksel/first multiselect standard, ssh-server\nd-i pkgsel/include string curl\nd-i preseed/late_command string \\\n    in-target true; echo done\nd-i grub-installer/only_debian boolean true\nd-i grub-installer/bootdev string default\nd-i finish-install/reboot_in_progress note\n")
     }
 
     #[test]
@@ -647,7 +689,9 @@ mod tests {
             "holds a password hash",
             "stops to ask for root's password",
             "No SSH server",
-            "asks before it restarts",
+            "stops before it restarts",
+            "stops to pick a language",
+            "stops to ask for the user's full name",
         ] {
             assert!(text.contains(want), "{want}: {text}");
         }

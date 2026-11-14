@@ -532,6 +532,10 @@ impl VmEditor {
                 }
                 VmLifecycleOp::Delete => {
                     self.store.release_vm(ctx, vmx_path).await?;
+                    // VM-32: its static addresses go back to their pools.
+                    for (ip, pool) in self.store.free_vm_leases(vmx_path).await? {
+                        changes.push(format!("{ip} went back to the address pool '{pool}'"));
+                    }
                 }
             }
         }

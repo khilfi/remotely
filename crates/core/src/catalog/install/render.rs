@@ -296,6 +296,34 @@ pub fn render(
     })
 }
 
+/// VM-29: whether `vm`'s values fill every plain placeholder the file uses, as [`render`] will want them (the deploy
+/// dialog's check, before any secret is read). The first problem, in words.
+pub fn check_values(spec: &InstallConfigInput, vm: &VmValues) -> Result<()> {
+    let pieces = vars::split(&spec.body).map_err(|errors| {
+        CoreError::InvalidInput(errors.first().map_or_else(
+            || "The file's placeholders can't be read.".to_owned(),
+            |e| format!("Line {}: {}", e.line, e.message),
+        ))
+    })?;
+    for p in vars::used(&pieces) {
+        if matches!(p, Placeholder::Password(_) | Placeholder::SshKey(_)) {
+            continue;
+        }
+        if let Placeholder::Own(name) = &p {
+            if !spec.variables.iter().any(|v| v.name == *name) {
+                return invalid(format!("{{{{{name}}}}} isn't one of the config's variables."));
+            }
+        }
+        plain_value(spec, vm, &p)?;
+    }
+    Ok(())
+}
+
+/// VM-29: whether the file uses `{{ip}}` (an address pool's address goes nowhere else).
+pub fn uses_ip(spec: &InstallConfigInput) -> bool {
+    vars::split(&spec.body).is_ok_and(|pieces| vars::used(&pieces).contains(&Placeholder::BuiltIn("ip")))
+}
+
 /// The kind's syntax check alone (no lint that depends on samples).
 fn kind_check(kind: InstallKind, text: &str) -> Vec<ConfigProblem> {
     match kind {

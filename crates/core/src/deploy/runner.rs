@@ -20,9 +20,12 @@ use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+mod install;
+
+pub use self::install::InstallTools;
 use super::cloud_init::{self, FirstBoot};
 use super::spec::{DeploySource, DeploySpec, DeployVm};
-use super::{seed, virtualbox as vb, vmx, workstation as ws, DeployActions};
+use super::{seed, virtualbox as vb, vmx, workstation as ws, DeployActions, DeployProgress};
 use crate::adapters::hypervisor::{Hypervisor, Hypervisors};
 use crate::adapters::vmx_file::VmxFile;
 use crate::catalog::images::ImageFormat;
@@ -49,7 +52,7 @@ const START: Duration = Duration::from_secs(10 * 60);
 pub const IMPORT_BOOT_TIPS: &str = "if it doesn't boot: an emergency shell or \"can't find root\" means its kernel has no driver for the disk controller, so import it again on SATA, or IDE if SATA fails too; \"no operating system\" or a boot menu that finds no disk means the firmware, so import it again with the other one (BIOS or UEFI)";
 
 /// How the runner waits; tests shorten it.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct DeployTuning {
     /// How often the guest's IP is asked for while the deploy waits for it.
     pub ip_poll: Duration,
@@ -59,6 +62,21 @@ pub struct DeployTuning {
     pub cleanup_tries: u32,
     /// ...this long apart.
     pub cleanup_pause: Duration,
+    /// VM-29: how often the install watcher reads the serial log and asks the hypervisor.
+    pub install_poll: Duration,
+    /// VM-29: at most this long, whatever the install's own time limit (tests).
+    pub install_cap: Option<Duration>,
+    /// VM-29: VirtualBox under Hyper-V hangs at known points with a silent serial port (S1, S2): a reset after this long.
+    pub hang_silence: Duration,
+    /// VM-29: resets for such hangs, at most, per VM.
+    pub max_hang_resets: u32,
+    /// VM-29: how long a probe of the installed system's SSH port waits.
+    pub connect_wait: Duration,
+    /// VM-29: Workstation's DHCP leases (`None`: not read).
+    pub leases_file: Option<PathBuf>,
+    /// VM-29 (tests): where the installed system's SSH or WinRM is probed instead of its own address, as (host, SSH
+    /// port, WinRM port); the address found is still the one the session gets.
+    pub probe: Option<(String, u16, u16)>,
 }
 
 impl Default for DeployTuning {
@@ -68,12 +86,19 @@ impl Default for DeployTuning {
             ip_wait_cap: None,
             cleanup_tries: 10,
             cleanup_pause: Duration::from_secs(3),
+            install_poll: Duration::from_secs(5),
+            install_cap: None,
+            hang_silence: Duration::from_secs(3 * 60),
+            max_hang_resets: 5,
+            connect_wait: Duration::from_secs(5),
+            leases_file: Some(PathBuf::from(super::install::WORKSTATION_LEASES)),
+            probe: None,
         }
     }
 }
 
 /// What one step made, so a failure or a cancel removes exactly that.
-#[derive(Debug, Default)]
+#[derive(Default)]
 struct Made {
     /// The VM's own folder, which this step made.
     folder: Option<PathBuf>,
@@ -93,6 +118,10 @@ struct Made {
     member: Option<String>,
     /// What the job says about the VM besides where it is.
     notes: Vec<String>,
+    /// VM-29: what an unattended install made (its seed, its copy of the ISO, its serial log).
+    install: Option<install::InstallMade>,
+    /// VM-32: the address claimed from a pool, given back when the step fails before the VM is made.
+    pool_claim: Option<(Uuid, std::net::Ipv4Addr)>,
 }
 
 /// The deploy runner the job runner calls (`JobRunner::set_deployer`).
@@ -107,6 +136,10 @@ pub struct Deployer {
     scan_folders: tokio::sync::Mutex<()>,
     /// CV-01, CV-03: converts what the hypervisor's own copy can't read (qcow2, VHDX; VHD and VDI on Workstation).
     converter: RwLock<Option<Arc<crate::convert::Converter>>>,
+    /// VM-29: what unattended installs need from the rest of Remotely.
+    install_tools: RwLock<Option<InstallTools>>,
+    /// VM-29: each running deploy's copy of its install ISO.
+    isos: install::IsoCopies,
 }
 
 impl Deployer {
@@ -126,6 +159,8 @@ impl Deployer {
             tuning: RwLock::new(DeployTuning::default()),
             scan_folders: tokio::sync::Mutex::new(()),
             converter: RwLock::new(None),
+            install_tools: RwLock::new(None),
+            isos: install::IsoCopies::default(),
         }
     }
 
@@ -169,7 +204,7 @@ impl Deployer {
     }
 
     fn tuning(&self) -> DeployTuning {
-        *locks::read(&self.tuning)
+        locks::read(&self.tuning).clone()
     }
 }
 
@@ -227,9 +262,22 @@ async fn make_folder(folder: &Path, made: &mut Made) -> Result<()> {
 
 impl Deployer {
     /// Makes the VM, up to its first power-on, and returns its key.
-    async fn make(&self, ctx: &Context, spec: &DeploySpec, vm: &DeployVm, made: &mut Made) -> Result<String> {
+    #[allow(clippy::too_many_arguments)]
+    async fn make(
+        &self,
+        ctx: &Context,
+        job_id: Uuid,
+        spec: &DeploySpec,
+        vm: &DeployVm,
+        made: &mut Made,
+        progress: &DeployProgress<'_>,
+        token: &CancellationToken,
+    ) -> Result<String> {
         let folder = spec.vm_folder(vm);
         make_folder(&folder, made).await?;
+        // VM-29: the address, the seed and the ISO copy first, so a refusal makes no VM.
+        self.prepare_install(ctx, job_id, spec, vm, &folder, made, progress, token)
+            .await?;
         let first_boot = spec.first_boot.as_ref().map(|f| FirstBoot {
             instance_id: format!("iid-remotely-{}", Uuid::new_v4()),
             hostname: vm.hostname.clone(),
@@ -249,6 +297,7 @@ impl Deployer {
             }
         };
         self.list(ctx, spec, &key, made).await?;
+        self.assign_claim(ctx, job_id, made, &key).await;
         if let Some(tag) = spec.stack {
             // VM-08: in its stack instance as soon as it is made, so teardown finds it even if the job stops here.
             let listed = self
@@ -268,7 +317,8 @@ impl Deployer {
                 .await?;
             made.member = Some(listed);
         }
-        if spec.after_deploy.clean_snapshot {
+        // VM-29: an install's clean snapshot is taken once it is installed.
+        if spec.after_deploy.clean_snapshot && made.install.is_none() {
             // Before the first boot: quick, with no memory to save, and going back to it boots the VM as deployed.
             match self
                 .hypervisors
@@ -422,7 +472,21 @@ impl Deployer {
             DeploySource::Iso { path } => {
                 let disks = self.new_workstation_disks(spec, vm, folder, &[]).await?;
                 made.vmx = Some(vmx_path.clone());
-                self.write_new_vmx(spec, vm, &vmx_path, disks, (Some(path.clone()), None), guestinfo)
+                // VM-29: the VM's copy of the ISO, its seed in a second drive, and its serial port to a file.
+                let (iso, seed, mut extra) = match made.install.as_mut() {
+                    Some(m) => {
+                        m.iso_drive = Some(install::Drive::Workstation(vmx::iso_slot(&disks)));
+                        m.seed_drive = Some(install::Drive::Workstation(vmx::seed_slot(&disks, true)));
+                        (
+                            m.iso.display().to_string(),
+                            Some(m.seed.display().to_string()),
+                            vmx::serial_file_keys(&m.serial),
+                        )
+                    }
+                    None => (path.clone(), None, Vec::new()),
+                };
+                extra.extend(guestinfo);
+                self.write_new_vmx(spec, vm, &vmx_path, disks, (Some(iso), seed), extra)
                     .await?;
             }
         }
@@ -675,14 +739,22 @@ impl Deployer {
             }
             DeploySource::Iso { path } => {
                 made.vbox = Some(uuid.clone());
-                let (controller, port) = self.new_vbox_vm(&uuid, spec, vm, true).await?;
+                let (controller, port) = self.new_vbox_vm(&uuid, spec, vm, made.install.is_some()).await?;
                 self.vbox_disks(&uuid, spec, vm, folder, &[]).await?;
-                self.vbox(vb::attach_args(&uuid, controller, port, true, path), SHORT)
+                let iso = match &made.install {
+                    Some(m) => m.iso.display().to_string(),
+                    None => path.clone(),
+                };
+                self.vbox(vb::attach_args(&uuid, controller, port, true, &iso), SHORT)
                     .await?;
+                // VM-29: its seed in the next drive, its serial port to a file, and on NAT a rule to its port.
+                if let Some(m) = made.install.as_mut() {
+                    self.virtualbox_install_settings(&uuid, (controller, port), m).await?;
+                }
                 if let Some(unattended) = &spec.unattended {
                     self.unattended(ctx, &uuid, path, vm, unattended).await?;
                     made.notes.push(format!(
-                        "VirtualBox installs the OS by itself as {}: it goes on for a while after the job ends",
+                        "VirtualBox installs the OS by itself as {}: it goes on after the job ends, and its install files are deleted once it ejects its ISO or the VM is shut down, while Remotely runs",
                         unattended.user
                     ));
                 }
@@ -698,7 +770,7 @@ impl Deployer {
         uuid: &str,
         spec: &DeploySpec,
         vm: &DeployVm,
-        boot_dvd_first: bool,
+        seed_drive: bool,
     ) -> Result<(DiskController, u32)> {
         let (Some(size), Some(profile)) = (&spec.size, &spec.profile) else {
             return Err(CoreError::InvalidInput(
@@ -717,7 +789,6 @@ impl Deployer {
                 profile,
                 spec.network.as_ref().unwrap_or(&Network::Nat),
                 spec.host_adapter.as_deref(),
-                boot_dvd_first,
             ),
             SHORT,
         )
@@ -735,8 +806,9 @@ impl Deployer {
                 None => controllers.push((disk.controller, disk.controller_model.clone(), 1)),
             }
         }
+        // The DVD drive, and VM-29's seed drive after it.
         if let Some(entry) = controllers.iter_mut().find(|(c, _, _)| *c == dvd.0) {
-            entry.2 += 1;
+            entry.2 += 1 + u32::from(seed_drive);
         }
         for (controller, model, ports) in controllers {
             self.vbox(vb::storagectl_args(uuid, controller, &model, ports), SHORT)
@@ -1094,9 +1166,10 @@ impl Deployer {
                         left.push(problem);
                     }
                 }
-                if let Some(seed) = &made.seed_file {
-                    // `unregistervm --delete` deletes the VM's disks but leaves a DVD image in VirtualBox's media list.
-                    let close = vec!["closemedium".into(), "dvd".into(), seed.display().to_string()];
+                // `unregistervm --delete` deletes the VM's disks but leaves a DVD image in VirtualBox's media list.
+                let install = made.install.as_ref().map(|m| [m.iso.clone(), m.seed.clone()]);
+                for dvd in made.seed_file.iter().chain(install.iter().flatten()) {
+                    let close = vec!["closemedium".into(), "dvd".into(), dvd.display().to_string()];
                     let _ = self.hypervisors.virtualbox().change(close, SHORT).await;
                 }
             }
@@ -1256,7 +1329,7 @@ impl Deployer {
             if spec.hypervisor == Hypervisor::VirtualBox && spec.network == Some(Network::Nat) {
                 notes.push("no SSH session: on VirtualBox's NAT the guest can't be reached from this PC".into());
             } else if let Some(ip) = &ip {
-                notes.push(self.make_session(ctx, spec, vm, key, ip).await);
+                notes.push(self.make_session(ctx, spec, vm, key, ip, None).await);
             }
         }
         if spec.after_deploy.open_console {
@@ -1269,11 +1342,36 @@ impl Deployer {
                 Err(err) => format!("the console didn't open: {err}"),
             });
         }
+        // VM-21: VirtualBox's own unattended install leaves its files (one with the password's hash) beside the .vbox
+        // and its virtual ISO in the media list. They go in the background once VirtualBox ejects that ISO or the VM
+        // is shut down (S3: Windows never ejects it; S2: Debian on UEFI waits at GRUB), so the job isn't held.
+        if spec.unattended.is_some() && spec.hypervisor == Hypervisor::VirtualBox {
+            let hypervisors = self.hypervisors.clone();
+            let (key, folder) = (key.to_owned(), spec.vm_folder(vm));
+            let poll = self.tuning().install_poll * 12;
+            tokio::spawn(async move {
+                let left = clean_vbox_unattended(&hypervisors, &key, &folder, poll, VBOX_UNATTENDED_WATCH).await;
+                if !left.is_empty() {
+                    tracing::warn!(
+                        files = left.len(),
+                        "VirtualBox's unattended install files stay beside the VM's settings"
+                    );
+                }
+            });
+        }
         notes.join("; ")
     }
 
     /// The SSH session to the guest, linked to the VM by hand (QL-01) when the deploy says so.
-    async fn make_session(&self, ctx: &Context, spec: &DeploySpec, vm: &DeployVm, key: &str, ip: &str) -> String {
+    async fn make_session(
+        &self,
+        ctx: &Context,
+        spec: &DeploySpec,
+        vm: &DeployVm,
+        key: &str,
+        ip: &str,
+        user: Option<String>,
+    ) -> String {
         let vm_id = if spec.after_deploy.link_session {
             match self.store.find_vm(ctx, key).await {
                 Ok(Some(record)) => Some(record.id),
@@ -1290,10 +1388,8 @@ impl Deployer {
             },
             None => SessionAuth::Password { password_id: None },
         };
-        let username = spec
-            .first_boot
-            .as_ref()
-            .and_then(|f| f.user.clone())
+        let username = user
+            .or_else(|| spec.first_boot.as_ref().and_then(|f| f.user.clone()))
             .or_else(|| spec.unattended.as_ref().map(|u| u.user.clone()))
             .or_else(|| default_user(spec));
         let input = SessionInput {
@@ -1328,14 +1424,39 @@ impl DeployActions for Deployer {
     async fn deploy_vm(
         &self,
         ctx: &Context,
-        _job_id: Uuid,
+        job_id: Uuid,
         spec: &DeploySpec,
         vm: &DeployVm,
+        progress: &DeployProgress<'_>,
+        token: &CancellationToken,
+    ) -> Result<String> {
+        if spec.install.is_none() {
+            return self.deploy_one(ctx, job_id, spec, vm, progress, token).await;
+        }
+        // VM-29: the deploy's copy of the install ISO is shared by its VMs while any of them runs.
+        self.isos.enter(job_id).await;
+        let result = self.deploy_one(ctx, job_id, spec, vm, progress, token).await;
+        if self.isos.leave(job_id).await {
+            // P3 of PR 98's review: whatever the job claimed of a pool and didn't give a VM goes back.
+            self.release_job_claims(ctx, job_id).await;
+        }
+        result
+    }
+}
+
+impl Deployer {
+    async fn deploy_one(
+        &self,
+        ctx: &Context,
+        job_id: Uuid,
+        spec: &DeploySpec,
+        vm: &DeployVm,
+        progress: &DeployProgress<'_>,
         token: &CancellationToken,
     ) -> Result<String> {
         let mut made = Made::default();
         let outcome = {
-            let work = self.make(ctx, spec, vm, &mut made);
+            let work = self.make(ctx, job_id, spec, vm, &mut made, progress, token);
             tokio::select! {
                 biased;
                 _ = token.cancelled() => Err(CoreError::Cancelled),
@@ -1343,8 +1464,52 @@ impl DeployActions for Deployer {
             }
         };
         match outcome {
-            Ok(key) => Ok(self.after_deploy(ctx, spec, vm, &key, &mut made, token).await),
+            Ok(key) => match (&spec.install, made.install.take()) {
+                (Some(install), Some(m)) => {
+                    // The VM is made: from here on a failure keeps it, for a look at why.
+                    let mut notes = vec![format!("made in {}", spec.vm_folder(vm).display())];
+                    notes.append(&mut made.notes);
+                    let address = self
+                        .watch_install(ctx, spec, install, vm, &key, &m, &mut notes, progress, token)
+                        .await;
+                    match address {
+                        Ok(address) => {
+                            if let Some((host, _)) = &address {
+                                notes.push(format!("installed, reached at {host}"));
+                            }
+                            self.finish_install(ctx, job_id, spec, vm, &key, &m, address, &mut notes)
+                                .await;
+                            Ok(notes.join("; "))
+                        }
+                        Err(err) => {
+                            // D4: the seed goes; the VM, its ISO copy and its serial log stay for a look. The step's
+                            // notes go with the error, the answer file's SHA-256 among them.
+                            let stage = match &err {
+                                CoreError::InstallFailed { message, .. } => message.clone(),
+                                CoreError::Cancelled => {
+                                    "the install was cancelled while it was watched; the VM goes on installing".into()
+                                }
+                                other => format!("the install stopped: {other}"),
+                            };
+                            notes.push(stage);
+                            notes.extend(self.abandon_install(job_id, spec, &key, &m).await);
+                            let message = notes.join("; ");
+                            let vm = vm.name.clone();
+                            Err(if matches!(err, CoreError::Cancelled) {
+                                CoreError::InstallCancelled { vm, message }
+                            } else {
+                                CoreError::InstallFailed { vm, message }
+                            })
+                        }
+                    }
+                }
+                _ => Ok(self.after_deploy(ctx, spec, vm, &key, &mut made, token).await),
+            },
             Err(err) => {
+                self.release_claim(ctx, job_id, &made).await;
+                if let Some(m) = &made.install {
+                    self.isos_forget(job_id, m).await;
+                }
                 let left = self.clean_up(spec, &made).await;
                 if let Some(member) = &made.member {
                     if let Err(err) = self.store.remove_stack_vm(ctx, member).await {
@@ -1367,4 +1532,72 @@ impl DeployActions for Deployer {
             }
         }
     }
+}
+
+/// VM-21: how long the background cleanup of VirtualBox's unattended install waits for its `.viso` to go.
+const VBOX_UNATTENDED_WATCH: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// VM-21 (D5 of PR 98's review): once VirtualBox has ejected its unattended install's `.viso`, or the VM is off (then
+/// it is ejected here), closes it in the media list and deletes the `Unattended-<uuid>-*` files beside the `.vbox`.
+/// Gives up after `limit`, or when the VM is gone. Returns the files left.
+pub async fn clean_vbox_unattended(
+    hypervisors: &Hypervisors,
+    key: &str,
+    folder: &Path,
+    poll: Duration,
+    limit: Duration,
+) -> Vec<String> {
+    let vbox = hypervisors.virtualbox();
+    let is_viso = |p: &Path| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("viso"));
+    let deadline = tokio::time::Instant::now() + limit;
+    loop {
+        let Ok(info) = vbox.vm_info(key).await else {
+            return Vec::new();
+        };
+        let attached = info
+            .dvds
+            .iter()
+            .find(|d| d.image.as_deref().is_some_and(is_viso))
+            .map(|d| d.slot.clone());
+        // Powered off or aborted only: a saved (suspended) VM is still mid-install, its .viso still needed.
+        let off = info.power_state() == crate::domain::PowerState::NotRunning;
+        match attached {
+            None => break,
+            Some(slot) if off => {
+                if let Some((controller, port, device)) = vb::parse_slot(&slot) {
+                    let _ = vbox
+                        .change(
+                            vb::attach_named(key, &controller, port, device, true, "emptydrive"),
+                            SHORT,
+                        )
+                        .await;
+                }
+                break;
+            }
+            Some(_) => {}
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return vec!["the install ISO is still in its drive".into()];
+        }
+        tokio::time::sleep(poll.max(Duration::from_millis(10))).await;
+    }
+    let prefix = format!("unattended-{}-", key.to_ascii_lowercase());
+    let mut left = Vec::new();
+    if let Ok(mut entries) = tokio::fs::read_dir(folder).await {
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if !name.to_ascii_lowercase().starts_with(&prefix) {
+                continue;
+            }
+            let path = entry.path();
+            if is_viso(&path) {
+                let close = vec!["closemedium".into(), "dvd".into(), path.display().to_string()];
+                let _ = vbox.change(close, SHORT).await;
+            }
+            if tokio::fs::remove_file(&path).await.is_err() {
+                left.push(name);
+            }
+        }
+    }
+    left
 }

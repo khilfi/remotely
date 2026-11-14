@@ -378,7 +378,14 @@ crates/core/          remotely-core: all app logic
                       NoCloud seed on both hypervisors (Workstation: a CD/DVD of its own after the SATA disks,
                       vmx::seed_slot, disconnected with `disconnectNamedDevice` once the guest's IP shows) with
                       cloud_init::DHCP_ANY_NIC's network-config and sshd's password setting left alone; the preview
-                      and the job's note say what to try when it doesn't boot (runner::IMPORT_BOOT_TIPS)
+                      and the job's note say what to try when it doesn't boot (runner::IMPORT_BOOT_TIPS);
+                      VM-29 (0.8.0 G6) unattended installs from install configs ("Unattended deploys (G6)"):
+                      install.rs (Flavor, seed files, leases, the WinRM scripts), iso/ (the ISO copy planned from the
+                      original as untrusted input: ISO 9660 with Rock Ridge and Joliet, UDF, El Torito; md5sum.txt),
+                      watch.rs (the serial log's stages), runner/install.rs (render, seed, links, the watcher, the
+                      first sign-in, the CDs out, the session)
+    address_pools.rs  VM-32 (0.8.0 G6, migration 0036) address pools per workspace: ranges per hypervisor network,
+                      pick (pinged), claim, assign, release; store/address_pools.rs
     convert/          CV-01 to CV-03, VM-17 conversion (other hypervisors' formats read and written, never managed).
                       formats.rs DiskFormat and OutputKind (VMDK sparse, flat, stream-optimized, ESXi's vmfs; VDI,
                       VHD, VHDX dynamic or fixed; qcow2; raw); inspect.rs CV-03 Inspect from each header (MO-13's
@@ -1834,7 +1841,7 @@ starter, unchanged for 13 too, rendered by `catalog::install::render::render` (a
   ahci; modprobe sr_mod; modprobe isofs; mkdir -p /seed; n=0; while [ $n -lt 30 ]; do for d in /dev/sr0 /dev/sr1
   /dev/sr2 /dev/sr3; do mount -t iso9660 -o ro $d /seed 2>/dev/null && { [ -e /seed/preseed.cfg ] && break 2; umount
   /seed; }; done; n=$((n+1)); sleep 1; done; cp /seed/preseed.cfg /tmp/preseed.cfg; umount /seed; echo 1 >
-  /sys/block/${d#/dev/}/device/delete" console=tty0 console=ttyS0,115200n8` (both menu files 737 bytes, inside
+  /sys/block/${d#/dev/}/device/delete" console=tty0 console=ttyS0,115200n8` (both menu files 703 bytes, inside
   isolinux.cfg's one sector and grub.cfg's three). The command finds the CD that holds `preseed.cfg` (by content, any
   label), copies it to `/tmp` and drops that drive from the guest's kernel; `file-preseed` then loads it as any preseed
   (`preseed/include`, `preseed/run` and the file's own `early_command` work: a marker in the file's `early_command`
@@ -2071,6 +2078,109 @@ PC.
   takes the country and time zone from this PC; a template without placeholders uses none of them, and its user is not
   made.
 
+## Unattended deploys (G6, what Remotely does)
+
+VM-29 and VM-32, from 0.8.0 (`docs/plan-0.8.md`, G6), built only on what S1 to S3 above saw work. The code is
+`deploy/install.rs` (pure), `deploy/iso/` (the ISO copy), `deploy/watch.rs` (the serial log), `deploy/runner/install.rs`
+(the job's work) and `address_pools.rs`.
+
+- **What is approved is what runs.** A launch template's install config goes into `DeploySpec.install`
+  (`InstallSpec`: the config by id, name and `config_fingerprint`, the SHA-256 of its kind, file, variables and vault
+  picks; the vault passwords it takes; the time limit; the pool; the ISO's size and modified time, `IsoSeen`) and each
+  VM's row into `DeployVm.install` (`VmInstall`: `{{ip}}` and own variables). The job refuses a config whose fingerprint
+  or an ISO whose size or time changed; vault items are read by id as each VM's file is made (the approval says so). A
+  vault password going into an answer file adds `VaultReauth` to the approval (AP-06, `ask_for_guest_password`), for a
+  deploy and for every step of a stack. The tier is a VM deploy's. Kickstart (no spike) and cloud-init configs are
+  refused for ISO installs, with the reason, and so is a typed `ip` for a config without `{{ip}}`.
+- **Delivery, one way on both hypervisors** (`install::Flavor`): Ubuntu autoinstall, Debian preseed ("a2") and Windows
+  unattend. `deploy::iso` plans the copy from the original read as untrusted input (refusing any layout S1 to S3 didn't
+  see: Ubuntu's first menu entry must be the casper installer it changes and the default entry 0, and the sectors it
+  rewrites, md5sum.txt's too, must belong to that file alone in both trees, with no Rock Ridge continuation area in them; grub.cfg's words are read as GRUB reads them, quotes and escapes included) when the dialog checks and again in the job. The job copies it
+  once per deploy as `<name>.iso.partial`, renamed when whole (a cancel stops the copy, `CancelOnDrop`), and gives every
+  VM a hard link (`<vm>-install.iso` in its folder; a copy of its own where links don't work). The preview counts the
+  copy's size against the drive's free space. Each VM's file is rendered with `render::render` into memory and written
+  onto a seed (`seed::write_seed`) in `<vm folder>\install-seed`, a `private_folder`; it never touches the disk anywhere
+  else. The note, the journal and the audit log keep the config's name and `Rendered.sha256` only.
+- **Drives and boot**: Workstation: the copy on `sata0:<n>` after the SATA disks, the seed on the next slot, COM1 to
+  `<vm>-serial.log`, `bios.bootOrder = "hdd,cdrom"` (so a BIOS install that stopped after partitioning needs a new VM to
+  try again: S2; the preview says so). VirtualBox: the copy on the boot disk's controller after its disks, the seed on
+  the next port, `--uart1 0x3F8 4 --uartmode1 file`, and `--boot1 disk --boot2 dvd` for every ISO deploy (VM-21's too).
+  On VirtualBox's NAT a rule `remotely-install,tcp,127.0.0.1,<free port>,,<22|5986>` lets the job reach the guest while
+  it is watched; it goes when the step ends. The serial port and the installed Linux's `console=ttyS0` stay, so
+  `<vm>-serial.log` grows on every boot. A Windows config must lay out GPT for UEFI and MBR for BIOS
+  (`unattend::disk_style`), and write `remotely-winrm SHA256:...` to COM1 (`WINRM_FINGERPRINT_MARKER`).
+- **The watcher** (one job step per VM, `JobEvent::TargetProgress` with the stage; up to `PARALLEL_INSTALLS`, 10, at
+  once, never more than `JobLimits.vm_ops`; 60 minutes by default, 240 at most): the serial log read as it grows,
+  escapes stripped (`watch::strip_escapes`), then S1's and S2's markers; any Debian `[!!] ` title, Subiquity's
+  `install_fail` or `An error occurred`, and `Continue with autoinstall?` fail it. Windows: Workstation's `vmware.log`
+  reset lines or VirtualBox's `/VirtualBox/VMInfo/ResetCounter`, the starters' `remotely-stage specialize` line, and the
+  fingerprint line, taken only after Setup's two restarts (the serial log is read to its end before they are counted, so an earlier line is never read late); a second, different
+  one fails the install. On VirtualBox a log silent for 3 minutes at a known hang point (Ubuntu's RAID6 benchmark as
+  the last line; Debian's partitioner as the last step title, since its dialog goes on drawing the frame and the
+  progress numbers after the title) gets `controlvm reset`, at most 5 times; Windows' restart hang isn't detected (the
+  time limit catches it). Debian's step titles count only whole (`Configuring apt-cdrom-setup`, a component the
+  installer loads, isn't `Configuring apt`). `<hostname> login:` counts anywhere in a line: Ubuntu's cloud-init writes
+  its last lines onto the prompt's line. Done: Linux at `<hostname> login:` and an SSH banner on the guest; Windows at WinRM over HTTPS signing in.
+- **A failure, the time limit or a cancel** (`CoreError::InstallFailed`, `InstallCancelled`, recorded as cancelled):
+  the seed is taken out and deleted (Workstation's drive keeps an empty disc) and VirtualBox's NAT rule removed; the VM,
+  its ISO copy, its serial log and (VirtualBox) `<vm>-install-failed.png` stay for a look, and its pool address stays
+  with it until the VM is deleted. A cancelled VM goes on installing. The step's error carries its notes (the answer
+  file's SHA-256 among them).
+- **The guest's address** (never gated on Tools): the row's or pool's, the NAT rule, a Workstation lease from
+  `vmnetdhcp.leases` by `ethernet0.generatedAddress`, else the hypervisor's report. Windows needs one before its password
+  can be set, so a Windows deploy on a network where Remotely can't learn it (bridged, a VirtualBox host-only or
+  internal network) is refused without a pool.
+- **Windows' first sign-in** (`WindowsSignIn`, tried again with a backoff up to a minute): the vault's passwords are
+  read first, so a locked vault sends nothing and the step waits ("waiting for the vault to be unlocked", which the
+  window turns into a notification). That wait isn't counted against the time limit, for up to 4 hours; after that the error says to deploy the VM again (its password is still the one-time one, and the seed is gone). NTLM over HTTPS with only the certificate
+  the VM wrote to COM1 (`PinnedCertificate`; another certificate, or a refused password, fails the install at once),
+  the one-time password; each account's password set to the vault's with `Set-LocalUser` (the script on stdin, never
+  logged) and noted as soon as it is, so a retry signs in with the vault's and does only what is left (a swap whose answer was lost is retried with the vault's password when the one-time one is refused); then, signed in
+  with the vault's, `install::AFTER_INSTALL_SCRIPT` signs the autologon session out and deletes
+  `Panther\unattend-original.xml` (its SHA-256 compared with the rendered file's; the note says so only when the delete
+  worked). The WinRM session is saved with that certificate trusted, with the vault password when no new approval is
+  needed to send it there, else without.
+- **After the install**: the seed, then the ISO copy, taken out: Workstation disconnects the drives and puts empty discs
+  in their files (the `.vmx` keeps the drives and a running VM's `.vmx` can't be changed); VirtualBox ejects both,
+  closes them in the media list and deletes the files. A link a file system won't delete yet is emptied when another VM
+  of the deploy ends. Then the "clean install" snapshot (with the running VM's memory) and the session (SSH as the
+  config's user with its key; none on VirtualBox's NAT). The notes say only what happened.
+- **Hand checks (14 Nov 2026, real VMs, PR 98)**: two Ubuntu 24.04.5 VMs on Workstation (UEFI), two Debian 12 netinst
+  on VirtualBox (UEFI, grub.cfg) and one Debian 12 on Workstation (BIOS, isolinux) installed unattended from one ISO
+  copy per deploy. vmware-vmx, VBoxHeadless and VBoxSVC run as the signed-in user, so both read the seed from its
+  private folder (one entry: the user, full control). NTFS deletes a VM's link to the copy while another VM reads the
+  copy through its own (seen on both hypervisors: a VirtualBox VM installed on from its link after its sibling's was
+  deleted), but never the link a VM holds itself. The installed systems (Ubuntu and Debian) lock their CD doors, so a
+  running VM's disc doesn't come out by asking: VirtualBox's `storageattach ... --medium
+  emptydrive` fails with `VERR_PDM_MEDIA_LOCKED` on every try, and `--forceunmount` takes it out; Workstation's
+  `disconnectNamedDevice` asks "Disconnect anyway and override the lock?" (`msg.cdromdisconnect.locked`), which with no
+  window gets its default, no, while vmrun answers 0 and the file stays open, so the job first sets `vmrun writeVariable
+  <vmx> runtimeConfig answer.msg.cdromdisconnect.locked Yes` (not written to the .vmx). Powered off and on with empty
+  discs in both drives, the UEFI VM booted its `Ubuntu` entry and the BIOS VM (`hdd,cdrom`) its disk, each at the login
+  prompt in 25 s with no question. Workstation asks `msg.serial.file.open` at each power-on (the serial log is there)
+  and appends to it. One installed Ubuntu's getty prompt had cloud-init's `<14>... cloud-init: ####` lines written
+  onto it. Two VirtualBox Debian installs of three hung at the partitioner; the reset got past it each time. With the
+  fixes, one Ubuntu VM on Workstation and one Debian VM on VirtualBox (reset once) each ended with "the seed is taken
+  out and deleted".
+- **Address pools (VM-32, migration 0036)**: per workspace, a range on one hypervisor's network with a gateway and DNS
+  servers; no tier, audited `address_pool_changed`, refused by the read-only lock. Each pool's network is resolved to
+  this PC's (`resolve_network`, from VM-11's `networks_only`: NAT and vmnet8 are one; bridged is one for both
+  hypervisors; a VirtualBox host-only pool names its adapter), and a lease is unique per PC network and address across
+  workspaces ("held in another workspace", naming nothing of it). VirtualBox NAT, NAT network and internal pools are
+  refused, and a pick or claim refuses a pool whose subnet no adapter of this PC is on. An address is free when it
+  answers neither a ping (nor sends its own "unreachable") nor ARP, both asked at once for up to 32 addresses; one that can't be checked is skipped and counted. An adapter list VirtualBox or Workstation couldn't give hides no pool (saving a pool on that network is refused, saying why), and pool edits and hand frees delete only leases that hold nothing now.
+  The dialog's check picks (cached 5 s); the job claims each address (a unique row, checked again; dropped if the claim
+  is cancelled), assigns it to the VM once made, and releases a step's claim when it fails before then and the job's
+  leftover claims when its last step ends; a claim whose job isn't open counts as free; a deleted VM frees its
+  addresses. A pool's gateway, DNS servers, prefix and netmask fill own variables of those names.
+- **VM-21's own `unattended install`** stays for ISOs without a config: its detected OS type must be the profile's
+  family. The step ends as before; in the background (while Remotely runs, up to a day) its `.viso` is closed and
+  `Unattended-<uuid>-*` deleted once VirtualBox has ejected it or the VM is powered off or aborted, never while it is saved (then it is ejected first): S3 saw
+  Windows never eject it, S2 Debian on UEFI wait at GRUB.
+- G5 fixes: `debian-12-minimal` turns the mirror on and the CD's apt entries off; `preseed::check` errors on a missing
+  locale, keymap, user full name, `grub-installer/only_debian` and `bootdev`, and `finish-install/reboot_in_progress`;
+  the unattend lint warns on a windowsPE command without `& exit 0` and on a file without the fingerprint line.
+
 ## Development safety
 
 - Unit and integration tests must never stop, reset, suspend, revert or delete snapshots on real VMs. Use the fake VMware adapter, and `fakes::FakeVirtualBox` for VirtualBox.
@@ -2120,6 +2230,11 @@ PC.
   like OpenSSH (direct-tcpip, tcpip-forward on 127.0.0.1 only); `with_route("db01.test", port)` makes a name only it
   resolves, so `tests/jump_hosts.rs` chains three servers, and `tests/tunnels.rs` carries bytes to an echo service on
   127.0.0.1. Tunnel tests bind loopback with port 0; never a network address.
+- Unattended deploys (VM-29, VM-32): `tests/unattended.rs` deploys on the fakes from small ISOs that
+  `fakes::install_isos` makes at run time, plays each installer by writing S1 to S3's lines into the VM's serial log,
+  answers SSH with a banner on 127.0.0.1 (`DeployTuning.probe`) and Windows' WinRM with a fake client
+  (`Core::set_deploy_winrm`); pools ping through `FakeNetworkTools`. Never boot a real ISO, and read the owner's ISOs
+  only in the opt-in ISO test (`REMOTELY_IT=1`, `REMOTELY_IT_ISO_DIR`).
 - Deploy (VM-21, VM-22, VM-10): never create, clone, import or delete real VMs in tests. `tests/deploy.rs` runs
   deploys through the bus and the job runner on `FakeVmware` and `FakeVirtualBox` (clone, import, create, media copies,
   `set_failing` for cleanup, `with_clone_delay` to cancel mid-way) in temp folders; the real adapters' command lines

@@ -3,7 +3,7 @@
 //! server the test runs on 127.0.0.1 (for the certificate viewer's TLS handshake), and a datagram is only recorded.
 
 use std::collections::HashMap;
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -55,11 +55,67 @@ pub struct FakeNetworkTools {
     dns_queries: Mutex<Vec<DnsQuery>>,
     connects: Mutex<Vec<SocketAddr>>,
     checked: Mutex<Vec<(usize, TrustUse)>>,
+    /// VM-32: addresses whose host answers ARP, the ARP requests asked, echoes that fail to send, echoes the address
+    /// itself answers with "unreachable", and how long each echo and each ARP request takes.
+    arp_hosts: Mutex<Vec<Ipv4Addr>>,
+    arps: Mutex<Vec<Ipv4Addr>>,
+    echo_errors: Mutex<Vec<IpAddr>>,
+    refusing: Mutex<Vec<IpAddr>>,
+    echo_delay: Mutex<Duration>,
+    arp_delay: Mutex<Duration>,
 }
 
 impl FakeNetworkTools {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// VM-32: a host at `ip` answers ARP (or, `false`, no longer does), whether or not it answers pings.
+    pub fn set_arp_host(&self, ip: &str, present: bool) {
+        if let Ok(ip) = ip.parse::<Ipv4Addr>() {
+            let mut hosts = locks::lock(&self.arp_hosts);
+            hosts.retain(|h| *h != ip);
+            if present {
+                hosts.push(ip);
+            }
+        }
+    }
+
+    /// VM-32: the ARP requests asked, in order.
+    pub fn arps(&self) -> Vec<Ipv4Addr> {
+        locks::lock(&self.arps).clone()
+    }
+
+    /// VM-32: an echo to `ip` can't be sent at all (Windows' error), or (`false`) can again.
+    pub fn set_echo_error(&self, ip: &str, failing: bool) {
+        if let Ok(ip) = ip.parse::<IpAddr>() {
+            let mut list = locks::lock(&self.echo_errors);
+            list.retain(|a| *a != ip);
+            if failing {
+                list.push(ip);
+            }
+        }
+    }
+
+    /// VM-32: the host at `ip` answers echoes with "unreachable" from itself (it refuses the protocol).
+    pub fn set_refusing(&self, ip: &str, refusing: bool) {
+        if let Ok(ip) = ip.parse::<IpAddr>() {
+            let mut list = locks::lock(&self.refusing);
+            list.retain(|a| *a != ip);
+            if refusing {
+                list.push(ip);
+            }
+        }
+    }
+
+    /// VM-32: each echo takes this long before its answer.
+    pub fn set_echo_delay(&self, delay: Duration) {
+        *locks::lock(&self.echo_delay) = delay;
+    }
+
+    /// VM-32: each ARP request takes this long (SendARP waits for its retries when nothing answers).
+    pub fn set_arp_delay(&self, delay: Duration) {
+        *locks::lock(&self.arp_delay) = delay;
     }
 
     /// Echoes to `to` answer from it, after passing these routers (`None`: one that doesn't answer).
@@ -181,6 +237,21 @@ impl FakeNetworkTools {
 impl NetworkTools for FakeNetworkTools {
     async fn echo(&self, request: EchoRequest) -> Result<Echo> {
         locks::lock(&self.echoes).push(request);
+        let delay = *locks::lock(&self.echo_delay);
+        if !delay.is_zero() {
+            tokio::time::sleep(delay).await;
+        }
+        if locks::lock(&self.echo_errors).contains(&request.to) {
+            return Err(crate::error::CoreError::Network(
+                "Windows couldn't send the ping".into(),
+            ));
+        }
+        if locks::lock(&self.refusing).contains(&request.to) {
+            return Ok(Echo::Unreachable {
+                from: Some(request.to),
+                reason: "the host refused the protocol".into(),
+            });
+        }
         if locks::lock(&self.silent).contains(&request.to) {
             return Ok(Echo::TimedOut);
         }
@@ -259,5 +330,14 @@ impl NetworkTools for FakeNetworkTools {
             payload: payload.to_vec(),
         });
         Ok(())
+    }
+
+    async fn arp(&self, ip: Ipv4Addr) -> Result<Option<bool>> {
+        locks::lock(&self.arps).push(ip);
+        let delay = *locks::lock(&self.arp_delay);
+        if !delay.is_zero() {
+            tokio::time::sleep(delay).await;
+        }
+        Ok(Some(locks::lock(&self.arp_hosts).contains(&ip)))
     }
 }

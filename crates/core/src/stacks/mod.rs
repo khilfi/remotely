@@ -487,6 +487,9 @@ impl Stacks {
                 naming_pattern: None,
                 host_adapter: None,
                 guest_password_id: None,
+                vm_values: Vec::new(),
+                address_pool_id: None,
+                install_minutes: None,
             };
             match self.deploys.spec_for_taken(ctx, &deploy, &taken).await? {
                 Ok(mut spec) => {
