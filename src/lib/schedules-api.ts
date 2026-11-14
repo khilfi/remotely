@@ -17,14 +17,18 @@ export type ScheduleAction =
   | { kind: "start" }
   | { kind: "stop" }
   | { kind: "suspend" }
-  | { kind: "resume" };
+  | { kind: "resume" }
+  /** VM-30: the next version of an image Remotely builds, from its build settings as they are at the run. */
+  | { kind: "rebuildImage" };
 
 /** A VM by its key (.vmx path or VirtualBox UUID), or every VM with a tag. */
 export type ScheduleTarget =
   | { kind: "vm"; vmKey: string }
   | { kind: "tag"; tag: string }
   /** VM-08: every VM of every instance of the stack. */
-  | { kind: "stack"; stackId: string };
+  | { kind: "stack"; stackId: string }
+  /** VM-30: an image Remotely builds, a rebuild schedule's one target. */
+  | { kind: "image"; imageId: string };
 
 export interface ScheduleSpec {
   action: ScheduleAction;
@@ -61,9 +65,9 @@ export interface ScheduleRun {
 
 export interface TargetView {
   target: ScheduleTarget;
-  /** The VM's name, or the tag. */
+  /** The VM's name, the tag, the stack's or the image's name. */
   name: string;
-  /** The VMs it stands for now. */
+  /** The VMs it stands for now (none for an image). */
   vms: number;
 }
 

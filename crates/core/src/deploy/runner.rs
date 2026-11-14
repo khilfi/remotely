@@ -20,8 +20,10 @@ use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+mod golden;
 mod install;
 
+pub use self::golden::{GuestShell, LinuxGuest, SshGuestShell};
 pub use self::install::InstallTools;
 use super::cloud_init::{self, FirstBoot};
 use super::spec::{DeploySource, DeploySpec, DeployVm};
@@ -415,6 +417,10 @@ impl Deployer {
                 } else {
                     self.grow_workstation(&vmx_path, spec, made).await?;
                 }
+                // VM-30: a clone of a sysprepped Windows image reads its answer file from a seed of its own.
+                if made.install.is_some() {
+                    self.clone_install_workstation(&vmx_path, made).await?;
+                }
             }
             DeploySource::BulkClone => {
                 let (source, _) = vm
@@ -698,6 +704,10 @@ impl Deployer {
                     );
                 }
                 self.attach_seed(&uuid, folder, vm, first_boot, None, made).await?;
+                // VM-30: a clone of a sysprepped Windows image reads its answer file from a seed of its own.
+                if made.install.is_some() {
+                    self.clone_install_virtualbox(&uuid, made).await?;
+                }
             }
             DeploySource::BulkClone => {
                 let (source, _) = vm
@@ -1438,6 +1448,23 @@ impl DeployActions for Deployer {
         let result = self.deploy_one(ctx, job_id, spec, vm, progress, token).await;
         if self.isos.leave(job_id).await {
             // P3 of PR 98's review: whatever the job claimed of a pool and didn't give a VM goes back.
+            self.release_job_claims(ctx, job_id).await;
+        }
+        result
+    }
+
+    async fn build_image(
+        &self,
+        ctx: &Context,
+        job_id: Uuid,
+        spec: &crate::golden::BuildSpec,
+        progress: &DeployProgress<'_>,
+        token: &CancellationToken,
+    ) -> Result<crate::golden::Built> {
+        // VM-30: the build's ISO copy is its own job's, as a deploy's.
+        self.isos.enter(job_id).await;
+        let result = self.build_one(ctx, job_id, spec, progress, token).await;
+        if self.isos.leave(job_id).await {
             self.release_job_claims(ctx, job_id).await;
         }
         result

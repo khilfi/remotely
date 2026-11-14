@@ -593,6 +593,20 @@ export const HELP = {
       "A VM that fails is removed with what it made; VMs already made stay.",
     ],
   },
+  "golden.build": {
+    title: "Golden image builds",
+    body: [
+      "Remotely makes a VM from the ISO, installs it unattended from the install config, makes the system generic so each clone gets its own name, keys and IDs, shuts it down and keeps it with a snapshot: the image's newest version.",
+      "Launch templates on the image deploy its newest version. Rebuild makes the next one from the build settings, by hand or on a schedule; the older versions stay until you delete them or retention does.",
+    ],
+  },
+  "golden.retention": {
+    title: "Keeping the newest versions",
+    body: [
+      "After each build, the versions past the newest few have their VMs and files deleted, oldest first. A version a linked clone was made from is kept until its clones are gone.",
+      "Because it deletes VMs, a build that keeps only the newest versions is Critical: its approval asks you to type to confirm, give a reason and enter the vault password.",
+    ],
+  },
   "deploy.unattended": {
     title: "Unattended installs",
     body: [

@@ -116,14 +116,53 @@ impl Facts {
         }
     }
 
-    /// VM-28: why the template's install config can't go with its image and size.
+    /// VM-28: why the template's install config can't go with its image and size. VM-30: a Windows image Remotely
+    /// built deploys with its own build config (see [`Self::golden_config`]).
     fn install_problems(&self, spec: &TemplateInput) -> Vec<Problem> {
-        templates::install_problems(
+        let mut problems = templates::install_problems(
             spec,
             self.image(spec.image_id),
             self.size(&spec.size_id),
             self.install(spec.install_config_id),
-        )
+        );
+        if let Err(problem) = self.golden_config(spec) {
+            problems.push(problem);
+        }
+        problems
+    }
+
+    /// VM-30: a clone of a Windows image Remotely built (sysprepped) reads its name, a one-time password and a WinRM
+    /// certificate of its own from the image's build config's specialize and oobeSystem passes, as G6 delivers a
+    /// Windows install: that config, for a template of such an image that names none.
+    fn golden_config(&self, spec: &TemplateInput) -> std::result::Result<Option<&install::InstallConfig>, Problem> {
+        let Some(image) = self.image(spec.image_id) else {
+            return Ok(None);
+        };
+        let Some(recipe) = image.build.as_ref() else {
+            return Ok(None);
+        };
+        let windows = profiles::profile(&image.os_profile).is_some_and(|p| p.family == profiles::GuestFamily::Windows);
+        if !windows || spec.install_config_id.is_some() {
+            return Ok(None);
+        }
+        let id = recipe.install_config_id.to_string();
+        match self.configs.iter().find(|c| c.id == id) {
+            Some(config) if config.can_deploy() => Ok(Some(config)),
+            Some(config) => Err(Problem::new(
+                ProblemCode::InstallConfigMismatch,
+                format!(
+                    "Image '{}''s install config '{}' has errors: its clones read their accounts and WinRM certificate from it, so fix it first.",
+                    image.name, config.spec.name
+                ),
+            )),
+            None => Err(Problem::new(
+                ProblemCode::InstallConfigGone,
+                format!(
+                    "Image '{}''s install config was deleted: its clones read their accounts and WinRM certificate from it, so restore it from the trash or build the image again.",
+                    image.name
+                ),
+            )),
+        }
     }
 
     /// [`templates::resolve`], with the install config's problems too.
@@ -145,6 +184,10 @@ impl Facts {
             Ok(mut plan) => {
                 // VM-29: the deploy installs from the config as the catalogue has it now.
                 if let templates::InstallRef::Found(config) = self.install(spec.install_config_id) {
+                    plan.install_config = Some(config.clone());
+                }
+                // VM-30: a Windows image Remotely built: its clones take their passes from its build config.
+                if let Ok(Some(config)) = self.golden_config(spec) {
                     plan.install_config = Some(config.clone());
                 }
                 Ok(plan)
@@ -253,6 +296,13 @@ impl Catalog {
     /// doesn't have, a snapshot that is gone. Refused paths are never looked at.
     async fn with_problems(&self, ctx: &Context, mut images: Vec<Image>) -> Result<Vec<Image>> {
         let vms = self.store.list_vms(ctx).await?;
+        // VM-30: an image Remotely built shows its newest version.
+        if images.iter().any(|i| i.build.is_some()) {
+            let newest = self.store.newest_image_versions(ctx).await?;
+            for image in &mut images {
+                image.version = newest.get(&image.id).copied();
+            }
+        }
         let files: Vec<(usize, String, Option<u64>)> = images
             .iter()
             .enumerate()

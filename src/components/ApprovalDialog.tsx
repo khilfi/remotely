@@ -16,6 +16,8 @@
 // sends that key, or Ctrl+C to clear the line.
 // SS-08: an upload shows the host folder and its files, marking the ones that replace a file there.
 // SS-07: a tunnel shows where it listens, where it leads and who can use it (a network address is called out).
+// VM-30: a golden image build shows the image and its version, the VM, the install config and ISO, the snapshot,
+// what making it generic does, how Remotely signs in and the retention, then its VM's deploy preview.
 // QL-08: a disabled button says why.
 
 import { useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
@@ -38,6 +40,7 @@ import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover
 import { Progress } from "@/components/ui/progress";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
+import { BuildDetailsView } from "@/components/BuildDetailsView";
 import { CapacityPlanView } from "@/components/CapacityPlanView";
 import { DeployPreviewView } from "@/components/DeployPreviewView";
 import { StackDetailsView } from "@/components/StackDetailsView";
@@ -388,6 +391,8 @@ export function ApprovalDialog({
         {request.upload && <UploadSummary upload={request.upload} />}
         {request.fileOp && <FileOpSummary op={request.fileOp} />}
         {request.tunnel && <TunnelSummary tunnel={request.tunnel} />}
+        {/* VM-30: a golden image build: the version, its VM, what makes it generic; its VM's deploy preview next. */}
+        {request.imageBuild && <BuildDetailsView details={request.imageBuild} />}
         {/* VM-21: the VMs a deploy makes, where, and the disk they may take; its warnings are listed below. */}
         {request.deploy && <DeployPreviewView preview={request.deploy} showWarnings={false} />}
         {request.vmChange && <VmChangeSummary change={request.vmChange} />}

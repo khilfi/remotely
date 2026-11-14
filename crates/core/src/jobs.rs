@@ -357,6 +357,8 @@ impl JobScope {
             | Command::VmLifecycle { .. } => JobScope::Vms,
             // VM-21: the new VMs show in the list. VM-08: a stack's VMs are made, started, stopped or deleted.
             Command::Deploy { .. } | Command::Stack { .. } => JobScope::Vms,
+            // VM-30: the build's VM shows in the list (and an old version's goes).
+            Command::ImageBuild { .. } => JobScope::Vms,
             Command::Container { .. } => JobScope::Containers,
             _ => JobScope::Other,
         }
@@ -686,6 +688,8 @@ pub struct JobRunner {
     /// VM-08: readiness checks, delays and instance records between a stack's steps (set once the core is put
     /// together).
     stacks: RwLock<Option<Arc<dyn crate::stacks::StackActions>>>,
+    /// VM-30: what registers a golden image's new version and finds its old ones (set once the core is put together).
+    image_builds: RwLock<Option<Arc<dyn crate::golden::ImageBuildActions>>>,
     /// CV-03, VM-17: what converts images and exports VMs (set once the core is put together).
     converter: RwLock<Option<Arc<dyn crate::convert::runner::ConvertActions>>>,
     /// FD-04: what writes a support bundle's zip (set once the core is put together).
@@ -746,6 +750,7 @@ impl JobRunner {
             terminals,
             containers: RwLock::new(None),
             deployer: RwLock::new(None),
+            image_builds: RwLock::new(None),
             stacks: RwLock::new(None),
             converter: RwLock::new(None),
             bundles: RwLock::new(None),
@@ -796,6 +801,11 @@ impl JobRunner {
     }
 
     /// VM-08: what runs between a stack's steps.
+    /// VM-30: golden image builds register their versions and keep the newest through these.
+    pub fn set_image_builds(&self, builds: Arc<dyn crate::golden::ImageBuildActions>) {
+        *locks::write(&self.image_builds) = Some(builds);
+    }
+
     pub fn set_stacks(&self, stacks: Arc<dyn crate::stacks::StackActions>) {
         *locks::write(&self.stacks) = Some(stacks);
     }
@@ -1750,6 +1760,72 @@ impl JobRunner {
         }
     }
 
+    /// VM-30: the image keeps its newest `keep` versions: each older version's VM goes through R3's delete (running,
+    /// Workstation's lock and VM-04's linked clones refuse it there and then, so a version a linked clone uses stays,
+    /// its record too, and a later build tries again). Protected VMs stay. Says what it did, version by version.
+    async fn prune_image_versions(
+        &self,
+        ctx: &Context,
+        job_id: Uuid,
+        build: &crate::golden::BuildSpec,
+        keep: u32,
+        images: &dyn crate::golden::ImageBuildActions,
+    ) -> Vec<String> {
+        let old = match images.prunable(ctx, build.image_id, keep).await {
+            Ok(old) => old,
+            Err(err) => return vec![format!("its old versions weren't looked at ({err})")],
+        };
+        let mut notes = Vec::new();
+        for version in old {
+            let n = version.number;
+            let vm = match self.store.find_vm(ctx, &version.vm_key).await {
+                Ok(vm) => vm,
+                Err(err) => {
+                    notes.push(format!("version {n} stays: its VM couldn't be looked up ({err})"));
+                    continue;
+                }
+            };
+            let Some(vm) = vm else {
+                // Deleted by hand since: the version is gone already.
+                if let Err(err) = images.version_deleted(ctx, &version, job_id, "its VM was gone").await {
+                    tracing::warn!(error = %err, "a golden image version whose VM is gone couldn't be marked");
+                }
+                notes.push(format!("version {n} is gone: its VM isn't in the VM list any more"));
+                continue;
+            };
+            if vm.protected {
+                notes.push(format!("version {n} stays: its VM {} is protected", vm.display_name));
+                continue;
+            }
+            let target = Target {
+                target: TargetRef::Vm {
+                    vmx_path: vm.vmx_path.clone(),
+                },
+                name: vm.display_name.clone(),
+                environment: vm.environment,
+                protected: vm.protected,
+            };
+            let delete = Command::VmLifecycle {
+                targets: vec![target.target.clone()],
+                op: crate::vm_settings::VmLifecycleOp::Delete,
+            };
+            match self.vm_editor.run(ctx, job_id, &delete, &target).await {
+                Ok(_) => {
+                    if let Err(err) = images
+                        .version_deleted(ctx, &version, job_id, "the image keeps newer versions")
+                        .await
+                    {
+                        tracing::warn!(error = %err, "a deleted golden image version couldn't be marked");
+                    }
+                    notes.push(format!("version {n} deleted with its VM {}", vm.display_name));
+                }
+                Err(CoreError::LinkedClones(reason)) => notes.push(format!("version {n} stays: {reason}")),
+                Err(err) => notes.push(format!("version {n} stays: its VM wasn't deleted ({err})")),
+            }
+        }
+        notes
+    }
+
     async fn execute(
         &self,
         job_id: Uuid,
@@ -2173,6 +2249,49 @@ impl JobRunner {
                 Ok(TargetOutcome {
                     output: Some(output),
                     note: Some(format!("{}: {note}", vm.name)),
+                    ..TargetOutcome::done()
+                })
+            }
+            // VM-30: a golden image's new version: the build VM made, installed, made generic and snapshotted by the
+            // deploy runner, then registered as the image's newest version, then (with `keep`) the image's old
+            // versions deleted through R3's delete, whose checks run again now: a version a linked clone uses stays.
+            (Command::ImageBuild { spec: build, .. }, TargetRef::NewVm { .. }) => {
+                if token.is_cancelled() {
+                    return Err(CoreError::Cancelled);
+                }
+                let deployer = locks::read(&self.deployer)
+                    .clone()
+                    .ok_or_else(|| CoreError::NotImplemented("deploys"))?;
+                let images = locks::read(&self.image_builds)
+                    .clone()
+                    .ok_or_else(|| CoreError::NotImplemented("golden image builds"))?;
+                let progress = self.progress_for(job_id, target);
+                let built = deployer.build_image(&spec.ctx, job_id, build, &progress, token).await?;
+                let mut notes = built.notes.clone();
+                let registered = images.register(&spec.ctx, job_id, build, &built).await.map_err(|err| {
+                    CoreError::DeployFailed {
+                        vm: build.vm_name().to_owned(),
+                        message: format!(
+                            "{}; it wasn't registered as version {} of image '{}' ({err}): the VM and its snapshot '{}' are kept, add it as an image by hand or build again",
+                            notes.join("; "),
+                            build.version,
+                            build.image_name,
+                            built.snapshot_name
+                        ),
+                    }
+                })?;
+                notes.push(registered);
+                if let Some(keep) = build.recipe.keep {
+                    notes.extend(
+                        self.prune_image_versions(&spec.ctx, job_id, build, keep, images.as_ref())
+                            .await,
+                    );
+                }
+                let note = notes.join("; ");
+                let output = OutputCollector::collect(note.as_bytes(), b"", &[], MAX_OUTPUT_PER_STREAM);
+                Ok(TargetOutcome {
+                    output: Some(output),
+                    note: Some(format!("{}: {note}", build.vm_name())),
                     ..TargetOutcome::done()
                 })
             }
@@ -3052,6 +3171,8 @@ impl JobRunner {
                 limits.vm_ops.min(crate::deploy::PARALLEL_INSTALLS)
             }
             Command::Deploy { .. } => limits.vm_ops.min(crate::deploy::PARALLEL_VMS),
+            // VM-30: one VM.
+            Command::ImageBuild { .. } => 1,
             // VM-08: within a step, as the commands it stands for.
             Command::Stack { op, .. } => match op {
                 crate::stacks::StackOp::Deploy { spec } if spec.steps.iter().any(|s| s.spec.install.is_some()) => {
@@ -3207,6 +3328,7 @@ fn safety_verb(command: &Command) -> &'static str {
         Command::Container { .. } => "container",
         Command::AppUpdate { .. } => "update",
         Command::Deploy { .. } => "deploy",
+        Command::ImageBuild { .. } => "image build",
         Command::VmConfig {
             edit: crate::vm_settings::VmConfigEdit::UpgradeHardware,
             ..

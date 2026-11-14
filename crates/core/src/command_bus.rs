@@ -219,6 +219,14 @@ pub enum Command {
         targets: Vec<TargetRef>,
         op: crate::stacks::StackOp,
     },
+    /// VM-30 (0.8.0 G7): build a version of a golden image: one VM installed from an install config as a deploy
+    /// installs it (the spec's [`crate::deploy::DeploySpec`]), made generic, shut down, snapshotted and registered
+    /// ([`crate::golden`]). The one target is the version's new VM ([`TargetRef::NewVm`]). Never built by the UI: the
+    /// golden image service builds it from the image's recipe and the catalogue.
+    ImageBuild {
+        targets: Vec<TargetRef>,
+        spec: Box<crate::golden::BuildSpec>,
+    },
     /// CV-03: convert a disk image into a new one on this PC. The one target is the new image
     /// ([`TargetRef::DiskImage`]). Never built by the UI: the conversion service builds it from the file the user
     /// picked and the place the shell's save dialog chose.
@@ -784,6 +792,8 @@ impl Command {
             Command::Deploy { .. } => "Deploys start from the Deploy dialog, a launch template or Clone on the VMs page.",
             // VM-08: a stack's steps, an instance's VMs and their order come from the stacks the core keeps.
             Command::Stack { .. } => "Stacks deploy, start, stop and tear down from the Stacks tab or the VMs page.",
+            // VM-30: the build's install, ISO and values come from the image's recipe and the catalogue.
+            Command::ImageBuild { .. } => "Images are built from the Templates page's Images tab or a schedule.",
             // VM-23, VM-24: a file or folder of this PC the guest (or the VM list) gets comes from a dialog or a
             // drop in the shell, never from the UI: an attached file or a shared folder is the guest's to read.
             Command::VmDevice {
@@ -906,6 +916,15 @@ impl Command {
                 if *targets != spec.targets() {
                     return Err(CoreError::InvalidInput(
                         "A deploy's targets are the VMs it makes.".into(),
+                    ));
+                }
+                Ok(())
+            }
+            Command::ImageBuild { targets, spec } => {
+                spec.validate()?;
+                if *targets != spec.targets() {
+                    return Err(CoreError::InvalidInput(
+                        "A build's one target is the version's new VM.".into(),
                     ));
                 }
                 Ok(())
@@ -1034,6 +1053,11 @@ impl Command {
                 **spec = spec.only(&new);
                 *targets = spec.targets();
             }
+            // VM-30: a build's one VM, made again under the same version.
+            Command::ImageBuild { targets, spec } => {
+                **spec = spec.only(&new);
+                *targets = spec.targets();
+            }
             // SS-14: the paths that failed, in their order.
             Command::FileOp { targets, spec } => {
                 **spec = spec.only(&new)?;
@@ -1093,6 +1117,7 @@ impl Command {
             | Command::VmDisk { targets, .. }
             | Command::VmLifecycle { targets, .. }
             | Command::Deploy { targets, .. }
+            | Command::ImageBuild { targets, .. }
             | Command::HostNetwork { targets, .. }
             | Command::WakeOnLan { targets, .. }
             | Command::FileServer { targets, .. }
@@ -1102,6 +1127,20 @@ impl Command {
             | Command::VmExport { targets, .. }
             | Command::SupportBundle { targets, .. } => targets,
             Command::AppUpdate { .. } => APP_TARGET,
+        }
+    }
+
+    /// VM-21, VM-08, VM-30: every deploy the command makes VMs with: a deploy's, each step of a stack's, and a golden
+    /// image build's one VM. The bus checks their sources, vault passwords and capacity alike.
+    pub fn deploy_specs(&self) -> Vec<&crate::deploy::DeploySpec> {
+        match self {
+            Command::Deploy { spec, .. } => vec![spec.as_ref()],
+            Command::Stack {
+                op: crate::stacks::StackOp::Deploy { spec },
+                ..
+            } => spec.steps.iter().map(|step| &step.spec).collect(),
+            Command::ImageBuild { spec, .. } => vec![&spec.deploy],
+            _ => Vec::new(),
         }
     }
 
@@ -1123,6 +1162,7 @@ impl Command {
             Command::OpenTunnel { .. } => "openTunnel",
             Command::Container { .. } => "container",
             Command::Deploy { .. } => "deploy",
+            Command::ImageBuild { .. } => "imageBuild",
             Command::VmConfig { .. } => "vmConfig",
             Command::VmDevice { .. } => "vmDevice",
             Command::VmDisk { .. } => "vmDisk",
@@ -1334,6 +1374,7 @@ impl Command {
                 other => format!("{} {}", other.label(), noun("container")),
             },
             Command::Deploy { spec, .. } => spec.summary(),
+            Command::ImageBuild { spec, .. } => spec.summary(),
             Command::VmConfig { edit, .. } => edit.summary(target_count),
             Command::VmDevice { op, .. } => op.summary(target_count),
             Command::VmDisk { op, .. } => op.summary(target_count),
@@ -1419,6 +1460,9 @@ pub struct ApprovalRequest {
     /// SS-14: for a file change, what it does besides its paths (the targets): where they go, the new mode or owner,
     /// whether it replaces, deletes what is in a folder, or runs as root.
     pub file_op: Option<Box<crate::terminal::file_ops::FileOpDetails>>,
+    /// VM-30: for a golden image build, the image and version, what it is built from, what makes it generic and
+    /// which versions it keeps (the build VM's own preview is in `deploy`).
+    pub image_build: Option<Box<crate::golden::BuildDetails>>,
 }
 
 /// FD-04: a support bundle as the approval dialog shows it, besides its commands.
@@ -1838,14 +1882,7 @@ impl CommandBus {
     /// reaches yet, so the approval asks for the vault password, and says so. Every deploy spec of the command counts:
     /// a deploy's, and each step of a stack's (D1 of PR 98's review).
     async fn ask_for_guest_password(&self, ctx: &Context, command: &Command, decision: &mut Decision) -> Result<()> {
-        let specs: Vec<&crate::deploy::DeploySpec> = match command {
-            Command::Deploy { spec, .. } => vec![spec.as_ref()],
-            Command::Stack {
-                op: crate::stacks::StackOp::Deploy { spec },
-                ..
-            } => spec.steps.iter().map(|step| &step.spec).collect(),
-            _ => return Ok(()),
-        };
+        let specs = command.deploy_specs();
         let mut warnings = Vec::new();
         for spec in specs {
             let vms = match spec.vms.len() {
@@ -2530,15 +2567,7 @@ impl CommandBus {
 
     async fn resolve_targets(&self, ctx: &Context, command: &Command) -> Result<Vec<Target>> {
         // FD-02: a deploy's targets are the new VMs; the VMs it clones from must be this workspace's too.
-        let deploys: Vec<&crate::deploy::DeploySpec> = match command {
-            Command::Deploy { spec, .. } => vec![spec.as_ref()],
-            Command::Stack {
-                op: crate::stacks::StackOp::Deploy { spec },
-                ..
-            } => spec.steps.iter().map(|step| &step.spec).collect(),
-            _ => Vec::new(),
-        };
-        for spec in deploys {
+        for spec in command.deploy_specs() {
             spec.require_sources_here(&self.store, ctx).await?;
         }
         let mut targets = Vec::with_capacity(command.targets().len());
@@ -2689,11 +2718,14 @@ impl CommandBus {
         let host = self.capacity.host().as_ref();
         let stack = self.impact.stack(command, &decision.targets, host).await;
         let demands = match (command, &stack) {
-            (Command::Deploy { spec, .. }, _) => self
-                .impact
-                .deploy(command, host)
-                .await
-                .map(|preview| crate::capacity_plan::deploy_demands(spec, &preview)),
+            (Command::Deploy { .. } | Command::ImageBuild { .. }, _) => match command.deploy_specs().first() {
+                Some(spec) => self
+                    .impact
+                    .deploy(command, host)
+                    .await
+                    .map(|preview| crate::capacity_plan::deploy_demands(spec, &preview)),
+                None => None,
+            },
             (
                 Command::Stack {
                     op: crate::stacks::StackOp::Deploy { spec },
@@ -2855,6 +2887,10 @@ impl CommandBus {
                     Some(Box::new(crate::terminal::file_ops::FileOpDetails::editor(spec)))
                 }
                 Command::EditLocal { spec, .. } => Some(Box::new(crate::terminal::file_ops::FileOpDetails::edit(spec))),
+                _ => None,
+            },
+            image_build: match command {
+                Command::ImageBuild { spec, .. } => Some(Box::new(crate::golden::BuildDetails::of(spec))),
                 _ => None,
             },
         })

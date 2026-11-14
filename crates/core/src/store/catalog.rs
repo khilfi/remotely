@@ -117,6 +117,11 @@ fn row_to_image(row: &sqlx::sqlite::SqliteRow) -> Result<Image> {
         updated_at: row.try_get("updated_at")?,
         problem: None,
         vm_name: None,
+        // VM-30: a recipe this version can't read leaves the image as a plain golden VM (rebuilding then says why).
+        build: row
+            .try_get::<Option<String>, _>("build")?
+            .and_then(|text| serde_json::from_str(&text).ok()),
+        version: None,
     })
 }
 
@@ -170,7 +175,7 @@ macro_rules! size_columns {
 macro_rules! image_columns {
     () => {
         "id, name, kind, path, format, vm_key, snapshot_id, snapshot_name, hypervisors, os_profile, sha256, size_bytes,
-         notes, created_at, updated_at"
+         notes, created_at, updated_at, build"
     };
 }
 

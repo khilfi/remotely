@@ -161,6 +161,8 @@ fn covers(approved: &Command, command: &Command) -> bool {
                 ..
             },
         ) => true,
+        // VM-30: a rebuild of the same image; what it builds is compared in `changes_since`.
+        (Command::ImageBuild { spec: a, .. }, Command::ImageBuild { spec: b, .. }) => a.image_id == b.image_id,
         _ => false,
     }
 }
@@ -397,6 +399,18 @@ impl CommandBus {
         Ok(changes)
     }
 
+    /// VM-30: what makes a grant need approving again whatever its run builds: the rules that rated it, and AP-08's
+    /// change ID. A rebuild's own changes (its recipe, install config, ISO) are the golden images service's
+    /// ([`crate::golden::GoldenImages::changes_since`]), read without planning a build. A read.
+    pub async fn standing_grant_changes(&self, ctx: &Context, grant: &StandingGrant) -> Result<Vec<String>> {
+        let mut changes = Vec::new();
+        if locks::read(&self.policy).rules().fingerprint(&grant.kinds) != grant.rules_hash {
+            changes.push("the approval rules changed".to_owned());
+        }
+        changes.extend(self.change_id_now_needed(ctx, grant, &grant.targets).await?);
+        Ok(changes)
+    }
+
     /// AP-08: the workspace requires a change ID for Prod targets since the schedule was approved without one.
     async fn change_id_now_needed(
         &self,
@@ -443,7 +457,23 @@ impl CommandBus {
         }
         let approved: HashMap<String, &Target> = grant.targets.iter().map(|t| (key(t), t)).collect();
         let skipped: HashMap<String, &Target> = grant.skipped.iter().map(|t| (key(t), t)).collect();
-        for target in targets {
+        // VM-30: each rebuild makes a new VM (its next version), approved as the image's: what it builds must be what
+        // was approved (the recipe, the install config's content, the ISO), never the VM's name.
+        let rebuild = match command {
+            Command::ImageBuild { spec, .. } => Some(spec),
+            _ => None,
+        };
+        if let Some(now) = rebuild {
+            let approved = grant.commands.iter().find_map(|c| match c {
+                Command::ImageBuild { spec, .. } if spec.image_id == now.image_id => Some(spec),
+                _ => None,
+            });
+            match approved {
+                Some(approved) => changes.extend(now.differences(approved)),
+                None => changes.push(format!("image '{}' was not the approved one", now.image_name)),
+            }
+        }
+        for target in targets.iter().filter(|_| rebuild.is_none()) {
             let k = key(target);
             match (approved.get(&k), skipped.get(&k)) {
                 (Some(was), _) => {

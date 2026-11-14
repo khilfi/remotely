@@ -42,6 +42,10 @@ pub enum ScheduleAction {
     Suspend,
     /// VM-14: power on the VMs that are suspended; the ones that are off stay off.
     Resume,
+    /// VM-30: build the next version of a golden image from its recipe as it is then (the schedule's one target is
+    /// the image). The approval is given for what the build builds: a recipe, install config or ISO changed since asks
+    /// again before the next run.
+    RebuildImage,
 }
 
 impl ScheduleAction {
@@ -54,6 +58,7 @@ impl ScheduleAction {
             ScheduleAction::Stop => "Shut down".into(),
             ScheduleAction::Suspend => "Suspend".into(),
             ScheduleAction::Resume => "Resume".into(),
+            ScheduleAction::RebuildImage => "Rebuild the image".into(),
         }
     }
 
@@ -63,7 +68,7 @@ impl ScheduleAction {
             ScheduleAction::Start | ScheduleAction::Resume => Some(PowerOp::Start { gui: false }),
             ScheduleAction::Stop => Some(PowerOp::Stop { mode: StopMode::Soft }),
             ScheduleAction::Suspend => Some(PowerOp::Suspend),
-            ScheduleAction::Snapshot { .. } => None,
+            ScheduleAction::Snapshot { .. } | ScheduleAction::RebuildImage => None,
         }
     }
 }
@@ -80,6 +85,8 @@ pub enum ScheduleTarget {
     /// VM-08: every VM of every instance of this stack, looked up like a tag's ([`super::Schedules::resolve`]); a
     /// VM that joins an instance later asks again before it is touched.
     Stack { stack_id: Uuid },
+    /// VM-30: a golden image Remotely builds (a rebuild schedule's one target).
+    Image { image_id: Uuid },
 }
 
 impl ScheduleTarget {
@@ -88,6 +95,7 @@ impl ScheduleTarget {
             ScheduleTarget::Vm { vm_key } => (0, vm_key.to_lowercase()),
             ScheduleTarget::Tag { tag } => (1, tag.to_lowercase()),
             ScheduleTarget::Stack { stack_id } => (2, stack_id.to_string()),
+            ScheduleTarget::Image { image_id } => (3, image_id.to_string()),
         }
     }
 }
@@ -129,6 +137,7 @@ impl ScheduleSpec {
                     ScheduleTarget::Tag { tag }
                 }
                 ScheduleTarget::Stack { stack_id } => ScheduleTarget::Stack { stack_id },
+                ScheduleTarget::Image { image_id } => ScheduleTarget::Image { image_id },
             };
             if !targets
                 .iter()
@@ -139,6 +148,19 @@ impl ScheduleSpec {
         }
         if targets.is_empty() {
             return invalid("Choose at least one VM, tag or stack.".into());
+        }
+        // VM-30: a rebuild builds one image, and only a rebuild targets an image.
+        let images = targets
+            .iter()
+            .filter(|t| matches!(t, ScheduleTarget::Image { .. }))
+            .count();
+        match self.action {
+            ScheduleAction::RebuildImage if targets.len() != 1 || images != 1 => {
+                return invalid("A rebuild schedule rebuilds one image.".into())
+            }
+            ScheduleAction::RebuildImage => {}
+            _ if images > 0 => return invalid("Only a rebuild schedule acts on an image.".into()),
+            _ => {}
         }
         if targets.len() > MAX_TARGETS {
             return invalid(format!(
@@ -183,11 +205,22 @@ impl ScheduleSpec {
                     ],
                 }
             }
+            // VM-30: built from the image's recipe at each run (the schedules service asks the golden images'
+            // service for it).
+            ScheduleAction::RebuildImage => Vec::new(),
             other => other
                 .power_op()
                 .map(|op| vec![Command::VmPower { targets, op }])
                 .unwrap_or_default(),
         }
+    }
+
+    /// VM-30: "Schedule 'monthly': rebuild image 'Ubuntu golden' weekly on Sun at 03:00".
+    pub fn rebuild_summary(&self, name: &str, image: &str) -> String {
+        format!(
+            "Schedule '{name}': rebuild image '{image}' {}",
+            lower_first(&self.timing.describe())
+        )
     }
 
     /// For the approval dialog and the audit log: "Schedule 'nightly': take a snapshot of 3 VMs daily at 02:00,
@@ -211,6 +244,7 @@ impl ScheduleSpec {
             ScheduleAction::Stop => format!("shut down {vms} {when}"),
             ScheduleAction::Suspend => format!("suspend {vms} {when}"),
             ScheduleAction::Resume => format!("resume {vms} {when} (the suspended ones)"),
+            ScheduleAction::RebuildImage => format!("rebuild the image {when}"),
         };
         format!("Schedule '{name}': {what}")
     }
@@ -338,6 +372,43 @@ mod tests {
         for changed in [other_action, other_time, fewer] {
             assert_ne!(changed.content_hash(), a.content_hash());
         }
+    }
+
+    #[test]
+    fn a_rebuild_builds_one_image_and_only_a_rebuild_targets_one() {
+        let image = ScheduleTarget::Image {
+            image_id: Uuid::from_u128(5),
+        };
+        let ok = spec(ScheduleAction::RebuildImage, vec![image.clone()])
+            .normalized()
+            .unwrap();
+        assert_eq!(ok.targets, std::slice::from_ref(&image));
+        assert!(
+            ok.commands(Vec::new(), "n").is_empty(),
+            "built from the recipe at each run"
+        );
+        assert_eq!(
+            ok.rebuild_summary("monthly", "Ubuntu golden"),
+            "Schedule 'monthly': rebuild image 'Ubuntu golden' daily at 02:00"
+        );
+        for bad in [
+            spec(ScheduleAction::RebuildImage, vec![vm("x")]),
+            spec(ScheduleAction::RebuildImage, vec![image.clone(), vm("x")]),
+            spec(
+                ScheduleAction::RebuildImage,
+                vec![
+                    image.clone(),
+                    ScheduleTarget::Image {
+                        image_id: Uuid::from_u128(6),
+                    },
+                ],
+            ),
+            spec(ScheduleAction::Start, vec![image.clone()]),
+        ] {
+            assert!(bad.normalized().is_err());
+        }
+        assert_eq!(ScheduleAction::RebuildImage.label(), "Rebuild the image");
+        assert_eq!(ScheduleAction::RebuildImage.power_op(), None);
     }
 
     #[test]

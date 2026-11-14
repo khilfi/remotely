@@ -66,6 +66,7 @@ const GROUPS: { title: string; kinds: ActionKind[]; exec?: boolean; deploy?: boo
   },
   { title: "Deploy", kinds: ["vmDeploy"], deploy: true },
   { title: "Stacks", kinds: ["stackTeardown"] },
+  { title: "Golden images", kinds: ["imageBuild", "imageBuildPrune"] },
   { title: "Commands on hosts", kinds: ["execReadOnly", "execOther", "execDangerous"], exec: true },
   { title: "SSH keys", kinds: ["sshKeyPush", "sshKeyRemove"] },
   {
