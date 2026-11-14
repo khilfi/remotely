@@ -636,6 +636,33 @@ struct TargetsRun<'a> {
     rollout: Rollout,
 }
 
+/// Tests only: where [`JobRunner::hold_after_finished`] holds a job's task, until the test lets it go.
+#[cfg(feature = "fakes")]
+#[derive(Default)]
+pub struct JobHold {
+    reached: Notify,
+    go: Notify,
+}
+
+#[cfg(feature = "fakes")]
+impl JobHold {
+    /// Waits until the job's task is held (at once when it is already).
+    pub async fn reached(&self) {
+        self.reached.notified().await;
+    }
+
+    /// Lets the job's task go on.
+    pub fn release(&self) {
+        self.go.notify_one();
+    }
+
+    async fn hold(&self) {
+        // `notify_one` keeps its permit for a waiter still to come, so neither side can miss the other.
+        self.reached.notify_one();
+        self.go.notified().await;
+    }
+}
+
 pub struct JobRunner {
     store: Store,
     /// VM-18: VMware and VirtualBox, each VM reached by its key.
@@ -688,6 +715,9 @@ pub struct JobRunner {
     /// BX-02: a job is enqueued under the read side; the journal's compaction (VACUUM) holds the write side, so no
     /// job starts while it runs ([`JobRunner::when_idle`]).
     maintenance: tokio::sync::RwLock<()>,
+    /// Tests only: [`JobRunner::hold_after_finished`].
+    #[cfg(feature = "fakes")]
+    hold_after_finished: Mutex<Option<Arc<JobHold>>>,
 }
 
 impl JobRunner {
@@ -731,6 +761,8 @@ impl JobRunner {
             idle: Notify::new(),
             waiting: Mutex::new(HashMap::new()),
             maintenance: tokio::sync::RwLock::new(()),
+            #[cfg(feature = "fakes")]
+            hold_after_finished: Mutex::new(None),
         })
     }
 
@@ -918,7 +950,9 @@ impl JobRunner {
     }
 
     /// Waits until the job has ended and returns how (SS-10: MultiExec waits for a line's Enter to be
-    /// sent before the next keys go out). A job that ended already answers from the journal.
+    /// sent before the next keys go out). A job that ended already answers from the journal. A job leaves
+    /// `running` before its `Finished` goes out ([`JobRunner::finish`]), so one still open after the subscription
+    /// sends its `Finished` to it.
     pub async fn wait(&self, job_id: Uuid) -> Result<JobStatus> {
         let mut events = self.subscribe();
         if locks::lock(&self.running).contains_key(&job_id) {
@@ -1047,35 +1081,63 @@ impl JobRunner {
             let ran = Arc::clone(&this)
                 .run(id, Arc::clone(&spec), summary.clone(), countdown, token)
                 .await;
-            if let Err(err) = ran {
-                // QL-15: only a job that could not start ends here (its journal or start audit failed),
-                // so no target was touched. Each write is tried; one failing does not stop the next.
-                tracing::error!(%id, error = %err, "job failed to run");
-                if let Err(journal) = this.store.set_job_status(id, JobStatus::Failed).await {
-                    tracing::error!(%id, error = %journal, "could not journal a job that failed to run");
+            let status = match ran {
+                Ok(status) => status,
+                Err(err) => {
+                    // QL-15: only a job that could not start ends here (its journal or start audit failed),
+                    // so no target was touched. Each write is tried; one failing does not stop the next.
+                    tracing::error!(%id, error = %err, "job failed to run");
+                    if let Err(journal) = this.store.set_job_status(id, JobStatus::Failed).await {
+                        tracing::error!(%id, error = %journal, "could not journal a job that failed to run");
+                    }
+                    let detail = format!("the job did not run, so no target was touched: {err}");
+                    let result = Some(JobStatus::Failed.as_str());
+                    if let Err(audit) = this
+                        .audit(&spec.ctx, "job_finished", &summary, &spec, id, result, Some(&detail))
+                        .await
+                    {
+                        tracing::error!(%id, error = %audit, "could not audit a job that failed to run");
+                    }
+                    JobStatus::Failed
                 }
-                let detail = format!("the job did not run, so no target was touched: {err}");
-                let result = Some(JobStatus::Failed.as_str());
-                if let Err(audit) = this
-                    .audit(&spec.ctx, "job_finished", &summary, &spec, id, result, Some(&detail))
-                    .await
-                {
-                    tracing::error!(%id, error = %audit, "could not audit a job that failed to run");
+            };
+            this.finish(id, status, &spec.command);
+            #[cfg(feature = "fakes")]
+            {
+                let hold = locks::lock(&this.hold_after_finished).take();
+                if let Some(hold) = hold {
+                    hold.hold().await;
                 }
-                this.emit(JobEvent::Finished {
-                    job_id: id,
-                    status: JobStatus::Failed,
-                    scope: JobScope::of(&spec.command),
-                });
             }
-            locks::lock(&this.running).remove(&id);
-            this.idle.notify_waiters();
         });
         Ok(id)
     }
 
-    /// Runs the job. An error means it never started (no target touched); once targets run, a failing journal or
-    /// audit write is logged and the job goes on, so it always ends with its real result (QL-15).
+    /// Closes the job, then sends its `Finished`: whoever hears it finds the job no longer open (a workspace switch,
+    /// compaction, an update's wait to run alone), and [`JobRunner::wait`] can't miss its end. Every way a job ends
+    /// comes here, once its journal and audit writes are done.
+    fn finish(&self, id: Uuid, status: JobStatus, command: &Command) {
+        locks::lock(&self.running).remove(&id);
+        self.idle.notify_waiters();
+        self.emit(JobEvent::Finished {
+            job_id: id,
+            status,
+            scope: JobScope::of(command),
+        });
+    }
+
+    /// Tests only: the next job to end holds its task once its `Finished` went out, until the test lets it go, so a
+    /// test can act in that moment (a `wait` that starts then still returns).
+    #[cfg(feature = "fakes")]
+    pub fn hold_after_finished(&self) -> Arc<JobHold> {
+        let hold = Arc::new(JobHold::default());
+        *locks::lock(&self.hold_after_finished) = Some(Arc::clone(&hold));
+        hold
+    }
+
+    /// Runs the job and returns how it ended; [`JobRunner::finish`] sends its `Finished`. An error means it never
+    /// started (no target touched); once targets run, a failing journal or audit write is logged and the job goes on,
+    /// so it always ends with its real result (QL-15).
     async fn run(
         self: Arc<Self>,
         id: Uuid,
@@ -1083,7 +1145,7 @@ impl JobRunner {
         summary: String,
         countdown: Option<(u32, String)>,
         token: CancellationToken,
-    ) -> Result<()> {
+    ) -> Result<JobStatus> {
         let ctx = spec.ctx;
 
         if let Some((seconds, until)) = countdown {
@@ -1102,12 +1164,7 @@ impl JobRunner {
                         Some("cancelled during the countdown; no target was touched")).await {
                         tracing::error!(%id, error = %err, "could not audit a job cancelled in its countdown");
                     }
-                    self.emit(JobEvent::Finished {
-                        job_id: id,
-                        status: JobStatus::Cancelled,
-                        scope: JobScope::of(&spec.command),
-                    });
-                    return Ok(());
+                    return Ok(JobStatus::Cancelled);
                 }
             }
         }
@@ -1295,12 +1352,7 @@ impl JobRunner {
         {
             tracing::error!(%id, error = %err, "could not audit a job's end");
         }
-        self.emit(JobEvent::Finished {
-            job_id: id,
-            status,
-            scope: JobScope::of(&spec.command),
-        });
-        Ok(())
+        Ok(status)
     }
 
     /// Runs `targets` with the job's parallel limit and journals each as it ends, into `tally`. H9:
