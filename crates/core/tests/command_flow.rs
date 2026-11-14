@@ -12,7 +12,7 @@ use remotely_core::domain::TargetRef;
 use remotely_core::fakes::{
     FakeHostCounters, FakeKeyProtector, FakeNetwork, FakeRemote, FakeUpdater, FakeVault, FakeVmware,
 };
-use remotely_core::jobs::{JobEvent, JobLimits, JobStatus};
+use remotely_core::jobs::{JobEvent, JobHold, JobLimits, JobStatus};
 use remotely_core::policy::{PolicyRules, Tier};
 use remotely_core::store::Store;
 use remotely_core::updates::UpdateCheck;
@@ -249,6 +249,102 @@ async fn cancelling_during_the_countdown_touches_no_target() {
     assert!(core.jobs.cancel(job_id));
     assert_eq!(wait_finished(&mut events, job_id).await, JobStatus::Cancelled);
     assert!(fake.calls().is_empty());
+}
+
+/// Hears the job's `Finished`, then calls `wait` while the job's task is held right after it sent it (before the task
+/// ends). `wait` used to find the job still open there and wait for ever for the `Finished` already sent; the job now
+/// leaves the open jobs before it says so, and `wait` answers from the journal. The time limit only turns that hang
+/// into a failure: nothing here waits for time to pass.
+async fn wait_after_finished(
+    core: &Core,
+    hold: &JobHold,
+    events: &mut tokio::sync::broadcast::Receiver<JobEvent>,
+    job: uuid::Uuid,
+) -> JobStatus {
+    let finished = wait_finished(events, job).await;
+    hold.reached().await;
+    assert_eq!(core.jobs.open_jobs(), 0, "a job that sent Finished is no longer open");
+    let waited = tokio::time::timeout(Duration::from_secs(10), core.jobs.wait(job))
+        .await
+        .expect("wait returns for a job that has ended")
+        .unwrap();
+    hold.release();
+    assert_eq!(waited, finished);
+    waited
+}
+
+#[tokio::test]
+async fn wait_returns_for_a_job_that_has_just_run() {
+    let core = core(fake_vmware(), None).await;
+    let hold = core.jobs.hold_after_finished();
+    let mut events = core.jobs.subscribe();
+    let cmd = Command::VmPower {
+        targets: vec![vm("a")],
+        op: PowerOp::Start { gui: false },
+    };
+    let SubmitOutcome::Queued { job_id, .. } = core.bus.submit(&core.ctx(), cmd).await.unwrap() else {
+        panic!("starting a VM should not need approval");
+    };
+    assert_eq!(
+        wait_after_finished(&core, &hold, &mut events, job_id).await,
+        JobStatus::Succeeded
+    );
+}
+
+#[tokio::test]
+async fn wait_returns_for_a_job_just_cancelled_in_its_countdown() {
+    let fake = fake_vmware();
+    let core = core(Arc::clone(&fake), None).await; // default 10 s countdown
+    let hold = core.jobs.hold_after_finished();
+    let mut events = core.jobs.subscribe();
+    let cmd = Command::VmSnapshot {
+        targets: vec![vm("a")],
+        op: SnapshotOp::Revert { name: "base".into() },
+    };
+    let SubmitOutcome::NeedsApproval { request } = core.bus.submit(&core.ctx(), cmd).await.unwrap() else {
+        panic!("revert is High");
+    };
+    let answers = ApprovalAnswers {
+        confirmed: true,
+        typed_target_count: Some(1),
+        reason: Some("lab reset".into()),
+        ..Default::default()
+    };
+    let job_id = core.bus.approve(request.id, answers).await.unwrap();
+    assert!(core.jobs.cancel(job_id));
+    assert_eq!(
+        wait_after_finished(&core, &hold, &mut events, job_id).await,
+        JobStatus::Cancelled
+    );
+    assert!(fake.calls().is_empty());
+}
+
+/// QL-15: the job's start can't be audited, so it never starts.
+#[tokio::test]
+async fn wait_returns_for_a_job_that_just_failed_to_start() {
+    let fake = fake_vmware();
+    let core = core(Arc::clone(&fake), None).await;
+    sqlx::query(
+        "CREATE TRIGGER no_start BEFORE INSERT ON audit_log WHEN NEW.event = 'job_started'
+         BEGIN SELECT RAISE(ABORT, 'database or disk is full'); END",
+    )
+    .execute(core.store.pool())
+    .await
+    .unwrap();
+    let hold = core.jobs.hold_after_finished();
+    let mut events = core.jobs.subscribe();
+    let cmd = Command::VmPower {
+        targets: vec![vm("a")],
+        op: PowerOp::Start { gui: false },
+    };
+    let SubmitOutcome::Queued { job_id, .. } = core.bus.submit(&core.ctx(), cmd).await.unwrap() else {
+        panic!("starting a VM should not need approval");
+    };
+    assert_eq!(
+        wait_after_finished(&core, &hold, &mut events, job_id).await,
+        JobStatus::Failed
+    );
+    assert!(fake.calls().is_empty(), "a job that can't start touches nothing");
 }
 
 #[tokio::test]

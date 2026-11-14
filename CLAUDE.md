@@ -138,7 +138,10 @@ crates/core/          remotely-core: all app logic
                       leaves them out unless include_unknown, and refuses redacted or purged runs); each remote target
                       journals peer_ip and the accepted host_key (BulkVerifier; migration 0018), listed at job_finished;
                       FD-02 JobOwner: each open job's workspace and whether a schedule started it (workspace_of,
-                      open_user_jobs, cancel_in; go_on only from the job's workspace)
+                      open_user_jobs, cancel_in; go_on only from the job's workspace); `finish`, every job's end: the
+                      job leaves the open jobs, then JobEvent::Finished goes out, so whoever hears it finds the job
+                      closed and `wait` can't miss its end (`hold_after_finished`, under `fakes`, holds the job's task
+                      just after)
     retention.rs      BX-02 how long the job journal keeps outputs and command text (Settings: 30 days, 90 by default,
                       1 year, forever; `jobs.retention`): the purge at start and daily (JournalRetention::run, wall
                       clock), Purge now, audited journal_purged; secure_delete, a WAL checkpoint and VACUUM after a big
