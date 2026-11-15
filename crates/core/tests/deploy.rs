@@ -875,19 +875,24 @@ async fn a_busy_virtualbox_is_asked_again_while_a_vm_is_made() {
             .count()
     };
 
-    // Two VMs made side by side, and VirtualBox busy twice: both are made, with two more calls in all.
+    // Two VMs made side by side, and VirtualBox busy twice at their keys and twice at their power-on: both are made
+    // and started, with two more calls of each in all.
     vb.busy_for("modifynvram enrollmssignatures", 2);
+    vb.busy_for("startvm", 2);
     let approval = needs_approval(core.deploy.submit(ctx, &named("win-{n}", 2)).await.unwrap());
     let (job, status) = approve_and_wait(&core, &approval).await;
     assert_eq!(status, JobStatus::Succeeded, "{:?}", job_outputs(&core, job).await);
     let calls = vb.calls().join("\n");
     assert_eq!(enrolls(&vb), 4, "two answered, two busy: {calls}");
+    let starts = vb.calls().iter().filter(|c| c.starts_with("power Start ")).count();
+    assert_eq!(starts, 4, "two answered, two busy: {calls}");
     for name in ["win-1", "win-2"] {
         let uuid = vb.vm_named(name).expect("made").uuid;
         assert!(
             calls.contains(&format!("change modifynvram {uuid} secureboot --enable")),
             "{name}'s Secure Boot went on after its keys: {calls}"
         );
+        assert_eq!(vb.power_state(&uuid), PowerState::Running, "{name} started");
     }
 
     // Busy past the retries: the VM fails with VirtualBox's answer after three more tries, and what it made goes.
@@ -919,6 +924,33 @@ async fn a_busy_virtualbox_is_asked_again_while_a_vm_is_made() {
         .count();
     assert_eq!(creates, 1, "asked once: {:?}", vb.calls());
     assert!(vb.vm_named("bad-1").is_none(), "unregistered");
+
+    // The new VM's `showvminfo` reads are asked again too: here its boot disk's size, read before it grows.
+    let disk = write(&dir, "noble.vmdk", &vmdk_bytes());
+    let cloud = add_image(
+        &core,
+        "Noble",
+        SourceInput::CloudImage {
+            path: disk.display().to_string(),
+        },
+        "ubuntu",
+    )
+    .await;
+    let mut input = template("web", &cloud, Hypervisor::VirtualBox, &dir, Network::Nat);
+    input.after_deploy.create_session = false;
+    input.after_deploy.link_session = false;
+    let web = core.catalog.add_template(ctx, input).await.unwrap();
+    let approval = needs_approval(core.deploy.submit(ctx, &request(web.id, 1)).await.unwrap());
+    vb.busy_for("showvminfo", 2);
+    let (job, status) = approve_and_wait(&core, &approval).await;
+    assert_eq!(status, JobStatus::Succeeded, "{:?}", job_outputs(&core, job).await);
+    let web1 = vb.vm_named("web-1").expect("made");
+    let boot = web1.disks.iter().find(|d| d.slot == "SATA-0-0").expect("its boot disk");
+    assert_eq!(
+        vb.disk_size_mb(&boot.path.display().to_string()),
+        Some(40 * 1024),
+        "grown to the size's"
+    );
     std::fs::remove_dir_all(dir).unwrap();
 }
 
