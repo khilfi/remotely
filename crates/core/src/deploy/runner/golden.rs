@@ -850,11 +850,12 @@ impl Deployer {
     }
 
     /// A VBoxManage change asked again while VirtualBox says the VM's session lock is held (VBoxHeadless lets go of
-    /// it a moment after the guest powered off: N2 of PR 100's second review).
+    /// it a moment after the guest powered off: N2 of PR 100's second review). Each try is one call
+    /// ([`Deployer::vbox_once`]), so [`Deployer::vbox`]'s own busy retries don't add to these waits.
     async fn vbox_unlocked(&self, args: Vec<String>) -> Result<String> {
         let mut waits = SESSION_RETRIES.iter();
         loop {
-            match self.vbox(args.clone(), SHORT).await {
+            match self.vbox_once(args.clone(), SHORT).await {
                 Err(err) if session_locked(&err) => match waits.next() {
                     Some(wait) => {
                         tracing::info!(

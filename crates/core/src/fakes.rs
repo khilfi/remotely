@@ -1283,6 +1283,9 @@ pub struct FakeVirtualBox {
     /// VM-30: VMs whose session lock VBoxHeadless still holds a moment after they powered off: how many more
     /// VBoxManage changes on each are refused as locked.
     held_sessions: Mutex<HashMap<String, u32>>,
+    /// VM-21, VM-29: changes VirtualBox answers as busy (another client's lock request on the VM pending), as
+    /// (the command and words its arguments hold, how many more of them).
+    busy: Mutex<Vec<(String, u32)>>,
 }
 
 /// The value after `--name` in a VBoxManage call.
@@ -1567,6 +1570,33 @@ impl FakeVirtualBox {
     /// VBoxHeadless still holds its session lock (a moment after the guest powered off).
     pub fn hold_session(&self, uuid: &str, changes: u32) {
         locks::lock(&self.held_sessions).insert(uuid.to_owned(), changes);
+    }
+
+    /// VM-21, VM-29: the next `calls` VBoxManage changes that `op` names (its command, then words its arguments
+    /// hold: `modifynvram enrollmssignatures`) are refused, changing nothing, as VirtualBox refused one while two
+    /// deploys made VMs at the same moment (G6's hand check, 15 Nov 2026): "The machine '<name>' already has a lock
+    /// request pending". 0 stops it.
+    pub fn busy_for(&self, op: &str, calls: u32) {
+        let mut busy = locks::lock(&self.busy);
+        busy.retain(|(o, _)| o != op);
+        busy.push((op.to_owned(), calls));
+    }
+
+    /// Whether this change is one [`Self::busy_for`] still refuses (and counts it).
+    fn busy_now(&self, args: &[String]) -> bool {
+        let mut busy = locks::lock(&self.busy);
+        let named = |op: &str| {
+            let mut words = op.split_whitespace();
+            words.next().is_some_and(|c| args.first().is_some_and(|a| a == c))
+                && words.all(|w| args.iter().skip(1).any(|a| a == w))
+        };
+        match busy.iter_mut().find(|(op, left)| *left > 0 && named(op)) {
+            Some((_, left)) => {
+                *left -= 1;
+                true
+            }
+            None => false,
+        }
     }
 
     /// VM-30: the VM's process ends as a crash ends it (`VMState="aborted"`), not as a shutdown does.
@@ -2589,6 +2619,16 @@ impl VirtualBoxAdapter for FakeVirtualBox {
                     &format!("The machine '{name}' is already locked for a session (or being unlocked)"),
                 ));
             }
+        }
+        if self.busy_now(&args) {
+            let name = option(&args, "--name")
+                .map(str::to_owned)
+                .or_else(|| args.get(1).and_then(|uuid| self.find(uuid)).map(|vm| vm.name))
+                .unwrap_or_default();
+            return Err(Self::failed(
+                args.first().map(String::as_str).unwrap_or_default(),
+                &format!("The machine '{name}' already has a lock request pending"),
+            ));
         }
         self.apply_change(&args)
     }

@@ -626,6 +626,33 @@ const BUSY_RETRIES: [std::time::Duration; 3] = [
     std::time::Duration::from_millis(1500),
 ];
 
+/// `call` asked again (up to three times, [`BUSY_RETRIES`] apart) while VirtualBox answers that another client holds
+/// or is taking the VM's session lock ([`vbox_busy`]). Any other answer, and the last busy one, is returned as it came.
+/// `what` names the call in the log.
+pub async fn while_busy<T, F, Fut>(what: &str, mut call: F) -> Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T>>,
+{
+    let mut waits = BUSY_RETRIES.iter();
+    loop {
+        match call().await {
+            Err(err) if vbox_busy(&err) => match waits.next() {
+                Some(wait) => {
+                    tracing::info!(
+                        command = what,
+                        wait_ms = u64::try_from(wait.as_millis()).unwrap_or(u64::MAX),
+                        "VirtualBox says the VM is busy: asking again"
+                    );
+                    tokio::time::sleep(*wait).await;
+                }
+                None => return Err(err),
+            },
+            other => return other,
+        }
+    }
+}
+
 /// `showvminfo <uuid> --machinereadable` as `key=value` pairs, asked again (up to three times) while VirtualBox says
 /// another client has the VM's session lock.
 pub async fn showvminfo_pairs(
@@ -634,17 +661,8 @@ pub async fn showvminfo_pairs(
     timeout: std::time::Duration,
 ) -> Result<Vec<(String, String)>> {
     let args = || vec!["showvminfo".to_owned(), uuid.to_owned(), "--machinereadable".to_owned()];
-    let mut waits = BUSY_RETRIES.iter();
-    loop {
-        match vbox.vboxmanage_host(args(), timeout).await {
-            Ok(out) => return Ok(crate::adapters::virtualbox::parse_machine_readable(&out)),
-            Err(err) if vbox_busy(&err) => match waits.next() {
-                Some(wait) => tokio::time::sleep(*wait).await,
-                None => return Err(err),
-            },
-            Err(err) => return Err(err),
-        }
-    }
+    let out = while_busy("showvminfo", || vbox.vboxmanage_host(args(), timeout)).await?;
+    Ok(crate::adapters::virtualbox::parse_machine_readable(&out))
 }
 
 /// A VM's hardware (R3's settings model, MO-13), asked again like [`showvminfo_pairs`] while VirtualBox says
@@ -653,16 +671,7 @@ pub async fn hardware_retrying(
     hypervisors: &crate::adapters::hypervisor::Hypervisors,
     key: &str,
 ) -> Result<crate::adapters::vm_hardware::VmHardware> {
-    let mut waits = BUSY_RETRIES.iter();
-    loop {
-        match hypervisors.hardware(key).await {
-            Err(err) if vbox_busy(&err) => match waits.next() {
-                Some(wait) => tokio::time::sleep(*wait).await,
-                None => return Err(err),
-            },
-            other => return other,
-        }
-    }
+    while_busy("hardware", || hypervisors.hardware(key)).await
 }
 
 /// `natnetwork modify --netname <name> --port-forward-4 <rule>` (or `delete <rule name>`).

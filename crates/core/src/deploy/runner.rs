@@ -668,7 +668,19 @@ impl Deployer {
 
     // ---- VirtualBox ----------------------------------------------------------------------------------------
 
+    /// A VBoxManage change for the VM being made, asked again a moment later (up to three times) while VirtualBox
+    /// answers that the VM is busy ([`crate::adapters::host_networks::vbox_busy`]): two deploys making VMs at the same
+    /// moment, and VirtualBox refused one `modifynvram <uuid> enrollmssignatures` with "already has a lock request
+    /// pending" (G6's hand check, 15 Nov 2026). Busy means it changed nothing, so asking again is safe. Any other
+    /// answer fails at once.
     async fn vbox(&self, args: Vec<String>, timeout: Duration) -> Result<String> {
+        let command = args.first().cloned().unwrap_or_default();
+        let this = self;
+        crate::adapters::host_networks::while_busy(&command, move || this.vbox_once(args.clone(), timeout)).await
+    }
+
+    /// One VBoxManage change, asked once.
+    async fn vbox_once(&self, args: Vec<String>, timeout: Duration) -> Result<String> {
         self.hypervisors.virtualbox().change(args, timeout).await
     }
 

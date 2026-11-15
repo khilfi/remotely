@@ -230,8 +230,9 @@ crates/core/          remotely-core: all app logic
                       refused; VmFiles: LocalFiles, or memory in tests), host_networks.rs (VM-11 the tools' network
                       output: listHostNetworks, listPortForwardings read loosely with vmnetnat.conf's [incomingtcp] and
                       [incomingudp] as the fallback, list hostonlyifs, list --long natnets, a VM's Forwarding(N) by
-                      the adapter keys before it; the change arguments; process_elevated; hardware_retrying: asked
-                      again while VirtualBox says another client holds the VM's lock), updater.rs, github.rs (FD-14
+                      the adapter keys before it; the change arguments; process_elevated; while_busy, and through it
+                      hardware_retrying and the deploy's changes: asked again while VirtualBox says another client
+                      holds the VM's lock), updater.rs, github.rs (FD-14
                       GitHub Releases API without a token or with the optional update token, public download links,
                       rate-limit backoff), network.rs (DNS for QL-01 auto-linking and QL-03 host name and IP, QL-04
                       TCP probe), net_tools.rs (FD-09 the toolbox's NetworkTools trait, behind `Adapters.network_tools`:
@@ -2151,6 +2152,15 @@ VM-29 and VM-32, from 0.8.0 (`docs/plan-0.8.md`, G6), built only on what S1 to S
   it is watched; it goes when the step ends. The serial port and the installed Linux's `console=ttyS0` stay, so
   `<vm>-serial.log` grows on every boot. A Windows config must lay out GPT for UEFI and MBR for BIOS
   (`unattend::disk_style`), and write `remotely-winrm SHA256:...` to COM1 (`WINRM_FINGERPRINT_MARKER`).
+- **A busy VirtualBox is asked again** (the hand check of 15 Nov 2026: two deploys made VirtualBox VMs at the same
+  moment, and one's `modifynvram <uuid> enrollmssignatures` got "The machine '<name>' already has a lock request
+  pending"). Every VBoxManage change a deploy makes for a new VM (G6's and VM-21's: `createvm`, `modifyvm`, Secure
+  Boot's `modifynvram`, `storagectl`, `storageattach`, the install's settings, the drives taken out) goes through
+  `Deployer::vbox`, which asks again up to three times, 0.3, 0.8 and 1.5 s apart (`host_networks::while_busy`,
+  `BUSY_RETRIES`), while VirtualBox answers busy (`vbox_busy`: a lock request pending, the session not locked, the
+  object not ready; such an answer changed nothing). Any other answer fails at once, and so does the last busy one,
+  which removes what the VM's step made. G7's `vbox_unlocked` asks once a try (`vbox_once`) with its own waits.
+  `FakeVirtualBox::busy_for` plays it (`tests/deploy.rs`, `a_busy_virtualbox_is_asked_again_while_a_vm_is_made`).
 - **The watcher** (one job step per VM, `JobEvent::TargetProgress` with the stage; up to `PARALLEL_INSTALLS`, 10, at
   once, never more than `JobLimits.vm_ops`; 60 minutes by default, 240 at most): the serial log read as it grows,
   escapes stripped (`watch::strip_escapes`), then S1's and S2's markers; any Debian `[!!] ` title, Subiquity's
