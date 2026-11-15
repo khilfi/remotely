@@ -2511,6 +2511,45 @@ seen on a real VM yet (the PR lists the checks).
     VBoxSVC logged nothing of the kind. It logged one refusal each time the seed was forced out of a running VM's drive:
     the `closemedium` that follows is refused ("locked for reading by another task"); `eject` ignores it, and the seed's
     file was deleted all the same.
+- **Hand checks of the Windows images** (15 Nov 2026, the package after 0.8.0; Workstation 26 and VirtualBox 7.2.22
+  under Hyper-V; copies of the owner's evaluation ISOs, the starters `windows-server-2025` and `-2022`, size
+  `gp.large`, NAT; a core built like the app's with its own data folder and a WinRM client that recorded each
+  sign-in's address, account and the first 12 hex digits of the password's SHA-256; VMs named `wgi-*`, five checks
+  at once): each build, then two linked clones, each clone looked at over WinRM with the vault's password and the
+  certificate it wrote to COM1.
+  1. **Windows Server 2025 on Workstation: passed.** COM1: `sysprep-exit 0`, `cached-in C:\Windows\Panther\unattend.xml`,
+     `cached`, `sealed`. Each clone's COM1: `remotely-clone started`, `seed D:\autounattend.xml`, `name <clone>`,
+     `time-zone`, the starter's `remotely-stage specialize`, `ran 0`, `handed` (about 50 s after power-on), then its
+     own `remotely-winrm` line (about 2 minutes after). Each clone: `COMPUTERNAME` its own name, its own machine SID (the
+     Administrator's SID less `-500`) and WinRM certificate (`CN=<name>`), none the build's; the deploy signed in with a
+     one-time password of its own (two different hashes, neither the vault's), then with the vault's;
+     `UnattendFile` and `remotely-clone.ps1` gone after the sign-in; time zone UTC. Panther kept no
+     `unattend-original.xml` on a clone (G6's note then has no `answer-file` line).
+  2. **Windows Server 2022 on Workstation: passed**, the same lines and facts (clones on WinRM about 2 minutes after
+     power-on).
+  3. **Windows Server 2022 on VirtualBox: passed** (clones on WinRM about 3 minutes after power-on, through the NAT
+     rule). The build stood still once in Setup (vCPU 0 frozen, vCPU 1 running) and was reset by hand: the harness
+     ran a binary from before the install watcher read vCPU 0.
+  4. **Windows Server 2025 on VirtualBox: passed, and a clone's hung first boot was reset by the deploy itself.**
+     The build stood still twice in Setup and was reset by hand as in 3. Clone `wgi-v25c-1` ran its specialize script
+     (`started` to `handed`), then stood still at the restart after specialize: vCPU 0's `cNsTotal` didn't move for
+     about 3 minutes while its serial log was silent, so the install watcher reset it ("reset its first boot once vCPU
+     0 had stood still for 4 minutes"); after the reset the counter moved again and the clone went on through OOBE to
+     WinRM (about 6 minutes after power-on; its sibling took 2.5). Both clones: their own names, SIDs, certificates
+     and one-time passwords, as in 1. Its first try failed before anything was installed:
+     `modifynvram enrollmssignatures` was refused with "already has a lock request pending" while another VirtualBox
+     VM was being made (G6's VM making doesn't ask a busy VirtualBox again; it removed what it had made).
+  5. **Ubuntu 24.04.5 on VirtualBox, one linked clone: passed.** The build hung at `Begin: Loading essential drivers
+     ...` (both vCPUs frozen, the line unfinished, so G6's RAID6 point never showed) and was reset by hand as in 3. The
+     clone's first boot was watched for the 5 minutes the deploy waited for its address (no Guest Additions): vCPU 0
+     moved 15 s every 15 s, no reset (uptime 297 s at the end); its own hostname, `cloud-init status: done`, the
+     template's user signs in with its key.
+  - On every running VirtualBox VM seen (four Windows clones, the Ubuntu clone) vCPU 0's `cNsTotal` (VBoxManage prints
+    `<U64 val="..." unit="ns" name="/TM/CPU/00/cNsTotal"/>`) grew with the wall clock, 15 s every 15 s; on each hung
+    VM it stood still for minutes, and after a reset it jumped by the time it had stood still. 4 of the 8 VirtualBox
+    VMs hung once or more (the three builds, one of the five clones), with five checks running at once. Not looked
+    at: whether Panther's cached copy of a clone's file has its passwords masked (Microsoft says Setup removes them at
+    the end of each pass; the one-time password is replaced by the vault's within minutes anyway).
 - G6 fix: `Deployer::read_fingerprint` read the serial log with a fresh watcher, which counts no Setup restarts and so
   never took the fingerprint line: a deploy's saved WinRM session never had its certificate trusted from the VM's
   serial port. It now reads the whole log without waiting for restarts, and two different lines give none.
