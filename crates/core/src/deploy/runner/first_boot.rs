@@ -1,21 +1,26 @@
-//! VM-30: a clone's first boot that hangs on VirtualBox under Hyper-V. G7's hand check saw a Windows Server 2022 clone
-//! stand at the firmware's logo with no disk writes for 17 minutes, until a reset by hand; S3 saw the same hang at an
-//! install's restarts, with vCPU 0's run time (`/TM/CPU/00/cNsTotal` in `VBoxManage debugvm <vm> statistics`) no
-//! longer moving. G6's hang reset knows only an install's points on its serial log, and a Linux clone has no serial
-//! port at all, so a clone's first boot is watched by that counter: one that stands still for
-//! [`super::DeployTuning::hang_silence`] (3 minutes) gets `controlvm reset`, at most `max_hang_resets` times. A guest
-//! that runs, idle or not, moves it (its timer wakes vCPU 0 many times a second), so a counter that can't be read
-//! resets nothing.
+//! VM-30: a VirtualBox boot or install that hangs under Hyper-V. 0.8.0's G7 hand check saw a Windows Server 2022
+//! clone stand at the firmware's logo with no disk writes for 17 minutes, until a reset by hand; S3 saw the same hang
+//! at an install's restarts, with vCPU 0's run time (`/TM/CPU/00/cNsTotal` in `VBoxManage debugvm <vm> statistics`)
+//! no longer moving. G6's hang reset knows only an install's points on its serial log, and a Linux clone has no serial
+//! port at all, so the deploy watches that counter: one that stands still for [`super::DeployTuning::hang_silence`]
+//! (3 minutes) while nothing else moved gets `controlvm reset`. A running guest, idle or not, moves it with the wall
+//! clock (seen: 15 s every 15 s), so a counter that can't be read resets nothing, and neither does a VM that isn't
+//! running (paused by the user, or by VirtualBox when the host's disk is full). One count of resets per VM, this
+//! watch's and G6's known points' together, at most `max_hang_resets`; a refused reset is noted once.
 //!
-//! The watch runs while the deploy waits for the clone anyway (a Windows clone's install watcher, a Linux clone's
-//! wait for its address) and, for a VirtualBox clone it wouldn't wait for, for [`super::DeployTuning::first_boot_watch`].
-//! The install watcher reads it for every VirtualBox install too (a golden image's build among them): this package's
-//! hand checks saw three VirtualBox builds under Hyper-V stand still at once (two in Windows Setup, which G6 doesn't
-//! watch for a hang, and Ubuntu's before its known point's line ended), which G6 would have left to the time limit.
+//! It runs only while the deploy waits anyway (item 1 of PR 101's review: it costs a deploy no time): in G6's install
+//! watcher for every VirtualBox install (a Windows clone's first boot, Setup from an ISO, a golden image's build) and
+//! in a Linux clone's wait for its address, whose wait starts again after a reset. A VirtualBox reset counts in
+//! `/VirtualBox/VMInfo/ResetCounter` as the guest's own do. Every Windows hang seen (S3; this package's three) stood at
+//! one of Setup's restarts, which the hung guest hadn't counted: the reset finished that restart and was counted once,
+//! so the install watcher counts it as Setup's (taking Remotely's resets off would wait for a restart that happened).
 
 use std::time::Duration;
 
+use tokio_util::sync::CancellationToken;
+
 use super::{Deployer, SHORT};
+use crate::domain::PowerState;
 
 /// vCPU 0's run time in nanoseconds, as VirtualBox's statistics name it.
 pub const VCPU0_RUN_TIME: &str = "/TM/CPU/00/cNsTotal";
@@ -35,27 +40,48 @@ pub fn counter(xml: &str, name: &str) -> Option<u64> {
         })
 }
 
-/// One clone's first boot as watched so far.
+/// One VM's boot or install as watched so far.
 #[derive(Debug, Default)]
 pub(super) struct BootWatch {
     /// The counter's last value and when it last moved.
     last: Option<(u64, tokio::time::Instant)>,
+    /// The resets this VM got for a hang, by this watch or G6's known points: together at most `max_hang_resets`.
     pub(super) resets: u32,
+    /// Whether a reset that VirtualBox refused was noted already (once is enough).
+    failed_noted: bool,
+}
+
+impl BootWatch {
+    /// Starts the stillness clock again (after another reset, or while the VM isn't running).
+    pub(super) fn restart(&mut self) {
+        self.last = None;
+    }
+}
+
+/// What a round of the watch did.
+#[derive(Debug)]
+pub(super) enum Hang {
+    /// The VM was reset; its note.
+    Reset(String),
+    /// VirtualBox refused the reset; its note (said once).
+    ResetFailed(String),
 }
 
 impl Deployer {
     /// One round of the watch (see the module): reads vCPU 0's counter and resets the VM once it has stood still for
-    /// `hang_silence`, while `quiet` (nothing else showed progress meanwhile). Returns the note of a reset, which names
-    /// `what` was reset ("its first boot", "the install").
+    /// `hang_silence` while `quiet` (nothing else showed progress meanwhile), the VM is running (a paused VM's counter
+    /// stands still too: its clock starts again) and the job isn't cancelled. `what` names what was reset in the note
+    /// ("its first boot", "the install").
     pub(super) async fn first_boot_round(
         &self,
         key: &str,
         watch: &mut BootWatch,
         quiet: bool,
         what: &str,
-    ) -> Option<String> {
+        token: &CancellationToken,
+    ) -> Option<Hang> {
         let tuning = self.tuning();
-        if watch.resets >= tuning.max_hang_resets {
+        if watch.resets >= tuning.max_hang_resets || token.is_cancelled() {
             return None;
         }
         let args = vec![
@@ -65,14 +91,13 @@ impl Deployer {
             "--pattern".to_owned(),
             VCPU0_RUN_TIME.to_owned(),
         ];
+        let read = tokio::select! {
+            _ = token.cancelled() => return None,
+            read = self.vbox(args, SHORT) => read,
+        };
         let now = tokio::time::Instant::now();
-        let Some(value) = self
-            .vbox(args, SHORT)
-            .await
-            .ok()
-            .and_then(|xml| counter(&xml, VCPU0_RUN_TIME))
-        else {
-            watch.last = None;
+        let Some(value) = read.ok().and_then(|xml| counter(&xml, VCPU0_RUN_TIME)) else {
+            watch.restart();
             return None;
         };
         let still = match watch.last {
@@ -85,30 +110,47 @@ impl Deployer {
         if still < tuning.hang_silence || !quiet {
             return None;
         }
-        watch.last = None;
+        // Item 4 of PR 101's review: only a running VM is reset (one the user or VirtualBox paused stands still too).
+        let running = tokio::select! {
+            _ = token.cancelled() => return None,
+            info = self.hypervisors.virtualbox().vm_info(key) => {
+                info.is_ok_and(|i| i.power_state() == PowerState::Running)
+            }
+        };
+        watch.restart();
+        if !running || token.is_cancelled() {
+            return None;
+        }
         let reset = self
             .vbox(vec!["controlvm".into(), key.into(), "reset".into()], SHORT)
             .await;
         match reset {
             Ok(_) => {
                 watch.resets += 1;
-                Some(format!(
+                Some(Hang::Reset(format!(
                     "reset {what} once vCPU 0 had stood still for {} (VirtualBox under Hyper-V)",
-                    minutes(still)
-                ))
+                    about_minutes(still)
+                )))
             }
             Err(err) => {
                 tracing::warn!(error = %err, what, "a VM that stood still couldn't be reset");
-                None
+                if watch.failed_noted {
+                    return None;
+                }
+                watch.failed_noted = true;
+                Some(Hang::ResetFailed(format!(
+                    "vCPU 0 stood still for {}, but VirtualBox refused to reset {what} ({err})",
+                    about_minutes(still)
+                )))
             }
         }
     }
 }
 
-/// `d` in whole minutes, rounded up.
-pub(super) fn minutes(d: Duration) -> String {
-    let m = d.as_millis().div_ceil(60_000);
-    format!("{m} minute{}", if m == 1 { "" } else { "s" })
+/// `d` as "about N minutes", N rounded to the nearest minute (at least 1).
+pub(super) fn about_minutes(d: Duration) -> String {
+    let m = ((d.as_millis() + 30_000) / 60_000).max(1);
+    format!("about {m} minute{}", if m == 1 { "" } else { "s" })
 }
 
 #[cfg(test)]

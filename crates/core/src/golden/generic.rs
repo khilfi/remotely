@@ -118,7 +118,8 @@ try { $x = New-Object Xml.XmlDocument; $x.Load($file) } catch { Say 'failed answ
 $ns = New-Object Xml.XmlNamespaceManager $x.NameTable
 $ns.AddNamespace('u', 'urn:schemas-microsoft-com:unattend')
 $pass = "/u:unattend/u:settings[@pass='specialize']/u:component"
-$shell = $pass + "[@name='Microsoft-Windows-Shell-Setup']"
+$arch = "(@processorArchitecture='amd64' or not(@processorArchitecture))"
+$shell = $pass + "[@name='Microsoft-Windows-Shell-Setup' and $arch]"
 $name = $x.SelectSingleNode($shell + '/u:ComputerName', $ns)
 if ($name -and $name.InnerText.Trim() -and ($name.InnerText.Trim() -ne '*')) {
   $n = $name.InnerText.Trim()
@@ -130,26 +131,52 @@ if ($tz -and $tz.InnerText.Trim()) {
   if ($LASTEXITCODE -ne 0) { Say 'failed time-zone'; exit 0 }
   Say 'time-zone'
 }
+# --- setup-command ---
+# A specialize command started as Setup starts one: its environment variables expanded, then the whole line handed to
+# CreateProcess with no program name, which finds the program in it (a quoted path, or an unquoted one with spaces
+# tried word by word, .exe added, the system folders and PATH searched) and gives it the line as it is.
+$runSource = @'
+using System;
+using System.Runtime.InteropServices;
+using System.Text;
+public static class RemotelySetupCommand {
+  [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+  struct StartupInfo { public int cb; public string reserved; public string desktop; public string title; public int x, y, xSize, ySize, xChars, yChars, fill, flags; public short show, reserved2; public IntPtr reserved3, stdIn, stdOut, stdErr; }
+  [StructLayout(LayoutKind.Sequential)]
+  struct ProcessInfo { public IntPtr process, thread; public int processId, threadId; }
+  [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+  static extern bool CreateProcessW(string app, StringBuilder line, IntPtr pa, IntPtr ta, bool inherit, uint flags, IntPtr env, string dir, ref StartupInfo si, out ProcessInfo pi);
+  [DllImport("kernel32.dll")] static extern uint WaitForSingleObject(IntPtr handle, uint ms);
+  [DllImport("kernel32.dll")] static extern bool GetExitCodeProcess(IntPtr handle, out uint code);
+  [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr handle);
+  public static long Run(string line) {
+    StartupInfo si = new StartupInfo();
+    si.cb = Marshal.SizeOf(typeof(StartupInfo));
+    ProcessInfo pi;
+    StringBuilder buffer = new StringBuilder(line, line.Length + 1);
+    if (!CreateProcessW(null, buffer, IntPtr.Zero, IntPtr.Zero, false, 0x08000000, IntPtr.Zero, null, ref si, out pi)) { return -1; }
+    WaitForSingleObject(pi.process, 0xFFFFFFFF);
+    uint code;
+    GetExitCodeProcess(pi.process, out code);
+    CloseHandle(pi.thread);
+    CloseHandle(pi.process);
+    return code;
+  }
+}
+'@
+function Invoke-SetupCommand($line) {
+  if (-not ('RemotelySetupCommand' -as [type])) { Add-Type -TypeDefinition $runSource -ErrorAction Stop }
+  [RemotelySetupCommand]::Run([Environment]::ExpandEnvironmentVariables($line))
+}
+# --- end setup-command ---
 $order = { $o = $_.SelectSingleNode('u:Order', $ns); if ($o) { [int]$o.InnerText.Trim() } else { 0 } }
-$cmds = @($x.SelectNodes($pass + "[@name='Microsoft-Windows-Deployment']/u:RunSynchronous/u:RunSynchronousCommand", $ns)) | Sort-Object $order
+$cmds = @($x.SelectNodes($pass + "[@name='Microsoft-Windows-Deployment' and $arch]/u:RunSynchronous/u:RunSynchronousCommand", $ns)) | Sort-Object $order
 foreach ($c in $cmds) {
   $p = $c.SelectSingleNode('u:Path', $ns)
-  if (-not $p) { continue }
-  $line = $p.InnerText.Trim()
-  if ($line.StartsWith('"')) {
-    $end = $line.IndexOf('"', 1)
-    if ($end -lt 0) { Say 'failed command'; exit 0 }
-    $exe = $line.Substring(1, $end - 1); $rest = $line.Substring($end + 1).Trim()
-  } else {
-    $sp = $line.IndexOf(' ')
-    if ($sp -lt 0) { $exe = $line; $rest = '' } else { $exe = $line.Substring(0, $sp); $rest = $line.Substring($sp + 1).Trim() }
-  }
-  try {
-    $si = New-Object Diagnostics.ProcessStartInfo
-    $si.FileName = $exe; $si.Arguments = $rest; $si.UseShellExecute = $false; $si.CreateNoWindow = $true
-    $run = [Diagnostics.Process]::Start($si); $run.WaitForExit()
-    Say ('ran ' + $run.ExitCode)
-  } catch { Say 'failed command'; exit 0 }
+  if (-not $p -or -not $p.InnerText.Trim()) { continue }
+  try { $code = Invoke-SetupCommand $p.InnerText.Trim() } catch { $code = -1 }
+  if ($code -lt 0) { Say 'failed command'; exit 0 }
+  Say ('ran ' + $code)
 }
 try {
   New-ItemProperty -Path 'HKLM:\SYSTEM\Setup' -Name 'UnattendFile' -Value $file -PropertyType String -Force -ErrorAction Stop | Out-Null
@@ -757,13 +784,16 @@ mod tests {
             "Say 'failed seed'; exit 0",
             "$ns.AddNamespace('u', 'urn:schemas-microsoft-com:unattend')",
             "settings[@pass='specialize']",
-            "[@name='Microsoft-Windows-Shell-Setup']",
             "/u:ComputerName",
             "Rename-Computer -NewName $n -Force",
             "tzutil.exe\" /s $tz.InnerText.Trim()",
-            "[@name='Microsoft-Windows-Deployment']/u:RunSynchronous/u:RunSynchronousCommand",
+            "[@name='Microsoft-Windows-Deployment' and $arch]/u:RunSynchronous/u:RunSynchronousCommand",
+            "$arch = \"(@processorArchitecture='amd64' or not(@processorArchitecture))\"",
+            "[@name='Microsoft-Windows-Shell-Setup' and $arch]",
             "Sort-Object $order",
-            "$si.UseShellExecute = $false",
+            "CreateProcessW(null, buffer,",
+            "[Environment]::ExpandEnvironmentVariables($line)",
+            "if ($code -lt 0) { Say 'failed command'; exit 0 }",
             "New-ItemProperty -Path 'HKLM:\\SYSTEM\\Setup' -Name 'UnattendFile' -Value $file -PropertyType String -Force",
             "Say 'handed'",
         ] {
@@ -782,6 +812,85 @@ mod tests {
         assert!(name < commands && commands < handed);
         // The clone's file (its one-time password) is read where it is, never copied.
         assert!(!body.contains("Copy-Item") && !body.contains("WriteAll"));
+        // Item 10 of PR 101's review: only an amd64 component (or one naming none) is read, as Setup on x64 does.
+        assert!(!body.contains("[@name='Microsoft-Windows-Shell-Setup']"));
+        assert!(!body.contains("[@name='Microsoft-Windows-Deployment']"));
+    }
+
+    /// The clone script's part that starts a specialize command, between its markers.
+    fn setup_command_block() -> &'static str {
+        let start = CLONE_SCRIPT_BODY.find("# --- setup-command ---").unwrap();
+        let end = CLONE_SCRIPT_BODY.find("# --- end setup-command ---").unwrap();
+        &CLONE_SCRIPT_BODY[start..end]
+    }
+
+    /// Item 2 of PR 101's review: a clone starts each specialize command as Setup does (Microsoft's own example is
+    /// `%ProgramFiles%\FabriKam\FabriKam First Run Application.exe`: a variable and an unquoted path with spaces),
+    /// and the starters' `cmd /c ...` line keeps working. Runs the script's own block in Windows PowerShell, on a
+    /// copy of cmd.exe in a temp folder whose name has a space.
+    #[cfg(windows)]
+    #[test]
+    fn a_clones_specialize_commands_start_as_setup_starts_them() {
+        let dir = std::env::temp_dir().join(format!("remotely-setup-command-{}", uuid::Uuid::new_v4().simple()));
+        let spaced = dir.join("with space");
+        std::fs::create_dir_all(&spaced).unwrap();
+        let system_root = std::env::var("SystemRoot").unwrap();
+        std::fs::copy(
+            std::path::Path::new(&system_root).join("System32").join("cmd.exe"),
+            spaced.join("tool.exe"),
+        )
+        .unwrap();
+        let starter = crate::catalog::install::starters::all()
+            .into_iter()
+            .find(|c| c.id == "starter.windows-server-2025")
+            .unwrap()
+            .spec
+            .body;
+        let root = crate::catalog::install::xml::parse(&starter).unwrap();
+        let mut paths = Vec::new();
+        root.find_all("Path", &mut paths);
+        let starter_line = paths[0].trimmed().to_owned();
+        assert!(starter_line.starts_with("cmd /c "), "{starter_line}");
+        let quote = |s: &str| s.replace('\'', "''");
+        let d = dir.display().to_string();
+        let cases = [
+            ("starter", starter_line),
+            ("system-root", "%SystemRoot%\\System32\\cmd.exe /c exit 7".to_owned()),
+            ("spaces", format!("{d}\\with space\\tool.exe /c exit 5")),
+            (
+                "variable-spaces",
+                "%REMOTELY_SETUP_TEST%\\with space\\tool.exe /c exit 6".to_owned(),
+            ),
+            ("quoted", format!("\"{d}\\with space\\tool.exe\" /c exit 4")),
+            ("missing", format!("{d}\\nothing-here.exe /x")),
+        ];
+        let mut script = String::from(setup_command_block());
+        script.push_str(&format!("$env:REMOTELY_SETUP_TEST = '{}'\n", quote(&d)));
+        for (name, line) in &cases {
+            script.push_str(&format!("'{name} ' + (Invoke-SetupCommand '{}')\n", quote(line)));
+        }
+        let file = dir.join("run.ps1");
+        std::fs::write(&file, script).unwrap();
+        let out = std::process::Command::new("powershell.exe")
+            .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File"])
+            .arg(&file)
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+        let _ = std::fs::remove_dir_all(&dir);
+        let code = |name: &str| {
+            stdout
+                .lines()
+                .find_map(|l| l.trim().strip_prefix(&format!("{name} ")))
+                .unwrap_or_else(|| panic!("{name}: {stdout} {}", String::from_utf8_lossy(&out.stderr)))
+                .to_owned()
+        };
+        assert_eq!(code("starter"), "0");
+        assert_eq!(code("system-root"), "7");
+        assert_eq!(code("spaces"), "5");
+        assert_eq!(code("variable-spaces"), "6");
+        assert_eq!(code("quoted"), "4");
+        assert_eq!(code("missing"), "-1");
     }
 
     #[test]

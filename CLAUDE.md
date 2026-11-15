@@ -397,7 +397,8 @@ crates/core/          remotely-core: all app logic
                       the power-off, its install drives, serial port and NAT rule out, the snapshot), and a sysprepped
                       Windows image's clones taking G6's install (a seed CD and COM1 added to the clone,
                       SerialWatcher::sysprepped, its `remotely-clone` lines); runner/first_boot.rs: a VirtualBox
-                      clone's first boot watched for vCPU 0 standing still (`debugvm statistics`), then reset
+                      install or clone's first boot watched for vCPU 0 standing still (`debugvm statistics`) while
+                      the deploy waits for it, then reset
     address_pools.rs  VM-32 (0.8.0 G6, migration 0036) address pools per workspace: ranges per hypervisor network,
                       pick (pinged), claim, assign, release; store/address_pools.rs
     golden/           VM-30 (0.8.0 G7, migration 0037) golden image builds ("Golden image builds (G7)"): spec.rs
@@ -2414,8 +2415,12 @@ seen on a real VM yet (the PR lists the checks).
     task checks both files before sysprep, `failed clone-files`, and seals only once a Panther file names the script,
     `cached`). On each clone, as SYSTEM in specialize, the script waits up to 10 minutes for a CD with
     `autounattend.xml` at its root (the seed), then applies that file's specialize pass the way a clone can:
-    `Rename-Computer` to its `ComputerName`, `tzutil /s` its `TimeZone`, and its `RunSynchronous` commands in order
-    (each started as Setup starts one, the program and the rest of the line, waited for). Then it sets
+    `Rename-Computer` to its `ComputerName`, `tzutil /s` its `TimeZone`, and its `RunSynchronous` commands in order,
+    each started as Setup starts one and waited for: its environment variables expanded, then the whole line given to
+    `CreateProcessW` with no program name, which finds the program in it (quoted, or unquoted with spaces tried word by
+    word, `.exe` added, the system folders and `PATH` searched). Microsoft's own example `Path` is
+    `%ProgramFiles%\FabriKam\FabriKam First Run Application.exe`; `ProcessStartInfo` (the first version) expanded
+    nothing and cut at the first space. Only an amd64 component, or one naming no architecture, is read. Then it sets
     `HKLM\SYSTEM\Setup` `UnattendFile` to the seed's file, so oobeSystem's search finds it first: OOBE sets the
     one-time password and the autologon and runs the FirstLogonCommands, which turn WinRM over HTTPS on with a new
     self-signed certificate and write its fingerprint to COM1 (the starters' lines). The clone's file is read where the
@@ -2423,28 +2428,44 @@ seen on a real VM yet (the PR lists the checks).
     step says `remotely-clone <what>` on COM1 (`started`, `seed <path>`, `name <n>`, `time-zone`, `ran <exit>`,
     `handed`); a failure says `failed seed|answer-file|name|time-zone|command|hand-over` and ends the script with 0
     (a failing specialize command can stop Setup), and the watcher fails the clone's install at once, saying why. A
-    clone applies no other specialize setting (`unattend::clone_unapplied`; the build's preview names what a config
-    has beyond them, e.g. a domain join or a command's `WillReboot`).
+    clone applies no other specialize setting again (`unattend::clone_unapplied`; the build's preview names what a
+    config has beyond them, e.g. a domain join or a command's `WillReboot`): the build applied them, so a clone has
+    those sysprep's generalize keeps (most registry settings) and not the rest.
+  - **Only through its image.** A Windows image's version VM used as a plain golden VM (an FD-07 import, which carries
+    no recipe; another image or template on that VM) has no install config, so its clones get no seed: the clone
+    script waits its 10 minutes, Setup stops at OOBE's first page, and the deploy, which watches no plain clone,
+    reports success. Deploy a Windows image Remotely built through that image.
   - The watcher is G6's with no Setup restarts to wait for (`SerialWatcher::sysprepped`: the clone's serial log is
     new), then G6's first sign-in replaces the one-time password with the vault's, deletes Panther's copy, signs the
     autologon out, and on a clone deletes the `UnattendFile` value and the script (`install::CLONE_AFTER_INSTALL_SCRIPT`,
     `clone-cleaned`); the seed is taken out.
-- **A clone's first boot that hangs on VirtualBox under Hyper-V** (`deploy/runner/first_boot.rs`): 0.8.0's hand check
-  4 saw a Windows Server 2022 clone stand at the firmware's logo with no disk writes for 17 minutes, until a reset by
-  hand; S3 saw the same hang at an install's restarts, with vCPU 0's `/TM/CPU/00/cNsTotal` no longer moving. G6's
-  hang reset knows only an install's points on the serial log, and a Linux clone has no serial port. So while a
-  deploy watches a VirtualBox clone (`DeploySource::GoldenVm`) it reads that counter each round (`VBoxManage debugvm
-  <vm> statistics --pattern /TM/CPU/00/cNsTotal`, XML, `deploy::runner::vbox_counter`): one that stands still for
-  `hang_silence` (3 minutes) while nothing else moved (a Windows clone's serial log) gets `controlvm reset`, at most
-  `max_hang_resets` (5) times, and the note says `reset its first boot once vCPU 0 had stood still for <n> minutes`.
-  A counter that can't be read resets nothing. G6's install watcher reads it for every VirtualBox install too (`reset
-  the install once ...`), next to its known points: this package's hand checks saw three VirtualBox builds under
-  Hyper-V stand still at once (vCPU 0 frozen while vCPU 1 ran; Ubuntu's two both frozen, its last line `Begin: Loading
-  essential drivers ...` without its line break, so G6's RAID6 point never showed). The watch runs in a Windows clone's install watcher, in a Linux clone's
-  wait for its address (a Linux clone always has cloud-init's seed), and for a clone the deploy waits for nothing
-  else (another golden VM, no session) for `first_boot_watch` (5 minutes, ending once an address shows; the note
-  then says it was watched with no hang). `FakeVirtualBox::hang_next_boot` plays the hang (the counter stands still
-  until a reset). Workstation never hung (S3), so its clones aren't watched.
+- **A VirtualBox boot or install that hangs under Hyper-V** (`deploy/runner/first_boot.rs`): 0.8.0's hand check 4 saw a
+  Windows Server 2022 clone stand at the firmware's logo with no disk writes for 17 minutes, until a reset by hand; S3
+  saw the same hang at an install's restarts, with vCPU 0's `/TM/CPU/00/cNsTotal` no longer moving. G6's hang reset
+  knows only an install's points on the serial log, and a Linux clone has no serial port. So while a deploy waits for a
+  VirtualBox VM anyway it reads that counter each round (`VBoxManage debugvm <vm> statistics --pattern
+  /TM/CPU/00/cNsTotal`, XML, `deploy::runner::vbox_counter`):
+  - **Where:** G6's install watcher, for every VirtualBox install (a Windows clone's first boot, Setup from an ISO, a
+    golden image's build: `reset the install once ...`), and a Linux clone's wait for its address (a Linux clone always
+    has cloud-init's seed), which starts its whole wait again after a reset. Nowhere else: a clone the deploy waits for
+    nothing else isn't watched, so the watch costs a deploy no time (review item 1 of PR 101: an earlier version
+    watched such a clone for 5 minutes). Workstation never hung (S3), so its VMs aren't watched.
+  - **When:** a counter standing still for `hang_silence` (3 minutes) while nothing else moved (the serial log), on a
+    VM VirtualBox says is running (a paused one, by the user or by VirtualBox on a full disk, stands still too: its
+    clock starts again), with the job not cancelled, gets `controlvm reset`, and the note says `reset its first boot
+    once vCPU 0 had stood still for about <n> minutes`. A refused reset is noted once. A counter that can't be read
+    resets nothing. The resets of one VM, this watch's and G6's known points' together, are at most `max_hang_resets`
+    (5); a known point's reset starts the counter's clock again, so one hang gets one reset.
+  - **Setup's restarts:** VirtualBox counts `controlvm reset` in `/VirtualBox/VMInfo/ResetCounter` as it counts the
+    guest's own. Every Windows hang seen (S3's two, this package's three) stood at one of Setup's restarts, which the
+    hung guest hadn't counted: the reset finished that restart and was counted once (the hand checks' logs: the counter
+    rose as the VM was reset, specialize followed 50 s later). So the watcher counts it as Setup's; taking Remotely's
+    resets off the counter would wait for a restart that already happened and drop the certificate's line. A hang in
+    the middle of a stage would make the count one too many (the stage's words run ahead; only the installed system
+    writes the certificate's line); none was seen.
+  - Fakes: `FakeVirtualBox::hang_next_boot` and `hang_boots` (the counter stands still until a reset, for that many
+    boots), a counter that moves with the clock while the VM runs, a reset that raises `ResetCounter`, no Guest
+    Additions data while hung, `set_failing("debugvm")`.
 - **Scheduled rebuilds** (`ScheduleAction::RebuildImage`, one `ScheduleTarget::Image`): the save asks the bus for a
   standing approval of the image's next build as it would be built then (VM-27; Medium, or Critical with `keep`). Each
   run builds the command from the recipe as it is then (`GoldenImages::command_for`) and submits it under the grant: a
@@ -2534,7 +2555,7 @@ seen on a real VM yet (the PR lists the checks).
      The build stood still twice in Setup and was reset by hand as in 3. Clone `wgi-v25c-1` ran its specialize script
      (`started` to `handed`), then stood still at the restart after specialize: vCPU 0's `cNsTotal` didn't move for
      about 3 minutes while its serial log was silent, so the install watcher reset it ("reset its first boot once vCPU
-     0 had stood still for 4 minutes"); after the reset the counter moved again and the clone went on through OOBE to
+     0 had stood still for 4 minutes", rounded up then; "about 3 minutes" now); after the reset the counter moved again and the clone went on through OOBE to
      WinRM (about 6 minutes after power-on; its sibling took 2.5). Both clones: their own names, SIDs, certificates
      and one-time passwords, as in 1. Its first try failed before anything was installed:
      `modifynvram enrollmssignatures` was refused with "already has a lock request pending" while another VirtualBox

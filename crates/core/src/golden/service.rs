@@ -613,7 +613,7 @@ impl GoldenImages {
             let unapplied = crate::catalog::install::unattend::clone_unapplied(config_body);
             if !unapplied.is_empty() {
                 out.push(format!(
-                    "A clone applies only the specialize pass's ComputerName, TimeZone and RunSynchronous commands (sysprep has run, so its own script applies them), so its clones won't get this config's {}.",
+                    "After sysprep a clone applies only the specialize pass's ComputerName, TimeZone and RunSynchronous commands again (its own script does). This config's {} were applied to the build, so its clones have them only where sysprep's generalize keeps them (most registry settings stay; a domain join doesn't).",
                     unapplied.join(", ")
                 ));
             }

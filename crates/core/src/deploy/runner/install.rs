@@ -743,8 +743,8 @@ impl Deployer {
         report(events, &watcher, &mut detail);
         let (mut serial_at, mut log_at, mut reset_seen) = (0u64, 0u64, 0u32);
         let mut last_growth = tokio::time::Instant::now();
-        let mut hang_resets = 0u32;
-        // VM-30: vCPU 0 is watched on every VirtualBox install (a clone's first boot, or Setup from an ISO).
+        // VM-30: vCPU 0 is watched on every VirtualBox install (a clone's first boot, or Setup from an ISO); its resets
+        // and the known points' share one count (`boot.resets`, at most `max_hang_resets`).
         let vcpu_watch = spec.hypervisor == Hypervisor::VirtualBox;
         let what = if Self::watches_first_boot(spec) {
             "its first boot"
@@ -769,6 +769,8 @@ impl Deployer {
                 return Err(self.install_failed(spec, vm, key, watcher.stage(), &why).await);
             }
             if m.flavor.windows() {
+                // VirtualBox counts Remotely's resets too; each one seen finished a restart of Setup's that the hung
+                // guest hadn't counted (`first_boot`'s module), so the count stays as it is.
                 let count = self.resets(spec, key, &folder, &mut log_at, &mut reset_seen).await;
                 let events = watcher.resets(count);
                 report(events, &watcher, &mut detail);
@@ -777,7 +779,7 @@ impl Deployer {
             if spec.hypervisor == Hypervisor::VirtualBox
                 && watcher.hang_point().is_some()
                 && last_growth.elapsed() >= tuning.hang_silence
-                && hang_resets < tuning.max_hang_resets
+                && boot.resets < tuning.max_hang_resets
             {
                 let point = watcher.hang_point().unwrap_or_default();
                 if self
@@ -785,19 +787,25 @@ impl Deployer {
                     .await
                     .is_ok()
                 {
-                    hang_resets += 1;
+                    boot.resets += 1;
                     notes.push(format!("reset once it hung at {point} (VirtualBox under Hyper-V)"));
                 }
                 last_growth = tokio::time::Instant::now();
+                // One hang, one reset: vCPU 0's clock starts again too.
+                boot.restart();
             }
             // VM-30: a clone's first boot has no known point to hang at (it may stand still at the firmware's logo),
             // and neither has Windows Setup: vCPU 0's run time standing still while the serial log is silent is the
             // hang a reset gets past, wherever it is.
             if vcpu_watch {
                 let quiet = last_growth.elapsed() >= tuning.hang_silence;
-                if let Some(note) = self.first_boot_round(key, &mut boot, quiet, what).await {
-                    notes.push(note);
-                    last_growth = tokio::time::Instant::now();
+                match self.first_boot_round(key, &mut boot, quiet, what, token).await {
+                    Some(super::first_boot::Hang::Reset(note)) => {
+                        notes.push(note);
+                        last_growth = tokio::time::Instant::now();
+                    }
+                    Some(super::first_boot::Hang::ResetFailed(note)) => notes.push(note),
+                    None => {}
                 }
             }
             if watcher.login_seen() && login_at.is_none() {

@@ -264,7 +264,10 @@ pub const STAGE_MARKER: &str = "remotely-stage";
 /// `<component>/<setting>`. Setup reads no answer file from a clone's seed after sysprep, so the clone's script
 /// ([`crate::golden::generic::CLONE_SCRIPT_BODY`]) applies the pass itself: only Shell-Setup's `ComputerName` and
 /// `TimeZone` and Deployment's `RunSynchronous` commands (their `Order` and `Path`; a `WillReboot` other than
-/// `Never` or a command's `Credentials` aren't). The oobeSystem pass is Setup's own, read from the clone's file.
+/// `Never` or a command's `Credentials` aren't). The oobeSystem pass is Setup's own, read from the clone's file. The
+/// build's own specialize pass applied everything listed here to the build VM, so a clone has each of them where
+/// sysprep's generalize kept it (registry settings mostly stay; per-machine ones such as a domain join don't): the
+/// build's preview words it so. Each item once; amd64 components only (or ones naming no architecture), as Setup on x64.
 pub fn clone_unapplied(text: &str) -> Vec<String> {
     let Ok(root) = xml::parse(text) else {
         return Vec::new();
@@ -274,7 +277,12 @@ pub fn clone_unapplied(text: &str) -> Vec<String> {
         if settings.attr("pass") != Some("specialize") {
             continue;
         }
-        for component in settings.children_named("component") {
+        // Item 10 of PR 101's review: as Setup on x64, only an amd64 component (or one naming none).
+        let amd64 = |c: &&Element| {
+            c.attr("processorArchitecture")
+                .is_none_or(|a| a.eq_ignore_ascii_case("amd64"))
+        };
+        for component in settings.children_named("component").filter(amd64) {
             let name = component.attr("name").unwrap_or_default();
             for setting in &component.children {
                 let what = setting.local();
@@ -303,7 +311,8 @@ pub fn clone_unapplied(text: &str) -> Vec<String> {
             }
         }
     }
-    out.dedup();
+    let mut seen = std::collections::HashSet::new();
+    out.retain(|item| seen.insert(item.clone()));
     out
 }
 
@@ -857,6 +866,20 @@ mod tests {
         // oobeSystem is Setup's own (the clone's file), so nothing there is listed.
         assert!(!clone_unapplied(&more).iter().any(|s| s.contains("UserAccounts")));
         assert!(clone_unapplied("<not xml").is_empty());
+        // Items 10 and 12 of PR 101's review: an x86 component is Setup's on x86 only, and each item is listed once
+        // however far apart it repeats.
+        let twice = r#"<unattend xmlns="urn:schemas-microsoft-com:unattend"><settings pass="specialize">
+<component name="Microsoft-Windows-Shell-Setup" processorArchitecture="amd64"><RegisteredOwner>alice</RegisteredOwner><ComputerName>vm-1</ComputerName><RegisteredOwner>bob</RegisteredOwner></component>
+<component name="Microsoft-Windows-Shell-Setup" processorArchitecture="x86"><RegisteredOrganization>example</RegisteredOrganization></component>
+<component name="Microsoft-Windows-TerminalServices-LocalSessionManager"><fDenyTSConnections>false</fDenyTSConnections></component>
+</settings></unattend>"#;
+        assert_eq!(
+            clone_unapplied(twice),
+            [
+                "Microsoft-Windows-Shell-Setup/RegisteredOwner",
+                "Microsoft-Windows-TerminalServices-LocalSessionManager/fDenyTSConnections",
+            ]
+        );
     }
 
     #[test]

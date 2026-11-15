@@ -174,8 +174,9 @@ G1, G2, G5 and the spikes can start at once. G3 and G4 both touch the file panel
     clone's seed CD, applies its computer name, time zone and RunSynchronous commands, and points Setup at the seed's
     `autounattend.xml` for oobeSystem (the documented `HKLM\System\Setup!UnattendFile`). OOBE then sets the one-time
     password and runs the FirstLogonCommands that make the clone's WinRM certificate and write it to COM1.
-  - The hang reset: while a deploy watches a VirtualBox clone's first boot (Windows or Linux), vCPU 0's run time is
-    read from VirtualBox's statistics. A counter that stands still for 3 minutes gets a reset, at most 5 times.
+  - The hang reset: while a deploy waits for a VirtualBox VM anyway (a clone's first boot, Windows or Linux, and any
+    install G6 watches), vCPU 0's run time is read from VirtualBox's statistics. A counter that stands still for 3
+    minutes on a running VM gets a reset, at most 5 times per VM.
   - CLAUDE.md "Golden image builds (G7)" has the details and the hand checks.
 
 ## Development safety for 0.8.0
