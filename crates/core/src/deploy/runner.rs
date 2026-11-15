@@ -20,9 +20,11 @@ use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+mod first_boot;
 mod golden;
 mod install;
 
+pub use self::first_boot::{counter as vbox_counter, VCPU0_RUN_TIME};
 pub use self::golden::{GuestShell, LinuxGuest, SshGuestShell};
 pub use self::install::InstallTools;
 use super::cloud_init::{self, FirstBoot};
@@ -73,6 +75,9 @@ pub struct DeployTuning {
     pub hang_silence: Duration,
     /// VM-29: resets for such hangs, at most, per VM.
     pub max_hang_resets: u32,
+    /// VM-30: how long a VirtualBox clone's first boot is watched for a hang ([`first_boot`]) when the deploy
+    /// wouldn't wait for it otherwise (its address, an install); `ip_wait_cap` bounds it too.
+    pub first_boot_watch: Duration,
     /// VM-29: how long a probe of the installed system's SSH port waits.
     pub connect_wait: Duration,
     /// VM-29: Workstation's DHCP leases (`None`: not read).
@@ -93,6 +98,7 @@ impl Default for DeployTuning {
             install_cap: None,
             hang_silence: Duration::from_secs(3 * 60),
             max_hang_resets: 5,
+            first_boot_watch: Duration::from_secs(5 * 60),
             connect_wait: Duration::from_secs(5),
             leases_file: Some(PathBuf::from(super::install::WORKSTATION_LEASES)),
             probe: None,
@@ -1254,18 +1260,50 @@ impl Deployer {
         }
     }
 
+    /// VM-30: whether the VM's first boot is a clone's on VirtualBox, which [`first_boot`] watches for a hang.
+    fn watches_first_boot(spec: &DeploySpec) -> bool {
+        spec.hypervisor == Hypervisor::VirtualBox && matches!(spec.source, DeploySource::GoldenVm { .. })
+    }
+
     /// Waits for the guest's IP, at most the deploy's wait; `None` when it doesn't show (or the job is cancelled).
-    async fn wait_for_ip(&self, spec: &DeploySpec, key: &str, token: &CancellationToken) -> Option<String> {
+    /// A VirtualBox clone's first boot is watched for a hang meanwhile (a reset's note goes to `notes`).
+    async fn wait_for_ip(
+        &self,
+        spec: &DeploySpec,
+        key: &str,
+        token: &CancellationToken,
+        notes: &mut Vec<String>,
+    ) -> Option<String> {
         let tuning = self.tuning();
         let mut wait = Duration::from_secs(u64::from(spec.ip_wait_secs));
         if let Some(cap) = tuning.ip_wait_cap {
             wait = wait.min(cap);
         }
-        let poll = tuning.ip_poll;
+        self.watch_boot(spec, key, token, notes, wait).await
+    }
+
+    /// Asks for the guest's IP every `ip_poll` for up to `wait` (`None`: it didn't show, or the job was cancelled),
+    /// and watches a VirtualBox clone's first boot for a hang meanwhile.
+    async fn watch_boot(
+        &self,
+        spec: &DeploySpec,
+        key: &str,
+        token: &CancellationToken,
+        notes: &mut Vec<String>,
+        wait: Duration,
+    ) -> Option<String> {
+        let poll = self.tuning().ip_poll;
         let deadline = tokio::time::Instant::now() + wait;
+        let mut boot = first_boot::BootWatch::default();
+        let watched = Self::watches_first_boot(spec);
         loop {
             if let Some(ip) = self.guest_ip(spec, key).await {
                 return Some(ip);
+            }
+            if watched {
+                if let Some(note) = self.first_boot_round(key, &mut boot, true).await {
+                    notes.push(note);
+                }
             }
             if tokio::time::Instant::now() >= deadline {
                 return None;
@@ -1293,7 +1331,7 @@ impl Deployer {
         let wants_ip =
             has_os && (spec.after_deploy.create_session || made.seed.is_some() || made.workstation_seed.is_some());
         let ip = if wants_ip {
-            let ip = self.wait_for_ip(spec, key, token).await;
+            let ip = self.wait_for_ip(spec, key, token, &mut notes).await;
             match &ip {
                 Some(ip) => notes.push(format!("IP {ip}")),
                 None if token.is_cancelled() => notes.push("cancelled while waiting for its IP".into()),
@@ -1305,6 +1343,22 @@ impl Deployer {
             }
             ip
         } else {
+            if has_os && Self::watches_first_boot(spec) {
+                // VM-30: a VirtualBox clone's first boot can hang under Hyper-V; it is watched a while, ending early
+                // once the guest shows its address.
+                let tuning = self.tuning();
+                let watch = tuning
+                    .ip_wait_cap
+                    .map_or(tuning.first_boot_watch, |cap| cap.min(tuning.first_boot_watch));
+                let resets = notes.len();
+                let shown = self.watch_boot(spec, key, token, &mut notes, watch).await;
+                if shown.is_none() && notes.len() == resets && !token.is_cancelled() {
+                    notes.push(format!(
+                        "its first boot was watched for {} with no hang",
+                        first_boot::minutes(watch)
+                    ));
+                }
+            }
             None
         };
         if let (Some(_), Some((controller, port, device))) = (&ip, &made.seed) {

@@ -744,6 +744,8 @@ impl Deployer {
         let (mut serial_at, mut log_at, mut reset_seen) = (0u64, 0u64, 0u32);
         let mut last_growth = tokio::time::Instant::now();
         let mut hang_resets = 0u32;
+        let clone_boot = Self::watches_first_boot(spec);
+        let mut boot = super::first_boot::BootWatch::default();
         let mut login_at: Option<tokio::time::Instant> = None;
         let mut windows = WindowsSignIn::default();
         let mut last_round = tokio::time::Instant::now();
@@ -781,6 +783,15 @@ impl Deployer {
                     notes.push(format!("reset once it hung at {point} (VirtualBox under Hyper-V)"));
                 }
                 last_growth = tokio::time::Instant::now();
+            }
+            // VM-30: a clone's first boot has no known point to hang at (it may stand still at the firmware's logo):
+            // vCPU 0's run time standing still while its serial log is silent is the hang a reset gets past.
+            if clone_boot {
+                let quiet = last_growth.elapsed() >= tuning.hang_silence;
+                if let Some(note) = self.first_boot_round(key, &mut boot, quiet).await {
+                    notes.push(note);
+                    last_growth = tokio::time::Instant::now();
+                }
             }
             if watcher.login_seen() && login_at.is_none() {
                 login_at = Some(tokio::time::Instant::now());
@@ -1154,7 +1165,8 @@ impl Deployer {
         let (connected, mismatch) = connect(&first.account, vault_passwords[0].clone()).await;
         drop(vault_passwords);
         let session = connected.map_err(|err| stop(err, mismatch, "the vault's password"))?;
-        let after = session.run(plan::AFTER_INSTALL_SCRIPT, MAX_SCRIPT_OUTPUT).await;
+        let clone = matches!(spec.source, DeploySource::GoldenVm { .. });
+        let after = session.run(&plan::after_install_script(clone), MAX_SCRIPT_OUTPUT).await;
         session.close().await;
         let out = match after {
             Ok(result) => result.output.stdout,
@@ -1181,6 +1193,13 @@ impl Deployer {
         }
         if line("signed-out").is_some() {
             note.push_str("; the autologon session is signed out");
+        }
+        if clone {
+            note.push_str(if line("clone-cleaned").is_some() {
+                "; the clone's pointer to its answer file and its specialize script are deleted"
+            } else {
+                "; the clone's pointer to its answer file (HKLM\\SYSTEM\\Setup UnattendFile) or its specialize script couldn't be deleted"
+            });
         }
         Ok(note)
     }

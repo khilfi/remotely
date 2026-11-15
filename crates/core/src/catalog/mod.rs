@@ -90,8 +90,6 @@ pub struct Catalog {
     hashing: Arc<Mutex<HashMap<Uuid, CancellationToken>>>,
     /// CV-03: whether qemu-img is installed, for qcow2 images. `None` (FD-07's own copy): not checked.
     disk_tools: Option<Arc<dyn crate::adapters::disk_tools::DiskTools>>,
-    /// VM-30: whether Windows golden images build and deploy (never in 0.8.0: [`crate::golden::WINDOWS_DEFERRED`]).
-    windows_images: crate::golden::WindowsImages,
 }
 
 /// What a check of templates needs, read once.
@@ -104,8 +102,6 @@ struct Facts {
     configs: Vec<install::InstallConfig>,
     /// VM-30: each built image's newest version (C5 of PR 100's review: its clones read that version's config).
     versions: HashMap<Uuid, crate::store::VersionRow>,
-    /// VM-30: whether a Windows image Remotely built deploys (never in 0.8.0: [`crate::golden::WINDOWS_DEFERRED`]).
-    windows_images: bool,
 }
 
 impl Facts {
@@ -152,14 +148,6 @@ impl Facts {
         let windows = profiles::profile(&image.os_profile).is_some_and(|p| p.family == profiles::GuestFamily::Windows);
         if !windows {
             return Ok(None);
-        }
-        // 0.8.0: refused, with or without an install config of the template's own, instead of a deploy that waits at
-        // OOBE to its time limit.
-        if !self.windows_images {
-            return Err(Problem::new(
-                ProblemCode::InstallConfigMismatch,
-                format!("Image '{}': {}", image.name, crate::golden::WINDOWS_DEFERRED),
-            ));
         }
         if spec.install_config_id.is_some() {
             return Ok(None);
@@ -275,13 +263,7 @@ impl Catalog {
             hypervisors: None,
             hashing: Arc::default(),
             disk_tools: None,
-            windows_images: crate::golden::WindowsImages::default(),
         }
-    }
-
-    /// VM-30: whether Windows golden images build and deploy (never in 0.8.0; [`crate::golden::WindowsImages`]).
-    pub fn windows_images(&self) -> &crate::golden::WindowsImages {
-        &self.windows_images
     }
 
     /// Golden VM images check that their snapshot is still there.
@@ -448,7 +430,6 @@ impl Catalog {
             vault_keys,
             configs: self.install_config_facts(ctx).await?,
             versions: self.store.newest_image_versions(ctx).await?,
-            windows_images: self.windows_images.allowed(),
         })
     }
 

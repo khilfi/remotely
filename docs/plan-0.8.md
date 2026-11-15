@@ -41,7 +41,7 @@ VM-32 (address pools) and CV-04 (a cloud server's disks imported as one VM).
 | Watching an install | One job step per VM with its stages: installer booted, installing, rebooted, first sign-in over SSH (or WinRM), done. The installer's log comes to Remotely through the VM's serial port (Workstation: a serial port to a file or named pipe; VirtualBox: `uartmode file`) where the installer writes to it. 60 minutes by default before it counts as failed; VirtualBox takes a screenshot when it fails. |
 | After an install | Seeds ejected and deleted, a "clean install" snapshot, the SSH session saved with the key (QL-01's link to the VM), and optionally commands from the command panel (rated like a Compare hosts run on the new VMs), health checks (MO-08) and a stack (VM-08). |
 | Addresses (VM-32) | DHCP, or a static address from a pool per network (range, gateway, DNS servers). An address is handed out only when nothing answers on it (the toolbox's ping) and stays the VM's until the VM is deleted. |
-| Golden images (VM-30) | "Build an image": an install from a config, then the VM made generic (`cloud-init clean`, a new machine id and SSH host keys on next boot; Windows' `sysprep` was deferred to a later release, see G7), shut down, snapshotted and registered as a VM-20 golden image with a version. A schedule (VM-14) can rebuild it, say monthly, so launch templates deploy patched systems; the old version stays until no linked clone needs it. |
+| Golden images (VM-30) | "Build an image": an install from a config, then the VM made generic (`cloud-init clean`, a new machine id and SSH host keys on next boot; Windows' `sysprep` was deferred past 0.8.0 and shipped after it, see G7), shut down, snapshotted and registered as a VM-20 golden image with a version. A schedule (VM-14) can rebuild it, say monthly, so launch templates deploy patched systems; the old version stays until no linked clone needs it. |
 | A cloud server's disks (CV-04, VM-31) | Import several disks as one VM: the system disk boots and the data disks are attached in order; picking one file of a pair named like `...System_Disk...` and `...Data_Disk...` offers the other. "Attach an existing disk" on a VM's Settings tab, copied into the VM's folder by default and converted when it is another format; never a disk another known VM uses. For a cloud export's first boot: a NoCloud seed with a user and an SSH key from the vault, so you can sign in without the cloud's root password, and DHCP on whatever the network card is called. SATA by default for disks built for KVM, whose boot image often lacks VMware's SCSI drivers. |
 | New dependencies | A YAML parser (a maintained crate, chosen in G5, passing `cargo deny`) and `sha-crypt` (RustCrypto) for the password hashes. The ISO copy uses the ISO 9660 code Remotely already has for seeds. |
 | Releases | **Agreed.** One 0.8.0 when every package is merged. |
@@ -166,6 +166,17 @@ G1, G2, G5 and the spikes can start at once. G3 and G4 both touch the file panel
     releases and both hypervisors.
   - a reset for a clone's first boot that hangs on VirtualBox under Hyper-V. One clone hung at the firmware logo with
     no disk writes for 17 minutes, until a reset by hand. G6's hang reset covers only an install's known points.
+- **What shipped after 0.8.0 (15 Nov 2026; there is no plan doc for the next release yet)**: Windows golden images are
+  built again, and the 0.8.0 refusals are gone (`WINDOWS_DEFERRED`, `WindowsImages`, `refuse_windows`, the Windows
+  branch of `golden_config`; the build dialog offers unattend configs again).
+  - The delivery: sysprep is given a generic answer file of its own (`sysprep /generalize /oobe /quit /quiet
+    /unattend:`), which it caches for the clone's next passes. Its specialize step runs a script that finds the
+    clone's seed CD, applies its computer name, time zone and RunSynchronous commands, and points Setup at the seed's
+    `autounattend.xml` for oobeSystem (the documented `HKLM\System\Setup!UnattendFile`). OOBE then sets the one-time
+    password and runs the FirstLogonCommands that make the clone's WinRM certificate and write it to COM1.
+  - The hang reset: while a deploy watches a VirtualBox clone's first boot (Windows or Linux), vCPU 0's run time is
+    read from VirtualBox's statistics. A counter that stands still for 3 minutes gets a reset, at most 5 times.
+  - CLAUDE.md "Golden image builds (G7)" has the details and the hand checks.
 
 ## Development safety for 0.8.0
 

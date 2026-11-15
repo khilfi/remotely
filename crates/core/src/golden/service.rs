@@ -389,20 +389,11 @@ impl GoldenImages {
         };
         let Some(os) = BuildOs::of(config.spec.kind) else {
             return Ok(Err(vec![format!(
-                "The install config '{}' is {}: Remotely builds images from Ubuntu autoinstall and Debian preseed configs.",
+                "The install config '{}' is {}: Remotely builds images from Ubuntu autoinstall, Debian preseed and Windows unattend configs.",
                 config.spec.name,
                 config.spec.kind.label()
             )]));
         };
-        // 0.8.0: no Windows image, new or a rebuild (the build dialog, Rebuild, build settings, a schedule's save and its
-        // runs all come through here). The seal is kept for the later release, which needs a delivery clones read.
-        if os.windows() && !self.catalog.windows_images().allowed() {
-            return Ok(Err(vec![format!(
-                "The install config '{}' is a Windows unattend config. {}",
-                config.spec.name,
-                super::WINDOWS_DEFERRED
-            )]));
-        }
         // A2 of PR 100's review: an address of the build VM's own would go into every clone (and stay leased to the
         // version's VM), so a build takes its address by DHCP.
         if recipe.address_pool_id.is_some() {
@@ -599,7 +590,7 @@ impl GoldenImages {
     }
 
     /// What a build's preview warns about: a clone's first boot that won't set the guest up, and retention.
-    fn warnings(&self, spec: &BuildSpec, config_packages: &[String]) -> Vec<String> {
+    fn warnings(&self, spec: &BuildSpec, config_packages: &[String], config_body: &str) -> Vec<String> {
         let mut out = Vec::new();
         let has = |name: &str| config_packages.iter().any(|p| p.trim() == name);
         if spec.os == BuildOs::Debian && !has("cloud-init") {
@@ -619,6 +610,13 @@ impl GoldenImages {
                 "Each clone of a Windows image reads this install config's specialize and oobeSystem passes from a seed of its own (its name, a one-time password the deploy replaces with the vault's, and a WinRM certificate of its own), so the config stays the image's while the image is used."
                     .into(),
             );
+            let unapplied = crate::catalog::install::unattend::clone_unapplied(config_body);
+            if !unapplied.is_empty() {
+                out.push(format!(
+                    "A clone applies only the specialize pass's ComputerName, TimeZone and RunSynchronous commands (sysprep has run, so its own script applies them), so its clones won't get this config's {}.",
+                    unapplied.join(", ")
+                ));
+            }
         }
         if let Some(keep) = spec.recipe.keep {
             out.push(format!(
@@ -641,8 +639,8 @@ impl GoldenImages {
             }
         };
         let (deploy, capacity) = self.deploys.preview_spec(ctx, &spec.deploy).await;
-        let packages = self.config_packages(ctx, &spec).await;
-        let mut warnings = self.warnings(&spec, &packages);
+        let (packages, body) = self.config_packages(ctx, &spec).await;
+        let mut warnings = self.warnings(&spec, &packages, &body);
         warnings.extend(deploy.warnings.iter().cloned());
         Ok(BuildCheck {
             problems: deploy.refusals.clone(),
@@ -655,14 +653,18 @@ impl GoldenImages {
         })
     }
 
-    async fn config_packages(&self, ctx: &Context, spec: &BuildSpec) -> Vec<String> {
+    /// The build config's packages and its file, for the preview's warnings.
+    async fn config_packages(&self, ctx: &Context, spec: &BuildSpec) -> (Vec<String>, String) {
         match self
             .catalog
             .install_config(ctx, &spec.recipe.install_config_id.to_string())
             .await
         {
-            Ok(config) => install::read_form(config.spec.kind, &config.spec.body).form.packages,
-            Err(_) => Vec::new(),
+            Ok(config) => (
+                install::read_form(config.spec.kind, &config.spec.body).form.packages,
+                config.spec.body,
+            ),
+            Err(_) => (Vec::new(), String::new()),
         }
     }
 
@@ -708,32 +710,6 @@ impl GoldenImages {
             target: BuildTarget::Image { id: image_id },
             recipe,
         })
-    }
-
-    /// 0.8.0: refuses a Windows image (its recipe installs from a Windows unattend config), read cheaply from the store,
-    /// before a schedule that rebuilds it is saved ([`super::WINDOWS_DEFERRED`]). Its builds are refused by
-    /// [`Self::spec_for`] too, a scheduled run's included.
-    pub async fn refuse_windows(&self, ctx: &Context, image_id: Uuid) -> Result<()> {
-        if self.catalog.windows_images().allowed() {
-            return Ok(());
-        }
-        let Some(image) = self.store.catalog_image(ctx, image_id).await? else {
-            return Ok(());
-        };
-        let Some(recipe) = &image.build else {
-            return Ok(());
-        };
-        let Some(config) = self.store.install_config_row(ctx, recipe.install_config_id).await? else {
-            return Ok(());
-        };
-        if BuildOs::of(config.spec.kind).is_some_and(BuildOs::windows) {
-            return Err(CoreError::InvalidInput(format!(
-                "Image '{}' is a Windows image. {}",
-                image.name,
-                super::WINDOWS_DEFERRED
-            )));
-        }
-        Ok(())
     }
 
     /// "Rebuild": the image's next version from its recipe as it is saved.

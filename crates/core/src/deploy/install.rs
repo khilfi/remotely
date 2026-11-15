@@ -199,11 +199,36 @@ pub fn set_password_script(account: &str, password: &str) -> String {
 /// copy's SHA-256 first, so the job can say Setup read this deploy's file.
 pub const AFTER_INSTALL_SCRIPT: &str = "$f = 'C:\\Windows\\Panther\\unattend-original.xml'; if (Test-Path -LiteralPath $f) { 'answer-file ' + (Get-FileHash -LiteralPath $f -Algorithm SHA256).Hash; try { Remove-Item -LiteralPath $f -Force -ErrorAction Stop; 'removed-original' } catch { } }; $p = Get-Process explorer -ErrorAction SilentlyContinue | Where-Object { $_.SessionId -gt 0 } | Select-Object -First 1; if ($p) { logoff $p.SessionId; if ($LASTEXITCODE -eq 0) { 'signed-out ' + $p.SessionId } }";
 
+/// VM-30: what a clone of a Windows golden image runs after [`AFTER_INSTALL_SCRIPT`]: Setup is done with the answer file
+/// its specialize script pointed it at (`HKLM\SYSTEM\Setup` `UnattendFile`, the seed's file, which goes now), so that
+/// value goes, and so does the script (it is in the image; the clone needs it no more). Says `clone-cleaned` once both
+/// are gone.
+pub const CLONE_AFTER_INSTALL_SCRIPT: &str = "Remove-ItemProperty -LiteralPath 'HKLM:\\SYSTEM\\Setup' -Name 'UnattendFile' -ErrorAction SilentlyContinue; $s = 'C:\\Windows\\Setup\\Scripts\\remotely-clone.ps1'; Remove-Item -LiteralPath $s -Force -ErrorAction SilentlyContinue; if (-not (Get-ItemProperty -LiteralPath 'HKLM:\\SYSTEM\\Setup' -Name 'UnattendFile' -ErrorAction SilentlyContinue) -and -not (Test-Path -LiteralPath $s)) { 'clone-cleaned' }";
+
+/// The after-install run for a VM: a clone of a sysprepped image adds [`CLONE_AFTER_INSTALL_SCRIPT`].
+pub fn after_install_script(clone: bool) -> String {
+    if clone {
+        format!("{AFTER_INSTALL_SCRIPT}; {CLONE_AFTER_INSTALL_SCRIPT}")
+    } else {
+        AFTER_INSTALL_SCRIPT.to_owned()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)]
 
     use super::*;
+
+    #[test]
+    fn a_clones_after_install_run_clears_the_pointer_to_its_answer_file_and_its_script() {
+        assert_eq!(after_install_script(false), AFTER_INSTALL_SCRIPT);
+        let clone = after_install_script(true);
+        assert!(clone.starts_with(AFTER_INSTALL_SCRIPT), "G6's part first");
+        assert!(clone.contains("Remove-ItemProperty -LiteralPath 'HKLM:\\SYSTEM\\Setup' -Name 'UnattendFile'"));
+        assert!(clone.contains(crate::golden::generic::CLONE_SCRIPT));
+        assert!(clone.ends_with("{ 'clone-cleaned' }"));
+    }
 
     #[test]
     fn kinds_have_a_delivery_only_where_one_was_seen_to_work() {

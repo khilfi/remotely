@@ -260,6 +260,53 @@ pub const WINRM_FINGERPRINT_MARKER: &str = "remotely-winrm";
 /// VM-29: the lines a Windows answer file writes to COM1 as Setup goes (`remotely-stage <stage> <time>`).
 pub const STAGE_MARKER: &str = "remotely-stage";
 
+/// VM-30: what a file's specialize pass asks that a clone of a sysprepped golden image doesn't apply, as
+/// `<component>/<setting>`. Setup reads no answer file from a clone's seed after sysprep, so the clone's script
+/// ([`crate::golden::generic::CLONE_SCRIPT_BODY`]) applies the pass itself: only Shell-Setup's `ComputerName` and
+/// `TimeZone` and Deployment's `RunSynchronous` commands (their `Order` and `Path`; a `WillReboot` other than
+/// `Never` or a command's `Credentials` aren't). The oobeSystem pass is Setup's own, read from the clone's file.
+pub fn clone_unapplied(text: &str) -> Vec<String> {
+    let Ok(root) = xml::parse(text) else {
+        return Vec::new();
+    };
+    let mut out: Vec<String> = Vec::new();
+    for settings in root.children_named("settings") {
+        if settings.attr("pass") != Some("specialize") {
+            continue;
+        }
+        for component in settings.children_named("component") {
+            let name = component.attr("name").unwrap_or_default();
+            for setting in &component.children {
+                let what = setting.local();
+                let applied = match (name, what) {
+                    (SHELL, "ComputerName" | "TimeZone") => true,
+                    ("Microsoft-Windows-Deployment", "RunSynchronous") => {
+                        for command in setting.children_named("RunSynchronousCommand") {
+                            for part in &command.children {
+                                let fine = match part.local() {
+                                    "Order" | "Path" | "Description" => true,
+                                    "WillReboot" => part.trimmed().eq_ignore_ascii_case("Never"),
+                                    _ => false,
+                                };
+                                if !fine {
+                                    out.push(format!("{name}/RunSynchronous/{}", part.local()));
+                                }
+                            }
+                        }
+                        true
+                    }
+                    _ => false,
+                };
+                if !applied {
+                    out.push(format!("{name}/{what}"));
+                }
+            }
+        }
+    }
+    out.dedup();
+    out
+}
+
 /// VM-29: which account each `{{password.<name>}}` of a file is: the Administrator's, or a local account's (by its
 /// `Name`). The deploy signs in with the first and sets each to the vault's password once Windows is installed.
 pub fn password_accounts(text: &str) -> Vec<(String, String)> {
@@ -780,6 +827,36 @@ mod tests {
             "<ProductKey><Key>XXXXX-XXXXX</Key></ProductKey><AcceptEula>",
         );
         assert!(messages(&check(&key)).contains("product key"));
+    }
+
+    #[test]
+    fn a_clone_applies_the_specialize_pass_only_in_part() {
+        // The starters' specialize pass: the name, the time zone and a command, all applied by a clone's script.
+        for starter in crate::catalog::install::starters::all() {
+            if starter.spec.kind == crate::catalog::install::InstallKind::Unattend {
+                assert!(clone_unapplied(&starter.spec.body).is_empty(), "{}", starter.id);
+            }
+        }
+        assert!(clone_unapplied(&file(SAMPLE_ONE_TIME)).is_empty());
+        let more = file(SAMPLE_ONE_TIME).replace(
+            "<ComputerName>vm-1</ComputerName>",
+            "<ComputerName>vm-1</ComputerName><RegisteredOwner>alice</RegisteredOwner>",
+        );
+        let more = more.replace(
+            "  </settings>\n  <settings pass=\"oobeSystem\">",
+            "    <component name=\"Microsoft-Windows-UnattendedJoin\"><Identification><JoinDomain>example.com</JoinDomain></Identification></component>\n    <component name=\"Microsoft-Windows-Deployment\"><RunSynchronous><RunSynchronousCommand><Order>1</Order><Path>cmd /c exit 0</Path><WillReboot>Always</WillReboot></RunSynchronousCommand><RunSynchronousCommand><Order>2</Order><Path>cmd /c exit 0</Path><WillReboot>Never</WillReboot></RunSynchronousCommand></RunSynchronous></component>\n  </settings>\n  <settings pass=\"oobeSystem\">",
+        );
+        assert_eq!(
+            clone_unapplied(&more),
+            [
+                "Microsoft-Windows-Shell-Setup/RegisteredOwner",
+                "Microsoft-Windows-UnattendedJoin/Identification",
+                "Microsoft-Windows-Deployment/RunSynchronous/WillReboot",
+            ]
+        );
+        // oobeSystem is Setup's own (the clone's file), so nothing there is listed.
+        assert!(!clone_unapplied(&more).iter().any(|s| s.contains("UserAccounts")));
+        assert!(clone_unapplied("<not xml").is_empty());
     }
 
     #[test]
