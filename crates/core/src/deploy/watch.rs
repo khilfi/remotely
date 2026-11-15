@@ -628,7 +628,21 @@ impl SerialWatcher {
                 "the clone's answer file goes to Windows' first start (oobeSystem)".into(),
             )),
             "failed" => {
+                // `command <reason>`: Windows' error number, or an exception's type; `command-start <mode> <type>`:
+                // PowerShell couldn't compile the starter (Add-Type), in that language mode.
+                let (value, reason) = value.split_once(' ').unwrap_or((value, ""));
+                let reason = cut(reason, 60);
                 let why = match value {
+                    "command" if reason.parse::<u32>().is_ok() => format!(
+                        "One of its answer file's specialize commands couldn't be started on the clone (Windows error {reason})."
+                    ),
+                    "command" if !reason.is_empty() => format!(
+                        "One of its answer file's specialize commands couldn't be started on the clone ({reason})."
+                    ),
+                    "command-start" => format!(
+                        "The clone couldn't prepare to start its answer file's specialize commands: PowerShell's Add-Type failed ({}). A policy that keeps PowerShell in Constrained Language Mode (WDAC, AppLocker) stops it.",
+                        if reason.is_empty() { "no reason given".to_owned() } else { reason }
+                    ),
                     "seed" => format!(
                         "The clone found no CD with its answer file (autounattend.xml at a drive's root) within {CLONE_SEED_WAIT_MINUTES} minutes of its specialize pass: its seed drive is missing or empty."
                     ),
@@ -869,6 +883,12 @@ mod tests {
             ("name", "computer name"),
             ("time-zone", "time zone"),
             ("command", "specialize commands"),
+            ("command 2", "(Windows error 2)"),
+            ("command MethodInvocationException", "(MethodInvocationException)"),
+            (
+                "command-start ConstrainedLanguage PSNotSupportedException",
+                "Add-Type failed (ConstrainedLanguage PSNotSupportedException)",
+            ),
             ("hand-over", "UnattendFile"),
             ("something", "stopped: something"),
         ] {

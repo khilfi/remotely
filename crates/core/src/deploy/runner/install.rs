@@ -792,17 +792,24 @@ impl Deployer {
                 && boot.resets < tuning.max_hang_resets
             {
                 let point = watcher.hang_point().unwrap_or_default();
-                if self
-                    .vbox(vec!["controlvm".into(), key.into(), "reset".into()], SHORT)
+                // The same reset as vCPU 0's watch (one count, a running VM only, not once cancelled, a refusal
+                // noted once); one hang, one reset: vCPU 0's clock starts again too (`reset_hung` restarts it).
+                match self
+                    .reset_hung(
+                        key,
+                        &mut boot,
+                        token,
+                        format!("reset once it hung at {point} (VirtualBox under Hyper-V)"),
+                        format!("it hung at {point}, but VirtualBox refused to reset it"),
+                    )
                     .await
-                    .is_ok()
                 {
-                    boot.resets += 1;
-                    notes.push(format!("reset once it hung at {point} (VirtualBox under Hyper-V)"));
+                    Some(super::first_boot::Hang::Reset(note) | super::first_boot::Hang::ResetFailed(note)) => {
+                        notes.push(note)
+                    }
+                    None => {}
                 }
                 last_growth = tokio::time::Instant::now();
-                // One hang, one reset: vCPU 0's clock starts again too.
-                boot.restart();
             }
             // VM-30: a clone's first boot has no known point to hang at (it may stand still at the firmware's logo),
             // and neither has Windows Setup: vCPU 0's run time standing still while the serial log is silent is the

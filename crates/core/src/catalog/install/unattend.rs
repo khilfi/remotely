@@ -267,7 +267,8 @@ pub const STAGE_MARKER: &str = "remotely-stage";
 /// `Never` or a command's `Credentials` aren't). The oobeSystem pass is Setup's own, read from the clone's file. The
 /// build's own specialize pass applied everything listed here to the build VM, so a clone has each of them where
 /// sysprep's generalize kept it (registry settings mostly stay; per-machine ones such as a domain join don't): the
-/// build's preview words it so. Each item once; amd64 components only (or ones naming no architecture), as Setup on x64.
+/// build's preview words it so. Each item once; components whose `processorArchitecture` is exactly `amd64` only, as
+/// the clone script reads them and as [`check`]'s lint says Setup does (it skips a component without one).
 pub fn clone_unapplied(text: &str) -> Vec<String> {
     let Ok(root) = xml::parse(text) else {
         return Vec::new();
@@ -277,11 +278,9 @@ pub fn clone_unapplied(text: &str) -> Vec<String> {
         if settings.attr("pass") != Some("specialize") {
             continue;
         }
-        // Item 10 of PR 101's review: as Setup on x64, only an amd64 component (or one naming none).
-        let amd64 = |c: &&Element| {
-            c.attr("processorArchitecture")
-                .is_none_or(|a| a.eq_ignore_ascii_case("amd64"))
-        };
+        // Item 10 of PR 101's review, and re-review low 2: as Setup on x64 and the clone script's XPath, only a
+        // component whose processorArchitecture is exactly amd64 (the lint above: Setup skips one without it).
+        let amd64 = |c: &&Element| c.attr("processorArchitecture") == Some("amd64");
         for component in settings.children_named("component").filter(amd64) {
             let name = component.attr("name").unwrap_or_default();
             for setting in &component.children {
@@ -853,7 +852,7 @@ mod tests {
         );
         let more = more.replace(
             "  </settings>\n  <settings pass=\"oobeSystem\">",
-            "    <component name=\"Microsoft-Windows-UnattendedJoin\"><Identification><JoinDomain>example.com</JoinDomain></Identification></component>\n    <component name=\"Microsoft-Windows-Deployment\"><RunSynchronous><RunSynchronousCommand><Order>1</Order><Path>cmd /c exit 0</Path><WillReboot>Always</WillReboot></RunSynchronousCommand><RunSynchronousCommand><Order>2</Order><Path>cmd /c exit 0</Path><WillReboot>Never</WillReboot></RunSynchronousCommand></RunSynchronous></component>\n  </settings>\n  <settings pass=\"oobeSystem\">",
+            "    <component name=\"Microsoft-Windows-UnattendedJoin\" processorArchitecture=\"amd64\"><Identification><JoinDomain>example.com</JoinDomain></Identification></component>\n    <component name=\"Microsoft-Windows-Deployment\" processorArchitecture=\"amd64\"><RunSynchronous><RunSynchronousCommand><Order>1</Order><Path>cmd /c exit 0</Path><WillReboot>Always</WillReboot></RunSynchronousCommand><RunSynchronousCommand><Order>2</Order><Path>cmd /c exit 0</Path><WillReboot>Never</WillReboot></RunSynchronousCommand></RunSynchronous></component>\n  </settings>\n  <settings pass=\"oobeSystem\">",
         );
         assert_eq!(
             clone_unapplied(&more),
@@ -871,8 +870,12 @@ mod tests {
         let twice = r#"<unattend xmlns="urn:schemas-microsoft-com:unattend"><settings pass="specialize">
 <component name="Microsoft-Windows-Shell-Setup" processorArchitecture="amd64"><RegisteredOwner>alice</RegisteredOwner><ComputerName>vm-1</ComputerName><RegisteredOwner>bob</RegisteredOwner></component>
 <component name="Microsoft-Windows-Shell-Setup" processorArchitecture="x86"><RegisteredOrganization>example</RegisteredOrganization></component>
-<component name="Microsoft-Windows-TerminalServices-LocalSessionManager"><fDenyTSConnections>false</fDenyTSConnections></component>
+<component name="Microsoft-Windows-TerminalServices-LocalSessionManager" processorArchitecture="amd64"><fDenyTSConnections>false</fDenyTSConnections></component>
+<component name="Microsoft-Windows-IE-ESC"><IEHardenAdmin>false</IEHardenAdmin></component>
+<component name="Microsoft-Windows-Security-SPP-UX" processorArchitecture="AMD64"><SkipAutoActivation>true</SkipAutoActivation></component>
 </settings></unattend>"#;
+        // Re-review low 2: one rule with the lint and the clone script's XPath: a component with no
+        // processorArchitecture (Setup skips it) or another spelling than `amd64` isn't read.
         assert_eq!(
             clone_unapplied(twice),
             [

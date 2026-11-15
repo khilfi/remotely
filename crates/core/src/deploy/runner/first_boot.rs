@@ -8,9 +8,10 @@
 //! running (paused by the user, or by VirtualBox when the host's disk is full). One count of resets per VM, this
 //! watch's and G6's known points' together, at most `max_hang_resets`; a refused reset is noted once.
 //!
-//! It runs only while the deploy waits anyway (item 1 of PR 101's review: it costs a deploy no time): in G6's install
-//! watcher for every VirtualBox install (a Windows clone's first boot, Setup from an ISO, a golden image's build) and
-//! in a Linux clone's wait for its address, whose wait starts again after a reset. A VirtualBox reset counts in
+//! It runs only while the deploy waits anyway (item 1 of PR 101's review: the watch itself adds no time): in G6's
+//! install watcher for every VirtualBox install (a Windows clone's first boot, Setup from an ISO, a golden image's
+//! build) and in a Linux clone's wait for its address. A reset does: that wait starts again after it, so a clone that
+//! hangs at every boot waits at most (1 + `max_hang_resets`) times the wait, and its note says "of its last reset". A VirtualBox reset counts in
 //! `/VirtualBox/VMInfo/ResetCounter` as the guest's own do. Every Windows hang seen but one (S3; this package's three) stood at
 //! one of Setup's restarts, which the hung guest hadn't counted: the reset finished that restart and was counted once,
 //! so the install watcher counts it as Setup's (taking Remotely's resets off would wait for a restart that happened).
@@ -110,7 +111,32 @@ impl Deployer {
         if still < tuning.hang_silence || !quiet {
             return None;
         }
-        // Item 4 of PR 101's review: only a running VM is reset (one the user or VirtualBox paused stands still too).
+        let still = about_minutes(still);
+        self.reset_hung(
+            key,
+            watch,
+            token,
+            format!("reset {what} once vCPU 0 had stood still for {still} (VirtualBox under Hyper-V)"),
+            format!("vCPU 0 stood still for {still}, but VirtualBox refused to reset {what}"),
+        )
+        .await
+    }
+
+    /// Resets a hung VM (this watch's, or G6's known points' in the install watcher), counted in `watch.resets`: only
+    /// within `max_hang_resets`, only a VM VirtualBox says is running (item 4 of PR 101's review: a paused VM stands
+    /// still too; its clock starts again) and only while the job isn't cancelled (item 8). `done` is the reset's note,
+    /// `refused` the start of a refused one's, which is said once (item 7; re-review low 4 for the known points).
+    pub(super) async fn reset_hung(
+        &self,
+        key: &str,
+        watch: &mut BootWatch,
+        token: &CancellationToken,
+        done: String,
+        refused: String,
+    ) -> Option<Hang> {
+        if watch.resets >= self.tuning().max_hang_resets || token.is_cancelled() {
+            return None;
+        }
         let running = tokio::select! {
             _ = token.cancelled() => return None,
             info = self.hypervisors.virtualbox().vm_info(key) => {
@@ -127,21 +153,15 @@ impl Deployer {
         match reset {
             Ok(_) => {
                 watch.resets += 1;
-                Some(Hang::Reset(format!(
-                    "reset {what} once vCPU 0 had stood still for {} (VirtualBox under Hyper-V)",
-                    about_minutes(still)
-                )))
+                Some(Hang::Reset(done))
             }
             Err(err) => {
-                tracing::warn!(error = %err, what, "a VM that stood still couldn't be reset");
+                tracing::warn!(error = %err, "a VM that hung couldn't be reset");
                 if watch.failed_noted {
                     return None;
                 }
                 watch.failed_noted = true;
-                Some(Hang::ResetFailed(format!(
-                    "vCPU 0 stood still for {}, but VirtualBox refused to reset {what} ({err})",
-                    about_minutes(still)
-                )))
+                Some(Hang::ResetFailed(format!("{refused} ({err})")))
             }
         }
     }

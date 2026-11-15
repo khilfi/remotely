@@ -1947,7 +1947,13 @@ fn notes_for<'a>(targets: &'a [(String, String)], name: &str) -> &'a str {
 
 /// The resets the fake VirtualBox was asked for, of the VM named `vm` (any: `None`).
 fn resets_of(lab: &Lab, vm: Option<&str>) -> usize {
-    let uuid = vm.and_then(|n| lab.virtualbox.vm_named(n)).map(|v| v.uuid);
+    // Re-review low 3: a name that isn't a VM is the test's mistake, not "every VM".
+    let uuid = vm.map(|n| {
+        lab.virtualbox
+            .vm_named(n)
+            .unwrap_or_else(|| panic!("no VM named {n}"))
+            .uuid
+    });
     lab.virtualbox
         .calls()
         .iter()
@@ -2007,10 +2013,8 @@ async fn a_virtualbox_linux_clones_first_boot_that_hangs_is_reset_and_a_running_
         .await
         .unwrap();
     lab.virtualbox.hang_next_boot("plain-1");
-    let started = std::time::Instant::now();
     let (status, targets) = deploy_clones(&lab, &plain, "plain", 1).await;
     assert_eq!(status, JobStatus::Succeeded, "{targets:?}");
-    assert!(started.elapsed() < Duration::from_secs(2), "no wait");
     let uuid = lab.virtualbox.vm_named("plain-1").unwrap().uuid;
     assert!(!lab
         .virtualbox
@@ -2088,33 +2092,38 @@ async fn a_linux_clones_hang_watch_resets_only_a_running_vm_within_its_cap_and_w
     let _ = std::fs::remove_dir_all(&lab.dir);
 }
 
-#[tokio::test]
-async fn one_hang_at_a_known_point_is_reset_once() {
-    // Item 5 of PR 101's review: G6's known point (Ubuntu's RAID6 benchmark) and vCPU 0 standing still see the same
-    // hang; they share one count, and the reset starts both clocks again.
-    let lab = lab("golden-vbox-one-hang", &[]).await;
+/// An Ubuntu build on the fake VirtualBox whose installer hangs at G6's known point (the RAID6 benchmark), its VM
+/// standing still for `hang_boots` boots; once a reset lets it run, the rest of the install. The job's status and notes.
+async fn ubuntu_build_hung_at_the_raid6_point(lab: &Lab, vm: &str, hang_boots: u32) -> (JobStatus, String) {
     let core = &lab.core;
     let pw = vault_password(core, &lab.secret).await;
     let key = build_key(core).await;
     let config = config_from(core, "starter.ubuntu-24.04-minimal", pw, Some(key), |_| {}).await;
-    let iso = iso_image(core, &lab.dir, "noble.iso", &install_isos::ubuntu_24_04(), "ubuntu").await;
+    let iso = iso_image(
+        core,
+        &lab.dir,
+        &format!("{vm}.iso"),
+        &install_isos::ubuntu_24_04(),
+        "ubuntu",
+    )
+    .await;
     let request = BuildRequest {
         target: BuildTarget::New {
-            name: "Ubu hang".into(),
+            name: vm.trim_end_matches("-v1").into(),
         },
         recipe: recipe(&iso, config, Hypervisor::VirtualBox, &lab.vms, "gp.medium"),
     };
-    hang_tuned(core, lab.ssh);
-    lab.virtualbox.hang_next_boot("ubu-hang-v1");
+    lab.virtualbox.hang_boots(vm, hang_boots);
     let ctx = &core.ctx();
     let approval = needs_approval(core.golden.submit(ctx, &request).await.unwrap());
-    let serial = lab.vms.join("ubu-hang-v1").join("ubu-hang-v1-serial.log");
+    assert_eq!(approval.image_build.as_ref().unwrap().vm_name, vm);
+    let serial = lab.vms.join(vm).join(format!("{vm}-serial.log"));
     let play = {
         let virtualbox = Arc::clone(&lab.virtualbox);
-        let serial = serial.clone();
+        let vm = vm.to_owned();
         tokio::spawn(async move {
             for _ in 0..3000 {
-                if virtualbox.is_hung("ubu-hang-v1") {
+                if virtualbox.is_hung(&vm) {
                     break;
                 }
                 tokio::time::sleep(Duration::from_millis(5)).await;
@@ -2124,12 +2133,15 @@ async fn one_hang_at_a_known_point_is_reset_once() {
                 b"[    0.000000] Command line: BOOT_IMAGE=/casper/vmlinuz autoinstall console=ttyS0,115200n8 ---\r\nBegin: Loading essential drivers ... raid6: avx2x4 gen() 1000 MB/s\r\n",
             );
             for _ in 0..3000 {
-                if !virtualbox.is_hung("ubu-hang-v1") {
+                if !virtualbox.is_hung(&vm) {
                     break;
                 }
                 tokio::time::sleep(Duration::from_millis(5)).await;
             }
-            for line in ubuntu_lines("ubu-hang-v1").into_iter().skip(1) {
+            if virtualbox.is_hung(&vm) {
+                return;
+            }
+            for line in ubuntu_lines(&vm).into_iter().skip(1) {
                 tokio::time::sleep(Duration::from_millis(40)).await;
                 append(&serial, line.as_bytes());
             }
@@ -2138,9 +2150,43 @@ async fn one_hang_at_a_known_point_is_reset_once() {
     let job = approve(core, &approval).await;
     let status = wait(core, job).await;
     play.await.unwrap();
-    let notes = notes_of(core, job).await;
+    (status, notes_of(core, job).await)
+}
+
+#[tokio::test]
+async fn one_hang_at_a_known_point_is_reset_once() {
+    // Item 5 of PR 101's review: G6's known point (Ubuntu's RAID6 benchmark) and vCPU 0 standing still see the same
+    // hang; they share one count, and the reset starts both clocks again.
+    let lab = lab("golden-vbox-one-hang", &[]).await;
+    hang_tuned(&lab.core, lab.ssh);
+    let (status, notes) = ubuntu_build_hung_at_the_raid6_point(&lab, "ubu-hang-v1", 1).await;
     assert_eq!(status, JobStatus::Succeeded, "{notes}");
     assert_eq!(resets_of(&lab, Some("ubu-hang-v1")), 1, "{notes}");
+    assert!(
+        notes.contains("reset once it hung at the initramfs's RAID6 benchmark"),
+        "{notes}"
+    );
+    let _ = std::fs::remove_dir_all(&lab.dir);
+}
+
+#[tokio::test]
+async fn a_known_points_reset_counts_against_the_vcpu_watchs_cap() {
+    // Re-review low 3 of PR 101: one count per VM. With room for one reset, the known point's reset uses it, and when
+    // the VM stands still again vCPU 0's watch doesn't reset it a second time (it would, with a count of its own).
+    let lab = lab("golden-vbox-shared-cap", &[]).await;
+    lab.core.set_deploy_tuning(DeployTuning {
+        max_hang_resets: 1,
+        install_cap: Some(Duration::from_secs(3)),
+        ..hang_tuning(lab.ssh)
+    });
+    let (status, notes) = ubuntu_build_hung_at_the_raid6_point(&lab, "ubu-cap-v1", 2).await;
+    assert_eq!(
+        status,
+        JobStatus::Failed,
+        "the second hang runs to the time limit: {notes}"
+    );
+    assert_eq!(resets_of(&lab, Some("ubu-cap-v1")), 1, "{notes}");
+    assert!(lab.virtualbox.is_hung("ubu-cap-v1"));
     let _ = std::fs::remove_dir_all(&lab.dir);
 }
 

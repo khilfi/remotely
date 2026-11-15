@@ -1264,14 +1264,16 @@ impl Deployer {
 
     /// Waits for the guest's IP, at most the deploy's wait; `None` when it doesn't show (or the job is cancelled).
     /// A VirtualBox clone's first boot is watched for a hang meanwhile (a reset's note goes to `notes`), and a reset
-    /// gives the wait its whole time again (item 6 of PR 101's review): the clone boots again from its start.
+    /// gives the wait its whole time again (item 6 of PR 101's review): the clone boots again from its start. So a
+    /// clone that hangs at every boot waits at most (1 + `max_hang_resets`) times the wait (`ip_wait_cap` bounds each
+    /// one). The flag says whether it was reset.
     async fn wait_for_ip(
         &self,
         spec: &DeploySpec,
         key: &str,
         token: &CancellationToken,
         notes: &mut Vec<String>,
-    ) -> Option<String> {
+    ) -> (Option<String>, bool) {
         let tuning = self.tuning();
         let mut wait = Duration::from_secs(u64::from(spec.ip_wait_secs));
         if let Some(cap) = tuning.ip_wait_cap {
@@ -1282,12 +1284,13 @@ impl Deployer {
         let mut boot = first_boot::BootWatch::default();
         let watched = Self::watches_first_boot(spec);
         loop {
+            let reset = boot.resets > 0;
             let ip = tokio::select! {
-                _ = token.cancelled() => return None,
+                _ = token.cancelled() => return (None, reset),
                 ip = self.guest_ip(spec, key) => ip,
             };
             if ip.is_some() {
-                return ip;
+                return (ip, reset);
             }
             if watched {
                 match self
@@ -1303,10 +1306,10 @@ impl Deployer {
                 }
             }
             if tokio::time::Instant::now() >= deadline {
-                return None;
+                return (None, boot.resets > 0);
             }
             tokio::select! {
-                _ = token.cancelled() => return None,
+                _ = token.cancelled() => return (None, boot.resets > 0),
                 _ = tokio::time::sleep(poll) => {}
             }
         }
@@ -1328,13 +1331,14 @@ impl Deployer {
         let wants_ip =
             has_os && (spec.after_deploy.create_session || made.seed.is_some() || made.workstation_seed.is_some());
         let ip = if wants_ip {
-            let ip = self.wait_for_ip(spec, key, token, &mut notes).await;
+            let (ip, reset) = self.wait_for_ip(spec, key, token, &mut notes).await;
             match &ip {
                 Some(ip) => notes.push(format!("IP {ip}")),
                 None if token.is_cancelled() => notes.push("cancelled while waiting for its IP".into()),
                 None => notes.push(format!(
-                    "no IP within {} minutes ({} report it): make its session once it shows",
+                    "no IP within {} minutes{} ({} report it): make its session once it shows",
                     spec.ip_wait_secs.div_ceil(60),
+                    if reset { " of its last reset" } else { "" },
                     spec.hypervisor.tools_name()
                 )),
             }

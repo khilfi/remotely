@@ -2419,14 +2419,19 @@ seen on a real VM yet (the PR lists the checks).
     `CreateProcessW` with no program name, which finds the program in it (quoted, or unquoted with spaces tried word by
     word, `.exe` added, the system folders and `PATH` searched). Microsoft's own example `Path` is
     `%ProgramFiles%\FabriKam\FabriKam First Run Application.exe`; `ProcessStartInfo` (the first version) expanded
-    nothing and cut at the first space. Only an amd64 component, or one naming no architecture, is read. Then it sets
+    nothing and cut at the first space. Only a component whose `processorArchitecture` is exactly `amd64` is read, as
+    the unattend lint says Setup does (it skips a component without one); `clone_unapplied` reads the same. Then it sets
     `HKLM\SYSTEM\Setup` `UnattendFile` to the seed's file, so oobeSystem's search finds it first: OOBE sets the
     one-time password and the autologon and runs the FirstLogonCommands, which turn WinRM over HTTPS on with a new
     self-signed certificate and write its fingerprint to COM1 (the starters' lines). The clone's file is read where the
     seed is; nothing of it is copied to the disk (Setup caches it as any answer file, masked at the pass's end). Each
     step says `remotely-clone <what>` on COM1 (`started`, `seed <path>`, `name <n>`, `time-zone`, `ran <exit>`,
-    `handed`); a failure says `failed seed|answer-file|name|time-zone|command|hand-over` and ends the script with 0
-    (a failing specialize command can stop Setup), and the watcher fails the clone's install at once, saying why. A
+    `handed`); a failure says `failed seed|answer-file|name|time-zone|command|command-start|hand-over` and ends the
+    script with 0 (a failing specialize command can stop Setup), and the watcher fails the clone's install at once,
+    saying why. A command that can't start says why, never the command (the seed's text): `failed command <Windows
+    error>` from `CreateProcessW`, or `failed command-start <language mode> <exception type>` when Add-Type can't
+    compile the starter (a WDAC or AppLocker policy keeps PowerShell in Constrained Language Mode). The commands run
+    through Add-Type's C# as SYSTEM in specialize, so every clone of a config with a specialize command needs it. A
     clone applies no other specialize setting again (`unattend::clone_unapplied`; the build's preview names what a
     config has beyond them, e.g. a domain join or a command's `WillReboot`): the build applied them, so a clone has
     those sysprep's generalize keeps (most registry settings) and not the rest.
@@ -2446,15 +2451,18 @@ seen on a real VM yet (the PR lists the checks).
   /TM/CPU/00/cNsTotal`, XML, `deploy::runner::vbox_counter`):
   - **Where:** G6's install watcher, for every VirtualBox install (a Windows clone's first boot, Setup from an ISO, a
     golden image's build: `reset the install once ...`), and a Linux clone's wait for its address (a Linux clone always
-    has cloud-init's seed), which starts its whole wait again after a reset. Nowhere else: a clone the deploy waits for
-    nothing else isn't watched, so the watch costs a deploy no time (review item 1 of PR 101: an earlier version
-    watched such a clone for 5 minutes). Workstation never hung (S3), so its VMs aren't watched.
+    has cloud-init's seed). Nowhere else: a clone the deploy waits for nothing else isn't watched, so the watch itself
+    adds no time (review item 1 of PR 101: an earlier version watched such a clone for 5 minutes). A reset does: the
+    address wait starts again after it, so a clone that hangs at every boot holds its deploy slot for at most (1 +
+    `max_hang_resets`) times the wait (`ip_wait_cap` bounds each one), and the note says "no IP within N minutes of
+    its last reset". Workstation never hung (S3), so its VMs aren't watched.
   - **When:** a counter standing still for `hang_silence` (3 minutes) while nothing else moved (the serial log), on a
     VM VirtualBox says is running (a paused one, by the user or by VirtualBox on a full disk, stands still too: its
     clock starts again), with the job not cancelled, gets `controlvm reset`, and the note says `reset its first boot
     once vCPU 0 had stood still for about <n> minutes`. A refused reset is noted once. A counter that can't be read
     resets nothing. The resets of one VM, this watch's and G6's known points' together, are at most `max_hang_resets`
-    (5); a known point's reset starts the counter's clock again, so one hang gets one reset.
+    (5), and both go through `Deployer::reset_hung` (a running VM only, not once cancelled, a refusal noted once); a
+    known point's reset starts the counter's clock again, so one hang gets one reset.
   - **Setup's restarts: Remotely's resets stay in the count, on purpose (don't take them off).** VirtualBox counts
     `controlvm reset` in `/VirtualBox/VMInfo/ResetCounter` as it counts the guest's own. Every Windows hang seen but one (S3's
     two, this package's three) stood at one of Setup's restarts, which the hung guest hadn't counted: the reset

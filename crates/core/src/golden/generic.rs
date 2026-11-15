@@ -118,7 +118,7 @@ try { $x = New-Object Xml.XmlDocument; $x.Load($file) } catch { Say 'failed answ
 $ns = New-Object Xml.XmlNamespaceManager $x.NameTable
 $ns.AddNamespace('u', 'urn:schemas-microsoft-com:unattend')
 $pass = "/u:unattend/u:settings[@pass='specialize']/u:component"
-$arch = "(@processorArchitecture='amd64' or not(@processorArchitecture))"
+$arch = "@processorArchitecture='amd64'"
 $shell = $pass + "[@name='Microsoft-Windows-Shell-Setup' and $arch]"
 $name = $x.SelectSingleNode($shell + '/u:ComputerName', $ns)
 if ($name -and $name.InnerText.Trim() -and ($name.InnerText.Trim() -ne '*')) {
@@ -140,6 +140,7 @@ using System;
 using System.Runtime.InteropServices;
 using System.Text;
 public static class RemotelySetupCommand {
+  public static int LastError;
   [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
   struct StartupInfo { public int cb; public string reserved; public string desktop; public string title; public int x, y, xSize, ySize, xChars, yChars, fill, flags; public short show, reserved2; public IntPtr reserved3, stdIn, stdOut, stdErr; }
   [StructLayout(LayoutKind.Sequential)]
@@ -154,7 +155,10 @@ public static class RemotelySetupCommand {
     si.cb = Marshal.SizeOf(typeof(StartupInfo));
     ProcessInfo pi;
     StringBuilder buffer = new StringBuilder(line, line.Length + 1);
-    if (!CreateProcessW(null, buffer, IntPtr.Zero, IntPtr.Zero, false, 0x08000000, IntPtr.Zero, null, ref si, out pi)) { return -1; }
+    if (!CreateProcessW(null, buffer, IntPtr.Zero, IntPtr.Zero, false, 0x08000000, IntPtr.Zero, null, ref si, out pi)) {
+      LastError = Marshal.GetLastWin32Error();
+      return -1;
+    }
     WaitForSingleObject(pi.process, 0xFFFFFFFF);
     uint code;
     GetExitCodeProcess(pi.process, out code);
@@ -164,18 +168,25 @@ public static class RemotelySetupCommand {
   }
 }
 '@
-function Invoke-SetupCommand($line) {
+function Add-SetupCommand {
   if (-not ('RemotelySetupCommand' -as [type])) { Add-Type -TypeDefinition $runSource -ErrorAction Stop }
+}
+function Invoke-SetupCommand($line) {
+  Add-SetupCommand
   [RemotelySetupCommand]::Run([Environment]::ExpandEnvironmentVariables($line))
 }
 # --- end setup-command ---
 $order = { $o = $_.SelectSingleNode('u:Order', $ns); if ($o) { [int]$o.InnerText.Trim() } else { 0 } }
 $cmds = @($x.SelectNodes($pass + "[@name='Microsoft-Windows-Deployment' and $arch]/u:RunSynchronous/u:RunSynchronousCommand", $ns)) | Sort-Object $order
+if (@($cmds).Count -gt 0) {
+  # Why the commands can't be started, never the command (it is the seed's text): the language mode and the error's type.
+  try { Add-SetupCommand } catch { Say ('failed command-start ' + $ExecutionContext.SessionState.LanguageMode + ' ' + $_.Exception.GetType().Name); exit 0 }
+}
 foreach ($c in $cmds) {
   $p = $c.SelectSingleNode('u:Path', $ns)
   if (-not $p -or -not $p.InnerText.Trim()) { continue }
-  try { $code = Invoke-SetupCommand $p.InnerText.Trim() } catch { $code = -1 }
-  if ($code -lt 0) { Say 'failed command'; exit 0 }
+  try { $code = Invoke-SetupCommand $p.InnerText.Trim() } catch { Say ('failed command ' + $_.Exception.GetType().Name); exit 0 }
+  if ($code -lt 0) { Say ('failed command ' + [RemotelySetupCommand]::LastError); exit 0 }
   Say ('ran ' + $code)
 }
 try {
@@ -788,12 +799,16 @@ mod tests {
             "Rename-Computer -NewName $n -Force",
             "tzutil.exe\" /s $tz.InnerText.Trim()",
             "[@name='Microsoft-Windows-Deployment' and $arch]/u:RunSynchronous/u:RunSynchronousCommand",
-            "$arch = \"(@processorArchitecture='amd64' or not(@processorArchitecture))\"",
+            "$arch = \"@processorArchitecture='amd64'\"",
             "[@name='Microsoft-Windows-Shell-Setup' and $arch]",
             "Sort-Object $order",
             "CreateProcessW(null, buffer,",
             "[Environment]::ExpandEnvironmentVariables($line)",
-            "if ($code -lt 0) { Say 'failed command'; exit 0 }",
+            // Re-review M1 of PR 101: why a command can't start goes to COM1 (Windows' error, or Add-Type's language
+            // mode and exception type), never the command itself.
+            "LastError = Marshal.GetLastWin32Error();",
+            "if ($code -lt 0) { Say ('failed command ' + [RemotelySetupCommand]::LastError); exit 0 }",
+            "Say ('failed command-start ' + $ExecutionContext.SessionState.LanguageMode + ' ' + $_.Exception.GetType().Name); exit 0",
             "New-ItemProperty -Path 'HKLM:\\SYSTEM\\Setup' -Name 'UnattendFile' -Value $file -PropertyType String -Force",
             "Say 'handed'",
         ] {
@@ -869,6 +884,8 @@ mod tests {
         for (name, line) in &cases {
             script.push_str(&format!("'{name} ' + (Invoke-SetupCommand '{}')\n", quote(line)));
         }
+        // The missing program's reason, as the script says it on COM1 (ERROR_FILE_NOT_FOUND).
+        script.push_str("'missing-error ' + [RemotelySetupCommand]::LastError\n");
         let file = dir.join("run.ps1");
         std::fs::write(&file, script).unwrap();
         let out = std::process::Command::new("powershell.exe")
@@ -891,6 +908,7 @@ mod tests {
         assert_eq!(code("variable-spaces"), "6");
         assert_eq!(code("quoted"), "4");
         assert_eq!(code("missing"), "-1");
+        assert_eq!(code("missing-error"), "2");
     }
 
     #[test]
