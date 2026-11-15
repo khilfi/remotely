@@ -1578,7 +1578,7 @@ async fn a_windows_build_whose_sysprep_fails_or_whose_seed_stays_in_fails_and_le
 
 #[tokio::test]
 async fn windows_golden_images_build_rebuild_schedule_and_deploy() {
-    // 0.8.0 refused them (its WINDOWS_DEFERRED): a sysprepped clone read no answer file. With sysprep's own answer file
+    // G7's last commit refused them (its WINDOWS_DEFERRED): a sysprepped clone read no answer file. With sysprep's own answer file
     // for the clones, every way in goes again: the build, its settings, a rebuild, a scheduled rebuild that runs, and a
     // clone of the version it built.
     use remotely_core::fakes::clock::{FakeClock, FakeZone};
@@ -1868,7 +1868,7 @@ async fn a_virtualbox_windows_build_whose_setup_stands_still_is_reset() {
 #[tokio::test]
 async fn a_reset_that_finishes_a_hung_restart_of_setup_counts_as_that_restart() {
     // Item 3 of PR 101's review, with the hand checks' evidence: VirtualBox counts Remotely's `controlvm reset` in
-    // /VirtualBox/VMInfo/ResetCounter, and every Windows hang seen stood at one of Setup's restarts, which the hung
+    // /VirtualBox/VMInfo/ResetCounter, and every Windows hang seen but one stood at one of Setup's restarts, which the hung
     // guest hadn't counted. The reset finishes that restart: counted once, it is Setup's. Here the VM hangs at Setup's
     // first restart; Remotely's reset makes the count 1, Setup's own second restart 2, and only then does the
     // certificate's line count. Taking Remotely's reset off would wait for a restart that already happened.

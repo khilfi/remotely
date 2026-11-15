@@ -769,8 +769,18 @@ impl Deployer {
                 return Err(self.install_failed(spec, vm, key, watcher.stage(), &why).await);
             }
             if m.flavor.windows() {
-                // VirtualBox counts Remotely's resets too; each one seen finished a restart of Setup's that the hung
-                // guest hadn't counted (`first_boot`'s module), so the count stays as it is.
+                // VirtualBox's ResetCounter counts Remotely's `controlvm reset`s too, and they stay in the count: do
+                // not take them off. Every Windows hang seen but one stood at one of Setup's restarts, which the hung guest
+                // hadn't counted; the reset finished that restart. PR 101's hand checks: on both VirtualBox builds the
+                // counter went from 0 to 1 just as the VM was reset, and specialize followed about 50 s later (one
+                // build's two restarts were both resets). Taking Remotely's resets off would hold such a build at 0,
+                // drop its certificate's line and run it to the time limit. The cost of counting: a hang in the
+                // middle of a stage counts one restart too many, which only moves the stage's words ahead, since only
+                // the installed system writes the certificate's line the gate waits for. PR 101's last check saw one
+                // (both vCPUs still mid-way through windowsPE, no guest reset in VBox.log): no count helps there, since
+                // the disk isn't bootable yet, so after the reset the firmware boots the ISO and Setup waits at "It
+                // looks like you started an upgrade" until the time limit, as it would have hung without the reset.
+                // `a_reset_that_finishes_a_hung_restart_of_setup_counts_as_that_restart` pins this.
                 let count = self.resets(spec, key, &folder, &mut log_at, &mut reset_seen).await;
                 let events = watcher.resets(count);
                 report(events, &watcher, &mut detail);

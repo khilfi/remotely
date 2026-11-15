@@ -1,4 +1,4 @@
-//! VM-30: a VirtualBox boot or install that hangs under Hyper-V. 0.8.0's G7 hand check saw a Windows Server 2022
+//! VM-30: a VirtualBox boot or install that hangs under Hyper-V. G7's hand check 4 saw a Windows Server 2022
 //! clone stand at the firmware's logo with no disk writes for 17 minutes, until a reset by hand; S3 saw the same hang
 //! at an install's restarts, with vCPU 0's run time (`/TM/CPU/00/cNsTotal` in `VBoxManage debugvm <vm> statistics`)
 //! no longer moving. G6's hang reset knows only an install's points on its serial log, and a Linux clone has no serial
@@ -11,7 +11,7 @@
 //! It runs only while the deploy waits anyway (item 1 of PR 101's review: it costs a deploy no time): in G6's install
 //! watcher for every VirtualBox install (a Windows clone's first boot, Setup from an ISO, a golden image's build) and
 //! in a Linux clone's wait for its address, whose wait starts again after a reset. A VirtualBox reset counts in
-//! `/VirtualBox/VMInfo/ResetCounter` as the guest's own do. Every Windows hang seen (S3; this package's three) stood at
+//! `/VirtualBox/VMInfo/ResetCounter` as the guest's own do. Every Windows hang seen but one (S3; this package's three) stood at
 //! one of Setup's restarts, which the hung guest hadn't counted: the reset finished that restart and was counted once,
 //! so the install watcher counts it as Setup's (taking Remotely's resets off would wait for a restart that happened).
 

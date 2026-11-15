@@ -174,7 +174,7 @@ test("another ISO keeps what still fits and picks what must change", () => {
 });
 
 test("a Windows image builds from a Windows unattend config again", () => {
-  // 0.8.0 refused them (its WINDOWS_DEFERRED); a clone now reads its own answer file through sysprep's.
+  // G7's last commit refused them (its WINDOWS_DEFERRED); a clone now reads its own answer file through sysprep's.
   const named = { ...defaultForm(choices), name: "WinSrv" };
   const windows = withIso(named, "iso-win", choices);
   assert.equal(windows.installConfigId, "c-win");

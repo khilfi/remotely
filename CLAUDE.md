@@ -2176,9 +2176,9 @@ VM-29 and VM-32, from 0.8.0 (`docs/plan-0.8.md`, G6), built only on what S1 to S
   fingerprint line, taken only after Setup's two restarts (the serial log is read to its end before they are counted, so an earlier line is never read late); a second, different
   one fails the install. On VirtualBox a log silent for 3 minutes at a known hang point (Ubuntu's RAID6 benchmark as
   the last line; Debian's partitioner as the last step title, since its dialog goes on drawing the frame and the
-  progress numbers after the title) gets `controlvm reset`, at most 5 times. Since the release after 0.8.0 any VirtualBox install
-  whose vCPU 0 stands still for 3 minutes while its serial log is silent is reset too (Windows Setup's restart hang,
-  and Ubuntu's before its known point's line ends: "Golden image builds (G7)", the first-boot hang). Debian's step titles count only whole (`Configuring apt-cdrom-setup`, a component the
+  progress numbers after the title) gets `controlvm reset`, at most 5 times. Any VirtualBox install whose vCPU 0 stands
+  still for 3 minutes while its serial log is silent is reset too, within the same 5 (Windows Setup's restart hang, and
+  Ubuntu's before its known point's line ends: "Golden image builds (G7)", the VirtualBox hang). Debian's step titles count only whole (`Configuring apt-cdrom-setup`, a component the
   installer loads, isn't `Configuring apt`). `<hostname> login:` counts anywhere in a line: Ubuntu's cloud-init writes
   its last lines onto the prompt's line. Done: Linux at `<hostname> login:` and an SSH banner on the guest; Windows at WinRM over HTTPS signing in.
 - **A failure, the time limit or a cancel** (`CoreError::InstallFailed`, `InstallCancelled`, recorded as cancelled):
@@ -2248,14 +2248,13 @@ scripts, the service), `deploy/runner/golden.rs` (the job's work on the VM), `st
 per-system facts below come from the tools' own documentation and G6's spikes; the ones marked *(hand check)* weren't
 seen on a real VM yet (the PR lists the checks).
 
-- **Windows images: 0.8.0 refused them, the release after builds them.** 0.8.0's hand checks 3 and 4 below sealed
-  both builds, but their clones never read the `autounattend.xml` on their own seed CD after sysprep and stopped at
-  OOBE, so the owner deferred Windows images on 14 Nov 2026 and 0.8.0 refused every way in (`WINDOWS_DEFERRED`,
-  `WindowsImages`, `refuse_windows`, the build dialog without unattend configs). The package after it (15 Nov 2026)
-  gives sysprep an answer file of its own (the bullet "A clone of a Windows image" below) and takes the refusals out:
-  a Windows image builds, rebuilds, takes a rebuild schedule and deploys clones again, and the build dialog offers
-  unattend configs for a Windows ISO (`golden.ts` `BUILD_KINDS`). FD-07 doesn't carry an image's recipe, so an import
-  is a plain golden VM.
+- **Windows images are in 0.8.0.** G7's hand checks 3 and 4 below sealed both builds, but their clones never read the
+  `autounattend.xml` on their own seed CD after sysprep and stopped at OOBE. So on 14 Nov 2026 the owner deferred
+  Windows images, and G7's last commit refused every way in (`WINDOWS_DEFERRED`, `WindowsImages`, `refuse_windows`,
+  the build dialog without unattend configs). A package on 15 Nov 2026, still within 0.8.0, gives sysprep an answer
+  file of its own (the bullet "A clone of a Windows image" below) and takes the refusals out. A Windows image builds,
+  rebuilds, takes a rebuild schedule and deploys clones, and the build dialog offers unattend configs for a Windows ISO
+  (`golden.ts` `BUILD_KINDS`). FD-07 doesn't carry an image's recipe, so an import is a plain golden VM.
 - **A build is G6's deploy of one VM, then more.** "Build an image" (the Templates page's Images tab) plans the build VM
   as the Deploy dialog's Custom plans a VM (`Deploys::spec_for_taken`): a launch template's fields made from the recipe
   (the catalogue's ISO image, the size, the hypervisor and its network, the folder, the install config; no session,
@@ -2399,7 +2398,7 @@ seen on a real VM yet (the PR lists the checks).
   (`validate_install`, `install_spec`: no ISO, no disk layout check). Each clone's file is rendered for it (its
   hostname, a one-time password) onto a seed in its private folder, in a CD drive added to the clone (Workstation: the
   first free `sata0:N`; VirtualBox: `dvd_slot`) with COM1 to `<vm>-serial.log` (and VirtualBox's NAT rule).
-  - **Why not the seed alone** (0.8.0's hand checks 3 and 4): Setup never read the seed's `autounattend.xml` after
+  - **Why not the seed alone** (G7's hand checks 3 and 4): Setup never read the seed's `autounattend.xml` after
     sysprep. It ran specialize without it (no `remotely-stage specialize` line) and stopped at OOBE's "Hi there".
     Microsoft's implicit search table lists removable read-only media for every pass, and it says Setup searches "at
     the beginning of each configuration pass" with the registry value `HKLM\System\Setup!UnattendFile` first and the
@@ -2439,7 +2438,7 @@ seen on a real VM yet (the PR lists the checks).
     new), then G6's first sign-in replaces the one-time password with the vault's, deletes Panther's copy, signs the
     autologon out, and on a clone deletes the `UnattendFile` value and the script (`install::CLONE_AFTER_INSTALL_SCRIPT`,
     `clone-cleaned`); the seed is taken out.
-- **A VirtualBox boot or install that hangs under Hyper-V** (`deploy/runner/first_boot.rs`): 0.8.0's hand check 4 saw a
+- **A VirtualBox boot or install that hangs under Hyper-V** (`deploy/runner/first_boot.rs`): G7's hand check 4 saw a
   Windows Server 2022 clone stand at the firmware's logo with no disk writes for 17 minutes, until a reset by hand; S3
   saw the same hang at an install's restarts, with vCPU 0's `/TM/CPU/00/cNsTotal` no longer moving. G6's hang reset
   knows only an install's points on the serial log, and a Linux clone has no serial port. So while a deploy waits for a
@@ -2456,13 +2455,23 @@ seen on a real VM yet (the PR lists the checks).
     once vCPU 0 had stood still for about <n> minutes`. A refused reset is noted once. A counter that can't be read
     resets nothing. The resets of one VM, this watch's and G6's known points' together, are at most `max_hang_resets`
     (5); a known point's reset starts the counter's clock again, so one hang gets one reset.
-  - **Setup's restarts:** VirtualBox counts `controlvm reset` in `/VirtualBox/VMInfo/ResetCounter` as it counts the
-    guest's own. Every Windows hang seen (S3's two, this package's three) stood at one of Setup's restarts, which the
-    hung guest hadn't counted: the reset finished that restart and was counted once (the hand checks' logs: the counter
-    rose as the VM was reset, specialize followed 50 s later). So the watcher counts it as Setup's; taking Remotely's
-    resets off the counter would wait for a restart that already happened and drop the certificate's line. A hang in
-    the middle of a stage would make the count one too many (the stage's words run ahead; only the installed system
-    writes the certificate's line); none was seen.
+  - **Setup's restarts: Remotely's resets stay in the count, on purpose (don't take them off).** VirtualBox counts
+    `controlvm reset` in `/VirtualBox/VMInfo/ResetCounter` as it counts the guest's own. Every Windows hang seen but one (S3's
+    two, this package's three) stood at one of Setup's restarts, which the hung guest hadn't counted: the reset
+    finished that restart and was counted once. In the hand checks' logs, on both VirtualBox builds the counter went
+    from 0 to 1 just as the VM was reset, and specialize followed about 50 s later; one build's two restarts were both
+    resets. So the watcher counts a reset as Setup's restart. Taking Remotely's resets off the counter would hold such
+    a build at 0, drop the certificate's line and run it to the time limit. The trade-off: a hang in the middle of a
+    stage counts one restart too many, which only moves the stage's words ahead, since only the installed system
+    writes the certificate's line the gate waits for. PR 101's review asked for the subtraction and agreed to keep the
+    count once it saw this; `a_reset_that_finishes_a_hung_restart_of_setup_counts_as_that_restart` pins it.
+  - **A hang in the middle of Setup's first stage isn't recovered** (hand check 6 below, the only one seen): both vCPUs
+    stood still mid-way through windowsPE, before Setup had made the disk bootable. After the reset the firmware fell
+    through to the ISO, and Setup asked "It looks like you started an upgrade and booted from installation media ...
+    Yes / No" and waited. The count read 1, and the stage said "the image is applied". The install runs to its time
+    limit, just as it would have, hung, without the reset, so the reset is never worse. Not done: answering "No" (a
+    clean install with the same seed, through VirtualBox's `keyboardputscancode`) or failing at once when windowsPE is
+    reset; either needs a hand check.
   - Fakes: `FakeVirtualBox::hang_next_boot` and `hang_boots` (the counter stands still until a reset, for that many
     boots), a counter that moves with the clock while the VM runs, a reset that raises `ResetCounter`, no Guest
     Additions data while hung, `set_failing("debugvm")`.
@@ -2532,7 +2541,7 @@ seen on a real VM yet (the PR lists the checks).
     VBoxSVC logged nothing of the kind. It logged one refusal each time the seed was forced out of a running VM's drive:
     the `closemedium` that follows is refused ("locked for reading by another task"); `eject` ignores it, and the seed's
     file was deleted all the same.
-- **Hand checks of the Windows images** (15 Nov 2026, the package after 0.8.0; Workstation 26 and VirtualBox 7.2.22
+- **Hand checks of the Windows images** (15 Nov 2026, the package that put them in 0.8.0; Workstation 26 and VirtualBox 7.2.22
   under Hyper-V; copies of the owner's evaluation ISOs, the starters `windows-server-2025` and `-2022`, size
   `gp.large`, NAT; a core built like the app's with its own data folder and a WinRM client that recorded each
   sign-in's address, account and the first 12 hex digits of the password's SHA-256; VMs named `wgi-*`, five checks
@@ -2565,10 +2574,20 @@ seen on a real VM yet (the PR lists the checks).
      clone's first boot was watched for the 5 minutes the deploy waited for its address (no Guest Additions): vCPU 0
      moved 15 s every 15 s, no reset (uptime 297 s at the end); its own hostname, `cloud-init status: done`, the
      template's user signs in with its key.
+  6. **Windows Server 2025 on VirtualBox, the build alone, with the final code (16 Nov 2026): the automatic reset
+     ran, but Setup couldn't go on.** The install watcher's stages were "Setup runs from the ISO" 6 s after
+     power-on, then a hang about 4.5 minutes into windowsPE: both vCPUs' counters stood still, and VBox.log has no
+     guest reset. 3 minutes later the watcher reset the VM by itself ("reset the install once vCPU 0 had stood still
+     ..."). VBox.log has one `RUNNING` to `RESETTING`, the reset counter went 0 to 1, and the stage read "the image is
+     applied", one restart too many. The disk wasn't bootable yet, so the firmware booted the ISO again, and Setup
+     waited at "It looks like you started an upgrade and booted from installation media" (screenshot, kept locally).
+     The run was stopped by hand; it would have run to its time limit. See "A hang in the middle of Setup's first
+     stage" above.
   - On every running VirtualBox VM seen (four Windows clones, the Ubuntu clone) vCPU 0's `cNsTotal` (VBoxManage prints
     `<U64 val="..." unit="ns" name="/TM/CPU/00/cNsTotal"/>`) grew with the wall clock, 15 s every 15 s; on each hung
     VM it stood still for minutes, and after a reset it jumped by the time it had stood still. 4 of the 8 VirtualBox
-    VMs hung once or more (the three builds, one of the five clones), with five checks running at once. Not looked
+    VMs hung once or more (the three builds, one of the five clones), with five checks running at once; check 6's
+    build, alone on VirtualBox, hung too. Not looked
     at: whether Panther's cached copy of a clone's file has its passwords masked (Microsoft says Setup removes them at
     the end of each pass; the one-time password is replaced by the vault's within minutes anyway).
 - G6 fix: `Deployer::read_fingerprint` read the serial log with a fresh watcher, which counts no Setup restarts and so
