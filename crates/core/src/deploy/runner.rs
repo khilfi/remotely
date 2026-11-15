@@ -1301,7 +1301,7 @@ impl Deployer {
                 return Some(ip);
             }
             if watched {
-                if let Some(note) = self.first_boot_round(key, &mut boot, true).await {
+                if let Some(note) = self.first_boot_round(key, &mut boot, true, "its first boot").await {
                     notes.push(note);
                 }
             }

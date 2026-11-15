@@ -2175,8 +2175,9 @@ VM-29 and VM-32, from 0.8.0 (`docs/plan-0.8.md`, G6), built only on what S1 to S
   fingerprint line, taken only after Setup's two restarts (the serial log is read to its end before they are counted, so an earlier line is never read late); a second, different
   one fails the install. On VirtualBox a log silent for 3 minutes at a known hang point (Ubuntu's RAID6 benchmark as
   the last line; Debian's partitioner as the last step title, since its dialog goes on drawing the frame and the
-  progress numbers after the title) gets `controlvm reset`, at most 5 times; Windows' restart hang isn't detected (the
-  time limit catches it; a golden image clone's first boot is: "Golden image builds (G7)"). Debian's step titles count only whole (`Configuring apt-cdrom-setup`, a component the
+  progress numbers after the title) gets `controlvm reset`, at most 5 times. Since the release after 0.8.0 any VirtualBox install
+  whose vCPU 0 stands still for 3 minutes while its serial log is silent is reset too (Windows Setup's restart hang,
+  and Ubuntu's before its known point's line ends: "Golden image builds (G7)", the first-boot hang). Debian's step titles count only whole (`Configuring apt-cdrom-setup`, a component the
   installer loads, isn't `Configuring apt`). `<hostname> login:` counts anywhere in a line: Ubuntu's cloud-init writes
   its last lines onto the prompt's line. Done: Linux at `<hostname> login:` and an SSH banner on the guest; Windows at WinRM over HTTPS signing in.
 - **A failure, the time limit or a cancel** (`CoreError::InstallFailed`, `InstallCancelled`, recorded as cancelled):
@@ -2436,7 +2437,10 @@ seen on a real VM yet (the PR lists the checks).
   <vm> statistics --pattern /TM/CPU/00/cNsTotal`, XML, `deploy::runner::vbox_counter`): one that stands still for
   `hang_silence` (3 minutes) while nothing else moved (a Windows clone's serial log) gets `controlvm reset`, at most
   `max_hang_resets` (5) times, and the note says `reset its first boot once vCPU 0 had stood still for <n> minutes`.
-  A counter that can't be read resets nothing. The watch runs in a Windows clone's install watcher, in a Linux clone's
+  A counter that can't be read resets nothing. G6's install watcher reads it for every VirtualBox install too (`reset
+  the install once ...`), next to its known points: this package's hand checks saw three VirtualBox builds under
+  Hyper-V stand still at once (vCPU 0 frozen while vCPU 1 ran; Ubuntu's two both frozen, its last line `Begin: Loading
+  essential drivers ...` without its line break, so G6's RAID6 point never showed). The watch runs in a Windows clone's install watcher, in a Linux clone's
   wait for its address (a Linux clone always has cloud-init's seed), and for a clone the deploy waits for nothing
   else (another golden VM, no session) for `first_boot_watch` (5 minutes, ending once an address shows; the note
   then says it was watched with no hang). `FakeVirtualBox::hang_next_boot` plays the hang (the counter stands still

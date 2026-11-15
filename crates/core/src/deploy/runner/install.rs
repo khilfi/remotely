@@ -744,7 +744,13 @@ impl Deployer {
         let (mut serial_at, mut log_at, mut reset_seen) = (0u64, 0u64, 0u32);
         let mut last_growth = tokio::time::Instant::now();
         let mut hang_resets = 0u32;
-        let clone_boot = Self::watches_first_boot(spec);
+        // VM-30: vCPU 0 is watched on every VirtualBox install (a clone's first boot, or Setup from an ISO).
+        let vcpu_watch = spec.hypervisor == Hypervisor::VirtualBox;
+        let what = if Self::watches_first_boot(spec) {
+            "its first boot"
+        } else {
+            "the install"
+        };
         let mut boot = super::first_boot::BootWatch::default();
         let mut login_at: Option<tokio::time::Instant> = None;
         let mut windows = WindowsSignIn::default();
@@ -784,11 +790,12 @@ impl Deployer {
                 }
                 last_growth = tokio::time::Instant::now();
             }
-            // VM-30: a clone's first boot has no known point to hang at (it may stand still at the firmware's logo):
-            // vCPU 0's run time standing still while its serial log is silent is the hang a reset gets past.
-            if clone_boot {
+            // VM-30: a clone's first boot has no known point to hang at (it may stand still at the firmware's logo),
+            // and neither has Windows Setup: vCPU 0's run time standing still while the serial log is silent is the
+            // hang a reset gets past, wherever it is.
+            if vcpu_watch {
                 let quiet = last_growth.elapsed() >= tuning.hang_silence;
-                if let Some(note) = self.first_boot_round(key, &mut boot, quiet).await {
+                if let Some(note) = self.first_boot_round(key, &mut boot, quiet, what).await {
                     notes.push(note);
                     last_growth = tokio::time::Instant::now();
                 }

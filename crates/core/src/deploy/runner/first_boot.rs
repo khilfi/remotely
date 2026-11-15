@@ -9,6 +9,9 @@
 //!
 //! The watch runs while the deploy waits for the clone anyway (a Windows clone's install watcher, a Linux clone's
 //! wait for its address) and, for a VirtualBox clone it wouldn't wait for, for [`super::DeployTuning::first_boot_watch`].
+//! The install watcher reads it for every VirtualBox install too (a golden image's build among them): this package's
+//! hand checks saw three VirtualBox builds under Hyper-V stand still at once (two in Windows Setup, which G6 doesn't
+//! watch for a hang, and Ubuntu's before its known point's line ended), which G6 would have left to the time limit.
 
 use std::time::Duration;
 
@@ -42,8 +45,15 @@ pub(super) struct BootWatch {
 
 impl Deployer {
     /// One round of the watch (see the module): reads vCPU 0's counter and resets the VM once it has stood still for
-    /// `hang_silence`, while `quiet` (nothing else showed progress meanwhile). Returns the note of a reset.
-    pub(super) async fn first_boot_round(&self, key: &str, watch: &mut BootWatch, quiet: bool) -> Option<String> {
+    /// `hang_silence`, while `quiet` (nothing else showed progress meanwhile). Returns the note of a reset, which names
+    /// `what` was reset ("its first boot", "the install").
+    pub(super) async fn first_boot_round(
+        &self,
+        key: &str,
+        watch: &mut BootWatch,
+        quiet: bool,
+        what: &str,
+    ) -> Option<String> {
         let tuning = self.tuning();
         if watch.resets >= tuning.max_hang_resets {
             return None;
@@ -83,12 +93,12 @@ impl Deployer {
             Ok(_) => {
                 watch.resets += 1;
                 Some(format!(
-                    "reset its first boot once vCPU 0 had stood still for {} (VirtualBox under Hyper-V)",
+                    "reset {what} once vCPU 0 had stood still for {} (VirtualBox under Hyper-V)",
                     minutes(still)
                 ))
             }
             Err(err) => {
-                tracing::warn!(error = %err, "a clone's hung first boot couldn't be reset");
+                tracing::warn!(error = %err, what, "a VM that stood still couldn't be reset");
                 None
             }
         }

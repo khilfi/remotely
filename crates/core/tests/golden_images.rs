@@ -1412,17 +1412,50 @@ async fn windows_build_on(
         recipe: recipe(&iso, config, hypervisor, &lab.vms, "gp.large"),
     };
     let approval = needs_approval(core.golden.submit(ctx, &request).await.unwrap());
-    let resets = if hypervisor == Hypervisor::Vmware { 2 } else { 0 };
-    let play = windows_setup(
-        &lab.vms.join(vm),
-        vm,
-        resets,
-        vec![format!("remotely-winrm {FINGERPRINT}\r\n")],
-    );
+    let lines = vec![format!("remotely-winrm {FINGERPRINT}\r\n")];
+    let play = match hypervisor {
+        Hypervisor::Vmware => windows_setup(&lab.vms.join(vm), vm, 2, lines),
+        Hypervisor::VirtualBox => vbox_setup(Arc::clone(&lab.virtualbox), lab.vms.join(vm), vm, lines),
+    };
     let job = approve(core, &approval).await;
     let status = wait(core, job).await;
     play.await.unwrap();
     (status, notes_of(core, job).await, winrm)
+}
+
+/// Windows Setup on the fake VirtualBox (its restarts are the reset counter's): once the VM named `vm` runs, and isn't
+/// hung (else once it was reset), `lines` on its serial port.
+fn vbox_setup(
+    virtualbox: Arc<FakeVirtualBox>,
+    folder: PathBuf,
+    vm: &str,
+    lines: Vec<String>,
+) -> tokio::task::JoinHandle<()> {
+    let vm = vm.to_owned();
+    tokio::spawn(async move {
+        let serial = folder.join(format!("{vm}-serial.log"));
+        for _ in 0..3000 {
+            let on = virtualbox
+                .vm_named(&vm)
+                .is_some_and(|info| virtualbox.power_state(&info.uuid) == PowerState::Running);
+            if on {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        for _ in 0..3000 {
+            if !virtualbox.is_hung(&vm) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        for line in lines {
+            tokio::time::sleep(Duration::from_millis(60)).await;
+            append(&serial, line.as_bytes());
+        }
+    })
 }
 
 /// Whether the fake Workstation runs the VM now.
@@ -1729,6 +1762,32 @@ async fn a_virtualbox_windows_clones_first_boot_that_hangs_is_reset() {
         .calls()
         .iter()
         .any(|c| c == &format!("change debugvm {} statistics --pattern /TM/CPU/00/cNsTotal", vm.uuid)));
+    let _ = std::fs::remove_dir_all(&lab.dir);
+}
+
+#[tokio::test]
+async fn a_virtualbox_windows_build_whose_setup_stands_still_is_reset() {
+    // The hand checks' VirtualBox builds stood still in Windows Setup (vCPU 0's run time frozen), which G6's known
+    // points don't cover: the install watcher reads vCPU 0 on every VirtualBox install.
+    let lab = lab("golden-vbox-iso-hang", &[]).await;
+    hang_tuned(&lab.core, lab.ssh);
+    lab.virtualbox.hang_next_boot("hangiso-v1");
+    let (status, notes, _) = windows_build_on(
+        &lab,
+        Hypervisor::VirtualBox,
+        "hangiso-v1",
+        "HangIso",
+        TASK_SAYS.to_vec(),
+        None,
+    )
+    .await;
+    assert_eq!(status, JobStatus::Succeeded, "{notes}");
+    assert!(
+        notes.contains("reset the install once vCPU 0 had stood still"),
+        "{notes}"
+    );
+    assert!(!lab.virtualbox.is_hung("hangiso-v1"));
+    assert_eq!(resets(&lab).len(), 1, "reset once");
     let _ = std::fs::remove_dir_all(&lab.dir);
 }
 
