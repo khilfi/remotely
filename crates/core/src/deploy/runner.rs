@@ -28,6 +28,7 @@ pub use self::install::InstallTools;
 use super::cloud_init::{self, FirstBoot};
 use super::spec::{DeploySource, DeploySpec, DeployVm};
 use super::{seed, virtualbox as vb, vmx, workstation as ws, DeployActions, DeployProgress};
+use crate::adapters::host_networks::while_busy;
 use crate::adapters::hypervisor::{Hypervisor, Hypervisors};
 use crate::adapters::vmx_file::VmxFile;
 use crate::catalog::images::ImageFormat;
@@ -349,12 +350,17 @@ impl Deployer {
                     command: "vmrun start".into(),
                     seconds: START.as_secs(),
                 })??,
-            Hypervisor::VirtualBox => tokio::time::timeout(START, self.hypervisors.virtualbox().power(&key, start))
-                .await
-                .map_err(|_| CoreError::Timeout {
-                    command: "VBoxManage startvm".into(),
-                    seconds: START.as_secs(),
-                })??,
+            // A busy `startvm` started nothing, so it is asked again like the changes before it ([`Self::vbox`]). START
+            // bounds every try and wait together, so a power-on takes no longer than before.
+            Hypervisor::VirtualBox => tokio::time::timeout(
+                START,
+                while_busy("startvm", || self.hypervisors.virtualbox().power(&key, start)),
+            )
+            .await
+            .map_err(|_| CoreError::Timeout {
+                command: "VBoxManage startvm".into(),
+                seconds: START.as_secs(),
+            })??,
         }
         // The VM list shows it running before the next refresh asks (VM-08: a stack instance's start and stop go
         // by it).
@@ -668,7 +674,21 @@ impl Deployer {
 
     // ---- VirtualBox ----------------------------------------------------------------------------------------
 
+    /// A VBoxManage change for the VM being made, asked again a moment later (up to three times) while VirtualBox
+    /// answers that the VM is busy ([`crate::adapters::host_networks::vbox_busy`]): two deploys making VMs at the same
+    /// moment, and VirtualBox refused one `modifynvram <uuid> enrollmssignatures` with "already has a lock request
+    /// pending" (G6's hand check, 15 Nov 2026). Busy means it changed nothing, so asking again is safe. Any other
+    /// answer fails at once. The new VM's power-on and its `showvminfo` reads (its disk to grow, its DVD drive, an
+    /// import's UUID, and "is it gone" in [`Self::unregister`] and [`clean_vbox_unattended`]) are asked again the same
+    /// way.
     async fn vbox(&self, args: Vec<String>, timeout: Duration) -> Result<String> {
+        let command = args.first().cloned().unwrap_or_default();
+        let this = self;
+        while_busy(&command, move || this.vbox_once(args.clone(), timeout)).await
+    }
+
+    /// One VBoxManage change, asked once.
+    async fn vbox_once(&self, args: Vec<String>, timeout: Duration) -> Result<String> {
         self.hypervisors.virtualbox().change(args, timeout).await
     }
 
@@ -895,7 +915,7 @@ impl Deployer {
         let Some(want) = boot_bytes(spec) else {
             return Ok(());
         };
-        let hardware = self.hypervisors.virtualbox().hardware(uuid).await?;
+        let hardware = while_busy("showvminfo", || self.hypervisors.virtualbox().hardware(uuid)).await?;
         let Some(boot) = hardware.disks.first() else {
             made.notes.push("it has no disk to grow".into());
             return Ok(());
@@ -966,7 +986,7 @@ impl Deployer {
 
     /// A clone's or an import's DVD drive, or a new one on its boot disk's controller (one more port).
     async fn dvd_slot(&self, uuid: &str) -> Result<(String, u32, u32)> {
-        let info = self.hypervisors.virtualbox().vm_info(uuid).await?;
+        let info = while_busy("showvminfo", || self.hypervisors.virtualbox().vm_info(uuid)).await?;
         if let Some(found) = info.dvds.first().and_then(|d| vb::parse_slot(&d.slot)) {
             return Ok(found);
         }
@@ -1019,7 +1039,7 @@ impl Deployer {
             if listed.name != name {
                 continue;
             }
-            let Ok(info) = vbox.vm_info(&listed.uuid).await else {
+            let Ok(info) = while_busy("showvminfo", || vbox.vm_info(&listed.uuid)).await else {
                 continue;
             };
             let in_folder = info
@@ -1205,7 +1225,8 @@ impl Deployer {
         let tuning = self.tuning();
         let mut last = None;
         for attempt in 0..tuning.cleanup_tries.max(1) {
-            if vbox.vm_info(uuid).await.is_err() {
+            // A busy VirtualBox isn't a VM that is gone: asked again first, or the VM would stay registered.
+            if while_busy("showvminfo", || vbox.vm_info(uuid)).await.is_err() {
                 return None;
             }
             match vbox.change(vb::unregister_args(uuid), SHORT).await {
@@ -1579,7 +1600,8 @@ pub async fn clean_vbox_unattended(
     let is_viso = |p: &Path| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("viso"));
     let deadline = tokio::time::Instant::now() + limit;
     loop {
-        let Ok(info) = vbox.vm_info(key).await else {
+        // A busy VirtualBox isn't a VM that is gone: asked again first, or the install's files would stay.
+        let Ok(info) = while_busy("showvminfo", || vbox.vm_info(key)).await else {
             return Vec::new();
         };
         let attached = info
