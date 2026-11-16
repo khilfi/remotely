@@ -1286,6 +1286,17 @@ pub struct FakeVirtualBox {
     /// VM-21, VM-29: calls VirtualBox answers as busy (another client's lock request on the VM pending), as
     /// (the command and words its arguments hold, how many more of them).
     busy: Mutex<Vec<(String, u32)>>,
+    /// VM-30: VMs (by name) whose next power-on hangs as VirtualBox under Hyper-V does, vCPU 0 standing still until a
+    /// `controlvm reset`, for this many boots (the power-on, then each reset); the VMs hung now, by UUID; each VM's
+    /// vCPU 0 run time (`debugvm ... statistics`) and when it was last read, which moves with the clock while the VM
+    /// runs and stands still while it is hung, paused or off; and each VM's resets, which VirtualBox counts in
+    /// `/VirtualBox/VMInfo/ResetCounter` as it does the guest's own.
+    hang_boots: Mutex<HashMap<String, u32>>,
+    hung: Mutex<HashSet<String>>,
+    vcpu_ns: Mutex<HashMap<String, (u64, std::time::Instant)>>,
+    reset_counts: Mutex<HashMap<String, u32>>,
+    /// VM-30: guest properties of VMs a deploy makes, by VM name (a Windows install's reset counter).
+    properties_by_name: Mutex<HashMap<String, HashMap<String, String>>>,
 }
 
 /// The value after `--name` in a VBoxManage call.
@@ -1604,6 +1615,64 @@ impl FakeVirtualBox {
             args.first().map(String::as_str).unwrap_or_default(),
             &format!("The machine '{name}' already has a lock request pending"),
         ))
+    }
+
+    /// VM-30: the next power-on of the VM named `name` (a deploy's, whose UUID VirtualBox picks) hangs: vCPU 0's run
+    /// time stands still until `controlvm reset`.
+    pub fn hang_next_boot(&self, name: &str) {
+        self.hang_boots(name, 1);
+    }
+
+    /// VM-30: the VM named `name` hangs at its power-on and again after each reset, `boots` times in all.
+    pub fn hang_boots(&self, name: &str, boots: u32) {
+        locks::lock(&self.hang_boots).insert(name.to_owned(), boots);
+    }
+
+    /// VM-30: a boot of the VM `uuid` named `name`: it hangs if it has boots left to hang.
+    fn boot(&self, uuid: &str, name: &str) {
+        let mut boots = locks::lock(&self.hang_boots);
+        let hangs = match boots.get_mut(name) {
+            Some(left) if *left > 0 => {
+                *left -= 1;
+                true
+            }
+            _ => false,
+        };
+        drop(boots);
+        let mut hung = locks::lock(&self.hung);
+        if hangs {
+            hung.insert(uuid.to_owned());
+        } else {
+            hung.remove(uuid);
+        }
+    }
+
+    /// VM-30: a guest property of the VM named `name` (a deploy's), shown while it runs.
+    pub fn set_guest_property_for_name(&self, name: &str, key: &str, value: &str) {
+        locks::lock(&self.properties_by_name)
+            .entry(name.to_owned())
+            .or_default()
+            .insert(key.to_owned(), value.to_owned());
+    }
+
+    /// VM-30: vCPU 0's run time of the VM `uuid` now: it moved with the clock since the last read while the VM ran
+    /// and wasn't hung.
+    fn vcpu_now(&self, uuid: &str, running: bool) -> u64 {
+        let hung = locks::lock(&self.hung).contains(uuid);
+        let now = std::time::Instant::now();
+        let mut times = locks::lock(&self.vcpu_ns);
+        let entry = times.entry(uuid.to_owned()).or_insert((1_000_000_000, now));
+        if running && !hung {
+            entry.0 += u64::try_from(now.duration_since(entry.1).as_nanos()).unwrap_or(u64::MAX);
+        }
+        entry.1 = now;
+        entry.0
+    }
+
+    /// VM-30: whether the VM named `name` is hung now.
+    pub fn is_hung(&self, name: &str) -> bool {
+        self.vm_named(name)
+            .is_some_and(|vm| locks::lock(&self.hung).contains(&vm.uuid))
     }
 
     /// VM-30: the VM's process ends as a crash ends it (`VMState="aborted"`), not as a shutdown does.
@@ -2170,6 +2239,10 @@ impl FakeVirtualBox {
                             &format!("Machine '{}' is not currently running", info.name),
                         ));
                     }
+                    if verb == "reset" {
+                        *locks::lock(&self.reset_counts).entry(uuid.clone()).or_insert(0) += 1;
+                        self.boot(&uuid, &info.name);
+                    }
                     return Ok(String::new());
                 }
                 let Some(n) = verb.strip_prefix("setlinkstate").and_then(|n| n.parse::<u32>().ok()) else {
@@ -2188,6 +2261,27 @@ impl FakeVirtualBox {
                     }
                     Ok(())
                 })?;
+            }
+            "debugvm" => {
+                // VM-30: a running VM's statistics, as `debugvm <vm> statistics --pattern <name>` prints them (XML).
+                let info = vm_now()?;
+                if args.get(2).map(String::as_str) != Some("statistics") {
+                    return Err(failed("debugvm", "Unknown command"));
+                }
+                if !info.power_state().is_on() {
+                    return Err(failed(
+                        "debugvm",
+                        &format!("Machine '{}' is not currently running", info.name),
+                    ));
+                }
+                if self.fails("debugvm") {
+                    return Err(failed("debugvm", "The object is not ready"));
+                }
+                let ns = self.vcpu_now(&uuid, info.power_state() == PowerState::Running);
+                let name = option(args, "--pattern").unwrap_or("/TM/CPU/00/cNsTotal");
+                return Ok(format!(
+                    "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"no\"?>\n<Statistics>\n<U64 val=\"{ns}\" unit=\"ns\" name=\"{name}\"/>\n</Statistics>\n"
+                ));
             }
             "unregistervm" => {
                 let info = vm_now()?;
@@ -2388,11 +2482,29 @@ impl VirtualBoxAdapter for FakeVirtualBox {
         if let Some(props) = self.properties.get(uuid) {
             return Ok(props.clone()).map(|p| if on { p } else { Default::default() });
         }
+        let mut named = vm
+            .as_ref()
+            .and_then(|vm| locks::lock(&self.properties_by_name).get(&vm.name).cloned())
+            .filter(|_| on)
+            .unwrap_or_default();
+        let hung = locks::lock(&self.hung).contains(uuid);
+        if on {
+            let resets = locks::lock(&self.reset_counts).get(uuid).copied().unwrap_or(0);
+            let base: Option<u32> = named.get(RESET_COUNTER).and_then(|c| c.trim().parse().ok());
+            if resets > 0 || base.is_some() {
+                named.insert(RESET_COUNTER.to_owned(), (base.unwrap_or(0) + resets).to_string());
+            }
+        }
+        if hung {
+            // Nothing in the guest runs: only VirtualBox's own properties.
+            named.retain(|k, _| !k.starts_with("/VirtualBox/GuestInfo/"));
+            return Ok(named.into_iter().collect());
+        }
         // VM-21: a VM a deploy made gets its IP by name.
         let Some(ip) = vm.as_ref().and_then(|vm| self.ips_by_name.get(&vm.name)).filter(|_| on) else {
-            return Ok(Default::default());
+            return Ok(named.into_iter().collect());
         };
-        let mut props = vbox::GuestProperties::new();
+        let mut props: vbox::GuestProperties = named.into_iter().collect();
         props.insert(GUEST_NET_COUNT.to_owned(), "1".to_owned());
         props.insert("/VirtualBox/GuestInfo/Net/0/V4/IP".to_owned(), ip.clone());
         props.insert(
@@ -2437,7 +2549,10 @@ impl VirtualBoxAdapter for FakeVirtualBox {
                     &format!("The machine '{}' is already locked by a session", vm.name),
                 ))
             }
-            PowerOp::Start { .. } => self.set_state(uuid, PowerState::Running),
+            PowerOp::Start { .. } => {
+                self.set_state(uuid, PowerState::Running);
+                self.boot(uuid, &vm.name);
+            }
             _ if !state.is_on() => return Err(not_running()),
             PowerOp::Stop { mode: StopMode::Soft } => {
                 if self.ignores_acpi.contains(uuid) {
@@ -3092,6 +3207,9 @@ struct FakeFs {
     /// SS-14: symbolic links, each path to its target (absolute). Only a path's last part is followed.
     links: HashMap<String, String>,
 }
+
+/// VM-30: VirtualBox's count of a VM's resets, the guest's and `controlvm reset`'s alike.
+const RESET_COUNTER: &str = "/VirtualBox/VMInfo/ResetCounter";
 
 /// SS-14: what [`FakeFiles`] reports for a path nobody changed.
 const FAKE_MTIME: u64 = 1_700_000_000;

@@ -260,6 +260,61 @@ pub const WINRM_FINGERPRINT_MARKER: &str = "remotely-winrm";
 /// VM-29: the lines a Windows answer file writes to COM1 as Setup goes (`remotely-stage <stage> <time>`).
 pub const STAGE_MARKER: &str = "remotely-stage";
 
+/// VM-30: what a file's specialize pass asks that a clone of a sysprepped golden image doesn't apply, as
+/// `<component>/<setting>`. Setup reads no answer file from a clone's seed after sysprep, so the clone's script
+/// ([`crate::golden::generic::CLONE_SCRIPT_BODY`]) applies the pass itself: only Shell-Setup's `ComputerName` and
+/// `TimeZone` and Deployment's `RunSynchronous` commands (their `Order` and `Path`; a `WillReboot` other than
+/// `Never` or a command's `Credentials` aren't). The oobeSystem pass is Setup's own, read from the clone's file. The
+/// build's own specialize pass applied everything listed here to the build VM, so a clone has each of them where
+/// sysprep's generalize kept it (registry settings mostly stay; per-machine ones such as a domain join don't): the
+/// build's preview words it so. Each item once; components whose `processorArchitecture` is exactly `amd64` only, as
+/// the clone script reads them and as [`check`]'s lint says Setup does (it skips a component without one).
+pub fn clone_unapplied(text: &str) -> Vec<String> {
+    let Ok(root) = xml::parse(text) else {
+        return Vec::new();
+    };
+    let mut out: Vec<String> = Vec::new();
+    for settings in root.children_named("settings") {
+        if settings.attr("pass") != Some("specialize") {
+            continue;
+        }
+        // Item 10 of PR 101's review, and re-review low 2: as Setup on x64 and the clone script's XPath, only a
+        // component whose processorArchitecture is exactly amd64 (the lint above: Setup skips one without it).
+        let amd64 = |c: &&Element| c.attr("processorArchitecture") == Some("amd64");
+        for component in settings.children_named("component").filter(amd64) {
+            let name = component.attr("name").unwrap_or_default();
+            for setting in &component.children {
+                let what = setting.local();
+                let applied = match (name, what) {
+                    (SHELL, "ComputerName" | "TimeZone") => true,
+                    ("Microsoft-Windows-Deployment", "RunSynchronous") => {
+                        for command in setting.children_named("RunSynchronousCommand") {
+                            for part in &command.children {
+                                let fine = match part.local() {
+                                    "Order" | "Path" | "Description" => true,
+                                    "WillReboot" => part.trimmed().eq_ignore_ascii_case("Never"),
+                                    _ => false,
+                                };
+                                if !fine {
+                                    out.push(format!("{name}/RunSynchronous/{}", part.local()));
+                                }
+                            }
+                        }
+                        true
+                    }
+                    _ => false,
+                };
+                if !applied {
+                    out.push(format!("{name}/{what}"));
+                }
+            }
+        }
+    }
+    let mut seen = std::collections::HashSet::new();
+    out.retain(|item| seen.insert(item.clone()));
+    out
+}
+
 /// VM-29: which account each `{{password.<name>}}` of a file is: the Administrator's, or a local account's (by its
 /// `Name`). The deploy signs in with the first and sets each to the vault's password once Windows is installed.
 pub fn password_accounts(text: &str) -> Vec<(String, String)> {
@@ -780,6 +835,54 @@ mod tests {
             "<ProductKey><Key>XXXXX-XXXXX</Key></ProductKey><AcceptEula>",
         );
         assert!(messages(&check(&key)).contains("product key"));
+    }
+
+    #[test]
+    fn a_clone_applies_the_specialize_pass_only_in_part() {
+        // The starters' specialize pass: the name, the time zone and a command, all applied by a clone's script.
+        for starter in crate::catalog::install::starters::all() {
+            if starter.spec.kind == crate::catalog::install::InstallKind::Unattend {
+                assert!(clone_unapplied(&starter.spec.body).is_empty(), "{}", starter.id);
+            }
+        }
+        assert!(clone_unapplied(&file(SAMPLE_ONE_TIME)).is_empty());
+        let more = file(SAMPLE_ONE_TIME).replace(
+            "<ComputerName>vm-1</ComputerName>",
+            "<ComputerName>vm-1</ComputerName><RegisteredOwner>alice</RegisteredOwner>",
+        );
+        let more = more.replace(
+            "  </settings>\n  <settings pass=\"oobeSystem\">",
+            "    <component name=\"Microsoft-Windows-UnattendedJoin\" processorArchitecture=\"amd64\"><Identification><JoinDomain>example.com</JoinDomain></Identification></component>\n    <component name=\"Microsoft-Windows-Deployment\" processorArchitecture=\"amd64\"><RunSynchronous><RunSynchronousCommand><Order>1</Order><Path>cmd /c exit 0</Path><WillReboot>Always</WillReboot></RunSynchronousCommand><RunSynchronousCommand><Order>2</Order><Path>cmd /c exit 0</Path><WillReboot>Never</WillReboot></RunSynchronousCommand></RunSynchronous></component>\n  </settings>\n  <settings pass=\"oobeSystem\">",
+        );
+        assert_eq!(
+            clone_unapplied(&more),
+            [
+                "Microsoft-Windows-Shell-Setup/RegisteredOwner",
+                "Microsoft-Windows-UnattendedJoin/Identification",
+                "Microsoft-Windows-Deployment/RunSynchronous/WillReboot",
+            ]
+        );
+        // oobeSystem is Setup's own (the clone's file), so nothing there is listed.
+        assert!(!clone_unapplied(&more).iter().any(|s| s.contains("UserAccounts")));
+        assert!(clone_unapplied("<not xml").is_empty());
+        // Items 10 and 12 of PR 101's review: an x86 component is Setup's on x86 only, and each item is listed once
+        // however far apart it repeats.
+        let twice = r#"<unattend xmlns="urn:schemas-microsoft-com:unattend"><settings pass="specialize">
+<component name="Microsoft-Windows-Shell-Setup" processorArchitecture="amd64"><RegisteredOwner>alice</RegisteredOwner><ComputerName>vm-1</ComputerName><RegisteredOwner>bob</RegisteredOwner></component>
+<component name="Microsoft-Windows-Shell-Setup" processorArchitecture="x86"><RegisteredOrganization>example</RegisteredOrganization></component>
+<component name="Microsoft-Windows-TerminalServices-LocalSessionManager" processorArchitecture="amd64"><fDenyTSConnections>false</fDenyTSConnections></component>
+<component name="Microsoft-Windows-IE-ESC"><IEHardenAdmin>false</IEHardenAdmin></component>
+<component name="Microsoft-Windows-Security-SPP-UX" processorArchitecture="AMD64"><SkipAutoActivation>true</SkipAutoActivation></component>
+</settings></unattend>"#;
+        // Re-review low 2: one rule with the lint and the clone script's XPath: a component with no
+        // processorArchitecture (Setup skips it) or another spelling than `amd64` isn't read.
+        assert_eq!(
+            clone_unapplied(twice),
+            [
+                "Microsoft-Windows-Shell-Setup/RegisteredOwner",
+                "Microsoft-Windows-TerminalServices-LocalSessionManager/fDenyTSConnections",
+            ]
+        );
     }
 
     #[test]

@@ -460,35 +460,37 @@ async fn build(lab: &Lab, request: &BuildRequest, lines: Vec<String>) -> (Uuid, 
 
 async fn template_of(core: &Core, image: &Image, hypervisor: Hypervisor, folder: &Path, clone_mode: CloneMode) -> Uuid {
     core.catalog
-        .add_template(
-            &core.ctx(),
-            TemplateInput {
-                name: "web".into(),
-                image_id: image.id,
-                size_id: "gp.medium".into(),
-                hypervisor,
-                vm_folder: Some(folder.display().to_string()),
-                network: Network::Nat,
-                ssh_key_id: None,
-                naming_pattern: "web-{n}".into(),
-                default_count: 1,
-                environment: Environment::Lab,
-                tags: vec![],
-                after_deploy: AfterDeploy {
-                    create_session: false,
-                    link_session: false,
-                    clean_snapshot: false,
-                    open_console: false,
-                },
-                guest_user: None,
-                packages: vec![],
-                clone_mode,
-                install_config_id: None,
-            },
-        )
+        .add_template(&core.ctx(), template_input(image, hypervisor, folder, clone_mode))
         .await
         .unwrap()
         .id
+}
+
+/// A template `web-{n}` of the image, with no session.
+fn template_input(image: &Image, hypervisor: Hypervisor, folder: &Path, clone_mode: CloneMode) -> TemplateInput {
+    TemplateInput {
+        name: "web".into(),
+        image_id: image.id,
+        size_id: "gp.medium".into(),
+        hypervisor,
+        vm_folder: Some(folder.display().to_string()),
+        network: Network::Nat,
+        ssh_key_id: None,
+        naming_pattern: "web-{n}".into(),
+        default_count: 1,
+        environment: Environment::Lab,
+        tags: vec![],
+        after_deploy: AfterDeploy {
+            create_session: false,
+            link_session: false,
+            clean_snapshot: false,
+            open_console: false,
+        },
+        guest_user: None,
+        packages: vec![],
+        clone_mode,
+        install_config_id: None,
+    }
 }
 
 #[tokio::test]
@@ -976,6 +978,8 @@ struct FakeWinrm {
     signins: Mutex<Vec<(String, String)>>,
     scripts: Arc<Mutex<Vec<String>>>,
     vmware: Arc<FakeVmware>,
+    /// A build on VirtualBox: its VM is found by the name `sysprep`'s file stem gives.
+    virtualbox: Arc<FakeVirtualBox>,
     sysprep: Arc<Mutex<Option<PathBuf>>>,
     task_says: Arc<Mutex<Vec<&'static str>>>,
     /// Whether the task's Windows goes off after its lines: by itself once `sealed`, or as a hard power-off.
@@ -985,19 +989,36 @@ struct FakeWinrm {
 }
 
 /// What the real task writes to COM1 when every step goes.
-const TASK_SAYS: [&str; 6] = [
+const TASK_SAYS: [&str; 8] = [
     "started",
     "removed winrm-https",
     "cleared event-logs",
     "sysprep",
     "sysprep-exit 0",
+    "cached-in C:\\Windows\\Panther\\unattend.xml",
+    "cached",
     "sealed",
 ];
+
+/// What a clone's specialize script (`golden::generic::CLONE_SCRIPT_BODY`) writes to COM1 when it finds its seed,
+/// then the starters' own specialize line and the clone's first sign-in's certificate line.
+fn clone_lines(name: &str) -> Vec<String> {
+    vec![
+        "remotely-clone started\r\n".into(),
+        "remotely-clone seed D:\\autounattend.xml\r\n".into(),
+        format!("remotely-clone name {name}\r\n"),
+        "remotely-clone time-zone\r\n".into(),
+        "remotely-stage specialize 10:01:02.03 \r\nremotely-clone ran 0\r\n".into(),
+        "remotely-clone handed\r\n".into(),
+        format!("remotely-winrm {FINGERPRINT}\r\n"),
+    ]
+}
 
 struct FakeWinrmSession {
     scripts: Arc<Mutex<Vec<String>>>,
     password: Arc<Mutex<Option<String>>>,
     vmware: Arc<FakeVmware>,
+    virtualbox: Arc<FakeVirtualBox>,
     sysprep: Arc<Mutex<Option<PathBuf>>>,
     task_says: Arc<Mutex<Vec<&'static str>>>,
     task_powers_off: Arc<Mutex<Option<bool>>>,
@@ -1037,6 +1058,7 @@ impl WinrmAdapter for FakeWinrm {
             scripts: Arc::clone(&self.scripts),
             password: Arc::clone(&self.password),
             vmware: Arc::clone(&self.vmware),
+            virtualbox: Arc::clone(&self.virtualbox),
             sysprep: Arc::clone(&self.sysprep),
             task_says: Arc::clone(&self.task_says),
             task_powers_off: Arc::clone(&self.task_powers_off),
@@ -1054,20 +1076,34 @@ impl ExecSession for FakeWinrmSession {
             *self.password.lock().unwrap() = Some(quoted.replace("''", "'"));
         }
         let stdout = if script.contains("unattend-original.xml") && !script.contains("Register-ScheduledTask") {
-            "answer-file 00\r\nsigned-out 1\r\n".to_owned()
+            // A clone's run also deletes the pointer to its answer file and its specialize script.
+            let clone = if script.contains("'UnattendFile'") {
+                "clone-cleaned\r\n"
+            } else {
+                ""
+            };
+            format!("answer-file 00\r\nsigned-out 1\r\n{clone}")
         } else if script.contains("Register-ScheduledTask -TaskName 'Remotely generalize'") {
             // The task runs a few seconds later: sysprep shuts Windows down, and the clone's OOBE sets its password.
             let vmx = self.sysprep.lock().unwrap().clone();
             if let Some(vmx) = vmx {
                 let (vmware, password) = (Arc::clone(&self.vmware), Arc::clone(&self.password));
+                let virtualbox = Arc::clone(&self.virtualbox);
                 let says = self.task_says.lock().unwrap().clone();
                 let stem = vmx.file_stem().unwrap().to_string_lossy().into_owned();
                 let seed = vmx.with_file_name("install-seed").join(format!("{stem}-seed.iso"));
                 let answers_gone = std::fs::read(&seed).map_or(true, |b| !holds(&b, b"unattend"));
-                let ejected = vmware
-                    .calls()
-                    .iter()
-                    .any(|c| c.starts_with("vmrun disconnectNamedDevice") && c.contains(&stem));
+                let ejected = if vmware.has_vm(&vmx.display().to_string()) {
+                    vmware
+                        .calls()
+                        .iter()
+                        .any(|c| c.starts_with("vmrun disconnectNamedDevice") && c.contains(&stem))
+                } else {
+                    virtualbox
+                        .calls()
+                        .iter()
+                        .any(|c| c.contains("--medium emptydrive") && c.contains("--forceunmount"))
+                };
                 self.seed_out_at_task.lock().unwrap().push(answers_gone && ejected);
                 let powers_off = self
                     .task_powers_off
@@ -1083,10 +1119,16 @@ impl ExecSession for FakeWinrmSession {
                     }
                     if powers_off {
                         *password.lock().unwrap() = None;
-                        vmware
-                            .power(&vmx, PowerOp::Stop { mode: StopMode::Hard })
-                            .await
-                            .unwrap();
+                        match virtualbox.vm_named(&stem) {
+                            Some(vm) => virtualbox
+                                .power(&vm.uuid, PowerOp::Stop { mode: StopMode::Hard })
+                                .await
+                                .unwrap(),
+                            None => vmware
+                                .power(&vmx, PowerOp::Stop { mode: StopMode::Hard })
+                                .await
+                                .unwrap(),
+                        }
                     }
                 });
             }
@@ -1162,16 +1204,15 @@ async fn a_windows_image_is_sysprepped_and_its_clones_get_g6s_one_time_password_
     let lab = lab("golden-windows", &["winsrv-v1", "web-1"]).await;
     let core = &lab.core;
     let ctx = &core.ctx();
-    // 0.8.0 refuses Windows images (windows_golden_images_are_refused_in_0_8_0_with_why); the kept seal and clone code
-    // runs here as the later release would run it. The hand checks proved the build half on real VMs; their clones
-    // didn't read the seed's answer file, which these fakes can't show.
-    core.catalog.windows_images().set_allowed_for_tests(true);
+    // The fakes can't show what Windows Setup reads; the hand checks in the PR do. Here: the task seals with sysprep's
+    // answer file for the clones, and a clone's watch reads its specialize script's lines, then G6's first sign-in.
     let winrm = Arc::new(FakeWinrm {
         fingerprint: FINGERPRINT.into(),
         password: Arc::default(),
         signins: Mutex::default(),
         scripts: Arc::default(),
         vmware: Arc::clone(&lab.vmware),
+        virtualbox: Arc::clone(&lab.virtualbox),
         sysprep: Arc::new(Mutex::new(Some(lab.vms.join("winsrv-v1").join("winsrv-v1.vmx")))),
         task_says: Arc::new(Mutex::new(TASK_SAYS.to_vec())),
         task_powers_off: Arc::default(),
@@ -1220,10 +1261,10 @@ async fn a_windows_image_is_sysprepped_and_its_clones_get_g6s_one_time_password_
         "{notes}"
     );
     let scripts = winrm.scripts.lock().unwrap().clone();
-    assert!(scripts
-        .last()
-        .unwrap()
-        .contains("Register-ScheduledTask -TaskName 'Remotely generalize'"));
+    let task = scripts.last().unwrap();
+    assert!(task.contains("Register-ScheduledTask -TaskName 'Remotely generalize'"));
+    // The run writes the clones' script and sysprep's answer file too (golden::generic's unit tests read them).
+    assert!(task.contains(generic::CLONE_SCRIPT) && task.contains(generic::SYSPREP_ANSWER_FILE));
     let vmx = folder.join("winsrv-v1.vmx");
     assert_eq!(
         lab.vmware.snapshot_names(&vmx.display().to_string()),
@@ -1258,8 +1299,9 @@ async fn a_windows_image_is_sysprepped_and_its_clones_get_g6s_one_time_password_
     let approval = needs_approval(core.deploy.submit(ctx, &deploy).await.unwrap());
     assert!(approval.steps.contains(&ApprovalStep::VaultReauth));
     let web = lab.vms.join("web-1");
-    // No Setup from an ISO: the clone's first sign-in writes its new certificate's line, with no restart counted.
-    let play = windows_setup(&web, "web-1", 0, vec![format!("remotely-winrm {FINGERPRINT}\r\n")]);
+    // No Setup from an ISO: sysprep's answer file runs the clone's script in specialize (its lines), then the clone's
+    // first sign-in writes its new certificate's line, with no restart counted.
+    let play = windows_setup(&web, "web-1", 0, clone_lines("web-1"));
     *winrm.sysprep.lock().unwrap() = None;
     let job = approve(core, &approval).await;
     let status = wait(core, job).await;
@@ -1274,6 +1316,18 @@ async fn a_windows_image_is_sysprepped_and_its_clones_get_g6s_one_time_password_
     assert!(clone.contains("web-1-seed.iso"), "{clone}");
     assert!(notes.contains("password set to the vault's"), "{notes}");
     assert!(!web.join("web-1-install.iso").exists(), "a clone has no ISO copy");
+    // Its first sign-in also deletes the pointer to its answer file and its specialize script.
+    let scripts = winrm.scripts.lock().unwrap().clone();
+    assert!(
+        scripts
+            .iter()
+            .any(|s| s.contains("'UnattendFile'") && s.contains(generic::CLONE_SCRIPT)),
+        "{scripts:?}"
+    );
+    assert!(
+        notes.contains("the clone's pointer to its answer file and its specialize script are deleted"),
+        "{notes}"
+    );
     let audit = format!("{:?}", core.store.recent_audit(ctx, 300).await.unwrap());
     assert!(!audit.contains(lab.secret.as_str()));
 
@@ -1311,17 +1365,54 @@ async fn windows_build(
     task_says: Vec<&'static str>,
     powers_off: Option<bool>,
 ) -> (JobStatus, String, Arc<FakeWinrm>) {
+    windows_build_on(lab, Hypervisor::Vmware, vm, name, task_says, powers_off).await
+}
+
+/// [`windows_build`] on either hypervisor (VirtualBox: Setup's two restarts in the VM's reset counter).
+async fn windows_build_on(
+    lab: &Lab,
+    hypervisor: Hypervisor,
+    vm: &str,
+    name: &str,
+    task_says: Vec<&'static str>,
+    powers_off: Option<bool>,
+) -> (JobStatus, String, Arc<FakeWinrm>) {
+    windows_build_with(lab, hypervisor, vm, name, task_says, powers_off, VboxRestarts::AtStart).await
+}
+
+/// How the fake VirtualBox counts Setup's two restarts in a Windows build.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VboxRestarts {
+    /// Both, from the start (the reset counter reads 2 at once).
+    AtStart,
+    /// The first restart hangs (the VM must be set to hang) and Remotely's reset finishes it; Setup's second is
+    /// counted after that.
+    AfterHang,
+}
+
+async fn windows_build_with(
+    lab: &Lab,
+    hypervisor: Hypervisor,
+    vm: &str,
+    name: &str,
+    task_says: Vec<&'static str>,
+    powers_off: Option<bool>,
+    restarts: VboxRestarts,
+) -> (JobStatus, String, Arc<FakeWinrm>) {
     let core = &lab.core;
     let ctx = &core.ctx();
-    // The kept Windows seal, which 0.8.0 refuses to run (see the test above).
-    core.catalog.windows_images().set_allowed_for_tests(true);
     let vmx = lab.vms.join(vm).join(format!("{vm}.vmx"));
+    if hypervisor == Hypervisor::VirtualBox && restarts == VboxRestarts::AtStart {
+        lab.virtualbox
+            .set_guest_property_for_name(vm, "/VirtualBox/VMInfo/ResetCounter", "2");
+    }
     let winrm = Arc::new(FakeWinrm {
         fingerprint: FINGERPRINT.into(),
         password: Arc::default(),
         signins: Mutex::default(),
         scripts: Arc::default(),
         vmware: Arc::clone(&lab.vmware),
+        virtualbox: Arc::clone(&lab.virtualbox),
         sysprep: Arc::new(Mutex::new(Some(vmx))),
         task_says: Arc::new(Mutex::new(task_says)),
         task_powers_off: Arc::new(Mutex::new(powers_off)),
@@ -1340,19 +1431,60 @@ async fn windows_build(
     .await;
     let request = BuildRequest {
         target: BuildTarget::New { name: name.into() },
-        recipe: recipe(&iso, config, Hypervisor::Vmware, &lab.vms, "gp.large"),
+        recipe: recipe(&iso, config, hypervisor, &lab.vms, "gp.large"),
     };
     let approval = needs_approval(core.golden.submit(ctx, &request).await.unwrap());
-    let play = windows_setup(
-        &lab.vms.join(vm),
-        vm,
-        2,
-        vec![format!("remotely-winrm {FINGERPRINT}\r\n")],
-    );
+    let lines = vec![format!("remotely-winrm {FINGERPRINT}\r\n")];
+    let play = match hypervisor {
+        Hypervisor::Vmware => windows_setup(&lab.vms.join(vm), vm, 2, lines),
+        Hypervisor::VirtualBox => vbox_setup(Arc::clone(&lab.virtualbox), lab.vms.join(vm), vm, lines, restarts),
+    };
     let job = approve(core, &approval).await;
     let status = wait(core, job).await;
     play.await.unwrap();
     (status, notes_of(core, job).await, winrm)
+}
+
+/// Windows Setup on the fake VirtualBox (its restarts are the reset counter's): once the VM named `vm` runs, and isn't
+/// hung (else once it was reset), `lines` on its serial port.
+/// [`VboxRestarts::AfterHang`]: once the reset finished Setup's first restart, Setup's second is counted (the
+/// counter's own value 1, Remotely's reset the other).
+fn vbox_setup(
+    virtualbox: Arc<FakeVirtualBox>,
+    folder: PathBuf,
+    vm: &str,
+    lines: Vec<String>,
+    restarts: VboxRestarts,
+) -> tokio::task::JoinHandle<()> {
+    let vm = vm.to_owned();
+    tokio::spawn(async move {
+        let serial = folder.join(format!("{vm}-serial.log"));
+        for _ in 0..3000 {
+            let on = virtualbox
+                .vm_named(&vm)
+                .is_some_and(|info| virtualbox.power_state(&info.uuid) == PowerState::Running);
+            if on {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        for _ in 0..3000 {
+            if !virtualbox.is_hung(&vm) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        if restarts == VboxRestarts::AfterHang {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            virtualbox.set_guest_property_for_name(&vm, "/VirtualBox/VMInfo/ResetCounter", "1");
+        }
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        for line in lines {
+            tokio::time::sleep(Duration::from_millis(60)).await;
+            append(&serial, line.as_bytes());
+        }
+    })
 }
 
 /// Whether the fake Workstation runs the VM now.
@@ -1389,7 +1521,7 @@ async fn a_windows_build_vm_that_goes_off_before_sysprep_sealed_it_isnt_sealed()
     assert_eq!(status, JobStatus::Failed, "{notes}");
     assert!(
         notes.contains(
-            "went off before the task that runs sysprep said 'removed winrm-https' and 'sysprep' and 'sealed'"
+            "went off before the task that runs sysprep said 'removed winrm-https' and 'sysprep' and 'cached' and 'sealed'"
         ),
         "{notes}"
     );
@@ -1399,7 +1531,7 @@ async fn a_windows_build_vm_that_goes_off_before_sysprep_sealed_it_isnt_sealed()
     let cut = vec!["started", "removed winrm-https", "cleared event-logs", "sysprep"];
     let (status, notes, _) = windows_build(&lab, "cut-v1", "Cut", cut, Some(true)).await;
     assert_eq!(status, JobStatus::Failed, "{notes}");
-    assert!(notes.contains("said 'sealed': it isn't sealed"), "{notes}");
+    assert!(notes.contains("said 'cached' and 'sealed': it isn't sealed"), "{notes}");
     nothing_registered(&lab, "cut-v1", "Cut").await;
     let _ = std::fs::remove_dir_all(&lab.dir);
 }
@@ -1445,77 +1577,61 @@ async fn a_windows_build_whose_sysprep_fails_or_whose_seed_stays_in_fails_and_le
 }
 
 #[tokio::test]
-async fn windows_golden_images_are_refused_in_0_8_0_with_why() {
-    // The owner deferred Windows images on 14 Nov 2026: every way to build one, or to deploy a clone of one Remotely
-    // built, says why, instead of a clone that waits at OOBE to its time limit.
+async fn windows_golden_images_build_rebuild_schedule_and_deploy() {
+    // G7's last commit refused them (its WINDOWS_DEFERRED): a sysprepped clone read no answer file. With sysprep's own answer file
+    // for the clones, every way in goes again: the build, its settings, a rebuild, a scheduled rebuild that runs, and a
+    // clone of the version it built.
     use remotely_core::fakes::clock::{FakeClock, FakeZone};
-    use remotely_core::golden::WINDOWS_DEFERRED;
     use remotely_core::schedules::{
         RunOutcome, ScheduleAction, ScheduleInput, ScheduleSpec, ScheduleState, ScheduleTarget, Timing, WallTime,
     };
-    let lab = lab("golden-win-deferred", &["deferred-v1", "web-1"]).await;
+    let lab = lab("golden-win-allowed", &["allowed-v1", "allowed-v2", "web-1"]).await;
     let core = &lab.core;
     let ctx = &core.ctx();
-    let says = |err: &CoreError| err.to_string().contains(WINDOWS_DEFERRED);
-
-    // A new Windows image: the dialog's check says why, and a submit is refused before anything is asked.
-    let pw = vault_password(core, &lab.secret).await;
-    let config = config_from(core, "starter.windows-server-2025", pw, None, |_| {}).await;
-    let iso = iso_image(
-        core,
-        &lab.dir,
-        "server.iso",
-        &install_isos::windows_server(),
-        "windows-server",
-    )
-    .await;
-    let request = BuildRequest {
-        target: BuildTarget::New { name: "Never".into() },
-        recipe: recipe(&iso, config, Hypervisor::Vmware, &lab.vms, "gp.large"),
-    };
-    let check = core.golden.check(ctx, &request).await.unwrap();
-    assert!(check.preview.is_none());
-    assert!(
-        check.problems.iter().any(|p| p.contains(WINDOWS_DEFERRED)),
-        "{:?}",
-        check.problems
-    );
-    let Err(err) = core.golden.submit(ctx, &request).await else {
-        panic!("a Windows build was submitted");
-    };
-    assert!(says(&err), "{err}");
-
-    // An image built while they were allowed (only a build of this PR's earlier commits made one), with a template and
-    // a scheduled rebuild approved then.
-    let (status, notes, _) = windows_build(&lab, "deferred-v1", "Deferred", TASK_SAYS.to_vec(), None).await;
+    let (status, notes, winrm) = windows_build(&lab, "allowed-v1", "Allowed", TASK_SAYS.to_vec(), None).await;
     assert_eq!(status, JobStatus::Succeeded, "{notes}");
-    let image = core
-        .catalog
-        .images(ctx)
+    let image = image_named(core, "Allowed").await;
+    core.golden
+        .set_recipe(ctx, image.id, image.build.clone().unwrap())
         .await
-        .unwrap()
-        .into_iter()
-        .find(|i| i.name == "Deferred")
         .unwrap();
-    let template = template_of(core, &image, Hypervisor::Vmware, &lab.vms, CloneMode::Full).await;
+    let rebuild = core.golden.rebuild_request(ctx, image.id).await.unwrap();
+    let check = core.golden.check(ctx, &rebuild).await.unwrap();
+    assert!(check.problems.is_empty(), "{:?}", check.problems);
+    let warnings = check.preview.unwrap().warnings;
+    assert!(
+        warnings.iter().any(|w| w.contains("Each clone of a Windows image")),
+        "{warnings:?}"
+    );
+    // The starter's specialize pass is all a clone applies: no warning about what it can't.
+    assert!(!warnings.iter().any(|w| w.contains("applies only")), "{warnings:?}");
+    assert!(matches!(
+        core.golden.rebuild(ctx, image.id).await.unwrap(),
+        SubmitOutcome::NeedsApproval { .. }
+    ));
+
+    // A nightly rebuild, approved, runs at its time and builds version 2.
     let clock = Arc::new(FakeClock::new(
         time::macros::datetime!(2026-06-10 10:00 UTC),
         FakeZone::central_europe(),
     ));
     core.schedules().set_clock(clock.clone());
-    let input = |name: &str| ScheduleInput {
-        id: None,
-        name: name.into(),
-        spec: ScheduleSpec {
-            action: ScheduleAction::RebuildImage,
-            targets: vec![ScheduleTarget::Image { image_id: image.id }],
-            timing: Timing::Daily {
-                at: WallTime::new(3, 0).unwrap(),
+    let saved = core
+        .schedules()
+        .save(ScheduleInput {
+            id: None,
+            name: "nightly rebuild".into(),
+            spec: ScheduleSpec {
+                action: ScheduleAction::RebuildImage,
+                targets: vec![ScheduleTarget::Image { image_id: image.id }],
+                timing: Timing::Daily {
+                    at: WallTime::new(3, 0).unwrap(),
+                },
             },
-        },
-    };
-    let saved = core.schedules().save(input("nightly rebuild")).await.unwrap();
-    let request = saved.approval.expect("a build asks");
+        })
+        .await
+        .unwrap();
+    let request = saved.approval.expect("the schedule asks for its standing approval");
     let answers = ApprovalAnswers {
         confirmed: true,
         vault_password: Some(SecretString::new(VAULT_PASSWORD)),
@@ -1523,32 +1639,62 @@ async fn windows_golden_images_are_refused_in_0_8_0_with_why() {
     };
     let view = core.schedules().approve(request.id, answers).await.unwrap();
     assert_eq!(view.state, ScheduleState::Active);
-
-    // 0.8.0: no rebuild, no build settings, no new schedule (nothing saved), no clone.
-    core.catalog.windows_images().set_allowed_for_tests(false);
-    let Err(err) = core.golden.rebuild(ctx, image.id).await else {
-        panic!("a Windows image was rebuilt");
-    };
-    assert!(says(&err), "{err}");
-    let Err(err) = core
-        .golden
-        .set_recipe(ctx, image.id, image.build.clone().unwrap())
-        .await
-    else {
-        panic!("a Windows image's build settings were saved");
-    };
-    assert!(says(&err), "{err}");
-    let Err(err) = core.schedules().save(input("weekly rebuild")).await else {
-        panic!("a Windows rebuild was scheduled");
-    };
-    assert!(says(&err), "{err}");
-    assert_eq!(core.schedules().list().await.unwrap().len(), 1, "nothing was saved");
-    let problems = core.catalog.plan(ctx, template, 1).await.unwrap().unwrap_err();
+    let v2 = lab.vms.join("allowed-v2");
+    *winrm.sysprep.lock().unwrap() = Some(v2.join("allowed-v2.vmx"));
+    let play = windows_setup(&v2, "allowed-v2", 2, vec![format!("remotely-winrm {FINGERPRINT}\r\n")]);
+    let at = &view.next_run.as_ref().unwrap().at;
+    let due = time::OffsetDateTime::parse(at, &time::format_description::well_known::Rfc3339).unwrap();
+    clock.set(due);
+    let report = core.schedules().tick().await.unwrap();
+    assert_eq!(report.started, 1);
+    core.schedules().wait_runs().await;
+    play.await.unwrap();
+    let view = core.schedules().get(view.id).await.unwrap();
+    let last = view.last_run.as_ref().unwrap();
+    assert_eq!(last.outcome, RunOutcome::Succeeded, "{:?}", last.detail);
+    let newest = core.catalog.image(ctx, image.id).await.unwrap();
+    assert_eq!(newest.version, Some(2));
     assert!(
-        problems.iter().any(|p| p.message.contains(WINDOWS_DEFERRED)),
-        "{problems:?}"
+        matches!(&newest.source, ImageSource::GoldenVm { vm_key, .. } if vm_key.contains("allowed-v2")),
+        "{:?}",
+        newest.source
     );
-    let deploy = DeployRequest {
+
+    // A clone of the newest version reads its own answer file through sysprep's.
+    *winrm.sysprep.lock().unwrap() = None;
+    let template = template_of(core, &image, Hypervisor::Vmware, &lab.vms, CloneMode::Full).await;
+    assert!(core.catalog.plan(ctx, template, 1).await.unwrap().is_ok());
+    let check = core.deploy.check(ctx, &deploy_of(template)).await.unwrap();
+    assert!(check.problems.is_empty(), "{:?}", check.problems);
+    let approval = needs_approval(core.deploy.submit(ctx, &deploy_of(template)).await.unwrap());
+    let play = windows_setup(&lab.vms.join("web-1"), "web-1", 0, clone_lines("web-1"));
+    let job = approve(core, &approval).await;
+    let status = wait(core, job).await;
+    play.await.unwrap();
+    let notes = notes_of(core, job).await;
+    assert_eq!(status, JobStatus::Succeeded, "{notes}");
+    assert!(notes.contains("password set to the vault's"), "{notes}");
+    assert!(
+        notes.contains("the clone's pointer to its answer file and its specialize script are deleted"),
+        "{notes}"
+    );
+    let _ = std::fs::remove_dir_all(&lab.dir);
+}
+
+/// The catalogue's image named `name`.
+async fn image_named(core: &Core, name: &str) -> Image {
+    core.catalog
+        .images(&core.ctx())
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|i| i.name == name)
+        .unwrap()
+}
+
+/// One VM from a template.
+fn deploy_of(template: Uuid) -> DeployRequest {
+    DeployRequest {
         from: DeployFrom::Template { id: template },
         count: 1,
         naming_pattern: None,
@@ -1557,34 +1703,500 @@ async fn windows_golden_images_are_refused_in_0_8_0_with_why() {
         vm_values: vec![],
         address_pool_id: None,
         install_minutes: None,
-    };
-    let check = core.deploy.check(ctx, &deploy).await.unwrap();
-    assert!(
-        check.problems.iter().any(|p| p.message.contains(WINDOWS_DEFERRED)),
-        "{:?}",
-        check.problems
-    );
-    assert!(core.deploy.submit(ctx, &deploy).await.is_err());
-    assert!(!lab.vms.join("web-1").exists(), "no clone was made");
+    }
+}
 
-    // The schedule approved before: its run fails with why and builds nothing.
-    let at = &view.next_run.as_ref().unwrap().at;
-    let due = time::OffsetDateTime::parse(at, &time::format_description::well_known::Rfc3339).unwrap();
-    clock.set(due);
-    let report = core.schedules().tick().await.unwrap();
-    assert_eq!(report.started, 1);
-    core.schedules().wait_runs().await;
-    let view = core.schedules().get(view.id).await.unwrap();
-    let last = view.last_run.as_ref().unwrap();
-    assert_eq!(last.outcome, RunOutcome::Failed, "{:?}", last.detail);
+#[tokio::test]
+async fn a_windows_clone_whose_specialize_script_finds_no_seed_fails_at_once_saying_why() {
+    let lab = lab("golden-win-noseed", &["noseed-v1", "web-1"]).await;
+    let core = &lab.core;
+    let ctx = &core.ctx();
+    let (status, notes, winrm) = windows_build(&lab, "noseed-v1", "NoSeed", TASK_SAYS.to_vec(), None).await;
+    assert_eq!(status, JobStatus::Succeeded, "{notes}");
+    *winrm.sysprep.lock().unwrap() = None;
+    let signins = winrm.signins.lock().unwrap().len();
+    let image = image_named(core, "NoSeed").await;
+    let template = template_of(core, &image, Hypervisor::Vmware, &lab.vms, CloneMode::Full).await;
+    let approval = needs_approval(core.deploy.submit(ctx, &deploy_of(template)).await.unwrap());
+    let lines = vec![
+        "remotely-clone started\r\n".to_owned(),
+        "remotely-clone failed seed\r\n".to_owned(),
+    ];
+    let play = windows_setup(&lab.vms.join("web-1"), "web-1", 0, lines);
+    let job = approve(core, &approval).await;
+    let status = wait(core, job).await;
+    play.await.unwrap();
+    let notes = notes_of(core, job).await;
+    assert_eq!(status, JobStatus::Failed, "{notes}");
+    assert!(notes.contains("found no CD with its answer file"), "{notes}");
     assert!(
-        last.detail.as_deref().unwrap_or_default().contains(WINDOWS_DEFERRED),
-        "{:?}",
-        last.detail
+        !notes.contains("not done within"),
+        "at once, not at its time limit: {notes}"
     );
-    assert_eq!(core.catalog.image(ctx, image.id).await.unwrap().version, Some(1));
-    assert!(!lab.vms.join("deferred-v2").exists(), "no version 2");
+    assert_eq!(winrm.signins.lock().unwrap().len(), signins, "no sign-in to the clone");
     let _ = std::fs::remove_dir_all(&lab.dir);
+}
+
+/// The deploy's waits made short, and a hang after 300 ms of vCPU 0 standing still (the fake's counter moves with the
+/// clock while a VM runs; the rounds are ms apart).
+fn hang_tuned(core: &Core, ssh_port: u16) {
+    core.set_deploy_tuning(hang_tuning(ssh_port));
+}
+
+fn hang_tuning(ssh_port: u16) -> DeployTuning {
+    DeployTuning {
+        ip_poll: Duration::from_millis(10),
+        ip_wait_cap: Some(Duration::from_secs(2)),
+        cleanup_tries: 3,
+        cleanup_pause: Duration::from_millis(10),
+        install_poll: Duration::from_millis(20),
+        install_cap: Some(Duration::from_secs(20)),
+        hang_silence: Duration::from_millis(300),
+        connect_wait: Duration::from_millis(500),
+        leases_file: None,
+        probe: Some(("127.0.0.1".into(), ssh_port, 1)),
+        ..DeployTuning::default()
+    }
+}
+
+/// Plays a clone's first boot that hangs: once the VM named `vm` was hung and is reset, writes `lines` into its
+/// serial log.
+fn after_reset(
+    virtualbox: Arc<FakeVirtualBox>,
+    folder: PathBuf,
+    vm: &str,
+    lines: Vec<String>,
+) -> tokio::task::JoinHandle<bool> {
+    let vm = vm.to_owned();
+    tokio::spawn(async move {
+        let serial = folder.join(format!("{vm}-serial.log"));
+        let mut hung = false;
+        for _ in 0..2000 {
+            if virtualbox.is_hung(&vm) {
+                hung = true;
+            } else if hung {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        if !hung || virtualbox.is_hung(&vm) {
+            return false;
+        }
+        for line in lines {
+            tokio::time::sleep(Duration::from_millis(40)).await;
+            append(&serial, line.as_bytes());
+        }
+        true
+    })
+}
+
+#[tokio::test]
+async fn a_virtualbox_windows_clones_first_boot_that_hangs_is_reset() {
+    let lab = lab("golden-vbox-win-hang", &[]).await;
+    let core = &lab.core;
+    let ctx = &core.ctx();
+    let (status, notes, winrm) = windows_build_on(
+        &lab,
+        Hypervisor::VirtualBox,
+        "hangwin-v1",
+        "HangWin",
+        TASK_SAYS.to_vec(),
+        None,
+    )
+    .await;
+    assert_eq!(status, JobStatus::Succeeded, "{notes}");
+    *winrm.sysprep.lock().unwrap() = None;
+    let image = image_named(core, "HangWin").await;
+    assert_eq!(image.hypervisors, [Hypervisor::VirtualBox]);
+    let template = template_of(core, &image, Hypervisor::VirtualBox, &lab.vms, CloneMode::Full).await;
+    let approval = needs_approval(core.deploy.submit(ctx, &deploy_of(template)).await.unwrap());
+    // The clone stands still at its firmware's logo (vCPU 0's run time doesn't move) until it is reset.
+    hang_tuned(core, lab.ssh);
+    lab.virtualbox.hang_next_boot("web-1");
+    let play = after_reset(
+        Arc::clone(&lab.virtualbox),
+        lab.vms.join("web-1"),
+        "web-1",
+        clone_lines("web-1"),
+    );
+    let job = approve(core, &approval).await;
+    let status = wait(core, job).await;
+    assert!(play.await.unwrap(), "the clone hung, then was reset");
+    let notes = notes_of(core, job).await;
+    assert_eq!(status, JobStatus::Succeeded, "{notes}");
+    assert!(
+        notes.contains("reset its first boot once vCPU 0 had stood still for about 1 minute"),
+        "{notes}"
+    );
+    assert!(notes.contains("password set to the vault's"), "{notes}");
+    let vm = lab.virtualbox.vm_named("web-1").unwrap();
+    assert_eq!(resets(&lab).len(), 1, "reset once");
+    assert!(lab
+        .virtualbox
+        .calls()
+        .iter()
+        .any(|c| c == &format!("change debugvm {} statistics --pattern /TM/CPU/00/cNsTotal", vm.uuid)));
+    let _ = std::fs::remove_dir_all(&lab.dir);
+}
+
+#[tokio::test]
+async fn a_virtualbox_windows_build_whose_setup_stands_still_is_reset() {
+    // The hand checks' VirtualBox builds stood still in Windows Setup (vCPU 0's run time frozen), which G6's known
+    // points don't cover: the install watcher reads vCPU 0 on every VirtualBox install.
+    let lab = lab("golden-vbox-iso-hang", &[]).await;
+    hang_tuned(&lab.core, lab.ssh);
+    lab.virtualbox.hang_next_boot("hangiso-v1");
+    let (status, notes, _) = windows_build_on(
+        &lab,
+        Hypervisor::VirtualBox,
+        "hangiso-v1",
+        "HangIso",
+        TASK_SAYS.to_vec(),
+        None,
+    )
+    .await;
+    assert_eq!(status, JobStatus::Succeeded, "{notes}");
+    assert!(
+        notes.contains("reset the install once vCPU 0 had stood still"),
+        "{notes}"
+    );
+    assert!(!lab.virtualbox.is_hung("hangiso-v1"));
+    assert_eq!(resets(&lab).len(), 1, "reset once");
+    let _ = std::fs::remove_dir_all(&lab.dir);
+}
+
+#[tokio::test]
+async fn a_reset_that_finishes_a_hung_restart_of_setup_counts_as_that_restart() {
+    // Item 3 of PR 101's review, with the hand checks' evidence: VirtualBox counts Remotely's `controlvm reset` in
+    // /VirtualBox/VMInfo/ResetCounter, and every Windows hang seen but one stood at one of Setup's restarts, which the hung
+    // guest hadn't counted. The reset finishes that restart: counted once, it is Setup's. Here the VM hangs at Setup's
+    // first restart; Remotely's reset makes the count 1, Setup's own second restart 2, and only then does the
+    // certificate's line count. Taking Remotely's reset off would wait for a restart that already happened.
+    let lab = lab("golden-vbox-counted", &[]).await;
+    hang_tuned(&lab.core, lab.ssh);
+    lab.virtualbox.hang_next_boot("counted-v1");
+    let (status, notes, _) = windows_build_with(
+        &lab,
+        Hypervisor::VirtualBox,
+        "counted-v1",
+        "Counted",
+        TASK_SAYS.to_vec(),
+        None,
+        VboxRestarts::AfterHang,
+    )
+    .await;
+    assert_eq!(status, JobStatus::Succeeded, "{notes}");
+    assert!(
+        notes.contains("reset the install once vCPU 0 had stood still"),
+        "{notes}"
+    );
+    assert_eq!(resets(&lab).len(), 1);
+    let _ = std::fs::remove_dir_all(&lab.dir);
+}
+
+/// A Debian image built on the fake VirtualBox, for its clones' first boots.
+async fn debian_image_on_virtualbox(lab: &Lab, name: &str, vm: &str) -> Image {
+    let core = &lab.core;
+    let pw = vault_password(core, &lab.secret).await;
+    let key = build_key(core).await;
+    let config = config_from(core, "starter.debian-12-minimal", pw, Some(key), |_| {}).await;
+    let iso = iso_image(core, &lab.dir, &format!("{vm}.iso"), &install_isos::debian(), "debian").await;
+    let request = BuildRequest {
+        target: BuildTarget::New { name: name.into() },
+        recipe: recipe(&iso, config, Hypervisor::VirtualBox, &lab.vms, "gp.medium"),
+    };
+    let (_, status, notes) = build(lab, &request, debian_lines(vm)).await;
+    assert_eq!(status, JobStatus::Succeeded, "{notes}");
+    image_named(core, name).await
+}
+
+/// Deploys `count` clones of `image` named `<pattern>-{n}` on the fake VirtualBox (no session); each one's notes.
+async fn deploy_clones(lab: &Lab, image: &Image, pattern: &str, count: u32) -> (JobStatus, Vec<(String, String)>) {
+    let core = &lab.core;
+    let ctx = &core.ctx();
+    let mut input = template_input(image, Hypervisor::VirtualBox, &lab.vms, CloneMode::Linked);
+    input.name = pattern.into();
+    input.naming_pattern = format!("{pattern}-{{n}}");
+    let template = core.catalog.add_template(ctx, input).await.unwrap().id;
+    let mut request = deploy_of(template);
+    request.count = count;
+    let approval = needs_approval(core.deploy.submit(ctx, &request).await.unwrap());
+    let job = approve(core, &approval).await;
+    let status = wait(core, job).await;
+    let targets = core
+        .store
+        .job_targets(ctx, job)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|t| {
+            let notes = format!("{} {}", t.output.unwrap_or_default(), t.error.unwrap_or_default());
+            (t.target_name, notes)
+        })
+        .collect();
+    (status, targets)
+}
+
+fn notes_for<'a>(targets: &'a [(String, String)], name: &str) -> &'a str {
+    targets
+        .iter()
+        .find(|(n, _)| n == name)
+        .map(|(_, notes)| notes.as_str())
+        .unwrap_or_else(|| panic!("no {name} in {targets:?}"))
+}
+
+/// The resets the fake VirtualBox was asked for, of the VM named `vm` (any: `None`).
+fn resets_of(lab: &Lab, vm: Option<&str>) -> usize {
+    // Re-review low 3: a name that isn't a VM is the test's mistake, not "every VM".
+    let uuid = vm.map(|n| {
+        lab.virtualbox
+            .vm_named(n)
+            .unwrap_or_else(|| panic!("no VM named {n}"))
+            .uuid
+    });
+    lab.virtualbox
+        .calls()
+        .iter()
+        .filter(|c| c.starts_with("change controlvm") && c.ends_with(" reset"))
+        .filter(|c| uuid.as_ref().is_none_or(|u| c.contains(u.as_str())))
+        .count()
+}
+
+#[tokio::test]
+async fn a_virtualbox_linux_clones_first_boot_that_hangs_is_reset_and_a_running_one_isnt() {
+    let lab = lab("golden-vbox-linux-hang", &[]).await;
+    let image = debian_image_on_virtualbox(&lab, "Deb hang", "deb-hang-v1").await;
+    // Two clones: the first stands still at its firmware's logo, the second runs (its counter moves with the clock).
+    // The deploy waits for each one's address (cloud-init's seed), and watches its first boot meanwhile.
+    hang_tuned(&lab.core, lab.ssh);
+    lab.virtualbox.hang_next_boot("web-1");
+    let (status, targets) = deploy_clones(&lab, &image, "web", 2).await;
+    assert_eq!(status, JobStatus::Succeeded, "{targets:?}");
+    assert!(
+        notes_for(&targets, "web-1").contains("reset its first boot once vCPU 0 had stood still"),
+        "{targets:?}"
+    );
+    assert!(!lab.virtualbox.is_hung("web-1"));
+    assert!(!notes_for(&targets, "web-2").contains("reset"), "{targets:?}");
+    assert_eq!(resets_of(&lab, Some("web-1")), 1);
+    assert_eq!(resets_of(&lab, None), 1);
+    // Item 6 of PR 101's review: no address showed, so the seed stays, and the note says so.
+    assert!(
+        notes_for(&targets, "web-2").contains("cloud-init's seed stays in its DVD drive"),
+        "{targets:?}"
+    );
+
+    // Item 1: a clone the deploy waits for nothing else (a golden VM that isn't Linux, no session) isn't watched: it
+    // costs the deploy no time, and a hang there isn't reset.
+    let core = &lab.core;
+    let ctx = &core.ctx();
+    core.inventory.refresh(ctx).await.unwrap();
+    let version = lab.virtualbox.vm_named("deb-hang-v1").unwrap();
+    let progress: Arc<dyn Fn(HashProgress) + Send + Sync> = Arc::new(|_| {});
+    let plain = core
+        .catalog
+        .add_image(
+            ctx,
+            Uuid::new_v4(),
+            ImageInput {
+                name: "plain".into(),
+                source: SourceInput::GoldenVm {
+                    vm_key: version.uuid.clone(),
+                    snapshot: "Remotely image v1".into(),
+                },
+                hypervisors: vec![],
+                os_profile: "windows-server".into(),
+                notes: None,
+            },
+            progress,
+        )
+        .await
+        .unwrap();
+    lab.virtualbox.hang_next_boot("plain-1");
+    let (status, targets) = deploy_clones(&lab, &plain, "plain", 1).await;
+    assert_eq!(status, JobStatus::Succeeded, "{targets:?}");
+    let uuid = lab.virtualbox.vm_named("plain-1").unwrap().uuid;
+    assert!(!lab
+        .virtualbox
+        .calls()
+        .iter()
+        .any(|c| c.starts_with("change debugvm") && c.contains(&uuid)));
+    assert_eq!(resets_of(&lab, Some("plain-1")), 0);
+    let _ = std::fs::remove_dir_all(&lab.dir);
+}
+
+#[tokio::test]
+async fn a_linux_clones_hang_watch_resets_only_a_running_vm_within_its_cap_and_waits_again_after_a_reset() {
+    let lab = lab("golden-vbox-linux-edges", &[]).await;
+    let image = debian_image_on_virtualbox(&lab, "Deb edges", "deb-edges-v1").await;
+    let virtualbox = Arc::clone(&lab.virtualbox);
+
+    // Item 4 of PR 101's review: a VM paused (by the user, or by VirtualBox on a full disk) has a still counter too,
+    // and isn't reset.
+    hang_tuned(&lab.core, lab.ssh);
+    let pauser = {
+        let virtualbox = Arc::clone(&virtualbox);
+        tokio::spawn(async move {
+            for _ in 0..2000 {
+                if let Some(vm) = virtualbox.vm_named("paused-1") {
+                    if virtualbox.power_state(&vm.uuid) == PowerState::Running {
+                        virtualbox.power(&vm.uuid, PowerOp::Pause).await.unwrap();
+                        return true;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            false
+        })
+    };
+    let (status, targets) = deploy_clones(&lab, &image, "paused", 1).await;
+    assert!(pauser.await.unwrap(), "paused");
+    assert_eq!(status, JobStatus::Succeeded, "{targets:?}");
+    assert_eq!(resets_of(&lab, Some("paused-1")), 0, "{targets:?}");
+
+    // Item 9: a counter VirtualBox won't show resets nothing.
+    virtualbox.set_failing("debugvm", true);
+    virtualbox.hang_next_boot("blind-1");
+    let (status, targets) = deploy_clones(&lab, &image, "blind", 1).await;
+    virtualbox.set_failing("debugvm", false);
+    assert_eq!(status, JobStatus::Succeeded, "{targets:?}");
+    assert_eq!(resets_of(&lab, Some("blind-1")), 0, "{targets:?}");
+
+    // Item 5: one VM that hangs at every boot is reset at most `max_hang_resets` times.
+    lab.core.set_deploy_tuning(DeployTuning {
+        max_hang_resets: 2,
+        ..hang_tuning(lab.ssh)
+    });
+    virtualbox.hang_boots("stuck-1", 10);
+    let (status, targets) = deploy_clones(&lab, &image, "stuck", 1).await;
+    assert_eq!(status, JobStatus::Succeeded, "{targets:?}");
+    assert_eq!(resets_of(&lab, Some("stuck-1")), 2, "{targets:?}");
+    assert!(virtualbox.is_hung("stuck-1"), "still hung after its two resets");
+
+    // Item 6: a reset gives the wait for the address its whole time again (1.5 s here, after a reset at about 1 s).
+    lab.core.set_deploy_tuning(DeployTuning {
+        ip_wait_cap: Some(Duration::from_millis(1500)),
+        hang_silence: Duration::from_secs(1),
+        ..hang_tuning(lab.ssh)
+    });
+    virtualbox.hang_next_boot("late-1");
+    let started = std::time::Instant::now();
+    let (status, targets) = deploy_clones(&lab, &image, "late", 1).await;
+    assert_eq!(status, JobStatus::Succeeded, "{targets:?}");
+    assert_eq!(resets_of(&lab, Some("late-1")), 1, "{targets:?}");
+    assert!(
+        started.elapsed() >= Duration::from_millis(2400),
+        "waited again after the reset: {:?}",
+        started.elapsed()
+    );
+    let _ = std::fs::remove_dir_all(&lab.dir);
+}
+
+/// An Ubuntu build on the fake VirtualBox whose installer hangs at G6's known point (the RAID6 benchmark), its VM
+/// standing still for `hang_boots` boots; once a reset lets it run, the rest of the install. The job's status and notes.
+async fn ubuntu_build_hung_at_the_raid6_point(lab: &Lab, vm: &str, hang_boots: u32) -> (JobStatus, String) {
+    let core = &lab.core;
+    let pw = vault_password(core, &lab.secret).await;
+    let key = build_key(core).await;
+    let config = config_from(core, "starter.ubuntu-24.04-minimal", pw, Some(key), |_| {}).await;
+    let iso = iso_image(
+        core,
+        &lab.dir,
+        &format!("{vm}.iso"),
+        &install_isos::ubuntu_24_04(),
+        "ubuntu",
+    )
+    .await;
+    let request = BuildRequest {
+        target: BuildTarget::New {
+            name: vm.trim_end_matches("-v1").into(),
+        },
+        recipe: recipe(&iso, config, Hypervisor::VirtualBox, &lab.vms, "gp.medium"),
+    };
+    lab.virtualbox.hang_boots(vm, hang_boots);
+    let ctx = &core.ctx();
+    let approval = needs_approval(core.golden.submit(ctx, &request).await.unwrap());
+    assert_eq!(approval.image_build.as_ref().unwrap().vm_name, vm);
+    let serial = lab.vms.join(vm).join(format!("{vm}-serial.log"));
+    let play = {
+        let virtualbox = Arc::clone(&lab.virtualbox);
+        let vm = vm.to_owned();
+        tokio::spawn(async move {
+            for _ in 0..3000 {
+                if virtualbox.is_hung(&vm) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            append(
+                &serial,
+                b"[    0.000000] Command line: BOOT_IMAGE=/casper/vmlinuz autoinstall console=ttyS0,115200n8 ---\r\nBegin: Loading essential drivers ... raid6: avx2x4 gen() 1000 MB/s\r\n",
+            );
+            for _ in 0..3000 {
+                if !virtualbox.is_hung(&vm) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            if virtualbox.is_hung(&vm) {
+                return;
+            }
+            for line in ubuntu_lines(&vm).into_iter().skip(1) {
+                tokio::time::sleep(Duration::from_millis(40)).await;
+                append(&serial, line.as_bytes());
+            }
+        })
+    };
+    let job = approve(core, &approval).await;
+    let status = wait(core, job).await;
+    play.await.unwrap();
+    (status, notes_of(core, job).await)
+}
+
+#[tokio::test]
+async fn one_hang_at_a_known_point_is_reset_once() {
+    // Item 5 of PR 101's review: G6's known point (Ubuntu's RAID6 benchmark) and vCPU 0 standing still see the same
+    // hang; they share one count, and the reset starts both clocks again.
+    let lab = lab("golden-vbox-one-hang", &[]).await;
+    hang_tuned(&lab.core, lab.ssh);
+    let (status, notes) = ubuntu_build_hung_at_the_raid6_point(&lab, "ubu-hang-v1", 1).await;
+    assert_eq!(status, JobStatus::Succeeded, "{notes}");
+    assert_eq!(resets_of(&lab, Some("ubu-hang-v1")), 1, "{notes}");
+    assert!(
+        notes.contains("reset once it hung at the initramfs's RAID6 benchmark"),
+        "{notes}"
+    );
+    let _ = std::fs::remove_dir_all(&lab.dir);
+}
+
+#[tokio::test]
+async fn a_known_points_reset_counts_against_the_vcpu_watchs_cap() {
+    // Re-review low 3 of PR 101: one count per VM. With room for one reset, the known point's reset uses it, and when
+    // the VM stands still again vCPU 0's watch doesn't reset it a second time (it would, with a count of its own).
+    let lab = lab("golden-vbox-shared-cap", &[]).await;
+    lab.core.set_deploy_tuning(DeployTuning {
+        max_hang_resets: 1,
+        install_cap: Some(Duration::from_secs(3)),
+        ..hang_tuning(lab.ssh)
+    });
+    let (status, notes) = ubuntu_build_hung_at_the_raid6_point(&lab, "ubu-cap-v1", 2).await;
+    assert_eq!(
+        status,
+        JobStatus::Failed,
+        "the second hang runs to the time limit: {notes}"
+    );
+    assert_eq!(resets_of(&lab, Some("ubu-cap-v1")), 1, "{notes}");
+    assert!(lab.virtualbox.is_hung("ubu-cap-v1"));
+    let _ = std::fs::remove_dir_all(&lab.dir);
+}
+
+/// The resets the fake VirtualBox was asked for.
+fn resets(lab: &Lab) -> Vec<String> {
+    lab.virtualbox
+        .calls()
+        .into_iter()
+        .filter(|c| c.starts_with("change controlvm") && c.ends_with(" reset"))
+        .collect()
 }
 
 #[tokio::test]

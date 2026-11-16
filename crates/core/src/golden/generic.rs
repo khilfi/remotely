@@ -24,11 +24,19 @@
 //!   WinRM shell is killed with the shell), deletes the build's WinRM over HTTPS listener and its certificate with its
 //!   private key (each clone makes its own at its first sign-in and writes its fingerprint to COM1, as G6 checks),
 //!   Setup's copies of the answer file, PowerShell's history and the event logs, each checked gone (else it stops
-//!   with `failed <what>`), then runs `sysprep /generalize /oobe /quit /quiet` and shuts Windows down itself only once
-//!   sysprep returned 0 and left `Sysprep_succeeded.tag` (`sealed`). With `/shutdown` the shutdown could end
-//!   sysprep.exe before its exit code was read, and a power-off during sysprep would look like its own. Its steps go
-//!   to COM1 as `remotely-generic ...` lines; the build takes the power-off as sealed only after `sealed`
-//!   ([`WINDOWS_STEPS`]).
+//!   with `failed <what>`), then runs `sysprep /generalize /oobe /quit /quiet /unattend:<`[`SYSPREP_ANSWER_FILE`]`>`
+//!   and shuts Windows down itself only once sysprep returned 0, left `Sysprep_succeeded.tag` and kept that answer
+//!   file in `C:\Windows\Panther` (`cached`, then `sealed`). With `/shutdown` the shutdown could end sysprep.exe before
+//!   its exit code was read, and a power-off during sysprep would look like its own. Its steps go to COM1 as
+//!   `remotely-generic ...` lines; the build takes the power-off as sealed only after `sealed` ([`WINDOWS_STEPS`]).
+//! * A Windows clone's first boot ([`SYSPREP_ANSWER`], [`CLONE_SCRIPT_BODY`]): Setup reads no answer file from a
+//!   clone's seed CD after sysprep (G7's hand checks), but it does read the one sysprep was given, which it caches in
+//!   Panther for the next passes. That file's specialize pass runs [`CLONE_SCRIPT`] as SYSTEM: it waits for the CD
+//!   with the clone's own `autounattend.xml` (G6's seed), applies that file's specialize pass the way a clone can (its
+//!   computer name, time zone and RunSynchronous commands: [`crate::catalog::install::unattend::clone_unapplied`] says
+//!   what else isn't), and points Setup's search at it for oobeSystem (`HKLM\SYSTEM\Setup` `UnattendFile`, the first
+//!   place Setup looks at the start of each pass), so OOBE sets the clone's one-time password, autologon and
+//!   FirstLogonCommands from it. Its steps go to COM1 as `remotely-clone ...` lines ([`CLONE_MARKER`]).
 
 use base64::Engine;
 
@@ -52,8 +60,145 @@ pub const LINUX_STEPS: [&str; 8] = [
     "leases",
 ];
 /// Windows: what the task must say on COM1 before the power-off counts as sysprep's: the build's listener gone,
-/// sysprep started, and sysprep done (exit 0 and its `Sysprep_succeeded.tag`) before the task shut Windows down.
-pub const WINDOWS_STEPS: [&str; 3] = ["removed winrm-https", "sysprep", "sealed"];
+/// sysprep started, sysprep's answer file for the clones kept in Panther, and sysprep done (exit 0 and its
+/// `Sysprep_succeeded.tag`) before the task shut Windows down.
+pub const WINDOWS_STEPS: [&str; 4] = ["removed winrm-https", "sysprep", "cached", "sealed"];
+/// Windows: the answer file sysprep is given (`/unattend:`); sysprep caches it in `C:\Windows\Panther` and the task
+/// deletes this copy.
+pub const SYSPREP_ANSWER_FILE: &str = r"C:\Windows\Temp\remotely-sysprep.xml";
+/// Windows: the script each clone's specialize pass runs (it stays in the image; a clone's first sign-in deletes it).
+pub const CLONE_SCRIPT: &str = r"C:\Windows\Setup\Scripts\remotely-clone.ps1";
+/// The marker every line of [`CLONE_SCRIPT_BODY`] on a clone's COM1 starts with.
+pub const CLONE_MARKER: &str = "remotely-clone";
+/// How long a clone's specialize pass waits for its seed CD, in minutes (Windows sets its devices up again after
+/// sysprep's generalize, so the drive may come late).
+pub const CLONE_SEED_WAIT_MINUTES: u32 = 10;
+
+/// The answer file sysprep is given: generic (no name, no password), its specialize pass only runs [`CLONE_SCRIPT`].
+pub const SYSPREP_ANSWER: &str = r#"<?xml version="1.0" encoding="utf-8"?>
+<!-- Remotely: each clone of this golden image reads its own answer file from its seed CD (see remotely-clone.ps1). -->
+<unattend xmlns="urn:schemas-microsoft-com:unattend" xmlns:wcm="http://schemas.microsoft.com/WMIConfig/2002/State">
+  <settings pass="specialize">
+    <component name="Microsoft-Windows-Deployment" processorArchitecture="amd64" publicKeyToken="31bf3856ad364e35" language="neutral" versionScope="nonSxS">
+      <RunSynchronous>
+        <RunSynchronousCommand wcm:action="add">
+          <Order>1</Order>
+          <Path>powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\Windows\Setup\Scripts\remotely-clone.ps1</Path>
+          <Description>Remotely: this clone's own answer file, from its seed CD</Description>
+        </RunSynchronousCommand>
+      </RunSynchronous>
+    </component>
+  </settings>
+</unattend>
+"#;
+
+/// What each clone runs as SYSTEM in its specialize pass (see the module). Every failure says `failed <what>` on
+/// COM1 and ends it with 0 (a failing command could stop Setup); the deploy's watcher fails the clone's install then.
+/// The clone's file is read where the deploy put it (a CD's root); nothing of it is copied to the disk, and Setup
+/// caches it as it does any answer file (G6's first sign-in deletes Panther's unmasked copy). Its first line after
+/// `$ErrorActionPreference` checks PowerShell's language mode: anything but FullLanguage (what a WDAC or AppLocker
+/// policy gives a script it doesn't allow) can't open the serial port or start the commands, so that line says
+/// `failed language-mode` through cmd.exe, which any language mode may start, and ends the script.
+pub const CLONE_SCRIPT_BODY: &str = r#"$ErrorActionPreference = 'Continue'
+if ($ExecutionContext.SessionState.LanguageMode -ne 'FullLanguage') { & "$env:SystemRoot\System32\cmd.exe" /c "echo remotely-clone failed language-mode>COM1"; exit 0 }
+function Say($t) { try { $p = New-Object System.IO.Ports.SerialPort COM1,115200; $p.Open(); $p.WriteLine('remotely-clone ' + $t); $p.Close() } catch { } }
+Say 'started'
+$file = $null
+$until = (Get-Date).AddMinutes(10)
+while (-not $file) {
+  foreach ($d in [IO.DriveInfo]::GetDrives()) {
+    if ($d.DriveType -eq [IO.DriveType]::CDRom -and $d.IsReady) {
+      $f = Join-Path $d.RootDirectory.FullName 'autounattend.xml'
+      if (Test-Path -LiteralPath $f) { $file = $f; break }
+    }
+  }
+  if (-not $file) {
+    if ((Get-Date) -gt $until) { Say 'failed seed'; exit 0 }
+    Start-Sleep -Seconds 2
+  }
+}
+Say ('seed ' + $file)
+try { $x = New-Object Xml.XmlDocument; $x.Load($file) } catch { Say 'failed answer-file'; exit 0 }
+$ns = New-Object Xml.XmlNamespaceManager $x.NameTable
+$ns.AddNamespace('u', 'urn:schemas-microsoft-com:unattend')
+$pass = "/u:unattend/u:settings[@pass='specialize']/u:component"
+$arch = "@processorArchitecture='amd64'"
+$shell = $pass + "[@name='Microsoft-Windows-Shell-Setup' and $arch]"
+$name = $x.SelectSingleNode($shell + '/u:ComputerName', $ns)
+if ($name -and $name.InnerText.Trim() -and ($name.InnerText.Trim() -ne '*')) {
+  $n = $name.InnerText.Trim()
+  try { Rename-Computer -NewName $n -Force -WarningAction SilentlyContinue -ErrorAction Stop; Say ('name ' + $n) } catch { Say 'failed name'; exit 0 }
+}
+$tz = $x.SelectSingleNode($shell + '/u:TimeZone', $ns)
+if ($tz -and $tz.InnerText.Trim()) {
+  & "$env:SystemRoot\System32\tzutil.exe" /s $tz.InnerText.Trim()
+  if ($LASTEXITCODE -ne 0) { Say 'failed time-zone'; exit 0 }
+  Say 'time-zone'
+}
+# --- setup-command ---
+# A specialize command started as Setup starts one: its environment variables expanded, then the whole line handed to
+# CreateProcess with no program name, which finds the program in it (a quoted path, or an unquoted one with spaces
+# tried word by word, .exe added, the system folders and PATH searched) and gives it the line as it is.
+$runSource = @'
+using System;
+using System.Runtime.InteropServices;
+using System.Text;
+public static class RemotelySetupCommand {
+  public static int LastError;
+  [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+  struct StartupInfo { public int cb; public string reserved; public string desktop; public string title; public int x, y, xSize, ySize, xChars, yChars, fill, flags; public short show, reserved2; public IntPtr reserved3, stdIn, stdOut, stdErr; }
+  [StructLayout(LayoutKind.Sequential)]
+  struct ProcessInfo { public IntPtr process, thread; public int processId, threadId; }
+  [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+  static extern bool CreateProcessW(string app, StringBuilder line, IntPtr pa, IntPtr ta, bool inherit, uint flags, IntPtr env, string dir, ref StartupInfo si, out ProcessInfo pi);
+  [DllImport("kernel32.dll")] static extern uint WaitForSingleObject(IntPtr handle, uint ms);
+  [DllImport("kernel32.dll")] static extern bool GetExitCodeProcess(IntPtr handle, out uint code);
+  [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr handle);
+  public static long Run(string line) {
+    StartupInfo si = new StartupInfo();
+    si.cb = Marshal.SizeOf(typeof(StartupInfo));
+    ProcessInfo pi;
+    StringBuilder buffer = new StringBuilder(line, line.Length + 1);
+    if (!CreateProcessW(null, buffer, IntPtr.Zero, IntPtr.Zero, false, 0x08000000, IntPtr.Zero, null, ref si, out pi)) {
+      LastError = Marshal.GetLastWin32Error();
+      return -1;
+    }
+    WaitForSingleObject(pi.process, 0xFFFFFFFF);
+    uint code;
+    GetExitCodeProcess(pi.process, out code);
+    CloseHandle(pi.thread);
+    CloseHandle(pi.process);
+    return code;
+  }
+}
+'@
+function Add-SetupCommand {
+  if (-not ('RemotelySetupCommand' -as [type])) { Add-Type -TypeDefinition $runSource -ErrorAction Stop }
+}
+function Invoke-SetupCommand($line) {
+  Add-SetupCommand
+  [RemotelySetupCommand]::Run([Environment]::ExpandEnvironmentVariables($line))
+}
+# --- end setup-command ---
+$order = { $o = $_.SelectSingleNode('u:Order', $ns); if ($o) { [int]$o.InnerText.Trim() } else { 0 } }
+$cmds = @($x.SelectNodes($pass + "[@name='Microsoft-Windows-Deployment' and $arch]/u:RunSynchronous/u:RunSynchronousCommand", $ns)) | Sort-Object $order
+if (@($cmds).Count -gt 0) {
+  # Why the commands can't be started, never the command (it is the seed's text): the error's category reason.
+  try { Add-SetupCommand } catch { Say ('failed command-start ' + $_.CategoryInfo.Reason); exit 0 }
+}
+foreach ($c in $cmds) {
+  $p = $c.SelectSingleNode('u:Path', $ns)
+  if (-not $p -or -not $p.InnerText.Trim()) { continue }
+  try { $code = Invoke-SetupCommand $p.InnerText.Trim() } catch { Say ('failed command ' + $_.CategoryInfo.Reason); exit 0 }
+  if ($code -lt 0) { Say ('failed command ' + [RemotelySetupCommand]::LastError); exit 0 }
+  Say ('ran ' + $code)
+}
+try {
+  New-ItemProperty -Path 'HKLM:\SYSTEM\Setup' -Name 'UnattendFile' -Value $file -PropertyType String -Force -ErrorAction Stop | Out-Null
+  Say 'handed'
+} catch { Say 'failed hand-over' }
+exit 0
+"#;
 
 /// Linux: run as root (`sudo sh -c`). Each step says `ok` or `failed`; the first that fails ends it (exit 0, so its
 /// report comes back), and `done` comes only when every step went.
@@ -189,31 +334,45 @@ Get-ChildItem -Path 'C:\Users\*\AppData\Roaming\Microsoft\Windows\PowerShell\PSR
 foreach ($log in @(wevtutil el)) { wevtutil cl "$log" 2>$null }
 Say 'cleared event-logs'
 Remove-Item -LiteralPath 'C:\Windows\Temp\remotely-generalize.ps1' -Force -ErrorAction SilentlyContinue
+$answer = 'C:\Windows\Temp\remotely-sysprep.xml'
+$clone = 'C:\Windows\Setup\Scripts\remotely-clone.ps1'
+if (-not ((Test-Path -LiteralPath $answer) -and (Test-Path -LiteralPath $clone))) { Stop-Here 'clone-files' }
 $tag = "$env:SystemRoot\System32\Sysprep\Sysprep_succeeded.tag"
 Remove-Item -LiteralPath $tag -Force -ErrorAction SilentlyContinue
 Say 'sysprep'
-$s = Start-Process -FilePath "$env:SystemRoot\System32\Sysprep\sysprep.exe" -ArgumentList '/generalize', '/oobe', '/quit', '/quiet' -Wait -PassThru
+$s = Start-Process -FilePath "$env:SystemRoot\System32\Sysprep\sysprep.exe" -ArgumentList '/generalize', '/oobe', '/quit', '/quiet', ('/unattend:' + $answer) -Wait -PassThru
 Say ('sysprep-exit ' + $s.ExitCode)
 if (($s.ExitCode -ne 0) -or -not (Test-Path -LiteralPath $tag)) { Say ('sysprep-failed ' + $s.ExitCode); exit 1 }
-foreach ($f in $panther) {
-  if (Test-Path -LiteralPath $f) {
-    Say ('after-sysprep ' + $f)
-    Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue
-    if (Test-Path -LiteralPath $f) { Stop-Here ('answer-file ' + $f) }
-  }
+$cached = $false
+foreach ($f in @(Get-ChildItem -LiteralPath 'C:\Windows\Panther' -Filter '*.xml' -File -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName })) {
+  if ([IO.File]::ReadAllText($f).Contains('remotely-clone.ps1')) { Say ('cached-in ' + $f); $cached = $true; continue }
+  if ($panther -notcontains $f) { continue }
+  Say ('after-sysprep ' + $f)
+  Remove-Item -LiteralPath $f -Force -ErrorAction SilentlyContinue
+  if (Test-Path -LiteralPath $f) { Stop-Here ('answer-file ' + $f) }
 }
+if (-not $cached) { Stop-Here 'cache' }
+Say 'cached'
+Remove-Item -LiteralPath $answer -Force -ErrorAction SilentlyContinue
 Say 'sealed'
 Stop-Computer -Force
 "#;
 
 /// Windows: run over WinRM (one `powershell -Command -`, one line per statement: `Stop` ends only the line that
-/// fails). It writes the task's script and registers the task to run a few seconds later (on battery power too), then
-/// reports `remotely-generic scheduled` only once both the script's file and the task are there.
+/// fails). It writes the task's script, the clones' script and sysprep's answer file, and registers the task to run a
+/// few seconds later (on battery power too), then reports `remotely-generic scheduled` only once the task's script
+/// and the task are there (the task itself checks the other two before sysprep).
 pub fn windows_script() -> String {
-    let body = base64::engine::general_purpose::STANDARD.encode(WINDOWS_TASK_BODY.as_bytes());
+    let encode = |text: &str| base64::engine::general_purpose::STANDARD.encode(text.as_bytes());
+    let body = encode(WINDOWS_TASK_BODY);
+    let clone = encode(CLONE_SCRIPT_BODY);
+    let answer = encode(SYSPREP_ANSWER);
     format!(
         "$ErrorActionPreference = 'Stop'\n\
          $b = [Convert]::FromBase64String('{body}'); [IO.File]::WriteAllBytes('{WINDOWS_TASK_SCRIPT}', $b)\n\
+         [IO.Directory]::CreateDirectory('C:\\Windows\\Setup\\Scripts') | Out-Null\n\
+         $b = [Convert]::FromBase64String('{clone}'); [IO.File]::WriteAllBytes('{CLONE_SCRIPT}', $b)\n\
+         $b = [Convert]::FromBase64String('{answer}'); [IO.File]::WriteAllBytes('{SYSPREP_ANSWER_FILE}', $b)\n\
          $a = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument '-NoProfile -ExecutionPolicy Bypass -File {WINDOWS_TASK_SCRIPT}'\n\
          $t = New-ScheduledTaskTrigger -Once -At ((Get-Date).AddSeconds(15))\n\
          $o = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries\n\
@@ -290,6 +449,20 @@ impl Report {
     /// `Sysprep_succeeded.tag`). With `/quit` sysprep always returns, so any such line is its own.
     pub fn windows_failure(&self) -> Option<String> {
         if let Some(what) = self.starts("failed ") {
+            match what {
+                "clone-files" => {
+                    return Some(format!(
+                        "the task that runs sysprep found no {CLONE_SCRIPT} or {SYSPREP_ANSWER_FILE}, which the image's clones need, so it didn't run sysprep: the VM is left running"
+                    ))
+                }
+                "cache" => {
+                    return Some(
+                        "sysprep returned 0 but kept no copy of the answer file it was given in C:\\Windows\\Panther, so the image's clones couldn't read their own: Windows is generalized but left running, so build the image again"
+                            .into(),
+                    )
+                }
+                _ => {}
+            }
             let what = match what {
                 "winrm-https" => "the build's WinRM over HTTPS listener".to_owned(),
                 "winrm-certificate" => "the listener's certificate and its private key".to_owned(),
@@ -379,6 +552,9 @@ pub fn facts(report: &Report) -> serde_json::Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The clone script's language-mode check, its first line after `$ErrorActionPreference`.
+    const LANGUAGE_GUARD: &str = r#"if ($ExecutionContext.SessionState.LanguageMode -ne 'FullLanguage') { & "$env:SystemRoot\System32\cmd.exe" /c "echo remotely-clone failed language-mode>COM1"; exit 0 }"#;
 
     /// A function's body in [`LINUX_SCRIPT`], from `name() {` to its closing line.
     fn function(name: &str) -> &'static str {
@@ -546,6 +722,282 @@ mod tests {
         assert!(removed < sysprep && sysprep < sealed);
     }
 
+    /// The base64 file each `[Convert]::FromBase64String('...')` of the WinRM run writes, decoded, in order.
+    fn written_files(script: &str) -> Vec<(String, String)> {
+        script
+            .lines()
+            .filter_map(|line| {
+                let encoded = line.split("FromBase64String('").nth(1)?.split('\'').next()?;
+                let path = line.split("WriteAllBytes('").nth(1)?.split('\'').next()?;
+                let bytes = base64::engine::general_purpose::STANDARD.decode(encoded).ok()?;
+                Some((path.to_owned(), String::from_utf8(bytes).ok()?))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_winrm_run_writes_the_task_the_clones_script_and_syspreps_answer_file() {
+        let files = written_files(&windows_script());
+        assert_eq!(
+            files,
+            [
+                (WINDOWS_TASK_SCRIPT.to_owned(), WINDOWS_TASK_BODY.to_owned()),
+                (CLONE_SCRIPT.to_owned(), CLONE_SCRIPT_BODY.to_owned()),
+                (SYSPREP_ANSWER_FILE.to_owned(), SYSPREP_ANSWER.to_owned()),
+            ]
+        );
+        let script = windows_script();
+        let folder = script.find("CreateDirectory('C:\\Windows\\Setup\\Scripts')").unwrap();
+        assert!(folder < script.find(CLONE_SCRIPT).unwrap(), "its folder first");
+        // The task runs sysprep with that file, only once both files are there, and seals only once Panther keeps it.
+        let body = WINDOWS_TASK_BODY;
+        for step in [
+            "$answer = 'C:\\Windows\\Temp\\remotely-sysprep.xml'",
+            "$clone = 'C:\\Windows\\Setup\\Scripts\\remotely-clone.ps1'",
+            "{ Stop-Here 'clone-files' }",
+            "'/generalize', '/oobe', '/quit', '/quiet', ('/unattend:' + $answer)",
+            "Contains('remotely-clone.ps1')) { Say ('cached-in ' + $f); $cached = $true; continue }",
+            "if ($panther -notcontains $f) { continue }",
+            "if (-not $cached) { Stop-Here 'cache' }",
+            "Say 'cached'\nRemove-Item -LiteralPath $answer",
+        ] {
+            assert!(body.contains(step), "{step}");
+        }
+        assert!(body.contains(SYSPREP_ANSWER_FILE) && body.contains(CLONE_SCRIPT));
+        let checked = body.find("Stop-Here 'clone-files'").unwrap();
+        let sysprep = body.find("Sysprep\\sysprep.exe").unwrap();
+        let cached = body.find("Say 'cached'").unwrap();
+        let sealed = body.find("Say 'sealed'").unwrap();
+        assert!(checked < sysprep && sysprep < cached && cached < sealed);
+    }
+
+    #[test]
+    fn sysprep_is_given_a_generic_answer_file_whose_specialize_pass_runs_the_clone_script() {
+        let root = crate::catalog::install::xml::parse(SYSPREP_ANSWER).unwrap();
+        let passes: Vec<&str> = root.children_named("settings").filter_map(|s| s.attr("pass")).collect();
+        assert_eq!(passes, ["specialize"], "nothing but specialize");
+        let mut paths = Vec::new();
+        root.find_all("Path", &mut paths);
+        assert_eq!(paths.len(), 1);
+        let path = paths[0].trimmed();
+        assert!(
+            path.starts_with("powershell.exe -NoProfile -ExecutionPolicy Bypass -File "),
+            "{path}"
+        );
+        assert!(path.ends_with(CLONE_SCRIPT), "{path}");
+        // Generic: no name, no account, no password.
+        for absent in ["ComputerName", "UserAccounts", "AutoLogon", "Password", "{{"] {
+            assert!(!SYSPREP_ANSWER.contains(absent), "{absent}");
+        }
+    }
+
+    #[test]
+    fn the_clone_script_finds_its_seed_applies_what_a_clone_can_and_hands_oobe_its_file() {
+        let body = CLONE_SCRIPT_BODY;
+        for step in [
+            "'remotely-clone ' + $t",
+            &format!("$until = (Get-Date).AddMinutes({CLONE_SEED_WAIT_MINUTES})"),
+            "$d.DriveType -eq [IO.DriveType]::CDRom -and $d.IsReady",
+            "Join-Path $d.RootDirectory.FullName 'autounattend.xml'",
+            "Say 'failed seed'; exit 0",
+            "$ns.AddNamespace('u', 'urn:schemas-microsoft-com:unattend')",
+            "settings[@pass='specialize']",
+            "/u:ComputerName",
+            "Rename-Computer -NewName $n -Force",
+            "tzutil.exe\" /s $tz.InnerText.Trim()",
+            "[@name='Microsoft-Windows-Deployment' and $arch]/u:RunSynchronous/u:RunSynchronousCommand",
+            "$arch = \"@processorArchitecture='amd64'\"",
+            "[@name='Microsoft-Windows-Shell-Setup' and $arch]",
+            "Sort-Object $order",
+            "CreateProcessW(null, buffer,",
+            "[Environment]::ExpandEnvironmentVariables($line)",
+            // Re-review M1 of PR 101: why a command can't start goes to COM1 (Windows' error, or the error's
+            // CategoryInfo.Reason), never the command itself.
+            "LastError = Marshal.GetLastWin32Error();",
+            "if ($code -lt 0) { Say ('failed command ' + [RemotelySetupCommand]::LastError); exit 0 }",
+            "Say ('failed command-start ' + $_.CategoryInfo.Reason); exit 0",
+            "Say ('failed command ' + $_.CategoryInfo.Reason); exit 0",
+            "New-ItemProperty -Path 'HKLM:\\SYSTEM\\Setup' -Name 'UnattendFile' -Value $file -PropertyType String -Force",
+            "Say 'handed'",
+        ] {
+            assert!(body.contains(step), "{step}");
+        }
+        // A failure is said and ends the script with 0 (a failing specialize command can stop Setup).
+        for line in body.lines().filter(|l| l.contains("Say 'failed")) {
+            assert!(line.contains("exit 0") || line.contains("hand-over"), "{line}");
+        }
+        assert!(!body.contains("exit 1"));
+        assert!(body.trim_end().ends_with("exit 0"));
+        // A language mode but FullLanguage is said before anything else, through cmd.exe (Say needs .NET types).
+        let mut lines = body.lines();
+        assert_eq!(lines.next(), Some("$ErrorActionPreference = 'Continue'"));
+        assert_eq!(lines.next(), Some(LANGUAGE_GUARD));
+        let started = body.find("Say 'started'").unwrap();
+        assert!(body.find(LANGUAGE_GUARD).unwrap() < started);
+        assert!(body.find("function Say").unwrap() > body.find(LANGUAGE_GUARD).unwrap());
+        // The name and the commands come before Setup is pointed at the clone's file for oobeSystem.
+        let name = body.find("Rename-Computer").unwrap();
+        let commands = body.find("foreach ($c in $cmds)").unwrap();
+        let handed = body.find("'UnattendFile'").unwrap();
+        assert!(name < commands && commands < handed);
+        // The clone's file (its one-time password) is read where it is, never copied.
+        assert!(!body.contains("Copy-Item") && !body.contains("WriteAll"));
+        // Item 10 of PR 101's review: only an amd64 component (or one naming none) is read, as Setup on x64 does.
+        assert!(!body.contains("[@name='Microsoft-Windows-Shell-Setup']"));
+        assert!(!body.contains("[@name='Microsoft-Windows-Deployment']"));
+    }
+
+    /// The clone script's part that starts a specialize command, between its markers.
+    fn setup_command_block() -> &'static str {
+        let start = CLONE_SCRIPT_BODY.find("# --- setup-command ---").unwrap();
+        let end = CLONE_SCRIPT_BODY.find("# --- end setup-command ---").unwrap();
+        &CLONE_SCRIPT_BODY[start..end]
+    }
+
+    /// Item 2 of PR 101's review: a clone starts each specialize command as Setup does (Microsoft's own example is
+    /// `%ProgramFiles%\FabriKam\FabriKam First Run Application.exe`: a variable and an unquoted path with spaces),
+    /// and the starters' `cmd /c ...` line keeps working. Runs the script's own block in Windows PowerShell, on a
+    /// copy of cmd.exe in a temp folder whose name has a space.
+    #[cfg(windows)]
+    #[test]
+    fn a_clones_specialize_commands_start_as_setup_starts_them() {
+        let dir = std::env::temp_dir().join(format!("remotely-setup-command-{}", uuid::Uuid::new_v4().simple()));
+        let spaced = dir.join("with space");
+        std::fs::create_dir_all(&spaced).unwrap();
+        let system_root = std::env::var("SystemRoot").unwrap();
+        std::fs::copy(
+            std::path::Path::new(&system_root).join("System32").join("cmd.exe"),
+            spaced.join("tool.exe"),
+        )
+        .unwrap();
+        let starter = crate::catalog::install::starters::all()
+            .into_iter()
+            .find(|c| c.id == "starter.windows-server-2025")
+            .unwrap()
+            .spec
+            .body;
+        let root = crate::catalog::install::xml::parse(&starter).unwrap();
+        let mut paths = Vec::new();
+        root.find_all("Path", &mut paths);
+        let starter_line = paths[0].trimmed().to_owned();
+        assert!(starter_line.starts_with("cmd /c "), "{starter_line}");
+        let quote = |s: &str| s.replace('\'', "''");
+        let d = dir.display().to_string();
+        let cases = [
+            ("starter", starter_line),
+            ("system-root", "%SystemRoot%\\System32\\cmd.exe /c exit 7".to_owned()),
+            ("spaces", format!("{d}\\with space\\tool.exe /c exit 5")),
+            (
+                "variable-spaces",
+                "%REMOTELY_SETUP_TEST%\\with space\\tool.exe /c exit 6".to_owned(),
+            ),
+            ("quoted", format!("\"{d}\\with space\\tool.exe\" /c exit 4")),
+            ("missing", format!("{d}\\nothing-here.exe /x")),
+        ];
+        let mut script = String::from(setup_command_block());
+        script.push_str(&format!("$env:REMOTELY_SETUP_TEST = '{}'\n", quote(&d)));
+        for (name, line) in &cases {
+            script.push_str(&format!("'{name} ' + (Invoke-SetupCommand '{}')\n", quote(line)));
+        }
+        // The missing program's reason, as the script says it on COM1 (ERROR_FILE_NOT_FOUND).
+        script.push_str("'missing-error ' + [RemotelySetupCommand]::LastError\n");
+        let file = dir.join("run.ps1");
+        std::fs::write(&file, script).unwrap();
+        let out = std::process::Command::new("powershell.exe")
+            .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File"])
+            .arg(&file)
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+        let _ = std::fs::remove_dir_all(&dir);
+        let code = |name: &str| {
+            stdout
+                .lines()
+                .find_map(|l| l.trim().strip_prefix(&format!("{name} ")))
+                .unwrap_or_else(|| panic!("{name}: {stdout} {}", String::from_utf8_lossy(&out.stderr)))
+                .to_owned()
+        };
+        assert_eq!(code("starter"), "0");
+        assert_eq!(code("system-root"), "7");
+        assert_eq!(code("spaces"), "5");
+        assert_eq!(code("variable-spaces"), "6");
+        assert_eq!(code("quoted"), "4");
+        assert_eq!(code("missing"), "-1");
+        assert_eq!(code("missing-error"), "2");
+    }
+
+    /// PR 101 (language modes): a clone whose PowerShell runs in a language mode other than FullLanguage can't open
+    /// COM1 through .NET, so the script's first check says so through cmd.exe and ends it; in FullLanguage it goes on.
+    /// Runs that check in Windows PowerShell, constrained by the script itself, with a file in place of COM1.
+    #[cfg(windows)]
+    #[test]
+    fn a_clone_in_another_language_mode_says_so_through_cmd_and_stops() {
+        let guard = CLONE_SCRIPT_BODY.lines().nth(1).unwrap();
+        assert_eq!(guard, LANGUAGE_GUARD);
+        let guard = guard.replace(">COM1", ">said.txt");
+        let run = |constrained: bool| {
+            let dir = std::env::temp_dir().join(format!("remotely-language-mode-{}", uuid::Uuid::new_v4().simple()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let mut script = String::new();
+            if constrained {
+                script.push_str("$ExecutionContext.SessionState.LanguageMode = 'ConstrainedLanguage'\n");
+            }
+            script.push_str("$ErrorActionPreference = 'Continue'\n");
+            script.push_str(&guard);
+            script.push_str("\n'went on'\n");
+            std::fs::write(dir.join("run.ps1"), script).unwrap();
+            let out = std::process::Command::new("powershell.exe")
+                .args([
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    "run.ps1",
+                ])
+                .current_dir(&dir)
+                .output()
+                .unwrap();
+            let said = std::fs::read_to_string(dir.join("said.txt")).ok();
+            let _ = std::fs::remove_dir_all(&dir);
+            (
+                String::from_utf8_lossy(&out.stdout).into_owned(),
+                said,
+                out.status.code(),
+            )
+        };
+        let (stdout, said, code) = run(true);
+        assert_eq!(
+            said.as_deref().map(str::trim_end),
+            Some("remotely-clone failed language-mode"),
+            "{stdout}"
+        );
+        assert!(!stdout.contains("went on"), "{stdout}");
+        assert_eq!(code, Some(0));
+        let (stdout, said, code) = run(false);
+        assert_eq!(said, None, "{stdout}");
+        assert!(stdout.contains("went on"), "{stdout}");
+        assert_eq!(code, Some(0));
+    }
+
+    #[test]
+    fn a_windows_seal_needs_the_clones_answer_file_cached_and_says_why_when_it_isnt() {
+        assert!(WINDOWS_STEPS.contains(&"cached"));
+        let uncached = Report::parse(
+            "remotely-generic removed winrm-https\r\nremotely-generic sysprep\r\nremotely-generic sysprep-exit 0\r\nremotely-generic sealed\r\n",
+        );
+        assert_eq!(uncached.windows_missing(), ["cached"]);
+        let cache = Report::parse("remotely-generic sysprep-exit 0\r\nremotely-generic failed cache\r\n");
+        let why = cache.windows_failure().unwrap();
+        assert!(why.contains("kept no copy of the answer file"), "{why}");
+        let files = Report::parse("remotely-generic started\r\nremotely-generic failed clone-files\r\n");
+        let why = files.windows_failure().unwrap();
+        assert!(
+            why.contains(CLONE_SCRIPT) && why.contains("didn't run sysprep"),
+            "{why}"
+        );
+    }
+
     #[test]
     fn a_linux_report_is_whole_only_when_every_step_said_ok() {
         let mut whole = String::from("remotely-generic cloud-init yes\nremotely-generic waited 42\n");
@@ -597,15 +1049,18 @@ mod tests {
     #[test]
     fn a_windows_report_is_sealed_only_after_sysprep_returned_0_and_any_failure_says_why() {
         let sealed = Report::parse(
-            "\u{1b}[0mremotely-generic started\r\nremotely-generic removed winrm-https\r\nremotely-generic sysprep\r\nremotely-generic sysprep-exit 0\r\nremotely-generic sealed\r\n",
+            "\u{1b}[0mremotely-generic started\r\nremotely-generic removed winrm-https\r\nremotely-generic sysprep\r\nremotely-generic sysprep-exit 0\r\nremotely-generic cached-in C:\\Windows\\Panther\\unattend.xml\r\nremotely-generic cached\r\nremotely-generic sealed\r\n",
         );
         assert!(sealed.windows_missing().is_empty());
         assert_eq!(sealed.windows_failure(), None);
         let early = Report::parse("remotely-generic started\r\n");
-        assert_eq!(early.windows_missing(), ["removed winrm-https", "sysprep", "sealed"]);
+        assert_eq!(
+            early.windows_missing(),
+            ["removed winrm-https", "sysprep", "cached", "sealed"]
+        );
         // A power-off while sysprep runs (N8): sysprep started, never sealed.
         let cut = Report::parse("remotely-generic removed winrm-https\r\nremotely-generic sysprep\r\n");
-        assert_eq!(cut.windows_missing(), ["sealed"]);
+        assert_eq!(cut.windows_missing(), ["cached", "sealed"]);
         assert_eq!(cut.last(), Some("sysprep"));
         // With /quit any sysprep-failed is sysprep's own: a code, or 0 without its tag.
         let failed = Report::parse("remotely-generic sysprep\r\nremotely-generic sysprep-failed 1\r\n");

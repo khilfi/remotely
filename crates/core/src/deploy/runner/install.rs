@@ -743,7 +743,15 @@ impl Deployer {
         report(events, &watcher, &mut detail);
         let (mut serial_at, mut log_at, mut reset_seen) = (0u64, 0u64, 0u32);
         let mut last_growth = tokio::time::Instant::now();
-        let mut hang_resets = 0u32;
+        // VM-30: vCPU 0 is watched on every VirtualBox install (a clone's first boot, or Setup from an ISO); its resets
+        // and the known points' share one count (`boot.resets`, at most `max_hang_resets`).
+        let vcpu_watch = spec.hypervisor == Hypervisor::VirtualBox;
+        let what = if Self::watches_first_boot(spec) {
+            "its first boot"
+        } else {
+            "the install"
+        };
+        let mut boot = super::first_boot::BootWatch::default();
         let mut login_at: Option<tokio::time::Instant> = None;
         let mut windows = WindowsSignIn::default();
         let mut last_round = tokio::time::Instant::now();
@@ -761,6 +769,18 @@ impl Deployer {
                 return Err(self.install_failed(spec, vm, key, watcher.stage(), &why).await);
             }
             if m.flavor.windows() {
+                // VirtualBox's ResetCounter counts Remotely's `controlvm reset`s too, and they stay in the count: do
+                // not take them off. Every Windows hang seen but one stood at one of Setup's restarts, which the hung guest
+                // hadn't counted; the reset finished that restart. PR 101's hand checks: on both VirtualBox builds the
+                // counter went from 0 to 1 just as the VM was reset, and specialize followed about 50 s later (one
+                // build's two restarts were both resets). Taking Remotely's resets off would hold such a build at 0,
+                // drop its certificate's line and run it to the time limit. The cost of counting: a hang in the
+                // middle of a stage counts one restart too many, which only moves the stage's words ahead, since only
+                // the installed system writes the certificate's line the gate waits for. PR 101's last check saw one
+                // (both vCPUs still mid-way through windowsPE, no guest reset in VBox.log): no count helps there, since
+                // the disk isn't bootable yet, so after the reset the firmware boots the ISO and Setup waits at "It
+                // looks like you started an upgrade" until the time limit, as it would have hung without the reset.
+                // `a_reset_that_finishes_a_hung_restart_of_setup_counts_as_that_restart` pins this.
                 let count = self.resets(spec, key, &folder, &mut log_at, &mut reset_seen).await;
                 let events = watcher.resets(count);
                 report(events, &watcher, &mut detail);
@@ -769,18 +789,41 @@ impl Deployer {
             if spec.hypervisor == Hypervisor::VirtualBox
                 && watcher.hang_point().is_some()
                 && last_growth.elapsed() >= tuning.hang_silence
-                && hang_resets < tuning.max_hang_resets
+                && boot.resets < tuning.max_hang_resets
             {
                 let point = watcher.hang_point().unwrap_or_default();
-                if self
-                    .vbox(vec!["controlvm".into(), key.into(), "reset".into()], SHORT)
+                // The same reset as vCPU 0's watch (one count, a running VM only, not once cancelled, a refusal
+                // noted once); one hang, one reset: vCPU 0's clock starts again too (`reset_hung` restarts it).
+                match self
+                    .reset_hung(
+                        key,
+                        &mut boot,
+                        token,
+                        format!("reset once it hung at {point} (VirtualBox under Hyper-V)"),
+                        format!("it hung at {point}, but VirtualBox refused to reset it"),
+                    )
                     .await
-                    .is_ok()
                 {
-                    hang_resets += 1;
-                    notes.push(format!("reset once it hung at {point} (VirtualBox under Hyper-V)"));
+                    Some(super::first_boot::Hang::Reset(note) | super::first_boot::Hang::ResetFailed(note)) => {
+                        notes.push(note)
+                    }
+                    None => {}
                 }
                 last_growth = tokio::time::Instant::now();
+            }
+            // VM-30: a clone's first boot has no known point to hang at (it may stand still at the firmware's logo),
+            // and neither has Windows Setup: vCPU 0's run time standing still while the serial log is silent is the
+            // hang a reset gets past, wherever it is.
+            if vcpu_watch {
+                let quiet = last_growth.elapsed() >= tuning.hang_silence;
+                match self.first_boot_round(key, &mut boot, quiet, what, token).await {
+                    Some(super::first_boot::Hang::Reset(note)) => {
+                        notes.push(note);
+                        last_growth = tokio::time::Instant::now();
+                    }
+                    Some(super::first_boot::Hang::ResetFailed(note)) => notes.push(note),
+                    None => {}
+                }
             }
             if watcher.login_seen() && login_at.is_none() {
                 login_at = Some(tokio::time::Instant::now());
@@ -1154,7 +1197,8 @@ impl Deployer {
         let (connected, mismatch) = connect(&first.account, vault_passwords[0].clone()).await;
         drop(vault_passwords);
         let session = connected.map_err(|err| stop(err, mismatch, "the vault's password"))?;
-        let after = session.run(plan::AFTER_INSTALL_SCRIPT, MAX_SCRIPT_OUTPUT).await;
+        let clone = matches!(spec.source, DeploySource::GoldenVm { .. });
+        let after = session.run(&plan::after_install_script(clone), MAX_SCRIPT_OUTPUT).await;
         session.close().await;
         let out = match after {
             Ok(result) => result.output.stdout,
@@ -1181,6 +1225,13 @@ impl Deployer {
         }
         if line("signed-out").is_some() {
             note.push_str("; the autologon session is signed out");
+        }
+        if clone {
+            note.push_str(if line("clone-cleaned").is_some() {
+                "; the clone's pointer to its answer file and its specialize script are deleted"
+            } else {
+                "; the clone's pointer to its answer file (HKLM\\SYSTEM\\Setup UnattendFile) or its specialize script couldn't be deleted"
+            });
         }
         Ok(note)
     }

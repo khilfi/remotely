@@ -20,9 +20,11 @@ use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+mod first_boot;
 mod golden;
 mod install;
 
+pub use self::first_boot::{counter as vbox_counter, VCPU0_RUN_TIME};
 pub use self::golden::{GuestShell, LinuxGuest, SshGuestShell};
 pub use self::install::InstallTools;
 use super::cloud_init::{self, FirstBoot};
@@ -1254,24 +1256,60 @@ impl Deployer {
         }
     }
 
+    /// VM-30: whether the VM's first boot is a clone's on VirtualBox, which [`first_boot`] watches for a hang while the
+    /// deploy waits for it (a Linux clone's address; a Windows clone's install watcher).
+    fn watches_first_boot(spec: &DeploySpec) -> bool {
+        spec.hypervisor == Hypervisor::VirtualBox && matches!(spec.source, DeploySource::GoldenVm { .. })
+    }
+
     /// Waits for the guest's IP, at most the deploy's wait; `None` when it doesn't show (or the job is cancelled).
-    async fn wait_for_ip(&self, spec: &DeploySpec, key: &str, token: &CancellationToken) -> Option<String> {
+    /// A VirtualBox clone's first boot is watched for a hang meanwhile (a reset's note goes to `notes`), and a reset
+    /// gives the wait its whole time again (item 6 of PR 101's review): the clone boots again from its start. So a
+    /// clone that hangs at every boot waits at most (1 + `max_hang_resets`) times the wait (`ip_wait_cap` bounds each
+    /// one). The flag says whether it was reset.
+    async fn wait_for_ip(
+        &self,
+        spec: &DeploySpec,
+        key: &str,
+        token: &CancellationToken,
+        notes: &mut Vec<String>,
+    ) -> (Option<String>, bool) {
         let tuning = self.tuning();
         let mut wait = Duration::from_secs(u64::from(spec.ip_wait_secs));
         if let Some(cap) = tuning.ip_wait_cap {
             wait = wait.min(cap);
         }
         let poll = tuning.ip_poll;
-        let deadline = tokio::time::Instant::now() + wait;
+        let mut deadline = tokio::time::Instant::now() + wait;
+        let mut boot = first_boot::BootWatch::default();
+        let watched = Self::watches_first_boot(spec);
         loop {
-            if let Some(ip) = self.guest_ip(spec, key).await {
-                return Some(ip);
+            let reset = boot.resets > 0;
+            let ip = tokio::select! {
+                _ = token.cancelled() => return (None, reset),
+                ip = self.guest_ip(spec, key) => ip,
+            };
+            if ip.is_some() {
+                return (ip, reset);
+            }
+            if watched {
+                match self
+                    .first_boot_round(key, &mut boot, true, "its first boot", token)
+                    .await
+                {
+                    Some(first_boot::Hang::Reset(note)) => {
+                        notes.push(note);
+                        deadline = tokio::time::Instant::now() + wait;
+                    }
+                    Some(first_boot::Hang::ResetFailed(note)) => notes.push(note),
+                    None => {}
+                }
             }
             if tokio::time::Instant::now() >= deadline {
-                return None;
+                return (None, boot.resets > 0);
             }
             tokio::select! {
-                _ = token.cancelled() => return None,
+                _ = token.cancelled() => return (None, boot.resets > 0),
                 _ = tokio::time::sleep(poll) => {}
             }
         }
@@ -1293,13 +1331,14 @@ impl Deployer {
         let wants_ip =
             has_os && (spec.after_deploy.create_session || made.seed.is_some() || made.workstation_seed.is_some());
         let ip = if wants_ip {
-            let ip = self.wait_for_ip(spec, key, token).await;
+            let (ip, reset) = self.wait_for_ip(spec, key, token, &mut notes).await;
             match &ip {
                 Some(ip) => notes.push(format!("IP {ip}")),
                 None if token.is_cancelled() => notes.push("cancelled while waiting for its IP".into()),
                 None => notes.push(format!(
-                    "no IP within {} minutes ({} report it): make its session once it shows",
+                    "no IP within {} minutes{} ({} report it): make its session once it shows",
                     spec.ip_wait_secs.div_ceil(60),
+                    if reset { " of its last reset" } else { "" },
                     spec.hypervisor.tools_name()
                 )),
             }
@@ -1329,6 +1368,13 @@ impl Deployer {
                     notes.push("cloud-init's seed ejected after the first boot".into());
                 }
                 Err(err) => notes.push(format!("cloud-init's seed is still in its DVD drive ({err})")),
+            }
+        }
+        if let (None, Some(_)) = (&ip, &made.seed) {
+            if !token.is_cancelled() {
+                notes.push(
+                    "cloud-init's seed stays in its DVD drive until the guest has booted: eject it once it has".into(),
+                );
             }
         }
         if let Some(slot) = &made.workstation_seed {

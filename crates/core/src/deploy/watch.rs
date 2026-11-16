@@ -12,8 +12,11 @@
 //!   key no one will press, so it counts as failed.
 //! * Windows writes nothing by itself: the answer file's `remotely-stage <stage>` lines and the
 //!   `remotely-winrm SHA256:...` line with its WinRM certificate's fingerprint; the resets come from the hypervisor.
+//!   VM-30: a clone of a golden image Remotely built also writes its specialize script's `remotely-clone ...` lines
+//!   ([`crate::golden::generic::CLONE_SCRIPT_BODY`]); one that says `failed` fails it at once.
 
 use crate::catalog::install::unattend::{STAGE_MARKER, WINRM_FINGERPRINT_MARKER};
+use crate::golden::generic::{CLONE_MARKER, CLONE_SCRIPT, CLONE_SEED_WAIT_MINUTES};
 
 /// The longest line kept; the rest of a longer one is dropped.
 const MAX_LINE: usize = 4096;
@@ -591,6 +594,10 @@ impl SerialWatcher {
             }
             return;
         }
+        if let Some(rest) = text.split(CLONE_MARKER).nth(1) {
+            self.clone_line(rest.trim(), out);
+            return;
+        }
         if let Some(rest) = text.split(STAGE_MARKER).nth(1) {
             let stage = rest.split_whitespace().next().unwrap_or_default();
             match stage {
@@ -598,6 +605,61 @@ impl SerialWatcher {
                 other if !other.is_empty() => out.push(WatchEvent::Detail(format!("Windows: {}", cut(other, 40)))),
                 _ => {}
             }
+        }
+    }
+}
+
+impl SerialWatcher {
+    /// VM-30: a line of a clone's specialize script (`remotely-clone <what>`).
+    fn clone_line(&mut self, rest: &str, out: &mut Vec<WatchEvent>) {
+        let (what, value) = rest.split_once(' ').unwrap_or((rest, ""));
+        match what {
+            "started" => self.advance(
+                Stage::Installing,
+                "Windows applies the clone's settings (specialize)",
+                out,
+            ),
+            "seed" => out.push(WatchEvent::Detail("the clone found its seed".into())),
+            "name" => out.push(WatchEvent::Detail(cut(
+                &format!("the clone is named {value}"),
+                MAX_DETAIL,
+            ))),
+            "handed" => out.push(WatchEvent::Detail(
+                "the clone's answer file goes to Windows' first start (oobeSystem)".into(),
+            )),
+            "failed" => {
+                // `command <reason>`: Windows' error number, or the error's category reason; `command-start <reason>`:
+                // PowerShell couldn't compile the starter (Add-Type); `language-mode`: PowerShell runs the script in
+                // a language mode but FullLanguage, said through cmd.exe before `started`.
+                let (value, reason) = value.split_once(' ').unwrap_or((value, ""));
+                let reason = cut(reason, 60);
+                let why = match value {
+                    "command" if reason.parse::<u32>().is_ok() => format!(
+                        "One of its answer file's specialize commands couldn't be started on the clone (Windows error {reason})."
+                    ),
+                    "command" if !reason.is_empty() => format!(
+                        "One of its answer file's specialize commands couldn't be started on the clone ({reason})."
+                    ),
+                    "command-start" => format!(
+                        "The clone couldn't prepare to start its answer file's specialize commands: PowerShell's Add-Type failed ({}).",
+                        if reason.is_empty() { "no reason given".to_owned() } else { reason }
+                    ),
+                    "language-mode" => format!(
+                        "PowerShell ran the clone's specialize script ({CLONE_SCRIPT}) in a language mode other than FullLanguage, so it couldn't apply the clone's settings. A WDAC or AppLocker policy does that to a script it doesn't allow."
+                    ),
+                    "seed" => format!(
+                        "The clone found no CD with its answer file (autounattend.xml at a drive's root) within {CLONE_SEED_WAIT_MINUTES} minutes of its specialize pass: its seed drive is missing or empty."
+                    ),
+                    "answer-file" => "The clone couldn't read the answer file on its seed (not XML Windows reads).".into(),
+                    "name" => "The clone couldn't take the computer name its answer file gives (Rename-Computer refused it).".into(),
+                    "time-zone" => "The clone couldn't set the time zone its answer file names (tzutil refused it).".into(),
+                    "command" => "One of its answer file's specialize commands couldn't be started on the clone.".into(),
+                    "hand-over" => "The clone couldn't point Windows' first start at its answer file (HKLM\\SYSTEM\\Setup UnattendFile).".into(),
+                    other => format!("The clone's specialize script ({CLONE_SCRIPT}) stopped: {}", cut(other, 60)),
+                };
+                self.fail(why, out);
+            }
+            _ => {}
         }
     }
 }
@@ -787,6 +849,65 @@ mod tests {
         assert_eq!(bad.fingerprint(), None);
         assert_eq!(stages(&w.signing_in("signing in")), [Stage::SigningIn]);
         assert_eq!(stages(&w.done("done")), [Stage::Done]);
+    }
+
+    #[test]
+    fn a_sysprepped_clone_goes_through_its_specialize_script_and_any_failure_says_why() {
+        let mut w = SerialWatcher::new(Os::Windows, "web-1").sysprepped();
+        assert_eq!(stages(&w.started()), [Stage::InstallerBooted]);
+        let mut all = Vec::new();
+        for line in [
+            "remotely-clone started\r\n",
+            "remotely-clone seed D:\\autounattend.xml\r\n",
+            "remotely-clone name web-1\r\n",
+            "remotely-clone time-zone\r\n",
+            "remotely-stage specialize 10:01:02.03 \r\n",
+            "remotely-clone ran 0\r\n",
+            "remotely-clone handed\r\n",
+        ] {
+            all.extend(w.feed(line.as_bytes()));
+        }
+        assert_eq!(stages(&all), [Stage::Installing], "{all:?}");
+        assert!(
+            all.contains(&WatchEvent::Detail("the clone is named web-1".into())),
+            "{all:?}"
+        );
+        assert!(all
+            .iter()
+            .any(|e| matches!(e, WatchEvent::Detail(d) if d.contains("oobeSystem"))));
+        assert!(!all.iter().any(|e| matches!(e, WatchEvent::Failed(_))));
+        // No Setup restarts to wait for: the certificate's line counts at once.
+        let fp = "SHA256:47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU";
+        let events = w.feed(format!("{WINRM_FINGERPRINT_MARKER} {fp}\r\n").as_bytes());
+        assert!(events.contains(&WatchEvent::Fingerprint(fp.into())), "{events:?}");
+        // Each failure of the script fails the clone's install at once, saying why.
+        for (what, says) in [
+            ("seed", "found no CD with its answer file"),
+            ("answer-file", "couldn't read the answer file"),
+            ("name", "computer name"),
+            ("time-zone", "time zone"),
+            ("command", "specialize commands"),
+            ("command 2", "(Windows error 2)"),
+            ("command MethodInvocationException", "(MethodInvocationException)"),
+            ("command-start RuntimeException", "Add-Type failed (RuntimeException)"),
+            ("command-start", "Add-Type failed (no reason given)"),
+            ("hand-over", "UnattendFile"),
+            ("something", "stopped: something"),
+        ] {
+            let mut w = SerialWatcher::new(Os::Windows, "web-1").sysprepped();
+            let events = w.feed(format!("remotely-clone started\r\nremotely-clone failed {what}\r\n").as_bytes());
+            assert!(
+                matches!(&events[..], [WatchEvent::Stage(..), WatchEvent::Failed(why)] if why.contains(says)),
+                "{what}: {events:?}"
+            );
+        }
+        // A language mode but FullLanguage is said through cmd.exe before `started`, and fails the clone too.
+        let mut w = SerialWatcher::new(Os::Windows, "web-1").sysprepped();
+        let events = w.feed(b"remotely-clone failed language-mode\r\n");
+        assert!(
+            matches!(&events[..], [WatchEvent::Failed(why)] if why.contains("language mode other than FullLanguage") && why.contains(CLONE_SCRIPT)),
+            "{events:?}"
+        );
     }
 
     #[test]

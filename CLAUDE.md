@@ -396,7 +396,9 @@ crates/core/          remotely-core: all app logic
                       build's VM (G6's make and watcher, then made generic through GuestShell (SshGuestShell) or WinRM,
                       the power-off, its install drives, serial port and NAT rule out, the snapshot), and a sysprepped
                       Windows image's clones taking G6's install (a seed CD and COM1 added to the clone,
-                      SerialWatcher::sysprepped)
+                      SerialWatcher::sysprepped, its `remotely-clone` lines); runner/first_boot.rs: a VirtualBox
+                      install or clone's first boot watched for vCPU 0 standing still (`debugvm statistics`) while
+                      the deploy waits for it, then reset
     address_pools.rs  VM-32 (0.8.0 G6, migration 0036) address pools per workspace: ranges per hypervisor network,
                       pick (pinged), claim, assign, release; store/address_pools.rs
     golden/           VM-30 (0.8.0 G7, migration 0037) golden image builds ("Golden image builds (G7)"): spec.rs
@@ -404,11 +406,11 @@ crates/core/          remotely-core: all app logic
                       DeploySpec, the version, SignIn, the old versions it deletes (PruneVm, each a target), the
                       fingerprint a standing approval compares, `differences` with the planned VM's), BuildDetails for
                       the approval, version_vm_name and snapshot_name; generic.rs LINUX_SCRIPT (LINUX_STEPS, each must
-                      say `ok`), LINUX_POWER_OFF, windows_script (WINDOWS_STEPS before its power-off counts) and Report
-                      (`remotely-generic` lines); mod.rs WINDOWS_DEFERRED and WindowsImages (0.8.0 refuses Windows
-                      images; only tests turn them on); service.rs GoldenImages (Core.golden: check, submit, rebuild,
-                      rebuild_request, command_for and changes_since for schedules, refuse_windows before a schedule's
-                      save, set_recipe, versions with their linked clones), its ImageBuildActions for the job runner
+                      say `ok`), LINUX_POWER_OFF, windows_script (WINDOWS_STEPS before its power-off counts; it writes
+                      SYSPREP_ANSWER, sysprep's `/unattend:` file, and CLONE_SCRIPT_BODY, what each clone's specialize
+                      pass runs) and Report (`remotely-generic` lines); service.rs GoldenImages (Core.golden: check,
+                      submit, rebuild, rebuild_request, command_for and changes_since for schedules, set_recipe,
+                      versions with their linked clones), its ImageBuildActions for the job runner
                       (begin: one build of an image at a time, BuildGuard; register, version_deleted) and StandingCheck
                       (StillApproved: a scheduled build's grant and schedule asked during vault waits); store/golden.rs
                       image_versions (each with its config's id and SHA-256), the recipe, forget_version_vm (R3's delete
@@ -2174,8 +2176,9 @@ VM-29 and VM-32, from 0.8.0 (`docs/plan-0.8.md`, G6), built only on what S1 to S
   fingerprint line, taken only after Setup's two restarts (the serial log is read to its end before they are counted, so an earlier line is never read late); a second, different
   one fails the install. On VirtualBox a log silent for 3 minutes at a known hang point (Ubuntu's RAID6 benchmark as
   the last line; Debian's partitioner as the last step title, since its dialog goes on drawing the frame and the
-  progress numbers after the title) gets `controlvm reset`, at most 5 times; Windows' restart hang isn't detected (the
-  time limit catches it). Debian's step titles count only whole (`Configuring apt-cdrom-setup`, a component the
+  progress numbers after the title) gets `controlvm reset`, at most 5 times. Any VirtualBox install whose vCPU 0 stands
+  still for 3 minutes while its serial log is silent is reset too, within the same 5 (Windows Setup's restart hang, and
+  Ubuntu's before its known point's line ends: "Golden image builds (G7)", the VirtualBox hang). Debian's step titles count only whole (`Configuring apt-cdrom-setup`, a component the
   installer loads, isn't `Configuring apt`). `<hostname> login:` counts anywhere in a line: Ubuntu's cloud-init writes
   its last lines onto the prompt's line. Done: Linux at `<hostname> login:` and an SSH banner on the guest; Windows at WinRM over HTTPS signing in.
 - **A failure, the time limit or a cancel** (`CoreError::InstallFailed`, `InstallCancelled`, recorded as cancelled):
@@ -2245,20 +2248,13 @@ scripts, the service), `deploy/runner/golden.rs` (the job's work on the VM), `st
 per-system facts below come from the tools' own documentation and G6's spikes; the ones marked *(hand check)* weren't
 seen on a real VM yet (the PR lists the checks).
 
-- **0.8.0 builds no Windows image** (the owner deferred them on 14 Nov 2026, after hand checks 3 and 4 below: the
-  builds sealed, their clones never read their answer file). Every way in refuses with `golden::WINDOWS_DEFERRED`
-  ("Windows golden images come in a later release: a clone of a sysprepped image doesn't read its answer file yet."):
-  `GoldenImages::spec_for`, which every build comes through (the build dialog's check, submit, Rebuild, `set_recipe`,
-  a schedule's ask and each scheduled run's `command_for`, which fails the run with it), `GoldenImages::refuse_windows`
-  before a rebuild schedule is saved (nothing is stored), and `catalog::Facts::golden_config` for a template of a
-  Windows image Remotely built (the deploy's check and submit, stacks, the template editor, which can't save it:
-  `InstallConfigMismatch`), so no clone waits at OOBE to its time limit. Only a build of this PR's earlier commits made
-  such an image; FD-07 doesn't carry an image's recipe, so an import is a plain golden VM. The build dialog offers no
-  unattend config (`golden.ts` `BUILD_KINDS`), marks a Windows ISO, and its config field and Build say why
-  (`windowsBuild`, QL-08). The Windows seal (`WINDOWS_TASK_BODY`, `WINDOWS_STEPS`, the watcher) and the clone delivery
-  below are kept, and their tests run on the fakes as the later release would run them: `WindowsImages` (the
-  catalogue's, shared with `GoldenImages`) is always off outside tests, and only `set_allowed_for_tests` (`fakes`)
-  turns it on. `docs/plan-0.8.md` G7 says what the later package needs.
+- **Windows images are in 0.8.0.** G7's hand checks 3 and 4 below sealed both builds, but their clones never read the
+  `autounattend.xml` on their own seed CD after sysprep and stopped at OOBE. So on 14 Nov 2026 the owner deferred
+  Windows images, and G7's last commit refused every way in (`WINDOWS_DEFERRED`, `WindowsImages`, `refuse_windows`,
+  the build dialog without unattend configs). A package on 15 Nov 2026, still within 0.8.0, gives sysprep an answer
+  file of its own (the bullet "A clone of a Windows image" below) and takes the refusals out. A Windows image builds,
+  rebuilds, takes a rebuild schedule and deploys clones, and the build dialog offers unattend configs for a Windows ISO
+  (`golden.ts` `BUILD_KINDS`). FD-07 doesn't carry an image's recipe, so an import is a plain golden VM.
 - **A build is G6's deploy of one VM, then more.** "Build an image" (the Templates page's Images tab) plans the build VM
   as the Deploy dialog's Custom plans a VM (`Deploys::spec_for_taken`): a launch template's fields made from the recipe
   (the catalogue's ISO image, the size, the hypervisor and its network, the folder, the install config; no session,
@@ -2369,9 +2365,10 @@ seen on a real VM yet (the PR lists the checks).
   passwords. They can't take a hostname (every clone is named like the build VM), a template's guest user, SSH key or
   packages, or a seed's network-config: nothing reads VM-22's seed or guestinfo. `cloud-init` in the preseed's
   `pkgsel/include` gives what Ubuntu's images get; the build dialog says so.
-- **Windows, made generic** (kept, refused in 0.8.0; `golden::generic::windows_script`): one WinRM run
-  (`$ErrorActionPreference = 'Stop'`, which under `-Command -` ends only the line that fails) writes
-  `C:\Windows\Temp\remotely-generalize.ps1` (from base64: a WinRM console ends a statement at an empty line) and
+- **Windows, made generic** (`golden::generic::windows_script`): one WinRM run (`$ErrorActionPreference = 'Stop'`,
+  which under `-Command -` ends only the line that fails) writes `C:\Windows\Temp\remotely-generalize.ps1`, the
+  clones' `C:\Windows\Setup\Scripts\remotely-clone.ps1` and sysprep's `C:\Windows\Temp\remotely-sysprep.xml` (each
+  from base64: a WinRM console ends a statement at an empty line) and
   registers the task `Remotely generalize` as SYSTEM 15 seconds later (on battery power too), since a process started
   from a WinRM shell is killed with the shell; its last line says `scheduled` only when both the script's file and the
   task are there. The task deletes itself and its script, deletes the build's WinRM over HTTPS listener
@@ -2379,38 +2376,115 @@ seen on a real VM yet (the PR lists the checks).
   would share the build's key, and its listener would point at it), Setup's `Panther\unattend.xml` and
   `unattend-original.xml`, PowerShell's history and the event logs; each removal is said only once `Test-Path` shows it
   gone, else the task says `failed <what>` and stops before sysprep (the build fails at once, Windows left running).
-  Then `sysprep.exe /generalize /oobe /quit /quiet` (`Start-Process -Wait -PassThru`: sysprep is a GUI program), its old
-  `Sysprep_succeeded.tag` deleted first; only an exit code 0 with a new `Sysprep_succeeded.tag` is `sealed`, after which
-  the task looks at Panther again (`after-sysprep <file>`, for the record, deleted) and shuts Windows down itself
+  The task checks the clones' two files are there (else `failed clone-files`, before sysprep). Then
+  `sysprep.exe /generalize /oobe /quit /quiet /unattend:C:\Windows\Temp\remotely-sysprep.xml` (`Start-Process -Wait
+  -PassThru`: sysprep is a GUI program), its old `Sysprep_succeeded.tag` deleted first; only an exit code 0 with a new
+  `Sysprep_succeeded.tag` goes on. The task then looks at Panther's `*.xml`: a file naming `remotely-clone.ps1` is
+  sysprep's cache of the clones' answer file and stays (`cached-in <file>`); Setup's old files are deleted
+  (`after-sysprep <file>`); with no cached file it says `failed cache` and leaves the generalized Windows running (the
+  build fails). Then `cached`, the answer file's Temp copy deleted, `sealed`, and the task shuts Windows down itself
   (`Stop-Computer -Force`); otherwise it says `sysprep-failed <code>` and leaves Windows running, and the build fails at
   once. Not `/shutdown`: the shutdown could end sysprep.exe before its code was read (or have the task's PowerShell
   report a code from the kill), and a power-off while sysprep runs would look like sysprep's own. A power-off before the
-  task said `removed winrm-https`, `sysprep` and `sealed` (`WINDOWS_STEPS`) fails the build; a wait that runs out says
+  task said `removed winrm-https`, `sysprep`, `cached` and `sealed` (`WINDOWS_STEPS`) fails the build; a wait that runs out says
   what COM1 showed last (nothing: see Task Scheduler; `sysprep`: sysprep's own log; `sealed`: the shutdown). Seen by
   hand (checks 3 and 4 below): sysprep as SYSTEM returned 0 with its tag, Panther held no answer file after it, the
   listener's removal was said, and Windows was off seconds after `sealed` on both hypervisors.
-- **A clone of a Windows image gets G6's delivery: it doesn't work yet (hand checks 3 and 4 below), so 0.8.0 refuses it
-  (the first bullet) and the rest of this bullet runs only in tests.** A template of a Windows image Remotely built (and
-  no install config of its own) deploys with the config its newest version was built from
+- **A clone of a Windows image: sysprep's own answer file runs the clone's.** A template of a Windows image Remotely
+  built (and no install config of its own) deploys with the config its newest version was built from
   (`catalog::Facts::golden_config`, by the version row's `config_id`, never the recipe's, which may name another since),
   and only while that config is as it was then (the row's `config_fingerprint`; a changed, deleted or broken config is
   the template's problem, and building the image again fixes it): `DeploySpec.install` on a `GoldenVm` source
   (`validate_install`, `install_spec`: no ISO, no disk layout check). Each clone's file is rendered for it (its
   hostname, a one-time password) onto a seed in its private folder, in a CD drive added to the clone (Workstation: the
-  first free `sata0:N`; VirtualBox: `dvd_slot`) with COM1 to `<vm>-serial.log` (and VirtualBox's NAT rule). After
-  sysprep, specialize sets the computer name and oobeSystem the one-time password, the autologon and its
-  FirstLogonCommands, which turn WinRM over HTTPS on with a new self-signed certificate and write its fingerprint to
-  COM1 (the starters' lines); windowsPE and offlineServicing don't run. The watcher is G6's with no Setup restarts to
-  wait for (`SerialWatcher::sysprepped`: the clone's serial log is new), then G6's first sign-in replaces the one-time
-  password with the vault's, deletes Panther's copy and signs the autologon out; the seed is taken out. **Seen by hand:
-  the sysprepped clones don't read the seed CD's `autounattend.xml`.** On both releases and both hypervisors the clone
-  ran specialize without it (no `remotely-stage specialize` line on COM1) and stopped at OOBE's first page ("Hi there",
-  the region and keyboard), so it got no name, one-time password or WinRM certificate of its own and the deploy waits to
-  its time limit. Microsoft's implicit search table lists removable read-only media for every pass, but it isn't used
-  here; which delivery replaces it is open (a generic answer file given to sysprep at build time whose specialize step
-  points Setup at the clone's seed, or the clone's file written into its disk before its first boot). *(Still to check
-  by hand once it reads its file: that a `LocalAccounts` account the build made doesn't stop OOBE; the starters'
-  `New-NetFirewallRule` failing harmlessly on a rule that is there.)*
+  first free `sata0:N`; VirtualBox: `dvd_slot`) with COM1 to `<vm>-serial.log` (and VirtualBox's NAT rule).
+  - **Why not the seed alone** (G7's hand checks 3 and 4): Setup never read the seed's `autounattend.xml` after
+    sysprep. It ran specialize without it (no `remotely-stage specialize` line) and stopped at OOBE's "Hi there".
+    Microsoft's implicit search table lists removable read-only media for every pass, and it says Setup searches "at
+    the beginning of each configuration pass" with the registry value `HKLM\System\Setup!UnattendFile` first and the
+    file cached in `%WINDIR%\Panther` before removable media (learn.microsoft.com, "Windows Setup Automation
+    Overview"). A generalized system sets its devices up again in specialize, so the CD may not be there yet when
+    Setup looks. Writing the clone's file into its disk before its first boot would need an NTFS writer for VMDK and
+    VDI disks, linked clones' delta disks included: not done.
+  - **What runs instead**: the build gives sysprep `/unattend:C:\Windows\Temp\remotely-sysprep.xml`
+    (`generic::SYSPREP_ANSWER`, no name or password), which sysprep caches in Panther "and will be used on subsequent
+    configuration passes" (Microsoft, "How configuration passes work"). Its only setting is a specialize
+    `RunSynchronous` command, `powershell.exe -NoProfile -ExecutionPolicy Bypass -File
+    C:\Windows\Setup\Scripts\remotely-clone.ps1` (`generic::CLONE_SCRIPT_BODY`, written by the build's WinRM run; the
+    task checks both files before sysprep, `failed clone-files`, and seals only once a Panther file names the script,
+    `cached`). On each clone, as SYSTEM in specialize, the script waits up to 10 minutes for a CD with
+    `autounattend.xml` at its root (the seed), then applies that file's specialize pass the way a clone can:
+    `Rename-Computer` to its `ComputerName`, `tzutil /s` its `TimeZone`, and its `RunSynchronous` commands in order,
+    each started as Setup starts one and waited for: its environment variables expanded, then the whole line given to
+    `CreateProcessW` with no program name, which finds the program in it (quoted, or unquoted with spaces tried word by
+    word, `.exe` added, the system folders and `PATH` searched). Microsoft's own example `Path` is
+    `%ProgramFiles%\FabriKam\FabriKam First Run Application.exe`; `ProcessStartInfo` (the first version) expanded
+    nothing and cut at the first space. Only a component whose `processorArchitecture` is exactly `amd64` is read, as
+    the unattend lint says Setup does (it skips a component without one); `clone_unapplied` reads the same. Then it sets
+    `HKLM\SYSTEM\Setup` `UnattendFile` to the seed's file, so oobeSystem's search finds it first: OOBE sets the
+    one-time password and the autologon and runs the FirstLogonCommands, which turn WinRM over HTTPS on with a new
+    self-signed certificate and write its fingerprint to COM1 (the starters' lines). The clone's file is read where the
+    seed is; nothing of it is copied to the disk (Setup caches it as any answer file, masked at the pass's end). Each
+    step says `remotely-clone <what>` on COM1 (`started`, `seed <path>`, `name <n>`, `time-zone`, `ran <exit>`,
+    `handed`); a failure says `failed language-mode|seed|answer-file|name|time-zone|command|command-start|hand-over`
+    and ends the script with 0 (a failing specialize command can stop Setup), and the watcher fails the clone's install
+    at once, saying why. A command that can't start says why, never the command (the seed's text): `failed command
+    <Windows error>` from `CreateProcessW`, else `failed command <reason>` or `failed command-start <reason>` (Add-Type
+    couldn't compile the starter) with the PowerShell error's `CategoryInfo.Reason`. The script's first line checks
+    PowerShell's language mode: in any but FullLanguage (what a WDAC or AppLocker policy gives a script it doesn't
+    allow) it can't open COM1 through .NET or use Add-Type, so it says `failed language-mode` through cmd.exe and stops
+    before `started`. The commands run through Add-Type's C# as SYSTEM in specialize, so every clone of a config with a
+    specialize command needs it. A clone applies no other specialize setting again (`unattend::clone_unapplied`; the
+    build's preview names what a config has beyond them, e.g. a domain join or a command's `WillReboot`): the build
+    applied them, so a clone has those sysprep's generalize keeps (most registry settings) and not the rest.
+  - **Only through its image.** A Windows image's version VM used as a plain golden VM (an FD-07 import, which carries
+    no recipe; another image or template on that VM) has no install config, so its clones get no seed: the clone
+    script waits its 10 minutes, Setup stops at OOBE's first page, and the deploy, which watches no plain clone,
+    reports success. Deploy a Windows image Remotely built through that image.
+  - The watcher is G6's with no Setup restarts to wait for (`SerialWatcher::sysprepped`: the clone's serial log is
+    new), then G6's first sign-in replaces the one-time password with the vault's, deletes Panther's copy, signs the
+    autologon out, and on a clone deletes the `UnattendFile` value and the script (`install::CLONE_AFTER_INSTALL_SCRIPT`,
+    `clone-cleaned`); the seed is taken out.
+- **A VirtualBox boot or install that hangs under Hyper-V** (`deploy/runner/first_boot.rs`): G7's hand check 4 saw a
+  Windows Server 2022 clone stand at the firmware's logo with no disk writes for 17 minutes, until a reset by hand; S3
+  saw the same hang at an install's restarts, with vCPU 0's `/TM/CPU/00/cNsTotal` no longer moving. G6's hang reset
+  knows only an install's points on the serial log, and a Linux clone has no serial port. So while a deploy waits for a
+  VirtualBox VM anyway it reads that counter each round (`VBoxManage debugvm <vm> statistics --pattern
+  /TM/CPU/00/cNsTotal`, XML, `deploy::runner::vbox_counter`):
+  - **Where:** G6's install watcher, for every VirtualBox install (a Windows clone's first boot, Setup from an ISO, a
+    golden image's build: `reset the install once ...`), and a Linux clone's wait for its address (a Linux clone always
+    has cloud-init's seed). Nowhere else: a clone the deploy waits for nothing else isn't watched, so the watch itself
+    adds no time (review item 1 of PR 101: an earlier version watched such a clone for 5 minutes). A reset does: the
+    address wait starts again after it, so a clone that hangs at every boot holds its deploy slot for at most (1 +
+    `max_hang_resets`) times the wait (`ip_wait_cap` bounds each one), and the note says "no IP within N minutes of
+    its last reset". Workstation never hung (S3), so its VMs aren't watched.
+  - **When:** a counter standing still for `hang_silence` (3 minutes) while nothing else moved (the serial log), on a
+    VM VirtualBox says is running (a paused one, by the user or by VirtualBox on a full disk, stands still too: its
+    clock starts again), with the job not cancelled, gets `controlvm reset`, and the note says `reset its first boot
+    once vCPU 0 had stood still for about <n> minutes`. A refused reset is noted once. A counter that can't be read
+    resets nothing. The resets of one VM, this watch's and G6's known points' together, are at most `max_hang_resets`
+    (5), and both go through `Deployer::reset_hung` (a running VM only, not once cancelled, a refusal noted once); a
+    known point's reset starts the counter's clock again, so one hang gets one reset.
+  - **Setup's restarts: Remotely's resets stay in the count, on purpose (don't take them off).** VirtualBox counts
+    `controlvm reset` in `/VirtualBox/VMInfo/ResetCounter` as it counts the guest's own. Every Windows hang seen but one (S3's
+    two, this package's three) stood at one of Setup's restarts, which the hung guest hadn't counted: the reset
+    finished that restart and was counted once. In the hand checks' logs, on both VirtualBox builds the counter went
+    from 0 to 1 just as the VM was reset, and specialize followed about 50 s later; one build's two restarts were both
+    resets. So the watcher counts a reset as Setup's restart. Taking Remotely's resets off the counter would hold such
+    a build at 0, drop the certificate's line and run it to the time limit. The trade-off: a hang in the middle of a
+    stage counts one restart too many, which only moves the stage's words ahead, since only the installed system
+    writes the certificate's line the gate waits for. PR 101's review asked for the subtraction and agreed to keep the
+    count once it saw this; `a_reset_that_finishes_a_hung_restart_of_setup_counts_as_that_restart` pins it.
+  - **A hang in the middle of Setup's first stage isn't recovered** (hand check 6 below, the only one seen): both vCPUs
+    stood still mid-way through windowsPE, before Setup had made the disk bootable. After the reset the firmware fell
+    through to the ISO, and Setup asked "It looks like you started an upgrade and booted from installation media ...
+    Yes / No" and waited. The count read 1, and the stage said "the image is applied". The install runs to its time
+    limit, just as it would have, hung, without the reset, so the reset is never worse. Not done: answering "No" (a
+    clean install with the same seed, through VirtualBox's `keyboardputscancode`) or failing at once when windowsPE is
+    reset; either needs a hand check.
+  - Fakes: `FakeVirtualBox::hang_next_boot` and `hang_boots` (the counter stands still until a reset, for that many
+    boots), a counter that moves with the clock while the VM runs, a reset that raises `ResetCounter`, no Guest
+    Additions data while hung, `set_failing("debugvm")`.
 - **Scheduled rebuilds** (`ScheduleAction::RebuildImage`, one `ScheduleTarget::Image`): the save asks the bus for a
   standing approval of the image's next build as it would be built then (VM-27; Medium, or Critical with `keep`). Each
   run builds the command from the recipe as it is then (`GoldenImages::command_for`) and submits it under the grant: a
@@ -2477,6 +2551,62 @@ seen on a real VM yet (the PR lists the checks).
     VBoxSVC logged nothing of the kind. It logged one refusal each time the seed was forced out of a running VM's drive:
     the `closemedium` that follows is refused ("locked for reading by another task"); `eject` ignores it, and the seed's
     file was deleted all the same.
+- **Hand checks of the Windows images** (15 Nov 2026, the package that put them in 0.8.0; Workstation 26 and VirtualBox 7.2.22
+  under Hyper-V; copies of the owner's evaluation ISOs, the starters `windows-server-2025` and `-2022`, size
+  `gp.large`, NAT; a core built like the app's with its own data folder and a WinRM client that recorded each
+  sign-in's address, account and the first 12 hex digits of the password's SHA-256; VMs named `wgi-*`, five checks
+  at once): each build, then two linked clones, each clone looked at over WinRM with the vault's password and the
+  certificate it wrote to COM1.
+  1. **Windows Server 2025 on Workstation: passed.** COM1: `sysprep-exit 0`, `cached-in C:\Windows\Panther\unattend.xml`,
+     `cached`, `sealed`. Each clone's COM1: `remotely-clone started`, `seed D:\autounattend.xml`, `name <clone>`,
+     `time-zone`, the starter's `remotely-stage specialize`, `ran 0`, `handed` (about 50 s after power-on), then its
+     own `remotely-winrm` line (about 2 minutes after). Each clone: `COMPUTERNAME` its own name, its own machine SID (the
+     Administrator's SID less `-500`) and WinRM certificate (`CN=<name>`), none the build's; the deploy signed in with a
+     one-time password of its own (two different hashes, neither the vault's), then with the vault's;
+     `UnattendFile` and `remotely-clone.ps1` gone after the sign-in; time zone UTC. Panther kept no
+     `unattend-original.xml` on a clone (G6's note then has no `answer-file` line).
+  2. **Windows Server 2022 on Workstation: passed**, the same lines and facts (clones on WinRM about 2 minutes after
+     power-on).
+  3. **Windows Server 2022 on VirtualBox: passed** (clones on WinRM about 3 minutes after power-on, through the NAT
+     rule). The build stood still once in Setup (vCPU 0 frozen, vCPU 1 running) and was reset by hand: the harness
+     ran a binary from before the install watcher read vCPU 0.
+  4. **Windows Server 2025 on VirtualBox: passed, and a clone's hung first boot was reset by the deploy itself.**
+     The build stood still twice in Setup and was reset by hand as in 3. Clone `wgi-v25c-1` ran its specialize script
+     (`started` to `handed`), then stood still at the restart after specialize: vCPU 0's `cNsTotal` didn't move for
+     about 3 minutes while its serial log was silent, so the install watcher reset it ("reset its first boot once vCPU
+     0 had stood still for 4 minutes", rounded up then; "about 3 minutes" now); after the reset the counter moved again and the clone went on through OOBE to
+     WinRM (about 6 minutes after power-on; its sibling took 2.5). Both clones: their own names, SIDs, certificates
+     and one-time passwords, as in 1. Its first try failed before anything was installed:
+     `modifynvram enrollmssignatures` was refused with "already has a lock request pending" while another VirtualBox
+     VM was being made (G6's VM making doesn't ask a busy VirtualBox again; it removed what it had made).
+  5. **Ubuntu 24.04.5 on VirtualBox, one linked clone: passed.** The build hung at `Begin: Loading essential drivers
+     ...` (both vCPUs frozen, the line unfinished, so G6's RAID6 point never showed) and was reset by hand as in 3. The
+     clone's first boot was watched for the 5 minutes the deploy waited for its address (no Guest Additions): vCPU 0
+     moved 15 s every 15 s, no reset (uptime 297 s at the end); its own hostname, `cloud-init status: done`, the
+     template's user signs in with its key.
+  6. **Windows Server 2025 on VirtualBox, the build alone, with the final code (16 Nov 2026): the automatic reset
+     ran, but Setup couldn't go on.** The install watcher's stages were "Setup runs from the ISO" 6 s after
+     power-on, then a hang about 4.5 minutes into windowsPE: both vCPUs' counters stood still, and VBox.log has no
+     guest reset. 3 minutes later the watcher reset the VM by itself ("reset the install once vCPU 0 had stood still
+     ..."). VBox.log has one `RUNNING` to `RESETTING`, the reset counter went 0 to 1, and the stage read "the image is
+     applied", one restart too many. The disk wasn't bootable yet, so the firmware booted the ISO again, and Setup
+     waited at "It looks like you started an upgrade and booted from installation media" (screenshot, kept locally).
+     The run was stopped by hand; it would have run to its time limit. See "A hang in the middle of Setup's first
+     stage" above.
+  7. **Windows Server 2022 and 2025 on Workstation, one linked clone each, with the C# command start (16 Nov 2026,
+     at 817a2ab, rebased on main): passed.** Checks 1 to 5 ran the first clone script (ProcessStartInfo); this one ran
+     the final one, which compiles its starter with Add-Type as SYSTEM in specialize. Each clone's COM1: `started`,
+     `seed D:\autounattend.xml`, `name <clone>`, `time-zone`, then the starter's own `cmd /c (echo remotely-stage
+     specialize %TIME%>COM1) 2>nul & exit 0` line (written by the command the script started through `CreateProcessW`),
+     `ran 0`, `handed`, and its own `remotely-winrm` line about 2 minutes after power-on. Each clone: its own name,
+     SID, WinRM certificate and one-time password; `UnattendFile` and the script gone after the sign-in.
+  - On every running VirtualBox VM seen (four Windows clones, the Ubuntu clone) vCPU 0's `cNsTotal` (VBoxManage prints
+    `<U64 val="..." unit="ns" name="/TM/CPU/00/cNsTotal"/>`) grew with the wall clock, 15 s every 15 s; on each hung
+    VM it stood still for minutes, and after a reset it jumped by the time it had stood still. 4 of the 8 VirtualBox
+    VMs hung once or more (the three builds, one of the five clones), with five checks running at once; check 6's
+    build, alone on VirtualBox, hung too. Not looked
+    at: whether Panther's cached copy of a clone's file has its passwords masked (Microsoft says Setup removes them at
+    the end of each pass; the one-time password is replaced by the vault's within minutes anyway).
 - G6 fix: `Deployer::read_fingerprint` read the serial log with a fresh watcher, which counts no Setup restarts and so
   never took the fingerprint line: a deploy's saved WinRM session never had its certificate trusted from the VM's
   serial port. It now reads the whole log without waiting for restarts, and two different lines give none.
