@@ -628,8 +628,9 @@ impl SerialWatcher {
                 "the clone's answer file goes to Windows' first start (oobeSystem)".into(),
             )),
             "failed" => {
-                // `command <reason>`: Windows' error number, or an exception's type; `command-start <mode> <type>`:
-                // PowerShell couldn't compile the starter (Add-Type), in that language mode.
+                // `command <reason>`: Windows' error number, or the error's category reason; `command-start <reason>`:
+                // PowerShell couldn't compile the starter (Add-Type); `language-mode`: PowerShell runs the script in
+                // a language mode but FullLanguage, said through cmd.exe before `started`.
                 let (value, reason) = value.split_once(' ').unwrap_or((value, ""));
                 let reason = cut(reason, 60);
                 let why = match value {
@@ -640,8 +641,11 @@ impl SerialWatcher {
                         "One of its answer file's specialize commands couldn't be started on the clone ({reason})."
                     ),
                     "command-start" => format!(
-                        "The clone couldn't prepare to start its answer file's specialize commands: PowerShell's Add-Type failed ({}). A policy that keeps PowerShell in Constrained Language Mode (WDAC, AppLocker) stops it.",
+                        "The clone couldn't prepare to start its answer file's specialize commands: PowerShell's Add-Type failed ({}).",
                         if reason.is_empty() { "no reason given".to_owned() } else { reason }
+                    ),
+                    "language-mode" => format!(
+                        "PowerShell ran the clone's specialize script ({CLONE_SCRIPT}) in a language mode other than FullLanguage, so it couldn't apply the clone's settings. A WDAC or AppLocker policy does that to a script it doesn't allow."
                     ),
                     "seed" => format!(
                         "The clone found no CD with its answer file (autounattend.xml at a drive's root) within {CLONE_SEED_WAIT_MINUTES} minutes of its specialize pass: its seed drive is missing or empty."
@@ -885,10 +889,8 @@ mod tests {
             ("command", "specialize commands"),
             ("command 2", "(Windows error 2)"),
             ("command MethodInvocationException", "(MethodInvocationException)"),
-            (
-                "command-start ConstrainedLanguage PSNotSupportedException",
-                "Add-Type failed (ConstrainedLanguage PSNotSupportedException)",
-            ),
+            ("command-start RuntimeException", "Add-Type failed (RuntimeException)"),
+            ("command-start", "Add-Type failed (no reason given)"),
             ("hand-over", "UnattendFile"),
             ("something", "stopped: something"),
         ] {
@@ -899,6 +901,13 @@ mod tests {
                 "{what}: {events:?}"
             );
         }
+        // A language mode but FullLanguage is said through cmd.exe before `started`, and fails the clone too.
+        let mut w = SerialWatcher::new(Os::Windows, "web-1").sysprepped();
+        let events = w.feed(b"remotely-clone failed language-mode\r\n");
+        assert!(
+            matches!(&events[..], [WatchEvent::Failed(why)] if why.contains("language mode other than FullLanguage") && why.contains(CLONE_SCRIPT)),
+            "{events:?}"
+        );
     }
 
     #[test]

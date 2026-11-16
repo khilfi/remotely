@@ -95,8 +95,12 @@ pub const SYSPREP_ANSWER: &str = r#"<?xml version="1.0" encoding="utf-8"?>
 /// What each clone runs as SYSTEM in its specialize pass (see the module). Every failure says `failed <what>` on
 /// COM1 and ends it with 0 (a failing command could stop Setup); the deploy's watcher fails the clone's install then.
 /// The clone's file is read where the deploy put it (a CD's root); nothing of it is copied to the disk, and Setup
-/// caches it as it does any answer file (G6's first sign-in deletes Panther's unmasked copy).
+/// caches it as it does any answer file (G6's first sign-in deletes Panther's unmasked copy). Its first line after
+/// `$ErrorActionPreference` checks PowerShell's language mode: anything but FullLanguage (what a WDAC or AppLocker
+/// policy gives a script it doesn't allow) can't open the serial port or start the commands, so that line says
+/// `failed language-mode` through cmd.exe, which any language mode may start, and ends the script.
 pub const CLONE_SCRIPT_BODY: &str = r#"$ErrorActionPreference = 'Continue'
+if ($ExecutionContext.SessionState.LanguageMode -ne 'FullLanguage') { & "$env:SystemRoot\System32\cmd.exe" /c "echo remotely-clone failed language-mode>COM1"; exit 0 }
 function Say($t) { try { $p = New-Object System.IO.Ports.SerialPort COM1,115200; $p.Open(); $p.WriteLine('remotely-clone ' + $t); $p.Close() } catch { } }
 Say 'started'
 $file = $null
@@ -179,13 +183,13 @@ function Invoke-SetupCommand($line) {
 $order = { $o = $_.SelectSingleNode('u:Order', $ns); if ($o) { [int]$o.InnerText.Trim() } else { 0 } }
 $cmds = @($x.SelectNodes($pass + "[@name='Microsoft-Windows-Deployment' and $arch]/u:RunSynchronous/u:RunSynchronousCommand", $ns)) | Sort-Object $order
 if (@($cmds).Count -gt 0) {
-  # Why the commands can't be started, never the command (it is the seed's text): the language mode and the error's type.
-  try { Add-SetupCommand } catch { Say ('failed command-start ' + $ExecutionContext.SessionState.LanguageMode + ' ' + $_.Exception.GetType().Name); exit 0 }
+  # Why the commands can't be started, never the command (it is the seed's text): the error's category reason.
+  try { Add-SetupCommand } catch { Say ('failed command-start ' + $_.CategoryInfo.Reason); exit 0 }
 }
 foreach ($c in $cmds) {
   $p = $c.SelectSingleNode('u:Path', $ns)
   if (-not $p -or -not $p.InnerText.Trim()) { continue }
-  try { $code = Invoke-SetupCommand $p.InnerText.Trim() } catch { Say ('failed command ' + $_.Exception.GetType().Name); exit 0 }
+  try { $code = Invoke-SetupCommand $p.InnerText.Trim() } catch { Say ('failed command ' + $_.CategoryInfo.Reason); exit 0 }
   if ($code -lt 0) { Say ('failed command ' + [RemotelySetupCommand]::LastError); exit 0 }
   Say ('ran ' + $code)
 }
@@ -549,6 +553,9 @@ pub fn facts(report: &Report) -> serde_json::Value {
 mod tests {
     use super::*;
 
+    /// The clone script's language-mode check, its first line after `$ErrorActionPreference`.
+    const LANGUAGE_GUARD: &str = r#"if ($ExecutionContext.SessionState.LanguageMode -ne 'FullLanguage') { & "$env:SystemRoot\System32\cmd.exe" /c "echo remotely-clone failed language-mode>COM1"; exit 0 }"#;
+
     /// A function's body in [`LINUX_SCRIPT`], from `name() {` to its closing line.
     fn function(name: &str) -> &'static str {
         let start = LINUX_SCRIPT.find(&format!("\n{name}() {{\n")).expect(name) + 1;
@@ -804,11 +811,12 @@ mod tests {
             "Sort-Object $order",
             "CreateProcessW(null, buffer,",
             "[Environment]::ExpandEnvironmentVariables($line)",
-            // Re-review M1 of PR 101: why a command can't start goes to COM1 (Windows' error, or Add-Type's language
-            // mode and exception type), never the command itself.
+            // Re-review M1 of PR 101: why a command can't start goes to COM1 (Windows' error, or the error's
+            // CategoryInfo.Reason), never the command itself.
             "LastError = Marshal.GetLastWin32Error();",
             "if ($code -lt 0) { Say ('failed command ' + [RemotelySetupCommand]::LastError); exit 0 }",
-            "Say ('failed command-start ' + $ExecutionContext.SessionState.LanguageMode + ' ' + $_.Exception.GetType().Name); exit 0",
+            "Say ('failed command-start ' + $_.CategoryInfo.Reason); exit 0",
+            "Say ('failed command ' + $_.CategoryInfo.Reason); exit 0",
             "New-ItemProperty -Path 'HKLM:\\SYSTEM\\Setup' -Name 'UnattendFile' -Value $file -PropertyType String -Force",
             "Say 'handed'",
         ] {
@@ -820,6 +828,13 @@ mod tests {
         }
         assert!(!body.contains("exit 1"));
         assert!(body.trim_end().ends_with("exit 0"));
+        // A language mode but FullLanguage is said before anything else, through cmd.exe (Say needs .NET types).
+        let mut lines = body.lines();
+        assert_eq!(lines.next(), Some("$ErrorActionPreference = 'Continue'"));
+        assert_eq!(lines.next(), Some(LANGUAGE_GUARD));
+        let started = body.find("Say 'started'").unwrap();
+        assert!(body.find(LANGUAGE_GUARD).unwrap() < started);
+        assert!(body.find("function Say").unwrap() > body.find(LANGUAGE_GUARD).unwrap());
         // The name and the commands come before Setup is pointed at the clone's file for oobeSystem.
         let name = body.find("Rename-Computer").unwrap();
         let commands = body.find("foreach ($c in $cmds)").unwrap();
@@ -909,6 +924,60 @@ mod tests {
         assert_eq!(code("quoted"), "4");
         assert_eq!(code("missing"), "-1");
         assert_eq!(code("missing-error"), "2");
+    }
+
+    /// PR 101 (language modes): a clone whose PowerShell runs in a language mode other than FullLanguage can't open
+    /// COM1 through .NET, so the script's first check says so through cmd.exe and ends it; in FullLanguage it goes on.
+    /// Runs that check in Windows PowerShell, constrained by the script itself, with a file in place of COM1.
+    #[cfg(windows)]
+    #[test]
+    fn a_clone_in_another_language_mode_says_so_through_cmd_and_stops() {
+        let guard = CLONE_SCRIPT_BODY.lines().nth(1).unwrap();
+        assert_eq!(guard, LANGUAGE_GUARD);
+        let guard = guard.replace(">COM1", ">said.txt");
+        let run = |constrained: bool| {
+            let dir = std::env::temp_dir().join(format!("remotely-language-mode-{}", uuid::Uuid::new_v4().simple()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let mut script = String::new();
+            if constrained {
+                script.push_str("$ExecutionContext.SessionState.LanguageMode = 'ConstrainedLanguage'\n");
+            }
+            script.push_str("$ErrorActionPreference = 'Continue'\n");
+            script.push_str(&guard);
+            script.push_str("\n'went on'\n");
+            std::fs::write(dir.join("run.ps1"), script).unwrap();
+            let out = std::process::Command::new("powershell.exe")
+                .args([
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-File",
+                    "run.ps1",
+                ])
+                .current_dir(&dir)
+                .output()
+                .unwrap();
+            let said = std::fs::read_to_string(dir.join("said.txt")).ok();
+            let _ = std::fs::remove_dir_all(&dir);
+            (
+                String::from_utf8_lossy(&out.stdout).into_owned(),
+                said,
+                out.status.code(),
+            )
+        };
+        let (stdout, said, code) = run(true);
+        assert_eq!(
+            said.as_deref().map(str::trim_end),
+            Some("remotely-clone failed language-mode"),
+            "{stdout}"
+        );
+        assert!(!stdout.contains("went on"), "{stdout}");
+        assert_eq!(code, Some(0));
+        let (stdout, said, code) = run(false);
+        assert_eq!(said, None, "{stdout}");
+        assert!(stdout.contains("went on"), "{stdout}");
+        assert_eq!(code, Some(0));
     }
 
     #[test]

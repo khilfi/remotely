@@ -2426,15 +2426,17 @@ seen on a real VM yet (the PR lists the checks).
     self-signed certificate and write its fingerprint to COM1 (the starters' lines). The clone's file is read where the
     seed is; nothing of it is copied to the disk (Setup caches it as any answer file, masked at the pass's end). Each
     step says `remotely-clone <what>` on COM1 (`started`, `seed <path>`, `name <n>`, `time-zone`, `ran <exit>`,
-    `handed`); a failure says `failed seed|answer-file|name|time-zone|command|command-start|hand-over` and ends the
-    script with 0 (a failing specialize command can stop Setup), and the watcher fails the clone's install at once,
-    saying why. A command that can't start says why, never the command (the seed's text): `failed command <Windows
-    error>` from `CreateProcessW`, or `failed command-start <language mode> <exception type>` when Add-Type can't
-    compile the starter (a WDAC or AppLocker policy keeps PowerShell in Constrained Language Mode). The commands run
-    through Add-Type's C# as SYSTEM in specialize, so every clone of a config with a specialize command needs it. A
-    clone applies no other specialize setting again (`unattend::clone_unapplied`; the build's preview names what a
-    config has beyond them, e.g. a domain join or a command's `WillReboot`): the build applied them, so a clone has
-    those sysprep's generalize keeps (most registry settings) and not the rest.
+    `handed`); a failure says `failed language-mode|seed|answer-file|name|time-zone|command|command-start|hand-over`
+    and ends the script with 0 (a failing specialize command can stop Setup), and the watcher fails the clone's install
+    at once, saying why. A command that can't start says why, never the command (the seed's text): `failed command
+    <Windows error>` from `CreateProcessW`, else `failed command <reason>` or `failed command-start <reason>` (Add-Type
+    couldn't compile the starter) with the PowerShell error's `CategoryInfo.Reason`. The script's first line checks
+    PowerShell's language mode: in any but FullLanguage (what a WDAC or AppLocker policy gives a script it doesn't
+    allow) it can't open COM1 through .NET or use Add-Type, so it says `failed language-mode` through cmd.exe and stops
+    before `started`. The commands run through Add-Type's C# as SYSTEM in specialize, so every clone of a config with a
+    specialize command needs it. A clone applies no other specialize setting again (`unattend::clone_unapplied`; the
+    build's preview names what a config has beyond them, e.g. a domain join or a command's `WillReboot`): the build
+    applied them, so a clone has those sysprep's generalize keeps (most registry settings) and not the rest.
   - **Only through its image.** A Windows image's version VM used as a plain golden VM (an FD-07 import, which carries
     no recipe; another image or template on that VM) has no install config, so its clones get no seed: the clone
     script waits its 10 minutes, Setup stops at OOBE's first page, and the deploy, which watches no plain clone,
