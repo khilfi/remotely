@@ -25,7 +25,7 @@ import {
   type VmSessionDraft,
 } from "@/lib/api";
 import { plural } from "@/lib/format";
-import { draftMissing, loginText, savedSummary, sentence, splitDrafts } from "@/lib/vm-sessions";
+import { draftMissing, loginText, saveReason, savedSummary, sentence, splitDrafts } from "@/lib/vm-sessions";
 import { SessionDialog } from "./SessionDialog";
 import { useReadOnlyReason } from "./Presentation";
 import { WhyDisabled } from "./WhyDisabled";
@@ -115,10 +115,8 @@ export function VmSessionsDialog({
 
   const { saving, refused } = splitDrafts(drafts ?? []);
   const keyLabel = (id: string) => keys.find((k) => k.id === id)?.label;
-  const reason =
-    readOnly ??
-    (drafts === null ? "The sessions are still being worked out." : null) ??
-    (saving.length === 0 ? "None of these VMs can get a session now: each row says why." : null);
+  // A failed read leaves `drafts` null with the error shown.
+  const reason = saveReason({ readOnly, drafts, failed: error !== null });
 
   async function save() {
     setBusy(true);
@@ -174,8 +172,13 @@ export function VmSessionsDialog({
                       <TableCell className="font-mono text-xs" data-mask="ip">
                         {s.host}
                       </TableCell>
-                      <TableCell data-mask="user">
-                        {s.username ?? <span className="text-muted-foreground">—</span>}
+                      <TableCell>
+                        {/* FD-03: only a real user is masked; the dash stays a dash. */}
+                        {s.username ? (
+                          <span data-mask="user">{s.username}</span>
+                        ) : (
+                          <span className="text-muted-foreground">—</span>
+                        )}
                       </TableCell>
                       <TableCell>{loginText(s.auth, keyLabel)}</TableCell>
                       <TableCell className="whitespace-normal text-xs text-muted-foreground">

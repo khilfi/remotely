@@ -164,7 +164,7 @@ import {
   type MoreItemId,
   type VmColumnId,
 } from "@/lib/vm-page";
-import { vmsWithoutSsh } from "@/lib/vm-sessions";
+import { sessionTargets as sessionTargetsOf } from "@/lib/vm-sessions";
 import { UnassignedVmsSheet } from "@/components/UnassignedVmsSheet";
 import { noVmsHere, releaseReason } from "@/lib/workspaces";
 import { workspacesApi, type UnassignedVm } from "@/lib/workspaces-api";
@@ -931,12 +931,7 @@ export function VmsPage({
   const filtered = !isEmptyFilter(filter) || starredOnly;
   const oldAfterDays = limits?.oldAfterDays ?? 30;
   // QL-29: the running VMs of the selection without an SSH session linked.
-  const sessionTargets = onCreateSessions
-    ? vmsWithoutSsh(
-        selectedVms.filter((v) => v.powerState === "running"),
-        sessions,
-      )
-    : [];
+  const sessionTargets = onCreateSessions ? sessionTargetsOf(selectedVms, sessions) : [];
   // UX-02: More shows only what applies to the selection.
   const more = moreGroups(selectedVms, {
     snapshots: selectionTrees === null ? null : snapshotReasons.revert === null ? withSnapshots.length : 0,

@@ -8,8 +8,11 @@ import {
   draftMissing,
   linkedSshSessions,
   loginText,
+  saveReason,
+  savedOneText,
   savedSummary,
   sentence,
+  sessionTargets,
   splitDrafts,
   vmsWithoutSsh,
 } from "./vm-sessions.ts";
@@ -46,6 +49,29 @@ const draft = (over: Partial<SessionDraft> = {}): SessionDraft => ({
   ...over,
 });
 
+test("QL-29: the selection's Create SSH sessions goes to its running VMs without an SSH session", () => {
+  const vms = [
+    { id: "vm-web", powerState: "running" as const },
+    { id: "vm-desk", powerState: "running" as const },
+    { id: "vm-db", powerState: "not_running" as const },
+    { id: "vm-cache", powerState: "suspended" as const },
+    { id: "vm-app", powerState: "running" as const },
+  ];
+  assert.deepEqual(
+    sessionTargets(vms, sessions).map((v) => v.id),
+    ["vm-desk", "vm-app"],
+    "web has its SSH session; an RDP session doesn't count; db and cache report no address",
+  );
+  assert.deepEqual(sessionTargets([], sessions), []);
+});
+
+test("QL-29: the editor's toast says linked only while the session still is", () => {
+  const asked = { vmId: "vm-1", vmName: "web-1" };
+  assert.equal(savedOneText({ name: "web-1", vmId: "vm-1" }, asked), "Created 'web-1', linked to web-1");
+  assert.equal(savedOneText({ name: "web-1", vmId: "vm-2" }, asked), "Created 'web-1'", "another VM picked");
+  assert.equal(savedOneText({ name: "web-1", vmId: null }, asked), "Created 'web-1'", "an RDP session, unlinked");
+});
+
 test("QL-29: a draft says how it logs in and what it leaves to fill in", () => {
   const labels = (id: string) => (id === "k-1" ? "deploy key" : undefined);
   assert.equal(loginText(draft().auth, labels), "Key 'deploy key'");
@@ -73,6 +99,13 @@ test("QL-29: the preview saves the VMs that get a draft and says why the others 
     ["web-2"],
   );
   assert.equal(sentence("it isn't running"), "It isn't running.");
+
+  // Save says why it is off: the lock, still reading, a failed read, or nothing to save.
+  assert.equal(saveReason({ readOnly: null, drafts, failed: false }), null);
+  assert.equal(saveReason({ readOnly: "Presenting", drafts, failed: false }), "Presenting");
+  assert.equal(saveReason({ readOnly: null, drafts: null, failed: false }), "The sessions are still being worked out.");
+  assert.match(saveReason({ readOnly: null, drafts: null, failed: true }) ?? "", /couldn't be worked out/);
+  assert.match(saveReason({ readOnly: null, drafts: refused, failed: false }) ?? "", /None of these VMs/);
   assert.equal(sentence("Already a sentence."), "Already a sentence.");
 });
 

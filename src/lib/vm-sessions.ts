@@ -2,7 +2,7 @@
 // it lacks read in the preview, and what saving several said. The core makes the drafts and saves them
 // (`api.vmSessionDrafts`, `api.createVmSessions`). Tested in vm-sessions.test.ts.
 
-import type { SessionAuth, SessionDraft, VmSessionDraft, VmSessionMade } from "./api.ts";
+import type { PowerState, SessionAuth, SessionDraft, VmSessionDraft, VmSessionMade } from "./api.ts";
 
 /** The parts of a saved session these helpers read. */
 export interface LinkedSession {
@@ -20,6 +20,39 @@ export function linkedSshSessions<S extends LinkedSession>(vmId: string, session
 export function vmsWithoutSsh<V extends { id: string }>(vms: readonly V[], sessions: readonly LinkedSession[]): V[] {
   const linked = new Set(sessions.filter((s) => s.vmId !== null && s.protocol === "ssh").map((s) => s.vmId));
   return vms.filter((v) => !linked.has(v.id));
+}
+
+/** The VMs Create SSH sessions goes to: running (only a running guest reports its address) with no SSH session. */
+export function sessionTargets<V extends { id: string; powerState: PowerState }>(
+  vms: readonly V[],
+  sessions: readonly LinkedSession[],
+): V[] {
+  return vmsWithoutSsh(
+    vms.filter((v) => v.powerState === "running"),
+    sessions,
+  );
+}
+
+/** The editor's toast: linked to the VM only while the session still is (Advanced or another kind changes it). */
+export function savedOneText(saved: { name: string; vmId: string | null }, draft: { vmId: string; vmName: string }) {
+  return saved.vmId === draft.vmId ? `Created '${saved.name}', linked to ${draft.vmName}` : `Created '${saved.name}'`;
+}
+
+/** Why the preview's Save is off, or null. */
+export function saveReason(state: {
+  readOnly: string | null;
+  drafts: readonly VmSessionDraft[] | null;
+  failed: boolean;
+}): string | null {
+  if (state.readOnly) return state.readOnly;
+  if (state.drafts === null) {
+    return state.failed
+      ? "The sessions couldn't be worked out (see the error). Close this and try again."
+      : "The sessions are still being worked out.";
+  }
+  if (!state.drafts.some((d) => d.session !== null))
+    return "None of these VMs can get a session now: each row says why.";
+  return null;
 }
 
 /** How a draft logs in, for the preview. `keyLabel` names a vault key by id. */

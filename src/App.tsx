@@ -198,7 +198,7 @@ import {
   type SettingsChange,
 } from "@/lib/job-events";
 import type { VmView } from "@/lib/vm-snapshots";
-import { sentence } from "@/lib/vm-sessions";
+import { savedOneText, sentence } from "@/lib/vm-sessions";
 import type { ScheduleAsk } from "@/components/VmSchedulesTab";
 import { WorkspaceSwitcher } from "@/components/WorkspaceSwitcher";
 
@@ -402,20 +402,26 @@ export default function App() {
   }, []);
 
   /** QL-29: SSH sessions for VMs without one: one VM opens the editor filled in, several the preview. */
+  // The newest ask wins: a draft read that comes back after a later ask is dropped.
+  const vmSessionAsk = useRef(0);
   const createVmSessions = useCallback((vmIds: string[]) => {
+    const ask = ++vmSessionAsk.current;
     if (vmIds.length !== 1) {
       setVmSessionsFor(vmIds);
       return;
     }
     api.vmSessionDrafts(vmIds).then(
       ([draft]) => {
+        if (ask !== vmSessionAsk.current) return;
         if (draft?.session) setVmSessionDraft(draft);
         else
           toast.error(`No SSH session for ${draft?.vmName ?? "this VM"}`, {
             description: sentence(draft?.refused ?? ""),
           });
       },
-      (err: unknown) => toast.error(errorMessage(err)),
+      (err: unknown) => {
+        if (ask === vmSessionAsk.current) toast.error(errorMessage(err));
+      },
     );
   }, []);
   const closeVmSession = useCallback(() => setVmSessionDraft(null), []);
@@ -1417,6 +1423,7 @@ export default function App() {
                   onExportInventory={openInventory}
                   active={page === "sessions"}
                   focus={sessionsFocus}
+                  sessionsKey={vmSessionsMade}
                 />
               </ErrorBoundary>
             </section>
@@ -1435,6 +1442,7 @@ export default function App() {
                   vault={vault}
                   onSubmitted={submitted}
                   onOpenVault={show.vault}
+                  sessionsKey={vmSessionsMade}
                 />
               </ErrorBoundary>
             </section>
@@ -1567,7 +1575,7 @@ export default function App() {
           onVaultChanged={setVault}
           draft={vmSessionDraft}
           onSaved={(saved) => {
-            toast.success(`Created '${saved.name}', linked to ${vmSessionDraft.vmName}`);
+            toast.success(savedOneText(saved, vmSessionDraft));
             vmSessionsSaved();
           }}
           onClose={closeVmSession}
