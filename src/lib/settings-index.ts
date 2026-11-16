@@ -145,6 +145,13 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
   },
   { id: "dashboard", group: "dashboard", title: "Dashboard polling", keywords: "poll watched hosts guest seconds" },
   {
+    id: "host-facts",
+    group: "dashboard",
+    card: "dashboard",
+    title: "Background host details",
+    keywords: "host facts os hardware specs terminal connect background reads soc edr siem alert allow-list",
+  },
+  {
     id: "history",
     group: "dashboard",
     title: "Dashboard history",

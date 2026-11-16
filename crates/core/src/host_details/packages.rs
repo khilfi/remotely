@@ -13,7 +13,8 @@ use super::linux::sections;
 /// `dpkg-query`'s `Status` field says whether a package is installed (`install ok installed`) or only left its
 /// configuration behind (`deinstall ok config-files`); the format's `\t` and `\n` are dpkg-query's own escapes. rpm's
 /// default output (`name-version-release.arch`) is split here, so no query format is passed to it.
-pub const PACKAGES_SCRIPT: &str = "echo @@dpkg; type dpkg-query >/dev/null 2>&1 && echo present && dpkg-query -W -f='${Status}\\t${Package}\\t${Version}\\t${Architecture}\\n' 2>/dev/null; \
+pub const PACKAGES_SCRIPT: &str = "# remotely:packages\n\
+echo @@dpkg; type dpkg-query >/dev/null 2>&1 && echo present && dpkg-query -W -f='${Status}\\t${Package}\\t${Version}\\t${Architecture}\\n' 2>/dev/null; \
 echo @@rpm; type rpm >/dev/null 2>&1 && echo present && rpm -qa 2>/dev/null";
 
 /// Output kept: a host with 5,000 packages prints about 300 KB.

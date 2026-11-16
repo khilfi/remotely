@@ -58,7 +58,8 @@ pub const DEFAULT_ORDER: [&str; 4] = ["nano", "micro", "vim", "vi"];
 
 /// SS-14: which of [`HOST_EDITORS`] the host has. A read, as the login user, run by `/bin/sh` whatever the login shell
 /// is; `command -v` prints nothing for one it doesn't have. One name per line.
-pub const EDITOR_PROBE: &str = "/bin/sh -c 'for e in nano micro vim vi nvim emacs mcedit joe ne; do \
+pub const EDITOR_PROBE: &str = "# remotely:editors\n\
+/bin/sh -c 'for e in nano micro vim vi nvim emacs mcedit joe ne; do \
 command -v \"$e\" >/dev/null 2>&1 && printf \"%s\\n\" \"$e\"; done; exit 0'";
 
 /// The session's own editor, per workspace: `{ "<session id>": "vim" }`.

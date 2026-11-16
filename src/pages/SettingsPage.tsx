@@ -27,6 +27,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Separator } from "@/components/ui/separator";
 import { Switch } from "@/components/ui/switch";
 import { ApprovalRulesCard } from "@/components/ApprovalRulesCard";
 import { DashboardHistoryCard } from "@/components/DashboardHistoryCard";
@@ -34,6 +35,7 @@ import { DataRetentionCard } from "@/components/DataRetentionCard";
 import { TrashCard } from "@/components/TrashCard";
 import { EmptyState } from "@/components/EmptyState";
 import { HelpTip } from "@/components/HelpTip";
+import { HostFactsSetting } from "@/components/HostFactsSetting";
 import { PageHeader } from "@/components/PageHeader";
 import { PresentationCard, useReadOnlyReason } from "@/components/Presentation";
 import { NumberSetting, SaveStatus, useSaveStatus } from "@/components/SaveStatus";
@@ -161,7 +163,7 @@ export function SettingsPage({ onChanged, vault, onVaultChanged, onOpenVault, fo
       case "trash":
         return <TrashCard />;
       case "dashboard":
-        return <DashboardPollingCard settings={settings} onSettings={setSettings} />;
+        return <DashboardPollingCard settings={settings} onSettings={setSettings} lit={lit} />;
       case "history":
         return <DashboardHistoryCard />;
       case "updates":
@@ -542,8 +544,8 @@ function VaultSettingsCard({ vault, onOpenVault }: { vault: VaultInfo | null; on
   );
 }
 
-/** MO-02: seconds between two polls of each watched host. */
-function DashboardPollingCard({ settings, onSettings }: SettingsCardProps) {
+/** MO-02: seconds between two polls of each watched host; MO-13: whether hosts' facts are read in the background. */
+function DashboardPollingCard({ settings, onSettings, lit }: SettingsCardProps & { lit: string | null }) {
   const status = useSaveStatus();
   return (
     <Card>
@@ -582,6 +584,13 @@ function DashboardPollingCard({ settings, onSettings }: SettingsCardProps) {
             ))}
           </SelectContent>
         </Select>
+        <Separator className="my-2" />
+        <div
+          id={settingsCardId("host-facts")}
+          className={cn("scroll-mt-4 rounded-md", lit === "host-facts" && "ring-2 ring-ring ring-offset-4")}
+        >
+          <HostFactsSetting />
+        </div>
       </CardContent>
     </Card>
   );

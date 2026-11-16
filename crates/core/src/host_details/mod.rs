@@ -5,10 +5,16 @@
 //! * MO-13, SSH hosts ([`linux`]): one exec of [`linux::SPECS_SCRIPT`] on an exec channel, never in a
 //!   shell, so nothing shows in a terminal, its log, MultiExec or QL-07. It runs
 //!   - when a terminal opens, on that terminal's own connection ([`SpecsCollector::on_terminal`]),
-//!     unless the facts are younger than [`SpecsTuning::terminal_min_age`];
+//!     unless the facts are younger than [`SpecsTuning::terminal_min_age`] (a day);
 //!   - from the dashboard's MO-02 poll, on its kept connection, when the facts are older than
-//!     [`SpecsTuning::dashboard_max_age`] (checked at most every half hour);
+//!     [`SpecsTuning::dashboard_max_age`] (a day; checked at most every half hour);
 //!   - on Refresh ([`HostDetails::refresh_session`]).
+//!
+//!   The first two are background reads: the workspace's [`BACKGROUND_READS_KEY`] turns them off (on by
+//!   default), for a customer whose SOC alerts on them; Refresh, the inventory and the admin reads still run
+//!   when the user asks. An OS and its hardware rarely change, so a day between background reads is
+//!   enough (it was 10 minutes on a terminal and 6 hours on the dashboard until a SOC's EDR read every
+//!   connect as someone exploring the host).
 //!
 //!   The latest facts are stored per session (migration 0014) with when and how they were read, so they
 //!   show offline.
@@ -63,9 +69,14 @@ use crate::locks;
 use crate::login_guard::{self, LoginGuard, ParkReason, ParkScope, Parked};
 use crate::metrics::guest::{spec_key, GuestVerifier};
 use crate::metrics::Metrics;
-use crate::store::Store;
+use crate::presentation::Change;
+use crate::store::{NewAuditEntry, Store};
 use crate::terminal::Terminals;
 use crate::vault::{Vault, VaultStatus};
+
+/// MO-13, FD-02: whether the workspace reads its hosts' facts in the background, when a terminal connects
+/// and from the dashboard (`true`, the default when unset), or only when the user asks (`false`).
+pub const BACKGROUND_READS_KEY: &str = "hostDetails.backgroundReads";
 
 /// What read a session's stored facts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -302,8 +313,8 @@ impl Default for SpecsTuning {
             specs_timeout: Duration::from_secs(20),
             admin_timeout: Duration::from_secs(30),
             updates_timeout: Duration::from_secs(150),
-            terminal_min_age: Duration::from_secs(10 * 60),
-            dashboard_max_age: Duration::from_secs(6 * 3600),
+            terminal_min_age: Duration::from_secs(24 * 3600),
+            dashboard_max_age: Duration::from_secs(24 * 3600),
             dashboard_check: Duration::from_secs(30 * 60),
             connect_timeout: Duration::from_secs(15),
             idle: Duration::from_secs(180),
@@ -426,8 +437,19 @@ impl SpecsCollector {
         Ok(SessionSpecs::new(session_id, specs, collected_at, by))
     }
 
-    /// Reads the facts when they are older than `min_age` (or missing) and no one is reading them now.
-    /// `Ok(None)`: nothing to do.
+    /// Whether `ctx`'s workspace reads facts in the background ([`BACKGROUND_READS_KEY`]; on when unset).
+    pub async fn background_reads(&self, ctx: &Context) -> Result<bool> {
+        Ok(self
+            .inner
+            .store
+            .get_setting::<bool>(ctx, BACKGROUND_READS_KEY)
+            .await?
+            .unwrap_or(true))
+    }
+
+    /// A background read (a terminal connecting, the dashboard): the facts, when the workspace reads them in
+    /// the background ([`Self::background_reads`]), they are older than `min_age` (or missing) and no one is
+    /// reading them now. `Ok(None)`: nothing to do, and nothing ran on the host.
     pub async fn collect_if_older(
         &self,
         ctx: &Context,
@@ -436,6 +458,9 @@ impl SpecsCollector {
         min_age: Duration,
         by: CollectedBy,
     ) -> Result<Option<SessionSpecs>> {
+        if !self.background_reads(ctx).await? {
+            return Ok(None);
+        }
         let Some(_busy) = self.claim(session_id) else {
             return Ok(None);
         };
@@ -608,6 +633,44 @@ impl HostDetails {
     /// F4: the WinRM client a Windows host's own connection uses.
     pub fn set_winrm(&self, adapter: Arc<dyn WinrmAdapter>) {
         *locks::write(&self.inner.winrm) = adapter;
+    }
+
+    /// MO-13: whether the shown workspace reads its hosts' facts in the background ([`BACKGROUND_READS_KEY`]).
+    pub async fn background_reads(&self, ctx: &Context) -> Result<bool> {
+        self.inner.collector.background_reads(ctx).await
+    }
+
+    /// MO-13: turns the workspace's background reads of host facts on or off. A setting of the workspace (FD-02),
+    /// audited there and refused by the read-only lock. Off, a terminal that connects and the dashboard read
+    /// nothing on their own; Refresh, the inventory and the admin reads still read when asked.
+    pub async fn set_background_reads(&self, ctx: &Context, on: bool) -> Result<bool> {
+        self.inner.store.read_only().check(Change::Settings)?;
+        if self.background_reads(ctx).await? == on {
+            return Ok(on);
+        }
+        self.inner.store.put_setting(ctx, BACKGROUND_READS_KEY, &on).await?;
+        let detail = if on {
+            "hosts' facts are read in the background, when a terminal connects and from the dashboard, at most once a day"
+        } else {
+            "hosts' facts are read only when asked (Refresh, the inventory), never in the background"
+        };
+        self.inner
+            .store
+            .append_audit(
+                ctx,
+                NewAuditEntry {
+                    event: "setting_changed",
+                    action: "Set background reads of host facts",
+                    tier: None,
+                    job_id: None,
+                    targets: &[],
+                    approval: None,
+                    result: None,
+                    detail: Some(detail),
+                },
+            )
+            .await?;
+        Ok(on)
     }
 
     /// MO-13: what was last read about the session, if anything. Makes no connection.

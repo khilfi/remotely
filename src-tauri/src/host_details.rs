@@ -42,6 +42,22 @@ pub async fn host_updates(state: State<'_, AppState>, session_id: Uuid) -> IpcRe
     Ok(core.host_details.updates(&core.ctx(), session_id).await?)
 }
 
+/// MO-13: whether the shown workspace reads its hosts' facts in the background (a terminal connecting, the
+/// dashboard).
+#[tauri::command]
+pub async fn host_background_reads(state: State<'_, AppState>) -> IpcResult<bool> {
+    let core = &state.core;
+    Ok(core.host_details.background_reads(&core.ctx()).await?)
+}
+
+/// MO-13: turns the shown workspace's background reads of host facts on or off. A setting, audited and refused by
+/// the read-only lock (unlike the reads themselves).
+#[tauri::command]
+pub async fn host_background_reads_set(state: State<'_, AppState>, on: bool) -> IpcResult<bool> {
+    let core = &state.core;
+    Ok(core.host_details.set_background_reads(&core.ctx(), on).await?)
+}
+
 /// The panel closed: Remotely's own connection to the session, if it made one, closes now.
 #[tauri::command]
 pub async fn host_details_release(state: State<'_, AppState>, session_id: Uuid) -> IpcResult<()> {

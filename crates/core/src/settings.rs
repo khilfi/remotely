@@ -21,6 +21,7 @@ use crate::containers::DOCKER_PATH_KEY;
 use crate::dashboard::{DashboardLayout, LAYOUT_KEY};
 use crate::domain::Context;
 use crate::error::{CoreError, Result};
+use crate::host_details::BACKGROUND_READS_KEY;
 use crate::metrics::guest::{POLL_KEY, WATCHED_KEY};
 use crate::metrics::history::{HistoryRetention, HISTORY_RETENTION_KEY};
 use crate::policy::PolicyRules;
@@ -69,14 +70,17 @@ pub const MACHINE_KEYS: [&str; 23] = [
 ];
 
 /// FD-02: each engagement's own settings: the dashboard's layout, the hosts it watches, and whether a High or
-/// Critical action on a Prod target needs a change ID (AP-08), and the file server's last choices (FD-09).
-pub const WORKSPACE_KEYS: [&str; 5] = [
+/// Critical action on a Prod target needs a change ID (AP-08), the file server's last choices (FD-09), and
+/// whether its hosts' facts are read in the background (MO-13).
+pub const WORKSPACE_KEYS: [&str; 6] = [
     LAYOUT_KEY,
     WATCHED_KEY,
     CHANGE_ID_KEY,
     FILE_SERVER_LAST_KEY,
     // SS-14 (G4): each session's terminal editor.
     HOST_EDITORS_KEY,
+    // MO-13: whether hosts' facts are read in the background, so a customer's SOC can have them off.
+    BACKGROUND_READS_KEY,
 ];
 
 /// Whether `key` is one of this PC's settings rather than an engagement's.
@@ -208,6 +212,14 @@ pub async fn repair_workspace(store: &Store, ctx: &Context) -> Result<Vec<&'stat
         ctx,
         HOST_EDITORS_KEY,
         "the sessions' terminal editors",
+        &mut reset,
+    )
+    .await?;
+    check::<bool>(
+        store,
+        ctx,
+        BACKGROUND_READS_KEY,
+        "background reads of host facts",
         &mut reset,
     )
     .await?;

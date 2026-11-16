@@ -44,7 +44,11 @@ test("the search finds a setting by its name, a word it covers or its group", ()
   // Every word must match.
   assert.deepEqual(ids("vmrun density"), []);
   // A group's name finds its sections.
-  assert.deepEqual(ids("dashboard"), ["dashboard", "history"]);
+  assert.deepEqual(ids("dashboard"), ["dashboard", "host-facts", "history"]);
+  // MO-13: the row a SOC's question leads to.
+  assert.ok(ids("edr").includes("host-facts"));
+  assert.ok(ids("background reads").includes("host-facts"));
+  assert.equal(sectionCard(settingsSection("host-facts")!), "dashboard");
   assert.deepEqual(ids("nothing-like-this"), []);
 });
 

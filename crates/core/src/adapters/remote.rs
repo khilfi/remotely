@@ -437,6 +437,18 @@ pub struct ShellHandle {
 /// How long the `hostname` beside a new shell may take.
 pub const HOSTNAME_WAIT: Duration = Duration::from_secs(5);
 
+/// What every script Remotely runs on its own to read a host starts with: a comment line naming the read,
+/// `# remotely:<name>`. The probes beside a new terminal ([`HOSTNAME_PROBE`], [`SHELL_PROBE`]), MO-13's
+/// facts, MO-02's poll, MO-14's and MO-16's admin reads, FD-05's ports and packages, and SS-14's editor and
+/// sftp-server probes all have one. It runs nothing and changes nothing the script does. An EDR shows it in
+/// the shell's command line, so a SOC can find Remotely's reads there and allow-list them (README "For SOC
+/// teams"). Nothing is hidden or disguised: the commands that run follow it in full. A script the user
+/// typed or chose never gets one: bulk runs, snippets, the Files page, the support bundle.
+pub const READ_MARKER: &str = "# remotely:";
+
+/// QL-03: the host's name for a new terminal's title, run on an exec channel beside its shell.
+pub const HOSTNAME_PROBE: &str = "# remotely:hostname\nhostname";
+
 /// SS-08: the shells whose prompt Remotely can hook to report the current folder (OSC 7).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -446,8 +458,12 @@ pub enum PromptShell {
 }
 
 /// SS-08: run by the login shell on an exec channel beside a new shell. bash and zsh print their
-/// name; sh prints an empty line; fish and tcsh fail on the syntax. No terminal, nothing typed.
-pub const SHELL_PROBE: &str = r#"printf '%s\n' "${BASH_VERSION:+bash}${ZSH_VERSION:+zsh}""#;
+/// name; sh prints an empty line; fish and tcsh fail on the syntax. No terminal, nothing typed, and no
+/// program started: `printf` is a builtin.
+pub const SHELL_PROBE: &str = concat!(
+    "# remotely:shell\n",
+    r#"printf '%s\n' "${BASH_VERSION:+bash}${ZSH_VERSION:+zsh}""#
+);
 
 /// SS-08: the shell [`SHELL_PROBE`] found, if it is one Remotely can hook.
 pub fn parse_shell_probe(stdout: &str, exit_code: Option<u32>) -> Option<PromptShell> {
@@ -599,8 +615,8 @@ pub struct RootOpened {
 /// run by `/bin/sh` (not the login shell, whose rc files and PATH the result would otherwise depend on): the first of
 /// the distributions' fixed places that is there (Debian and Ubuntu, RHEL and Fedora, Arch, Alpine, SUSE). Never the
 /// PATH, which the login user controls and what is found runs as root. Prints one absolute path, or nothing.
-pub const SFTP_SERVER_PROBE: &str =
-    "/bin/sh -c 'for p in /usr/lib/openssh/sftp-server /usr/libexec/openssh/sftp-server \
+pub const SFTP_SERVER_PROBE: &str = "# remotely:sftp-server\n\
+/bin/sh -c 'for p in /usr/lib/openssh/sftp-server /usr/libexec/openssh/sftp-server \
 /usr/lib/ssh/sftp-server /usr/libexec/sftp-server /usr/lib/sftp-server /usr/libexec/ssh/sftp-server; do \
 if [ -x \"$p\" ]; then printf \"%s\\n\" \"$p\"; exit 0; fi; done; exit 1'";
 
@@ -1992,7 +2008,7 @@ fn pump_pty(
             let mut hostname_tx = Some(hostname_tx);
             let hostname = tokio::time::timeout(
                 HOSTNAME_WAIT,
-                run_command(&handle, &shared, "hostname", None, &[], 1024),
+                run_command(&handle, &shared, HOSTNAME_PROBE, None, &[], 1024),
             );
             tokio::pin!(hostname);
             let mut shell_tx = Some(shell_tx);

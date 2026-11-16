@@ -463,8 +463,8 @@ crates/core/          remotely-core: all app logic
                       resolved alerts, checkpoint and VACUUM through when_idle, audited history_pruned), guest.rs (MO-02 SSH polling, kept connections,
                       backoff for unreachable hosts, login_guard parks and caps, GuestState::Paused and
                       GuestStatus.parked; MO-13 reads a host's facts on its kept connection when they are old; P8
-                      POLL_KEY: every 5, 15, 30 or 60 s), procfs.rs (one `grep` of the /proc files, `df` once a
-                      minute (DF_EVERY), and their parsers); windows.rs (MO-05 METRICS_SCRIPT, one CIM read a round in
+                      POLL_KEY: every 5, 15, 30 or 60 s), procfs.rs (`# remotely:metrics`, one `grep` of the /proc
+                      files, `df` once a minute (DF_EVERY), and their parsers); windows.rs (MO-05 METRICS_SCRIPT, one CIM read a round in
                       the PowerShell a watched WinRM host keeps open; idle and timestamp counters made CpuJiffies,
                       bytes made 512-byte sectors, so rates() treats it as a Linux reading); guest.rs read_windows and
                       connect_windows (login_guard's parks and caps); HostProcessSource reads no inventory with no VM process;
@@ -474,11 +474,19 @@ crates/core/          remotely-core: all app logic
                       workspace only; a round during a switch is dropped
     host_details/     MO-13, MO-14 (reads only: no bus, no audit, not stopped by the read-only lock): mod.rs
                       (SpecsCollector: a session's facts read when a terminal connects, on its own connection's exec
-                      channel, or by the dashboard; HostDetails: Refresh, admin reads and updates on a terminal's, the
+                      channel, or by the dashboard, each when they are over a day old (SpecsTuning; 10 min and 6 h
+                      before a SOC's EDR read every connect as someone exploring the host), and only while the
+                      workspace's BACKGROUND_READS_KEY (`hostDetails.backgroundReads`, on when unset; WORKSPACE_KEYS)
+                      allows: collect_if_older is the background path; set_background_reads audited, refused by the
+                      read-only lock; HostDetails: Refresh, admin reads and updates on a terminal's, the
                       dashboard's or its own kept connection; VM specs from the hypervisor's files; facts stored per
                       session and VM, migration 0014; G4: HostSpecs.editors, the host's terminal editors, kept across
-                      reads, stored_editors and keep_editors), linux.rs (SPECS_SCRIPT and its parsers: os-release, uname,
-                      lscpu or /proc/cpuinfo, meminfo, swaps, lsblk JSON or pairs, df, systemd-detect-virt), admin.rs
+                      reads, stored_editors and keep_editors), linux.rs (SPECS_SCRIPT, four programs: one `grep -s` of
+                      FILES (os-release, redhat-release, the kernel's hostname, cpuinfo less its flag lists, cpufreq's
+                      top speed, meminfo, swaps, uptime, DMI vendor and product, clock sources, /sys/hypervisor,
+                      systemd's container file), `uname -srm`, lsblk JSON or pairs, df; never cat, hostname, lscpu or
+                      systemd-detect-virt again (a test counts the programs); `virtualization` names what
+                      systemd-detect-virt would, in its order; parse_cpuinfo names ARM CPUs as lscpu does), admin.rs
                       (ADMIN_SCRIPT and UPDATES_SCRIPT: systemctl or rc-status/service, ss or netstat, who, last, ps,
                       apt or dnf; every command checked read-only by `classify_script` in tests; FD-05 PORTS_SCRIPT),
                       networks.rs (QL-21 every VM's adapters for the map from the stored hardware; only VMs never read
@@ -1271,7 +1279,9 @@ src/                  React + TypeScript UI
                       (hooks/use-export-run.ts, with the count of hosts done); FD-02
                       WorkspaceSwitcher (the top bar's menu, the switch, edit and manage dialogs; the window loads again
                       after a switch), UnassignedVmsSheet; AP-08 ChangeIdSetting (ChangeIdCard.tsx, a row of the
-                      approval rules' card) and the approval dialog's one reason or change ID field; UX-10 Settings:
+                      approval rules' card) and the approval dialog's one reason or change ID field; MO-13
+                      HostFactsSetting (a row of the dashboard polling card, `host-facts`: the workspace's background
+                      reads of host facts, `host_background_reads(_set)`); UX-10 Settings:
                       SaveStatus (useSaveStatus, SaveStatus: "Saved" with Undo in a card's header; NumberSetting saves
                       on Enter or blur), ToolPathsCard (every tool path in one table, Change opens a dialog; qemu-img
                       too), ApprovalRulesCard (the summary, the change ID rule, PolicyRulesEditor under Advanced with
@@ -2737,8 +2747,9 @@ seen on a real VM yet (the PR lists the checks).
   (`with_containers(engine, Fixture::sample())`, `without_docker_group()` for sudo; `tests/containers_ssh.rs`).
   `Setup::with_ssh()` uses `CliEngines::without_this_pc()`, so no test ever finds or runs this PC's Docker Desktop.
 - Host details (MO-13, MO-14): never read a real host. The test server's `with_host_facts(HostFixture::ubuntu())` (or
-  `rhel()`: no lscpu, an lsblk without JSON, dnf) answers the specs, admin and updates scripts from real hosts'
-  samples, and its toy shell knows `type`, `$?` and `NAME=value` before a command (`tests/host_details.rs`). VM
+  `rhel()`: KVM, one socket, an lsblk without JSON, dnf) answers the specs, admin and updates scripts from real hosts'
+  samples (its files for MO-13's `grep`; it has no lscpu or systemd-detect-virt), and its toy shell knows `type`, `$?`,
+  `#` comments and `NAME=value` before a command (`tests/host_details.rs`). VM
   hardware tests use `FakeVmware::with_hardware` or disk files made at run time in the system temp folder. Every
   command the scripts use must classify as read-only under the default rules (the tests check each one): naming
   `reboot` or `shutdown` as a word, even as `last reboot`, trips the dangerous-command rule.
@@ -2800,6 +2811,12 @@ seen on a real VM yet (the PR lists the checks).
   data never lands in a Git working tree. Free text kept in the journal or the audit log goes through
   `export::redact_secrets` (the audit store and `Command::for_journal` already do it).
 - Commit messages start with the requirement ID where one applies, e.g. `VM-02: bulk suspend and resume`.
+- Routine reads on hosts (a script Remotely runs on its own, not one the user typed or chose): its first line is
+  `adapters::remote::READ_MARKER` and its name (`# remotely:<name>\n`); it starts as few programs as it can (one
+  `grep` of the files, not `cat`s and discovery tools: a SOC's EDR flagged MO-13's eleven as someone exploring the
+  host); it is listed in README "For SOC teams"; and it gets a row in `tests/host_details.rs`
+  `every_routine_read_names_itself_only_reads_and_is_listed_for_soc_teams`. Fewer and clearer, never hidden: no
+  renamed `argv[0]`, encoded scripts, or moving a read to a channel the host's process log doesn't see to dodge an EDR.
 
 ### UI rules (0.6.0, UX-01 to UX-13; `docs/plan-0.6.md`)
 
