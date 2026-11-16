@@ -486,7 +486,10 @@ crates/core/          remotely-core: all app logic
                       top speed, meminfo, swaps, uptime, DMI vendor and product, clock sources, /sys/hypervisor,
                       systemd's container file), `uname -srm`, lsblk JSON or pairs, df; never cat, hostname, lscpu or
                       systemd-detect-virt again (a test counts the programs); `virtualization` names what
-                      systemd-detect-virt would, in its order; parse_cpuinfo names ARM CPUs as lscpu does), admin.rs
+                      systemd-detect-virt would, in its order; parse_cpuinfo names ARM CPUs as lscpu does. Lost
+                      against lscpu and systemd-detect-virt, knowingly: ARM model names beyond ARM_PARTS' cores, ARM
+                      sockets and cores (lscpu's clusters), and a container only `docker` reported (no systemd
+                      inside, so no /run/systemd/container). Every part still classify_script read-only), admin.rs
                       (ADMIN_SCRIPT and UPDATES_SCRIPT: systemctl or rc-status/service, ss or netstat, who, last, ps,
                       apt or dnf; every command checked read-only by `classify_script` in tests; FD-05 PORTS_SCRIPT),
                       networks.rs (QL-21 every VM's adapters for the map from the stored hardware; only VMs never read

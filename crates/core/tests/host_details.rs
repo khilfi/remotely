@@ -435,7 +435,8 @@ fn every_routine_read_names_itself_only_reads_and_is_listed_for_soc_teams() {
     use remotely_core::metrics::procfs;
     use remotely_core::terminal::editor::EDITOR_PROBE;
     let policy = PolicyEngine::new(PolicyRules::default()).unwrap();
-    let readme = include_str!("../../../README.md");
+    // A checkout with Windows line ends still quotes the scripts as they are.
+    let readme = include_str!("../../../README.md").replace("\r\n", "\n");
     // The SS-14 probes run `/bin/sh -c '...'`, which the policy engine doesn't look into: builtins only.
     for (name, script, rated) in [
         ("hostname", HOSTNAME_PROBE, true),
@@ -460,6 +461,11 @@ fn every_routine_read_names_itself_only_reads_and_is_listed_for_soc_teams() {
         assert!(
             readme.contains(&format!("`{marker}`")),
             "README's \"For SOC teams\" lists {marker}"
+        );
+        // A SOC allow-lists the exact command line, so the README quotes it as the shell gets it.
+        assert!(
+            readme.contains(&format!("```sh\n{script}\n```")),
+            "README's \"For SOC teams\" quotes {marker} exactly:\n{script}"
         );
     }
 }

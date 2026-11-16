@@ -764,6 +764,53 @@ async fn golden_images_and_their_versions_are_per_workspace() {
 }
 
 #[tokio::test]
+async fn background_reads_of_host_facts_are_set_per_workspace_and_audited_in_it() {
+    use remotely_core::host_details::BACKGROUND_READS_KEY;
+    const SET: &str = "Set background reads of host facts";
+    assert!(remotely_core::settings::WORKSPACE_KEYS.contains(&BACKGROUND_READS_KEY));
+    assert!(!remotely_core::settings::is_machine_key(BACKGROUND_READS_KEY));
+    let core = Setup::new(FakeVmware::default()).build().await;
+    let acme = core.ctx();
+    assert!(
+        core.host_details.background_reads(&acme).await.unwrap(),
+        "on by default"
+    );
+    assert!(!core.host_details.set_background_reads(&acme, false).await.unwrap());
+
+    let globex = create(&core, "Globex").await;
+    switch(&core, &globex).await;
+    let b = core.ctx();
+    assert!(
+        core.host_details.background_reads(&b).await.unwrap(),
+        "another workspace keeps its own, on"
+    );
+    // Setting what is set already changes and audits nothing.
+    assert!(core.host_details.set_background_reads(&b, true).await.unwrap());
+    assert!(!audit_of(&core, &b).await.iter().any(|e| e.action == SET));
+
+    let home = core
+        .workspaces
+        .list()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|w| !w.current)
+        .unwrap();
+    switch(&core, &home).await;
+    assert!(
+        !core.host_details.background_reads(&acme).await.unwrap(),
+        "still off where it was turned off"
+    );
+    let set: Vec<AuditEntry> = audit_of(&core, &acme)
+        .await
+        .into_iter()
+        .filter(|e| e.action == SET)
+        .collect();
+    assert_eq!(set.len(), 1, "audited in its own workspace");
+    assert_eq!(set[0].event, "setting_changed");
+}
+
+#[tokio::test]
 async fn file_bookmarks_are_per_workspace() {
     let core = Setup::new(FakeVmware::default()).build().await;
     let acme = core.ctx();

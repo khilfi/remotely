@@ -351,6 +351,12 @@ function SystemTab({ sessionId, thresholds }: { sessionId: string; thresholds: T
   const [read, setRead] = useState<{ for: string; value: SessionSpecs | null } | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // MO-13: false when this workspace reads no facts in the background, so they come only from Refresh.
+  const [background, setBackground] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    api.hostBackgroundReads().then(setBackground, () => setBackground(null));
+  }, []);
 
   useEffect(() => {
     let stale = false;
@@ -388,6 +394,7 @@ function SystemTab({ sessionId, thresholds }: { sessionId: string; thresholds: T
         <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
           <span>
             As of {formatWhen(current.collectedAt)}, read {collectedByText(current.collectedBy)}
+            {background === false && ". Background reads are off in this workspace: only Refresh reads them again"}
           </span>
           <span className="ml-auto">{refreshButton}</span>
         </div>
@@ -414,7 +421,9 @@ function SystemTab({ sessionId, thresholds }: { sessionId: string; thresholds: T
             </EmptyMedia>
             <EmptyTitle>Not read yet</EmptyTitle>
             <EmptyDescription>
-              Read when a terminal to it connects; Refresh reads them now, logging in once if no connection is open.
+              {background === false
+                ? "Background reads are off in this workspace, so only Refresh reads them: now, logging in once if no connection is open."
+                : "Read when a terminal to it connects, at most once a day; Refresh reads them now, logging in once if no connection is open."}
             </EmptyDescription>
           </EmptyHeader>
           <EmptyContent>{refreshButton}</EmptyContent>
