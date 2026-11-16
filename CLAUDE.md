@@ -2591,6 +2591,13 @@ seen on a real VM yet (the PR lists the checks).
      waited at "It looks like you started an upgrade and booted from installation media" (screenshot, kept locally).
      The run was stopped by hand; it would have run to its time limit. See "A hang in the middle of Setup's first
      stage" above.
+  7. **Windows Server 2022 and 2025 on Workstation, one linked clone each, with the C# command start (16 Nov 2026,
+     at 817a2ab, rebased on main): passed.** Checks 1 to 5 ran the first clone script (ProcessStartInfo); this one ran
+     the final one, which compiles its starter with Add-Type as SYSTEM in specialize. Each clone's COM1: `started`,
+     `seed D:\autounattend.xml`, `name <clone>`, `time-zone`, then the starter's own `cmd /c (echo remotely-stage
+     specialize %TIME%>COM1) 2>nul & exit 0` line (written by the command the script started through `CreateProcessW`),
+     `ran 0`, `handed`, and its own `remotely-winrm` line about 2 minutes after power-on. Each clone: its own name,
+     SID, WinRM certificate and one-time password; `UnattendFile` and the script gone after the sign-in.
   - On every running VirtualBox VM seen (four Windows clones, the Ubuntu clone) vCPU 0's `cNsTotal` (VBoxManage prints
     `<U64 val="..." unit="ns" name="/TM/CPU/00/cNsTotal"/>`) grew with the wall clock, 15 s every 15 s; on each hung
     VM it stood still for minutes, and after a reset it jumped by the time it had stood still. 4 of the 8 VirtualBox
