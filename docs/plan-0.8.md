@@ -178,6 +178,34 @@ G1, G2, G5 and the spikes can start at once. G3 and G4 both touch the file panel
   - Hand checks: Windows Server 2025 and 2022 on Workstation 26 and on VirtualBox 7.2, two clones each, and an Ubuntu
     clone on VirtualBox. CLAUDE.md "Golden image builds (G7)" has the details.
 
+## After 0.8.1: SSH sessions from VMs (QL-29)
+
+Asked for after 0.8.1 (released 16 Nov 2026), after ten Ubuntu VMs deployed unattended on a bridged Workstation
+network got no SSH session: without VMware Tools nothing reported their addresses. Once `open-vm-tools` was in
+(VM-15's change), the addresses showed, but their sessions could only be made by hand, and QL-01's auto-linking links
+only sessions that exist.
+
+- **Create SSH session** for a running VM with no SSH session linked: in the VM's details (Overview, Sessions), in its
+  Ctrl+K palette entry, and for several on the VMs page's selection (More, Organise). One VM opens the session editor
+  filled in; several show a preview (each VM's session and what it lacks, or why it gets none), saved together.
+- What a session is: the VM's display name, the guest address the hypervisor reports, port 22, no folder and no jump
+  host, the VM's environment and tags, linked to the VM by hand (QL-01). For a VM Remotely deployed, the user and key
+  of its deploy: the newest deploy or stack deploy in the workspace's job journal whose VM folder holds the VM's `.vmx`
+  or `.vbox`, its user picked as the deploy's own session picks it (`deploy::runner::session_user`: the install
+  config's user while the config is still the approved one, the first-boot user, the unattended user, the image's
+  default user), its key unless the vault no longer has it. Any other VM leaves the user and login to fill in.
+- None for a VM that has an SSH session linked, isn't running, reports no address (the message says to install
+  `open-vm-tools` or VMware Tools on Workstation, the Guest Additions on VirtualBox), or is only on VirtualBox's NAT.
+- The app's own data: no tier, each session audited as any new one, refused by the read-only lock (`Change::Sessions`).
+  Rule 8: VMs are read in the shown workspace and checked with `Store::require_vm_here`; the save takes only VM ids
+  from the window and works each session out again.
+- **Not built: finishing a deploy's session later by itself.** A deploy that ended with "no session: its address isn't
+  known" would keep a record, and Remotely would make the session when the inventory first saw the address. It would
+  need a migration, a hook in every inventory refresh (hidden workspaces too), notifications from the core, and the
+  record removed on a VM's delete, a link by hand and a workspace release. With `open-vm-tools` in the Linux starters
+  new deploys report their address in time, and Create SSH sessions covers the VMs already made in a few clicks, so the
+  deploy's note now points to it instead.
+
 ## Development safety for 0.8.0
 
 - No test boots a real ISO or installs a real system: deploys run on `FakeVmware` and `FakeVirtualBox`, and seeds and

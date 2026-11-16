@@ -55,6 +55,7 @@ import { Command as CommandRoot } from "@/components/ui/command";
 import { StateBadge, TierBadge } from "@/components/Badges";
 import { glossaryEntry, isTermKey, type TermKey } from "@/lib/glossary";
 import { toolsName } from "@/lib/hypervisors";
+import { linkedSshSessions } from "@/lib/vm-sessions";
 import type { AppLink } from "@/lib/links";
 import type { ToolTarget } from "@/lib/toolbox";
 import { TOOLBOX_ROW_ITEMS } from "@/components/toolbox/ToolboxMenu";
@@ -108,6 +109,8 @@ interface Props {
   onShowMetrics: (key: string) => void;
   /** QL-14: the VM's details on the Virtual machines page, on a tab (VM-24: with its rename dialog). */
   onOpenVm: (vmxPath: string, view: VmView, rename?: boolean) => void;
+  /** QL-29: a VM without an SSH session gets one, filled in from the VM (by its id). */
+  onCreateSession?: (vmId: string) => void;
   /** VM-24: the hypervisor's own window on the VM. */
   onOpenConsole: (vmxPath: string) => void;
   /** R10: opens what a search result is about (App.tsx's openLink). */
@@ -192,6 +195,7 @@ export function CommandPalette({
   onConnect,
   onShowMetrics,
   onOpenVm,
+  onCreateSession,
   onOpenConsole,
   onOpenLink,
 }: Props) {
@@ -564,6 +568,18 @@ export function CommandPalette({
                       <SquareTerminalIcon /> Open a terminal ({s.name})
                     </CommandItem>
                   ))}
+                {/* QL-29: only a running VM reports its address; one without says what to install. */}
+                {onCreateSession && vm.powerState === "running" && linkedSshSessions(vm.id, sessions).length === 0 && (
+                  <CommandItem
+                    value="create ssh session new connect terminal"
+                    onSelect={() => {
+                      close();
+                      onCreateSession(vm.id);
+                    }}
+                  >
+                    <SquareTerminalIcon /> Create SSH session…
+                  </CommandItem>
+                )}
               </CommandGroup>
               <CommandSeparator />
               {toolboxGroup({ kind: "vm", vmKey: vm.vmxPath, label: vm.displayName })}

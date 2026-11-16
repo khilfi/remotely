@@ -597,6 +597,16 @@ crates/core/          remotely-core: all app logic
                       P3 a name looked up once at a time and cached, lookups done by the deadline kept and the rest
                       finished in the background, sessions behind a jump host never looked up; A4 never linked
                       behind a jump host or across environment labels (not_linkable)
+    vm_sessions.rs    QL-29 an SSH session made from a VM with none linked (Core::vm_session_drafts, a read, and
+                      create_vm_sessions, the bulk save through SessionLibrary::create, each audited and linked by
+                      hand; the read-only lock; only VM ids from the window): the display name, the guest address,
+                      port 22, no folder or jump host (jump_direct), the VM's environment and tags; a deploy's user
+                      and key from the newest deploy or stack deploy job whose spec's vm_folder holds the VM's .vmx or
+                      .vbox (Store::deploy_commands), the user by deploy::runner::session_user (the install config's
+                      while its fingerprint is the approved one, never unattend's), a key the vault no longer lists
+                      left out; refused with the reason when an SSH session is linked, not running, no guest address
+                      (open-vm-tools or VMware Tools, the Guest Additions), or only VirtualBox NAT (stored adapters,
+                      else the deploy's network); MAKE_IT_LATER, the deploy's note when it couldn't make one
     vm_settings/      VM-11, VM-12, VM-15, VM-16, VM-23, VM-24: ops.rs the typed edits (Command::VmConfig, VmDevice,
                       VmDisk, VmLifecycle), their checks and summaries; vmware.rs each edit as changes to a VmxFile, new
                       disk slots and vdiskmanager arguments, what deleteVM deletes; virtualbox.rs each edit as VBoxManage
@@ -1102,8 +1112,10 @@ crates/core/          remotely-core: all app logic
                       hypervisors (copies by FakeDiskTools into VM folders in the temp folder, the refusals, Prod) and
                       CV-04 a System_Disk and Data_Disk pair imported as one VM (SATA, firmware from the partition
                       table, the seed read back with read_joliet); workspaces.rs: FD-02 isolation of every service and
-                      switching; change_ids.rs: AP-08; support_bundle.rs: FD-04 on the test SSH server, zips in the
-                      temp folder; reports.rs: FD-05, BX-12, FD-08 on the test SSH server's Ubuntu and RHEL hosts and
+                      switching; change_ids.rs: AP-08; vm_sessions.rs: QL-29 (a deploy's user and key, refusals, the
+                      bulk save, the lock, another workspace's VM); support_bundle.rs: FD-04 on the test SSH server,
+                      zips in the temp folder; reports.rs: FD-05, BX-12, FD-08 on the test SSH server's Ubuntu and RHEL
+                      hosts and
                       the fakes, files in the temp folder read back (the xlsx's XML, both Ansible formats, the zip's
                       members, the page's CSP and attributes, a secret in a note, an output, a name and a tag found in
                       none); toolbox.rs: FD-09 on FakeNetworkTools, a TLS server with an
@@ -1302,7 +1314,10 @@ src/                  React + TypeScript UI
                       "Add a check" opens a `checks` link; 0.7.0 F5: NoteSheet (FD-06, hosted once by App and opened by
                       a `note` AppLink; the core's HTML, the web link confirm, Send to terminal), StarButton (QL-26),
                       TrashCard (QL-27, Settings › Privacy and data), BulkEditDialog (QL-28, the Sessions page's selection
-                      bar, which also has FD-04's Support bundle for the SSH sessions picked); SS-14, BX-10 (0.8.0 G3)
+                      bar, which also has FD-04's Support bundle for the SSH sessions picked); QL-29 VmSessionsDialog
+                      (hosted by App: NewVmSessionDialog, SessionDialog's `draft` for one VM, from VmSessionLinks'
+                      Create SSH session… and the palette's VM entry; VmSessionsDialog the preview for the selection's
+                      More › Organise; lib/vm-sessions.ts); SS-14, BX-10 (0.8.0 G3)
                       files/: FileTable (both panes' table: folders first, sort, click with Ctrl and Shift, a row menu, a
                       pointer drag followed by window listeners, host folder rows `data-files-folder` drop targets),
                       LocalPane (this PC by listing), HostPane (a host tab on an open terminal's connection: G2's changes,

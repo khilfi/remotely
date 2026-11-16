@@ -1349,8 +1349,11 @@ impl Deployer {
                     out.push("no session: on VirtualBox's NAT the guest can't be reached from this PC".into())
                 }
                 (None, _) => out.push(match spec.unknown_address_hint() {
-                    Some(_) => "no session: its address isn't known (on a bridged network only VMware Tools in the guest tell it)".into(),
-                    None => "no session: its address isn't known".into(),
+                    Some(_) => format!(
+                        "no session: its address isn't known (on a bridged network only VMware Tools in the guest tell it); {}",
+                        crate::vm_sessions::MAKE_IT_LATER
+                    ),
+                    None => format!("no session: its address isn't known; {}", crate::vm_sessions::MAKE_IT_LATER),
                 }),
                 (Some((host, port)), None) if m.flavor.windows() => {
                     out.push(self.winrm_session(ctx, spec, vm, key, m, host, *port).await);

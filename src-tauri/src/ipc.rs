@@ -34,6 +34,7 @@ use remotely_core::vault::{
     MAX_SECRET_BYTES,
 };
 use remotely_core::vm_links::AmbiguousLink;
+use remotely_core::vm_sessions::{VmSessionDraft, VmSessionMade};
 use remotely_core::{AuditExport, Core, CoreError};
 use serde::Serialize;
 use tauri::{Manager, State, WebviewWindow};
@@ -898,6 +899,20 @@ pub async fn session_link_vm(
 ) -> IpcResult<SessionRecord> {
     let core = &state.core;
     Ok(core.links.link(&core.ctx(), session_id, vm_id).await?)
+}
+
+/// QL-29: each VM's SSH session as it would be made from the VM (its name, guest address, labels, and a deploy's
+/// user and key), or why none can be. A read.
+#[tauri::command]
+pub async fn vm_session_drafts(state: State<'_, AppState>, vm_ids: Vec<String>) -> IpcResult<Vec<VmSessionDraft>> {
+    Ok(state.core.vm_session_drafts(&vm_ids).await?)
+}
+
+/// QL-29: saves the session of each VM that gets one, each audited and linked to its VM by hand. The core works
+/// every draft out again from the ids.
+#[tauri::command]
+pub async fn vm_sessions_create(state: State<'_, AppState>, vm_ids: Vec<String>) -> IpcResult<Vec<VmSessionMade>> {
+    Ok(state.core.create_vm_sessions(&vm_ids).await?)
 }
 
 /// QL-01: keeps an automatic link, so auto-linking never changes it. Audited.

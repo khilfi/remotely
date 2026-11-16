@@ -125,6 +125,41 @@ export interface LinkChange {
   vmName: string;
 }
 
+/** QL-29: the fields a session made from a VM fills in; the rest are a new session's defaults. */
+export interface SessionDraft {
+  name: string;
+  host: string;
+  port: number;
+  /** null: not known (the terminal asks when it connects). */
+  username: string | null;
+  /** The deploy's key, else a password asked when connecting. */
+  auth: SessionAuth;
+  environment: Environment;
+  tags: string[];
+  /** The VM, linked by hand once saved. */
+  vmId: string;
+  /** How the deploy that made the VM is described ("launch template 'web'"), when one did. */
+  deploy: string | null;
+}
+
+/** QL-29: one VM's session as it would be made, or why none can be. */
+export interface VmSessionDraft {
+  vmId: string;
+  vmName: string;
+  session: SessionDraft | null;
+  refused: string | null;
+  notes: string[];
+}
+
+/** QL-29: what saving the sessions of several VMs did for one. */
+export interface VmSessionMade {
+  vmId: string;
+  vmName: string;
+  sessionId: string | null;
+  sessionName: string | null;
+  error: string | null;
+}
+
 /** QL-01: a session whose address several VMs have; the user picks one. */
 export interface AmbiguousLink {
   sessionId: string;
@@ -3885,6 +3920,10 @@ export const api = {
     invoke<SessionRecord>("session_link_vm", { sessionId, vmId }),
   /** QL-01: keeps an automatic link, so auto-linking never changes it. Audited. */
   confirmSessionVmLink: (sessionId: string) => invoke<SessionRecord>("session_confirm_vm_link", { sessionId }),
+  /** QL-29: each VM's SSH session as it would be made from the VM, or why none can be. A read. */
+  vmSessionDrafts: (vmIds: string[]) => invoke<VmSessionDraft[]>("vm_session_drafts", { vmIds }),
+  /** QL-29: saves the session of each VM that gets one (audited, linked by hand); the core works them out again. */
+  createVmSessions: (vmIds: string[]) => invoke<VmSessionMade[]>("vm_sessions_create", { vmIds }),
   /** QL-01: sessions several VMs match, left for the user to pick. */
   ambiguousVmLinks: () => invoke<AmbiguousLink[]>("vm_links_ambiguous"),
   /**

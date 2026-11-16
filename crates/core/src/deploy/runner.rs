@@ -250,6 +250,27 @@ fn default_user(spec: &DeploySpec) -> Option<String> {
     }
 }
 
+/// The SSH session's user for a VM the deploy made: the install config's user (`install_user`, from its answer
+/// file), else the first-boot user, the unattended install's, then the image's default user. QL-29 picks it the
+/// same way for a session made from the VM later ([`crate::vm_sessions`]).
+pub(crate) fn session_user(spec: &DeploySpec, install_user: Option<String>) -> Option<String> {
+    install_user
+        .or_else(|| spec.first_boot.as_ref().and_then(|f| f.user.clone()))
+        .or_else(|| spec.unattended.as_ref().map(|u| u.user.clone()))
+        .or_else(|| default_user(spec))
+}
+
+/// The SSH session's login for a VM the deploy made: the deploy's key, else a password asked when connecting.
+pub(crate) fn session_auth(spec: &DeploySpec) -> SessionAuth {
+    match spec.ssh_key_id {
+        Some(key_id) => SessionAuth::Key {
+            key_id: Some(key_id),
+            passphrase_id: None,
+        },
+        None => SessionAuth::Password { password_id: None },
+    }
+}
+
 /// The deploy's folder for the VM, made by this step: it must not be there yet.
 async fn make_folder(folder: &Path, made: &mut Made) -> Result<()> {
     if let Some(parent) = folder.parent() {
@@ -1344,15 +1365,17 @@ impl Deployer {
                 None => notes.push(match spec.unknown_address_hint() {
                     // VM-15: a bridged Workstation guest without open-vm-tools.
                     Some(hint) => format!(
-                        "no IP within {} minutes{}: {hint}; make its session once it shows",
+                        "no IP within {} minutes{}: {hint}; {}",
                         spec.ip_wait_secs.div_ceil(60),
                         if reset { " of its last reset" } else { "" },
+                        crate::vm_sessions::MAKE_IT_LATER,
                     ),
                     None => format!(
-                        "no IP within {} minutes{} ({} report it): make its session once it shows",
+                        "no IP within {} minutes{} ({} report it): {}",
                         spec.ip_wait_secs.div_ceil(60),
                         if reset { " of its last reset" } else { "" },
-                        spec.hypervisor.tools_name()
+                        spec.hypervisor.tools_name(),
+                        crate::vm_sessions::MAKE_IT_LATER,
                     ),
                 }),
             }
@@ -1472,24 +1495,13 @@ impl Deployer {
             None
         };
         let linked = vm_id.is_some();
-        let auth = match spec.ssh_key_id {
-            Some(key_id) => SessionAuth::Key {
-                key_id: Some(key_id),
-                passphrase_id: None,
-            },
-            None => SessionAuth::Password { password_id: None },
-        };
-        let username = user
-            .or_else(|| spec.first_boot.as_ref().and_then(|f| f.user.clone()))
-            .or_else(|| spec.unattended.as_ref().map(|u| u.user.clone()))
-            .or_else(|| default_user(spec));
         let input = SessionInput {
             name: vm.name.clone(),
             folder_id: None,
             host: ip.to_owned(),
             port: 22,
-            username,
-            auth,
+            username: session_user(spec, user),
+            auth: session_auth(spec),
             jump_session_id: None,
             // The VM is on this PC's own network: no jump host.
             jump_direct: true,
@@ -1710,4 +1722,34 @@ pub async fn clean_vbox_unattended(
         }
     }
     left
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::deploy::spec::tests::{cloud, plan};
+    use crate::deploy::spec::{DeployOrigin, FirstBootSpec};
+
+    #[test]
+    fn a_sessions_user_is_the_install_configs_then_the_first_boots_then_the_images() {
+        // QL-29 picks the user of a session made from a VM later with these too.
+        let mut spec = DeploySpec::from_plan(
+            &plan(cloud(), "ubuntu", Hypervisor::Vmware, 1),
+            DeployOrigin::Custom { name: "w".into() },
+            r"C:\VMs".into(),
+            None,
+        );
+        spec.first_boot = None;
+        assert_eq!(session_user(&spec, None).as_deref(), Some("ubuntu"));
+        spec.first_boot = Some(FirstBootSpec {
+            user: Some("alice".into()),
+            public_key: None,
+            packages: vec![],
+            imported: false,
+        });
+        assert_eq!(session_user(&spec, None).as_deref(), Some("alice"));
+        assert_eq!(session_user(&spec, Some("bob".into())).as_deref(), Some("bob"));
+        spec.ssh_key_id = None;
+        assert_eq!(session_auth(&spec), SessionAuth::Password { password_id: None });
+    }
 }

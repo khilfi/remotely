@@ -108,6 +108,7 @@ import { AnsibleExportDialog } from "@/components/AnsibleExportDialog";
 import { HandoverPackDialog } from "@/components/HandoverPackDialog";
 import { InventoryExportDialog } from "@/components/InventoryExportDialog";
 import { VmImportDialog } from "@/components/VmImportDialog";
+import { NewVmSessionDialog, VmSessionsDialog } from "@/components/VmSessionsDialog";
 import { CommandPalette, type PaletteAction } from "@/components/CommandPalette";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { ReauthDialog } from "@/components/ReauthDialog";
@@ -153,6 +154,7 @@ import {
   type SubmitOutcome,
   type UpdateCheck,
   type VaultInfo,
+  type VmSessionDraft,
 } from "@/lib/api";
 import { shouldPingActivity } from "@/lib/reauth";
 import { useTheme } from "@/lib/theme";
@@ -196,6 +198,7 @@ import {
   type SettingsChange,
 } from "@/lib/job-events";
 import type { VmView } from "@/lib/vm-snapshots";
+import { sentence } from "@/lib/vm-sessions";
 import type { ScheduleAsk } from "@/components/VmSchedulesTab";
 import { WorkspaceSwitcher } from "@/components/WorkspaceSwitcher";
 
@@ -381,6 +384,10 @@ export default function App() {
   const [dashboardFocus, setDashboardFocus] = useState<{ key: string; n: number } | null>(null);
   // Bumped when the palette refreshed the VM list.
   const [inventoryVersion, setInventoryVersion] = useState(0);
+  // QL-29: SSH sessions made from VMs: one VM's draft in the session editor, or several VMs' preview.
+  const [vmSessionDraft, setVmSessionDraft] = useState<VmSessionDraft | null>(null);
+  const [vmSessionsFor, setVmSessionsFor] = useState<string[] | null>(null);
+  const [vmSessionsMade, setVmSessionsMade] = useState(0);
   const { resolved, followWindows, setDark, setFollowWindows } = useTheme();
   // FD-03: presenting, the read-only lock (QL-08: the update banner's Install says why it is off).
   const presentation = usePresentation();
@@ -393,6 +400,26 @@ export default function App() {
     setVmRequest((prev) => ({ vmxPaths, view, rename, n: (prev?.n ?? 0) + 1 }));
     setPage("vms");
   }, []);
+
+  /** QL-29: SSH sessions for VMs without one: one VM opens the editor filled in, several the preview. */
+  const createVmSessions = useCallback((vmIds: string[]) => {
+    if (vmIds.length !== 1) {
+      setVmSessionsFor(vmIds);
+      return;
+    }
+    api.vmSessionDrafts(vmIds).then(
+      ([draft]) => {
+        if (draft?.session) setVmSessionDraft(draft);
+        else
+          toast.error(`No SSH session for ${draft?.vmName ?? "this VM"}`, {
+            description: sentence(draft?.refused ?? ""),
+          });
+      },
+      (err: unknown) => toast.error(errorMessage(err)),
+    );
+  }, []);
+  const closeVmSession = useCallback(() => setVmSessionDraft(null), []);
+  const vmSessionsSaved = useCallback(() => setVmSessionsMade((n) => n + 1), []);
 
   /** VM-11, VM-16: the VM page's host networks or waste finder. */
   // FD-02: a switch refused while jobs run offers Activity.
@@ -1304,6 +1331,8 @@ export default function App() {
                   request={vmRequest}
                   refreshKey={vmJobs + vmSettings + inventoryVersion}
                   onSchedules={openSchedules}
+                  onCreateSessions={createVmSessions}
+                  sessionsKey={vmSessionsMade}
                 />
               </ErrorBoundary>
             </section>
@@ -1521,6 +1550,7 @@ export default function App() {
           go({ page: "dashboard", tab: "metrics" });
         }}
         onOpenVm={(vmxPath, view, rename) => openVms([vmxPath], view, rename)}
+        onCreateSession={(vmId) => createVmSessions([vmId])}
         onOpenLink={openLink}
         onOpenConsole={(vmxPath) =>
           void api.vmOpenConsole(vmxPath).then(
@@ -1530,6 +1560,22 @@ export default function App() {
         }
       />
       <ReauthDialog />
+      {vmSessionDraft && (
+        <NewVmSessionDialog
+          key={vmSessionDraft.vmId}
+          vault={vault}
+          onVaultChanged={setVault}
+          draft={vmSessionDraft}
+          onSaved={(saved) => {
+            toast.success(`Created '${saved.name}', linked to ${vmSessionDraft.vmName}`);
+            vmSessionsSaved();
+          }}
+          onClose={closeVmSession}
+        />
+      )}
+      {vmSessionsFor && (
+        <VmSessionsDialog vmIds={vmSessionsFor} onSaved={vmSessionsSaved} onClose={() => setVmSessionsFor(null)} />
+      )}
       {noteTarget && (
         <NoteSheet
           key={`${noteTarget.kind}:${noteTarget.key}`}

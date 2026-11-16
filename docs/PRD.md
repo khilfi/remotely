@@ -177,6 +177,7 @@ Notes, stars and recents, the trash and bulk edit (0.7.0, `docs/plan-0.7.md` "Ap
 | Delete a session, favourite command, size, image, launch template, stack or install config (it moves to the trash); restore one, delete one for good, or empty the trash (QL-27) | No tier; audited, refused by the read-only lock; a restored session that would send a vault password somewhere it didn't go before asks for the vault password again (AP-06) |
 | The trash's daily purge of items deleted more than 30 days ago | No tier; audited when it removed something; the read-only lock doesn't stop it |
 | Bulk edit sessions: folder, port, user, login, jump host, environment, tags (QL-28) | No tier; one audit entry naming every session, refused by the read-only lock; asks for the vault password once when a login would send one somewhere new (AP-06) |
+| Create SSH sessions from VMs, one or several (QL-29, after 0.8.1, `docs/plan-0.8.md` "After 0.8.1") | No tier; each session audited as any new one and linked to its VM by hand, refused by the read-only lock |
 | Star a session, VM or command; the items opened last (QL-26) | Not audited, not locked (like the notification centre) |
 
 Install configs (0.8.0, VM-28, `docs/plan-0.8.md` "Approval tiers"). An install config is an answer file (Ubuntu autoinstall, Kickstart, Debian preseed, cloud-init user data, Windows unattend) in the catalogue; it never holds a secret, and changing one touches no VM:

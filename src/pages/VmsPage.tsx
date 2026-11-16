@@ -51,6 +51,7 @@ import {
   ShieldIcon,
   ShieldOffIcon,
   SquareIcon,
+  SquareTerminalIcon,
   TagIcon,
   Trash2Icon,
   TriangleAlertIcon,
@@ -163,6 +164,7 @@ import {
   type MoreItemId,
   type VmColumnId,
 } from "@/lib/vm-page";
+import { vmsWithoutSsh } from "@/lib/vm-sessions";
 import { UnassignedVmsSheet } from "@/components/UnassignedVmsSheet";
 import { noVmsHere, releaseReason } from "@/lib/workspaces";
 import { workspacesApi, type UnassignedVm } from "@/lib/workspaces-api";
@@ -201,6 +203,10 @@ interface Props {
   refreshKey: number;
   /** VM-14, VM-27: the Schedules page, from a VM's Schedules tab. */
   onSchedules?: (ask: ScheduleAsk) => void;
+  /** QL-29: SSH sessions for VMs without one (by id): one opens the editor filled in, several a preview. */
+  onCreateSessions?: (vmIds: string[]) => void;
+  /** QL-29: changes when sessions were made from VMs, so the linked sessions are read again. */
+  sessionsKey?: number;
 }
 
 interface Action {
@@ -358,6 +364,8 @@ export function VmsPage({
   request,
   refreshKey,
   onSchedules,
+  onCreateSessions,
+  sessionsKey = 0,
 }: Props) {
   // FD-03: power actions, snapshots, protection, tags and labels are off while the read-only lock applies (the core
   // refuses them too); the page's notice says so.
@@ -498,7 +506,7 @@ export function VmsPage({
   }, [filter, listVersion]);
 
   // QL-01: the sessions linked to each VM, read again when the page shows (they may have changed on
-  // the Sessions page), after a refresh (it may link some) and after a change here.
+  // the Sessions page), after a refresh (it may link some), after a change here and after sessions made from VMs.
   useEffect(() => {
     if (!active) return;
     let stale = false;
@@ -513,7 +521,7 @@ export function VmsPage({
     return () => {
       stale = true;
     };
-  }, [active, listVersion, linksVersion]);
+  }, [active, listVersion, linksVersion, sessionsKey]);
   const linksChanged = useCallback(() => setLinksVersion((v) => v + 1), []);
 
   // MO-01: each running VM's share of the host, after every metrics round while the page shows and the window is
@@ -922,12 +930,20 @@ export function VmsPage({
   const virtualboxTrouble = warnings.some((w) => w.code.startsWith("vboxmanage"));
   const filtered = !isEmptyFilter(filter) || starredOnly;
   const oldAfterDays = limits?.oldAfterDays ?? 30;
+  // QL-29: the running VMs of the selection without an SSH session linked.
+  const sessionTargets = onCreateSessions
+    ? vmsWithoutSsh(
+        selectedVms.filter((v) => v.powerState === "running"),
+        sessions,
+      )
+    : [];
   // UX-02: More shows only what applies to the selection.
   const more = moreGroups(selectedVms, {
     snapshots: selectionTrees === null ? null : snapshotReasons.revert === null ? withSnapshots.length : 0,
     canRelease: releaseOff === null,
     canExport: onExport !== undefined && selectedVms.length === 1,
     toolsImages,
+    withoutSession: sessionTargets.length,
   });
 
   /** One item of the More menu. The count says how many of the selected VMs it goes to, when not all of them. */
@@ -1079,6 +1095,14 @@ export function VmsPage({
           >
             <ShieldOffIcon />
             Remove Protected
+            {n}
+          </DropdownMenuItem>
+        );
+      case "sessions":
+        return (
+          <DropdownMenuItem key={id} onSelect={() => onCreateSessions?.(sessionTargets.map((v) => v.id))}>
+            <SquareTerminalIcon />
+            {sessionTargets.length === 1 ? "Create SSH session…" : "Create SSH sessions…"}
             {n}
           </DropdownMenuItem>
         );
@@ -1628,6 +1652,7 @@ export function VmsPage({
                 thresholds={thresholds}
                 sessions={sessions}
                 onLinksChanged={linksChanged}
+                onCreateSession={onCreateSessions && ((vmId) => onCreateSessions([vmId]))}
                 tree={detailTree}
                 treeError={detailTreeError}
                 onReadTree={() => readTreeAgain(detailVm.vmxPath)}
