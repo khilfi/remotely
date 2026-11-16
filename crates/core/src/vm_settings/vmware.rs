@@ -718,9 +718,73 @@ pub fn vm_files_going(
     (going, kept)
 }
 
+/// VM-15: why Install VMware Tools is off for a guest whose Tools image Workstation doesn't have (the UI's words
+/// too, `src/lib/vm-settings.ts`). Workstation 26 ships only `windows.iso` beside vmrun.exe, so `vmrun installTools`
+/// on a Linux guest fails (`vmware.log`: `toolsInstallManager.lastInstallError = "21000"`); such a guest gets its
+/// Tools from its own packages.
+pub const OPEN_VM_TOOLS: &str = "Workstation has no VMware Tools installer for this guest: install the distribution's open-vm-tools package in the guest instead (for example sudo apt install open-vm-tools, or sudo dnf install open-vm-tools)";
+
+/// Whether a `.vmx`'s `guestOS` is a Windows one (`windows11-64`, `winxppro`, `longhorn-64`).
+pub fn windows_guest(guest_os: &str) -> bool {
+    let id = guest_os.trim().to_ascii_lowercase();
+    id.starts_with("win") || id.starts_with("longhorn")
+}
+
+/// VM-15: the Tools image (beside vmrun.exe) `vmrun installTools` mounts for a guest that isn't Windows' own, by its
+/// `guestOS`. None for a Windows guest, whose installer Workstation keeps shipping.
+pub fn tools_image(guest_os: &str) -> Option<&'static str> {
+    let id = guest_os.trim().to_ascii_lowercase();
+    if windows_guest(&id) {
+        return None;
+    }
+    Some(if id.starts_with("freebsd") {
+        "freebsd.iso"
+    } else if id.starts_with("solaris") {
+        "solaris.iso"
+    } else if id.starts_with("darwin") {
+        "darwin.iso"
+    } else {
+        "linux.iso"
+    })
+}
+
+/// VM-15: why `vmrun installTools` can't work for a guest, or None: its Tools image isn't among `images` (the
+/// `.iso` files beside vmrun.exe, lower case). Without that list (vmrun's folder unknown), a guest that isn't Windows
+/// is refused, as no Workstation Remotely can find here ships `linux.iso`. A Windows guest, or one with no `guestOS`,
+/// is never refused here: vmrun answers for it.
+pub fn tools_refusal(guest_os: Option<&str>, images: Option<&[String]>) -> Option<&'static str> {
+    let image = tools_image(guest_os?)?;
+    match images {
+        Some(images) if images.iter().any(|i| i.eq_ignore_ascii_case(image)) => None,
+        _ => Some(OPEN_VM_TOOLS),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn install_tools_is_refused_for_a_guest_whose_tools_image_workstation_lacks() {
+        // VM-15: Workstation 26's folder (only windows.iso).
+        let ws26 = vec!["windows.iso".to_owned()];
+        assert_eq!(tools_refusal(Some("ubuntu-64"), Some(&ws26)), Some(OPEN_VM_TOOLS));
+        assert_eq!(tools_refusal(Some("rhel9-64"), Some(&ws26)), Some(OPEN_VM_TOOLS));
+        assert_eq!(tools_refusal(Some("freebsd14-64"), Some(&ws26)), Some(OPEN_VM_TOOLS));
+        assert_eq!(tools_refusal(Some("windows2019srvNext-64"), Some(&ws26)), None);
+        assert_eq!(tools_refusal(Some("winxppro"), Some(&ws26)), None);
+        assert_eq!(tools_refusal(Some("longhorn-64"), Some(&ws26)), None);
+        // A Workstation that still ships linux.iso keeps the installer for Linux guests, whatever its version.
+        let older = vec!["windows.iso".to_owned(), "LINUX.ISO".to_owned()];
+        assert_eq!(tools_refusal(Some("ubuntu-64"), Some(&older)), None);
+        assert_eq!(tools_refusal(Some("freebsd14-64"), Some(&older)), Some(OPEN_VM_TOOLS));
+        // vmrun's folder unknown: decided by the guest alone.
+        assert_eq!(tools_refusal(Some("debian12-64"), None), Some(OPEN_VM_TOOLS));
+        assert_eq!(tools_refusal(Some("windows11-64"), None), None);
+        // No guestOS: vmrun answers.
+        assert_eq!(tools_refusal(None, Some(&ws26)), None);
+        assert!(OPEN_VM_TOOLS.contains("open-vm-tools"));
+    }
 
     const VMX: &str = r#".encoding = "UTF-8"
 config.version = "8"

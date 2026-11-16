@@ -3825,6 +3825,8 @@ export const api = {
   vmGuestOsTypes: (vmxPath: string) => invoke<GuestOsType[]>("vm_guest_os_types", { vmxPath }),
   /** VM-23: whether Workstation's window runs (it may write its own copy of a VM's settings over a change). */
   vmWorkstationOpen: () => invoke<boolean>("vm_workstation_open"),
+  /** VM-15: the VMware Tools images beside vmrun.exe (Workstation 26: only windows.iso); null: its folder unknown. */
+  vmToolsImages: () => invoke<string[] | null>("vm_tools_images"),
   onMetricsRound: (handler: (cost: CollectorCost) => void): Promise<UnlistenFn> =>
     listen<CollectorCost>("metrics://round", (e) => handler(e.payload)),
 

@@ -199,6 +199,13 @@ impl VmSettings {
         self.hypervisors.vmware().workstation_window_open().await
     }
 
+    /// VM-15: the VMware Tools images beside vmrun.exe (`*.iso`, lower case), or None when Workstation's folder isn't
+    /// known: the UI keeps Install VMware Tools only for a guest whose image is there ([`super::vmware::tools_refusal`],
+    /// which the job checks again). A read.
+    pub async fn tools_images(&self) -> Option<Vec<String>> {
+        super::tools_images(self.hypervisors.vmware().as_ref()).await
+    }
+
     /// VM-23: the guest OS types the VM's hypervisor offers.
     pub async fn guest_os_types(&self, key: &str) -> Result<Vec<GuestOsType>> {
         match Hypervisor::of_key(key) {

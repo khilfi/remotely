@@ -129,6 +129,7 @@ import {
   type VmSnapshots,
 } from "@/lib/api";
 import { useVisibility } from "@/hooks/use-poll";
+import { useToolsImages } from "@/hooks/use-tools-images";
 import { CloneDialog } from "@/components/CloneDialog";
 import { PageHeader } from "@/components/PageHeader";
 import { RefreshButton } from "@/components/RefreshButton";
@@ -149,7 +150,7 @@ import {
   type SnapshotMatch,
   type VmView,
 } from "@/lib/vm-snapshots";
-import { resizeTargets } from "@/lib/vm-settings";
+import { resizeTargets, toolsInstallTargets } from "@/lib/vm-settings";
 import {
   moreGroups,
   parseColumns,
@@ -518,6 +519,8 @@ export function VmsPage({
   // MO-01: each running VM's share of the host, after every metrics round while the page shows and the window is
   // visible (P8), and once when it shows again.
   const visibility = useVisibility();
+  // VM-15: Workstation's Tools images, read each time the page shows (the selection's Install guest tools).
+  const toolsImages = useToolsImages(active);
   const readUsage = shouldPoll(active, visibility);
   useEffect(() => {
     if (!readUsage) return;
@@ -909,7 +912,7 @@ export function VmsPage({
   const toUnprotect = selectedVms.filter((v) => v.protected);
   // VM-12, VM-15, VM-24: what the selection's settings and lifecycle actions go to.
   const resize = resizeTargets(selectedVms);
-  const toolsTargets = selectedVms.filter((v) => v.powerState === "running" && !v.protected);
+  const toolsTargets = toolsInstallTargets(selectedVms, toolsImages);
   const deletable = selectedVms.filter((v) => !v.protected && v.powerState !== "running" && v.powerState !== "paused");
   const cloneable = selectedVms.filter((v) => v.powerState === "not_running");
   const selectedLabels = new Set(selectedVms.map((v) => v.environment));
@@ -924,6 +927,7 @@ export function VmsPage({
     snapshots: selectionTrees === null ? null : snapshotReasons.revert === null ? withSnapshots.length : 0,
     canRelease: releaseOff === null,
     canExport: onExport !== undefined && selectedVms.length === 1,
+    toolsImages,
   });
 
   /** One item of the More menu. The count says how many of the selected VMs it goes to, when not all of them. */

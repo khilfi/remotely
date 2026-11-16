@@ -109,8 +109,14 @@ with its size, and a VM it would refuse (running, snapshots in the way).
   cable, install or upgrade VMware Tools or the Guest Additions (VirtualBox's ISO goes into the DVD drive; nothing
   types guest passwords anywhere), and a screenshot of a running VirtualBox VM (hidden while presenting). On a running
   Workstation VM an ISO stays attached until it powers off.
+- **VMware Tools on Linux guests**: Workstation installs VMware Tools only from the installer images beside
+  `vmrun.exe`, and Workstation 26 ships only Windows' (`windows.iso`; `vmrun installTools` on a Linux guest fails with
+  error 21000). So Install or upgrade is off for a guest whose image isn't there, and says to install the
+  distribution's `open-vm-tools` package in the guest instead, for example with `sudo apt install open-vm-tools` or
+  `sudo dnf install open-vm-tools`. A Workstation that still has `linux.iso` keeps it, and Windows guests keep it.
 - **Bulk resize**: More, Resize CPU and memory on the selection changes every selected VM that is off, with one
-  approval. More also has Install or upgrade guest tools and Delete with their files.
+  approval. More also has Install or upgrade guest tools (for the running VMs whose guest can take them) and Delete
+  with their files.
 - **Lifecycle**: Delete (Critical; Workstation deletes the VM's own files and keeps the folder when anything else is in
   it, VirtualBox unregisters it and deletes its files), Rename, **Add VM…** (a `.vmx` joins the list; a `.vbox` is
   registered with VirtualBox) and **Console** (the hypervisor's own window: a Workstation tab without powering the VM on,
@@ -207,6 +213,11 @@ launch template, or from **Custom** values typed in the dialog.
   linked clone, and the job says so), the "clean" snapshot before the first boot, power on, then up to 5 minutes for
   its IP (a VM without VMware Tools or Guest Additions may not report one: the job says so and goes on), its SSH
   session saved and linked to it, and its console, as the template says.
+- **Addresses on Workstation's bridged network**: Workstation's own DHCP leases cover only its NAT and host-only
+  networks, so on a bridged network only VMware Tools in the guest tell a VM's address. A Linux guest has them only
+  with `open-vm-tools`, which the Linux install config starters install; without it the job ends without a session
+  and its note says what to do: install `open-vm-tools` in the guest, or deploy on NAT or host-only, or with an
+  address pool.
 - **Clone** (VM-10): pick shut-down VMs of one hypervisor on the VMs page, then Clone makes a full copy of each in one
   job, named by a pattern (`{template}` is the VM's name: `{template}-clone` by default). The copies stay off, like the
   VMs they copy: started as they are, they would use their source's name and addresses.

@@ -4,6 +4,7 @@
 
 import type { Environment, Hypervisor, PowerState, ToolsState, VmFilter } from "./api.ts";
 import type { ChainInfo, ChainLimits } from "./schedules-api.ts";
+import { toolsInstallTargets } from "./vm-settings.ts";
 import type { VmView } from "./vm-snapshots.ts";
 
 // ---- The environment that applies (UX-12) ----
@@ -216,6 +217,9 @@ export interface SelectedVm {
   protected: boolean;
   environment: Environment;
   tags: readonly string[];
+  /** VM-15: Install guest tools goes only to a Workstation guest whose Tools image is there. */
+  hypervisor?: Hypervisor;
+  guestOs?: string | null;
 }
 
 export type MoreItemId =
@@ -266,11 +270,16 @@ export function powerTargets<T extends { powerState: PowerState }>(vms: readonly
  * The More menu for the selection: only the items that apply to at least one selected VM, in groups, and only the
  * groups that have one. `snapshots` is how many selected VMs have a snapshot (null while their trees are read, when
  * the Snapshots group is left out); `canRelease` whether they may leave this workspace; `canExport` whether export is
- * offered (one VM).
+ * offered (one VM); `toolsImages` Workstation's Tools images (`api.vmToolsImages`; null or left out: not known).
  */
 export function moreGroups(
   vms: readonly SelectedVm[],
-  options: { snapshots: number | null; canRelease: boolean; canExport: boolean },
+  options: {
+    snapshots: number | null;
+    canRelease: boolean;
+    canExport: boolean;
+    toolsImages?: readonly string[] | null;
+  },
 ): MoreGroup[] {
   const count = (pick: (v: SelectedVm) => boolean) => vms.filter(pick).length;
   const open = (v: SelectedVm) => !v.protected;
@@ -291,7 +300,7 @@ export function moreGroups(
         ];
   const change: MoreItem[] = [
     { id: "resize", count: count((v) => open(v) && v.powerState === "not_running") },
-    { id: "tools", count: count((v) => open(v) && v.powerState === "running") },
+    { id: "tools", count: toolsInstallTargets(vms, options.toolsImages ?? null).length },
     { id: "clone", count: count((v) => v.powerState === "not_running") },
     { id: "export", count: options.canExport ? 1 : 0 },
     { id: "delete", count: count((v) => open(v) && !ON.includes(v.powerState)) },

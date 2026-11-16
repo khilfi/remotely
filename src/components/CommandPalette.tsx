@@ -65,6 +65,8 @@ import { actionItems, pageItems } from "@/lib/search-sources";
 import { boostStarred, isStarred, starredFirst } from "@/lib/stars";
 import { useRecents, useStars } from "@/lib/stars-store";
 import type { VmView } from "@/lib/vm-snapshots";
+import { vmwareToolsReason } from "@/lib/vm-settings";
+import { useToolsImages } from "@/hooks/use-tools-images";
 import {
   api,
   errorMessage,
@@ -133,7 +135,7 @@ function power(vms: VmRecord[], op: PowerOp): Command {
 }
 
 /** The power actions that make sense in a VM's state, as commands for the bus. */
-function vmActions(vm: VmRecord): VmAction[] {
+function vmActions(vm: VmRecord, toolsImages: readonly string[] | null): VmAction[] {
   const one = [vm];
   const actions: VmAction[] = [];
   const add = (id: string, label: string, icon: LucideIcon, op: PowerOp) =>
@@ -156,9 +158,11 @@ function vmActions(vm: VmRecord): VmAction[] {
     icon: vm.protected ? ShieldOffIcon : ShieldIcon,
     command: { type: "vmProtect", targets: [{ kind: "vm", vmxPath: vm.vmxPath }], protected: !vm.protected },
   });
-  // VM-15, VM-24.
+  // VM-15, VM-24. Tools only where they can be installed: not on a Workstation guest whose Tools image Workstation
+  // lacks (a Linux guest on Workstation 26: its Settings tab says to install open-vm-tools).
   const target = [{ kind: "vm" as const, vmxPath: vm.vmxPath }];
-  if (vm.powerState === "running") {
+  const toolsThere = vm.hypervisor !== "vmware" || vmwareToolsReason(vm.guestOs, toolsImages) === null;
+  if (vm.powerState === "running" && toolsThere) {
     actions.push({
       id: "tools",
       label: `Install or upgrade ${toolsName(vm.hypervisor)}`,
@@ -199,6 +203,7 @@ export function CommandPalette({
   const [watched, setWatched] = useState<Set<string>>(new Set());
   const [tiers, setTiers] = useState<Record<string, Tier>>({});
   const [found, setFound] = useState<SearchItem[]>([]);
+  const toolsImages = useToolsImages(open);
 
   // Fresh lists each time it opens; QL-20's providers share the VM and session reads.
   useEffect(() => {
@@ -274,8 +279,8 @@ export function CommandPalette({
   // UX-07: the bulk actions only for a search that asks for them.
   const bulkShown = useMemo(() => (query ? bulk.filter((b) => typedForBulk(query, b.label)) : []), [query, bulk]);
   const shownActions = useMemo(
-    () => (vm ? vmActions(vm) : view.kind === "root" ? bulkShown : []),
-    [vm, view.kind, bulkShown],
+    () => (vm ? vmActions(vm, toolsImages) : view.kind === "root" ? bulkShown : []),
+    [vm, view.kind, bulkShown, toolsImages],
   );
   const { create, other } = useMemo(() => splitActions(actions), [actions]);
   const searchable = useMemo(

@@ -717,6 +717,9 @@ impl Deployer {
         let folder = spec.vm_folder(vm);
         let limit = Duration::from_secs(u64::from(install.time_limit_minutes) * 60);
         let limit = tuning.install_cap.map_or(limit, |cap| limit.min(cap));
+        // How long a Linux guest at its login prompt may go without an address, as the other deploys wait for one.
+        let ip_wait = Duration::from_secs(u64::from(spec.ip_wait_secs));
+        let ip_wait = tuning.ip_wait_cap.map_or(ip_wait, |cap| ip_wait.min(cap));
         let start = tokio::time::Instant::now();
         let deadline = start + limit;
         let mut watcher = SerialWatcher::new(m.flavor.os(), &vm.hostname);
@@ -911,15 +914,18 @@ impl Deployer {
                             return Ok(Some((host, port)));
                         }
                     }
-                    None if !m.flavor.windows()
-                        && login_at
-                            .is_some_and(|at| at.elapsed() >= Duration::from_secs(u64::from(spec.ip_wait_secs))) =>
-                    {
-                        notes.push(format!(
-                            "its login prompt showed, but no address did within {} minutes ({} report none): find it in the guest",
-                            spec.ip_wait_secs.div_ceil(60),
-                            spec.hypervisor.tools_name()
-                        ));
+                    None if !m.flavor.windows() && login_at.is_some_and(|at| at.elapsed() >= ip_wait) => {
+                        let minutes = spec.ip_wait_secs.div_ceil(60);
+                        notes.push(match spec.unknown_address_hint() {
+                            // VM-15: a bridged Workstation guest without open-vm-tools.
+                            Some(hint) => {
+                                format!("its login prompt showed, but no address did within {minutes} minutes: {hint}")
+                            }
+                            None => format!(
+                                "its login prompt showed, but no address did within {minutes} minutes ({} report none): find it in the guest",
+                                spec.hypervisor.tools_name()
+                            ),
+                        });
                         report(watcher.done("installed"), &watcher, &mut detail);
                         return Ok(None);
                     }
@@ -1342,7 +1348,10 @@ impl Deployer {
                 (_, Some(_)) => {
                     out.push("no session: on VirtualBox's NAT the guest can't be reached from this PC".into())
                 }
-                (None, _) => out.push("no session: its address isn't known".into()),
+                (None, _) => out.push(match spec.unknown_address_hint() {
+                    Some(_) => "no session: its address isn't known (on a bridged network only VMware Tools in the guest tell it)".into(),
+                    None => "no session: its address isn't known".into(),
+                }),
                 (Some((host, port)), None) if m.flavor.windows() => {
                     out.push(self.winrm_session(ctx, spec, vm, key, m, host, *port).await);
                 }

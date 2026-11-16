@@ -17,7 +17,8 @@ use remotely_core::jobs::JobStatus;
 use remotely_core::policy::{ApprovalStep, Tier};
 use remotely_core::vault::SecretString;
 use remotely_core::vm_settings::{
-    ConsoleOutcome, Firmware, NicNetwork, VmConfigEdit, VmDeviceOp, VmDiskOp, VmLifecycleOp, WORKSTATION_OPEN_WARNING,
+    ConsoleOutcome, Firmware, NicNetwork, VmConfigEdit, VmDeviceOp, VmDiskOp, VmLifecycleOp, OPEN_VM_TOOLS,
+    WORKSTATION_OPEN_WARNING,
 };
 use remotely_core::Core;
 use uuid::Uuid;
@@ -673,14 +674,74 @@ async fn an_iso_and_a_cable_change_a_running_vm_live_and_a_vm_that_is_off_in_its
     )
     .await;
     assert_eq!(status, JobStatus::Failed, "web is off");
-    let (_, status) = run(
-        &core,
-        Command::VmDevice {
-            targets: vec![vm("app")],
-            op: VmDeviceOp::InstallTools,
-        },
-    )
-    .await;
+    // VM-15: app is an Ubuntu guest, and vmrun's folder (so its Tools images) isn't known here: refused, saying to
+    // install open-vm-tools in the guest instead.
+    let request = asked(
+        core.bus
+            .submit(
+                &core.ctx(),
+                Command::VmDevice {
+                    targets: vec![vm("app")],
+                    op: VmDeviceOp::InstallTools,
+                },
+            )
+            .await
+            .unwrap(),
+    );
+    let problem = request.vm_change.as_ref().unwrap().targets[0].problem.clone().unwrap();
+    assert_eq!(problem, format!("{OPEN_VM_TOOLS}."));
+    let mut rx = core.jobs.subscribe();
+    let job = approve(&core, &request).await;
+    assert_eq!(wait_finished(&mut rx, job).await, JobStatus::Failed);
+    assert!(!vmware.calls().iter().any(|c| c.starts_with("vmrun installTools")));
+}
+
+/// VM-15: Workstation 26 ships only windows.iso beside vmrun.exe, so `vmrun installTools` can't work for a Linux
+/// guest (`toolsInstallManager.lastInstallError = "21000"`): Remotely refuses it with what to do instead, and keeps
+/// it for a Windows guest, and for a Linux one where Workstation still has linux.iso.
+#[tokio::test]
+async fn install_tools_goes_by_the_tools_images_beside_vmrun() {
+    const WS: &str = r"C:\Program Files\VMware\VMware Workstation";
+    let windows_vmx = WEB_VMX
+        .replace("\"web", "\"win")
+        .replace("ubuntu-64", "windows2019srvNext-64");
+    let fake = || {
+        FakeVmware::with_running([vmx("app"), vmx("win")])
+            .in_library(&vmx("app"), Some("app"))
+            .with_vmx_text(&vmx("app"), &WEB_VMX.replace("\"web", "\"app"))
+            .in_library(&vmx("win"), Some("win"))
+            .with_vmx_text(&vmx("win"), &windows_vmx)
+            .with_tool_path(format!(r"{WS}\vmrun.exe"))
+            .with_file(&format!(r"{WS}\windows.iso"), 142_000_000)
+    };
+    let install = |name: &str| Command::VmDevice {
+        targets: vec![vm(name)],
+        op: VmDeviceOp::InstallTools,
+    };
+
+    // Workstation 26.
+    let setup = Setup::new(fake());
+    let vmware = Arc::clone(&setup.vmware);
+    let core = built(setup).await;
+    assert_eq!(
+        core.vm_settings.tools_images().await,
+        Some(vec!["windows.iso".to_owned()])
+    );
+    let request = asked(core.bus.submit(&core.ctx(), install("app")).await.unwrap());
+    let problem = request.vm_change.as_ref().unwrap().targets[0].problem.clone().unwrap();
+    assert!(problem.contains("sudo apt install open-vm-tools"), "{problem}");
+    core.bus.cancel_approval(request.id).await.unwrap();
+    let (_, status) = run(&core, install("win")).await;
+    assert_eq!(status, JobStatus::Succeeded, "a Windows guest keeps it");
+    let calls = vmware.calls();
+    assert!(calls.iter().any(|c| c == &format!("vmrun installTools {}", vmx("win"))));
+    assert!(!calls.iter().any(|c| c == &format!("vmrun installTools {}", vmx("app"))));
+
+    // A Workstation that still has linux.iso: decided by the image, not the version.
+    let setup = Setup::new(fake().with_file(&format!(r"{WS}\linux.iso"), 60_000_000));
+    let vmware = Arc::clone(&setup.vmware);
+    let core = built(setup).await;
+    let (_, status) = run(&core, install("app")).await;
     assert_eq!(status, JobStatus::Succeeded);
     assert!(vmware
         .calls()

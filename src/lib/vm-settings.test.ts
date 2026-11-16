@@ -2,7 +2,9 @@
 // VM-23 and on (QL-08): the Settings tab's reasons, the edit dialogs' checks and choices. Run with `npm test`.
 
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 import type { VmHardware, VmRecord } from "./api.ts";
 import { READ_ONLY_REASON } from "./disabled-reasons.ts";
 import {
@@ -17,15 +19,18 @@ import {
   macProblem,
   networkOf,
   normalMac,
+  OPEN_VM_TOOLS_REASON,
   powerReason,
   resizeTargets,
   resourcesProblem,
   shareNameProblem,
+  toolsInstallTargets,
   toolsReason,
   tpmReason,
   vmActionReason,
   vmFolder,
   vmNameProblem,
+  vmwareToolsReason,
   WORKSTATION_OPEN_WARNING,
   workstationWarning,
 } from "./vm-settings.ts";
@@ -103,14 +108,62 @@ test("disk actions wait for the snapshots and refuse what can't be done", () => 
 });
 
 test("tools, ISOs and the TPM say why they are off", () => {
-  assert.match(toolsReason(vm("web"), null, null)!, /^Not running/);
+  assert.match(toolsReason(vm("web"), null, null, null)!, /^Not running/);
   const running = vm("db", { powerState: "running", hypervisor: "virtualbox" });
-  assert.match(toolsReason(running, null, noDrives)!, /no DVD drive/);
-  assert.equal(toolsReason({ ...running, hypervisor: "vmware" }, null, noDrives), null, "vmrun brings its own");
+  assert.match(toolsReason(running, null, noDrives, null)!, /no DVD drive/);
+  assert.equal(toolsReason({ ...running, hypervisor: "vmware" }, null, noDrives, null), null, "vmrun brings its own");
   assert.equal(isoReason(vm("web"), null, noDrives), null, "off: a drive is added");
   assert.match(isoReason(running, null, noDrives)!, /no CD\/DVD drive/);
   assert.match(tpmReason("vmware")!, /encrypted/);
   assert.equal(tpmReason("virtualbox"), null);
+});
+
+test("Install VMware Tools goes by the Tools images beside vmrun, and says to use open-vm-tools", () => {
+  // Workstation 26 ships only windows.iso.
+  const ws26 = ["windows.iso"];
+  const ubuntu = vm("web", { powerState: "running", guestOs: "ubuntu-64" });
+  const windows = vm("dc", { powerState: "running", guestOs: "windows2019srvNext-64" });
+  assert.equal(toolsReason(ubuntu, null, null, ws26), OPEN_VM_TOOLS_REASON);
+  assert.match(OPEN_VM_TOOLS_REASON, /sudo apt install open-vm-tools/);
+  assert.equal(toolsReason(windows, null, null, ws26), null, "a Windows guest keeps it");
+  assert.equal(toolsReason(ubuntu, null, null, [...ws26, "LINUX.ISO"]), null, "a Workstation that has linux.iso");
+  assert.equal(toolsReason(ubuntu, null, null, null), OPEN_VM_TOOLS_REASON, "not known: by the guest alone");
+  assert.equal(toolsReason(windows, null, null, null), null);
+  // Said before the power state (starting it wouldn't help), after the read-only lock and Protected.
+  assert.equal(toolsReason({ ...ubuntu, powerState: "not_running" }, null, null, ws26), OPEN_VM_TOOLS_REASON);
+  assert.equal(toolsReason({ ...ubuntu, protected: true }, null, null, ws26), PROTECTED_REASON);
+  assert.equal(toolsReason(ubuntu, READ_ONLY_REASON, null, ws26), READ_ONLY_REASON);
+  // The Settings tab's hardware read names the guest as the .vmx has it now.
+  const asReadNow = { cdroms: [], guestOs: "windows11-64" } as unknown as VmHardware;
+  assert.equal(toolsReason(ubuntu, null, asReadNow, ws26), null);
+  // Other guests and VirtualBox.
+  assert.equal(vmwareToolsReason("freebsd14-64", ["windows.iso", "linux.iso"]), OPEN_VM_TOOLS_REASON);
+  assert.equal(vmwareToolsReason("freebsd14-64", ["freebsd.iso"]), null);
+  assert.equal(vmwareToolsReason(null, ws26), null, "no guestOS: vmrun answers");
+  assert.equal(toolsReason({ ...ubuntu, hypervisor: "virtualbox" }, null, null, ws26), null);
+
+  // The VMs page and the palette: only running, unprotected VMs whose guest can take them.
+  const targets = toolsInstallTargets(
+    [
+      ubuntu,
+      windows,
+      { ...windows, id: "off", powerState: "not_running" },
+      { ...windows, id: "kept", protected: true },
+      { ...ubuntu, id: "vbox", hypervisor: "virtualbox" },
+    ],
+    ws26,
+  );
+  assert.deepEqual(
+    targets.map((v) => v.id),
+    ["dc", "vbox"],
+  );
+
+  // The core refuses the command with the same words.
+  const core = readFileSync(
+    fileURLToPath(new URL("../../crates/core/src/vm_settings/vmware.rs", import.meta.url)),
+    "utf8",
+  );
+  assert.ok(core.includes(`pub const OPEN_VM_TOOLS: &str = "${OPEN_VM_TOOLS_REASON}";`), "the core's OPEN_VM_TOOLS");
 });
 
 test("an attached disk's copy says what each hypervisor makes of it", () => {

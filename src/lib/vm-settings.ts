@@ -110,18 +110,80 @@ export function tpmReason(hypervisor: Hypervisor): string | null {
     : null;
 }
 
-/** VM-15: why Install Tools is off on one VM. */
+/**
+ * VM-15: why Install VMware Tools is off for a guest whose Tools image Workstation doesn't have (the core's words,
+ * crates/core/src/vm_settings/vmware.rs `OPEN_VM_TOOLS`). Workstation 26 ships only windows.iso beside vmrun.exe, so
+ * `vmrun installTools` fails on a Linux guest (error 21000); such a guest gets its Tools from its own packages.
+ */
+export const OPEN_VM_TOOLS_REASON =
+  "Workstation has no VMware Tools installer for this guest: install the distribution's open-vm-tools package in the guest instead (for example sudo apt install open-vm-tools, or sudo dnf install open-vm-tools)";
+
+/** Whether a Workstation `guestOS` is a Windows one (`windows11-64`, `winxppro`, `longhorn-64`). */
+export function windowsGuest(guestOs: string): boolean {
+  const id = guestOs.trim().toLowerCase();
+  return id.startsWith("win") || id.startsWith("longhorn");
+}
+
+/** VM-15: the Tools image `vmrun installTools` mounts for a guest, by its `guestOS`; null for a Windows guest. */
+export function vmwareToolsImage(guestOs: string): string | null {
+  const id = guestOs.trim().toLowerCase();
+  if (windowsGuest(id)) return null;
+  if (id.startsWith("freebsd")) return "freebsd.iso";
+  if (id.startsWith("solaris")) return "solaris.iso";
+  if (id.startsWith("darwin")) return "darwin.iso";
+  return "linux.iso";
+}
+
+/**
+ * VM-15: why Workstation can't install VMware Tools in this guest, or null: its Tools image isn't among `images` (the
+ * .iso files beside vmrun.exe, from `api.vmToolsImages`). Without that list (not read yet, or Workstation's folder
+ * unknown) a guest that isn't Windows is refused, as the core does. A guest with no `guestOS` is left to vmrun.
+ */
+export function vmwareToolsReason(guestOs: string | null, images: readonly string[] | null): string | null {
+  if (!guestOs) return null;
+  const image = vmwareToolsImage(guestOs);
+  if (!image) return null;
+  return images?.some((i) => i.toLowerCase() === image) ? null : OPEN_VM_TOOLS_REASON;
+}
+
+type ToolsVm = Pick<VmRecord, "powerState" | "protected" | "hypervisor" | "guestOs">;
+
+/** VM-15: why Install Tools is off on one VM. `images`: Workstation's Tools images (see vmwareToolsReason). */
 export function toolsReason(
-  vm: Pick<VmRecord, "powerState" | "protected" | "hypervisor">,
+  vm: ToolsVm,
   readOnly: string | null,
   hardware: VmHardware | null,
+  images: readonly string[] | null,
 ): string | null {
-  const off = vmActionReason({ vm, needs: "running", readOnly });
+  if (readOnly) return readOnly;
+  if (vm.protected) return PROTECTED_REASON;
+  if (vm.hypervisor === "vmware") {
+    // Before the power state: starting the VM wouldn't help.
+    const guest = vmwareToolsReason(hardware?.guestOs ?? vm.guestOs, images);
+    if (guest) return guest;
+  }
+  const off = powerReason(vm.powerState, "running", vm.hypervisor);
   if (off) return off;
   if (vm.hypervisor === "virtualbox" && hardware && hardware.cdroms.length === 0) {
     return "The VM has no DVD drive for the Guest Additions ISO: attach an ISO while it is off to add one";
   }
   return null;
+}
+
+/**
+ * VM-15: the VMs Install or upgrade guest tools goes to from the VMs page and the palette: running, not Protected,
+ * and on Workstation a guest whose Tools image is there.
+ */
+export function toolsInstallTargets<T extends Pick<VmRecord, "powerState" | "protected"> & Partial<ToolsVm>>(
+  vms: readonly T[],
+  images: readonly string[] | null,
+): T[] {
+  return vms.filter(
+    (v) =>
+      v.powerState === "running" &&
+      !v.protected &&
+      (v.hypervisor !== "vmware" || vmwareToolsReason(v.guestOs ?? null, images) === null),
+  );
 }
 
 /** VM-23: why attaching an ISO is off. A running VM needs a CD/DVD drive already; one that is off gets one. */

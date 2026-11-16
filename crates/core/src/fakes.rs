@@ -127,6 +127,9 @@ pub struct FakeVmware {
     held_discs: Mutex<HashMap<String, std::fs::File>>,
     /// VMs whose runtime config answers that question with Yes.
     cdrom_answered: Mutex<HashSet<String>>,
+    /// VM-15: vmrun.exe's path (`with_tool_path`); None by default, as if it were unknown. Its folder's files
+    /// (`with_file`) are the Tools images.
+    tool_path: Option<PathBuf>,
 }
 
 /// What the fake writes for a .vmx it was given no text for.
@@ -150,6 +153,13 @@ fn synthesized_vmx(info: &VmxInfo) -> String {
 }
 
 impl FakeVmware {
+    /// VM-15: vmrun.exe is at `path`; give its folder Tools images with `with_file` (Workstation 26 has only
+    /// `windows.iso`).
+    pub fn with_tool_path(mut self, path: impl Into<PathBuf>) -> Self {
+        self.tool_path = Some(path.into());
+        self
+    }
+
     /// VM-21: where Workstation would put new VMs (by default a made-up folder under alice's Documents).
     pub fn with_default_folder(mut self, folder: impl Into<PathBuf>) -> Self {
         self.default_folder = Some(folder.into());
@@ -645,7 +655,7 @@ impl FakeVmware {
 #[async_trait]
 impl VmwareAdapter for FakeVmware {
     fn tool_path(&self) -> Option<PathBuf> {
-        None
+        self.tool_path.clone()
     }
 
     async fn library(&self) -> Result<Vec<LibraryVm>> {

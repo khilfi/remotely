@@ -33,6 +33,7 @@ pub mod virtualbox;
 pub mod vmware;
 
 pub use service::{ConsoleOutcome, GuestOsType, VmSettings};
+pub use vmware::OPEN_VM_TOOLS;
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -437,6 +438,22 @@ fn stamp_matches(seen: &[ops::FileStamp], now: &[ops::FileStamp]) -> bool {
         })
 }
 
+/// VM-15: the VMware Tools images beside vmrun.exe (its `*.iso` files, lower case; Workstation 26 has only
+/// `windows.iso`), or None when vmrun's folder isn't known or can't be listed.
+pub async fn tools_images(vmware: &dyn VmwareAdapter) -> Option<Vec<String>> {
+    let vmrun = vmware.tool_path()?;
+    let folder = vmrun.parent()?;
+    let files = vmware.folder_files(folder).await.ok()?;
+    let mut images: Vec<String> = files
+        .iter()
+        .filter_map(|(path, _)| path.file_name())
+        .map(|name| name.to_string_lossy().to_ascii_lowercase())
+        .filter(|name| name.ends_with(".iso"))
+        .collect();
+    images.sort();
+    Some(images)
+}
+
 /// VM-31: the stamps of a disk's files now ([`crate::convert::inspect::disk_files`]); files that aren't there or
 /// that Remotely doesn't open (A3) are left out.
 pub async fn disk_stamps(path: &Path) -> Vec<ops::FileStamp> {
@@ -760,6 +777,11 @@ impl VmEditor {
         let vmware = self.hypervisors.vmware();
         if let VmDeviceOp::InstallTools = op {
             require_running(state, "install VMware Tools")?;
+            let file = self.vmx(vmx).await?;
+            let images = tools_images(vmware.as_ref()).await;
+            if let Some(why) = vmware::tools_refusal(file.get("guestOS"), images.as_deref()) {
+                return Err(refused(format!("{why}.")));
+            }
             return Ok(Plan::one(
                 Action::Vmrun {
                     calls: vec![vec!["installTools".into(), vmx.into()]],

@@ -1492,6 +1492,11 @@ src/                  React + TypeScript UI
   `-c -s <n>MB -a lsilogic|buslogic|ide -t 0` (thin) or `-t 2` (thick), `-x <n>MB` (expand; it says to grow the
   partition in the guest), `-k` (shrink), `-d` (defragment). It reports failures on stdout with a non-zero exit code.
   `vmware.exe <vmx>` opens Workstation's window on the VM (a tab, not powered on); Workstation adds the VM to its library.
+- VM-15: Workstation 26 ships only `windows.iso` beside vmrun.exe (no `linux.iso`), so `installTools` on a Linux guest
+  fails (vmware.log `toolsInstallManager.lastInstallError = "21000"`). Remotely decides by the image, not the version
+  (`vm_settings::vmware::tools_refusal`, `tools_images`; the UI's `vmwareToolsReason` and the `vm_tools_images` read):
+  a guest that isn't Windows and whose image (`linux.iso`, `freebsd.iso`...) isn't there is refused with
+  `OPEN_VM_TOOLS` (install the distribution's open-vm-tools), in the Settings tab's reason, the palette and More.
 - vmrun (Workstation 26): `upgradevm <vmx>` (VM off; 19 went to 22), `installTools <vmx>` (VM running; "No VMware Tools
   image exists for the guest operating system" for a guest type without one), `connectNamedDevice` /
   `disconnectNamedDevice <vmx> <ethernet0|sata0:1>` on a running VM. vmrun answers 0 even for a device the VM doesn't
@@ -2207,7 +2212,9 @@ VM-29 and VM-32, from 0.8.0 (`docs/plan-0.8.md`, G6), built only on what S1 to S
 - **The guest's address** (never gated on Tools): the row's or pool's, the NAT rule, a Workstation lease from
   `vmnetdhcp.leases` by `ethernet0.generatedAddress`, else the hypervisor's report. Windows needs one before its password
   can be set, so a Windows deploy on a network where Remotely can't learn it (bridged, a VirtualBox host-only or
-  internal network) is refused without a pool.
+  internal network) is refused without a pool. On Workstation's bridged network (no leases) a Linux guest's address
+  comes only from open-vm-tools, which the Linux starters install (`ubuntu-server-minimal` leaves it out); without it
+  the note says so and what to do (`spec::BRIDGED_NO_TOOLS`, `DeploySpec::unknown_address_hint`).
 - **Windows' first sign-in** (`WindowsSignIn`, tried again with a backoff up to a minute): the vault's passwords are
   read first, so a locked vault sends nothing and the step waits ("waiting for the vault to be unlocked", which the
   window turns into a notification). That wait isn't counted against the time limit, for up to 4 hours; after that the error says to deploy the VM again (its password is still the one-time one, and the seed is gone). NTLM over HTTPS with only the certificate

@@ -405,6 +405,64 @@ async fn ubuntu_installs_unattended_on_workstation_from_its_own_iso_copy_and_see
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// VM-15, VM-29: on Workstation's bridged network the guest's address comes only from VMware Tools (Workstation's DHCP
+/// leases cover NAT and host-only), so a guest that reports none ends without a session, and the note says why and what
+/// to do instead of only that the address isn't known.
+#[tokio::test]
+async fn a_bridged_workstation_guest_without_vmware_tools_gets_a_note_on_what_to_do() {
+    let dir = temp_folder("unattended-bridged");
+    // No `with_ip`: VMware Tools in the guest report nothing.
+    let setup = Setup::new(FakeVmware::default()).with_real_vault();
+    let core = setup.build().await;
+    let ssh = ssh_banner().await;
+    fast(&core, ssh);
+    let ctx = &core.ctx();
+    let pw = vault_password(&core, &password()).await;
+    let key = deploy_key(&core).await;
+    let config = config_from(&core, "starter.ubuntu-24.04-minimal", pw, Some(key), |_| {}).await;
+    let (image, _) = iso_image(&core, &dir, "noble.iso", &install_isos::ubuntu_24_04(), "ubuntu").await;
+    let vms = dir.join("vms");
+    let id = template(
+        &core,
+        "edge",
+        &image,
+        Hypervisor::Vmware,
+        &vms,
+        Network::Bridged,
+        config,
+        "gp.medium",
+    )
+    .await;
+    let rows = vec![VmInstall {
+        ip: None,
+        values: Default::default(),
+    }];
+    let check = core.deploy.check(ctx, &request(id, 1, rows.clone())).await.unwrap();
+    assert!(
+        check.problems.is_empty(),
+        "a Linux guest needs no pool: {:?}",
+        check.problems
+    );
+    let approval = needs_approval(core.deploy.submit(ctx, &request(id, 1, rows)).await.unwrap());
+    let play = installer(vms.join("edge-1").join("edge-1-serial.log"), ubuntu_lines("edge-1"));
+    let job = approve(&core, &approval).await;
+    let status = wait(&core, job).await;
+    play.await.unwrap();
+    let notes = notes_of(&core, job).await;
+    assert_eq!(status, JobStatus::Succeeded, "installed, only unreached: {notes}");
+    for want in [
+        "its login prompt showed, but no address did",
+        "only from VMware Tools in the guest",
+        "sudo apt install open-vm-tools",
+        "or deploy on NAT or host-only, or with an address pool",
+        "no session: its address isn't known (on a bridged network",
+    ] {
+        assert!(notes.contains(want), "{want} in {notes}");
+    }
+    assert!(core.sessions.list(ctx, &Default::default()).await.unwrap().is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[tokio::test]
 async fn the_iso_copy_and_seed_carry_the_boot_menu_and_the_rendered_file() {
     // The copy and the seed as the job makes them, read back before the install takes them out.

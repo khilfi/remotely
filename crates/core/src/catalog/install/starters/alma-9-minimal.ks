@@ -1,6 +1,7 @@
 # AlmaLinux 9, minimal: one admin user in wheel with your SSH key, root locked, LVM over the whole disk, DHCP.
 # Installs from the ISO itself. A starter from Remotely: copy it to change it. The admin password, picked from
-# the vault, goes in as a SHA-512 hash when a VM is deployed.
+# the vault, goes in as a SHA-512 hash when a VM is deployed. open-vm-tools (VMware Tools) lets Workstation learn the
+# guest's address on a bridged network; on VirtualBox it doesn't start.
 text
 lang en_US.UTF-8
 keyboard --xlayouts='us'
@@ -23,6 +24,7 @@ reboot --eject
 %packages
 @^minimal-environment
 openssh-server
+open-vm-tools
 %end
 
 %post

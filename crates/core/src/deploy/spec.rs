@@ -373,11 +373,23 @@ pub const MAX_IP_WAIT_SECS: u32 = 60 * 60;
 /// Longest folder path a deploy takes (Windows' own limit is 260 without long paths).
 pub const MAX_FOLDER_CHARS: usize = 200;
 
+/// VM-15, VM-29: why a Workstation VM on a bridged network has no address yet, and what to do, for the step's note.
+/// Workstation's DHCP leases (`vmnetdhcp.leases`) cover only its NAT and host-only networks, so on a bridged one only
+/// VMware Tools in the guest report the address, and a Linux guest has them only with open-vm-tools.
+pub const BRIDGED_NO_TOOLS: &str = "on a bridged network Workstation learns a guest's address only from VMware Tools in the guest, and none reported one: install open-vm-tools in the guest (for example sudo apt install open-vm-tools, or sudo dnf install open-vm-tools; the Linux starters install it), or deploy on NAT or host-only, or with an address pool";
+
 fn invalid<T>(message: impl Into<String>) -> Result<T> {
     Err(CoreError::InvalidInput(message.into()))
 }
 
 impl DeploySpec {
+    /// VM-15, VM-29: [`BRIDGED_NO_TOOLS`] for a Workstation deploy on a bridged network (vmnet0), where only the guest's
+    /// VMware Tools tell its address; None elsewhere.
+    pub fn unknown_address_hint(&self) -> Option<&'static str> {
+        let bridged = matches!(self.network, Some(Network::Bridged | Network::Vmnet { number: 0 }));
+        (self.hypervisor == Hypervisor::Vmware && bridged).then_some(BRIDGED_NO_TOOLS)
+    }
+
     /// FD-02: the existing VMs the deploy clones from (a golden VM, or each VM of a bulk clone), by key. The command
     /// bus requires each to be in the workspace, as for any action on a VM.
     pub fn source_vms(&self) -> Vec<&str> {
