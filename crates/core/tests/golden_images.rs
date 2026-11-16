@@ -523,9 +523,34 @@ async fn an_ubuntu_build_on_workstation_makes_a_generic_versioned_image_and_a_re
     );
     assert!(preview.details.steps.iter().any(|s| s.contains("cloud-init")));
     assert!(
-        preview.warnings.iter().any(|w| w.contains("open-vm-tools")),
-        "ubuntu-server-minimal on Workstation: {:?}",
+        !preview.warnings.iter().any(|w| w.contains("open-vm-tools")),
+        "the starter installs open-vm-tools in a late command (VM-15): {:?}",
         preview.warnings
+    );
+    // A copy without it: ubuntu-server-minimal on Workstation leaves it out, so the dialog warns.
+    let bare = config_from(core, "starter.ubuntu-24.04-minimal", pw, Some(key), |spec| {
+        let late = "  late-commands:\n    - \"curtin in-target -- sh -c 'timeout 300 apt-get install -y open-vm-tools || true'\"\n";
+        assert!(spec.body.contains(late), "{}", spec.body);
+        spec.body = spec.body.replace(late, "");
+    })
+    .await;
+    let without = BuildRequest {
+        target: BuildTarget::New {
+            name: "Ubuntu bare".into(),
+        },
+        recipe: recipe(&iso, bare, Hypervisor::Vmware, &lab.vms, "gp.medium"),
+    };
+    let warnings = core
+        .golden
+        .check(ctx, &without)
+        .await
+        .unwrap()
+        .preview
+        .unwrap()
+        .warnings;
+    assert!(
+        warnings.iter().any(|w| w.contains("open-vm-tools")),
+        "ubuntu-server-minimal on Workstation: {warnings:?}"
     );
 
     // Medium, with the vault password asked again (the answer file and sudo get the vault's password).

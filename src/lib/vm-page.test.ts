@@ -194,6 +194,21 @@ test("More shows only what applies to the selection, in groups", () => {
   );
 });
 
+test("Install guest tools leaves out Workstation guests whose Tools image Workstation lacks", () => {
+  const tools = (vms: SelectedVm[], toolsImages: string[] | null) =>
+    moreGroups(vms, { snapshots: null, canRelease: false, canExport: false, toolsImages })
+      .flatMap((g) => g.items)
+      .find((i) => i.id === "tools")?.count ?? 0;
+  const ubuntu = vm({ powerState: "running", hypervisor: "vmware", guestOs: "ubuntu-64" });
+  const windows = vm({ powerState: "running", hypervisor: "vmware", guestOs: "windows11-64" });
+  // Workstation 26: only windows.iso beside vmrun.
+  assert.equal(tools([ubuntu], ["windows.iso"]), 0, "not offered for a Linux guest alone");
+  assert.equal(tools([ubuntu, windows], ["windows.iso"]), 1, "the Windows guest only");
+  assert.equal(tools([ubuntu], ["windows.iso", "linux.iso"]), 1);
+  assert.equal(tools([ubuntu], null), 0, "not known: by the guest");
+  assert.equal(tools([{ ...ubuntu, hypervisor: "virtualbox" }], ["windows.iso"]), 1, "the Guest Additions");
+});
+
 test("power goes to the VMs in a state it applies to, and to VMs in an unknown state", () => {
   const vms = [vm({ powerState: "running" }), vm({ powerState: "unknown" }), vm()];
   assert.equal(powerTargets(vms, ["running"]).length, 2);

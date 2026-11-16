@@ -202,6 +202,26 @@ impl StillApproved for StandingCheck {
     }
 }
 
+/// What a build's install config installs, as its form reads it: packages, and late commands (autoinstall's
+/// `late-commands`, kickstart's first `%post`).
+#[derive(Debug, Default)]
+struct ConfigInstalls {
+    packages: Vec<String>,
+    late_commands: Vec<String>,
+}
+
+impl ConfigInstalls {
+    /// Whether `name` is one of the packages, or a word of a late command (VM-15: the Ubuntu starter installs
+    /// open-vm-tools in a late command, since its ISO doesn't carry it for the minimal source).
+    fn installs(&self, name: &str) -> bool {
+        self.packages.iter().any(|p| p.trim() == name)
+            || self.late_commands.iter().any(|c| {
+                c.split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '-' || ch == '.' || ch == '_'))
+                    .any(|word| word == name)
+            })
+    }
+}
+
 /// The golden image service (`Core.golden`).
 #[derive(Clone)]
 pub struct GoldenImages {
@@ -590,9 +610,9 @@ impl GoldenImages {
     }
 
     /// What a build's preview warns about: a clone's first boot that won't set the guest up, and retention.
-    fn warnings(&self, spec: &BuildSpec, config_packages: &[String], config_body: &str) -> Vec<String> {
+    fn warnings(&self, spec: &BuildSpec, config: &ConfigInstalls, config_body: &str) -> Vec<String> {
         let mut out = Vec::new();
-        let has = |name: &str| config_packages.iter().any(|p| p.trim() == name);
+        let has = |name: &str| config.installs(name);
         if spec.os == BuildOs::Debian && !has("cloud-init") {
             out.push(
                 "This Debian config installs no cloud-init, so the image's clones keep this build's hostname, users and keys, and a launch template's guest user, SSH key and packages aren't set on them: add cloud-init to the config's packages (pkgsel/include) for that."
@@ -639,8 +659,8 @@ impl GoldenImages {
             }
         };
         let (deploy, capacity) = self.deploys.preview_spec(ctx, &spec.deploy).await;
-        let (packages, body) = self.config_packages(ctx, &spec).await;
-        let mut warnings = self.warnings(&spec, &packages, &body);
+        let (installs, body) = self.config_packages(ctx, &spec).await;
+        let mut warnings = self.warnings(&spec, &installs, &body);
         warnings.extend(deploy.warnings.iter().cloned());
         Ok(BuildCheck {
             problems: deploy.refusals.clone(),
@@ -653,18 +673,24 @@ impl GoldenImages {
         })
     }
 
-    /// The build config's packages and its file, for the preview's warnings.
-    async fn config_packages(&self, ctx: &Context, spec: &BuildSpec) -> (Vec<String>, String) {
+    /// The build config's packages, late commands and file, for the preview's warnings.
+    async fn config_packages(&self, ctx: &Context, spec: &BuildSpec) -> (ConfigInstalls, String) {
         match self
             .catalog
             .install_config(ctx, &spec.recipe.install_config_id.to_string())
             .await
         {
-            Ok(config) => (
-                install::read_form(config.spec.kind, &config.spec.body).form.packages,
-                config.spec.body,
-            ),
-            Err(_) => (Vec::new(), String::new()),
+            Ok(config) => {
+                let form = install::read_form(config.spec.kind, &config.spec.body).form;
+                (
+                    ConfigInstalls {
+                        packages: form.packages,
+                        late_commands: form.late_commands,
+                    },
+                    config.spec.body,
+                )
+            }
+            Err(_) => (ConfigInstalls::default(), String::new()),
         }
     }
 

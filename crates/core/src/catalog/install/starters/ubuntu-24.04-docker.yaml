@@ -1,6 +1,7 @@
 #cloud-config
-# Ubuntu Server 24.04 LTS with Docker: the minimal starter, plus Docker from Ubuntu's archive, with the admin user in
-# the docker group. A starter from Remotely: copy it to change it.
+# Ubuntu Server 24.04 LTS with Docker: the minimal starter, plus Docker and open-vm-tools (VMware Tools) from Ubuntu's
+# archive, with the admin user in the docker group. It needs the archive for Docker anyway, so both are packages here.
+# A starter from Remotely: copy it to change it.
 autoinstall:
   version: 1
   source:
@@ -30,6 +31,7 @@ autoinstall:
     authorized-keys:
       - "{{ssh_key.admin}}"
   packages:
+    - open-vm-tools
     - docker.io
     - docker-compose-v2
   updates: security

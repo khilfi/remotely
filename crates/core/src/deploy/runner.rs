@@ -1341,12 +1341,20 @@ impl Deployer {
             match &ip {
                 Some(ip) => notes.push(format!("IP {ip}")),
                 None if token.is_cancelled() => notes.push("cancelled while waiting for its IP".into()),
-                None => notes.push(format!(
-                    "no IP within {} minutes{} ({} report it): make its session once it shows",
-                    spec.ip_wait_secs.div_ceil(60),
-                    if reset { " of its last reset" } else { "" },
-                    spec.hypervisor.tools_name()
-                )),
+                None => notes.push(match spec.unknown_address_hint() {
+                    // VM-15: a bridged Workstation guest without open-vm-tools.
+                    Some(hint) => format!(
+                        "no IP within {} minutes{}: {hint}; make its session once it shows",
+                        spec.ip_wait_secs.div_ceil(60),
+                        if reset { " of its last reset" } else { "" },
+                    ),
+                    None => format!(
+                        "no IP within {} minutes{} ({} report it): make its session once it shows",
+                        spec.ip_wait_secs.div_ceil(60),
+                        if reset { " of its last reset" } else { "" },
+                        spec.hypervisor.tools_name()
+                    ),
+                }),
             }
             ip
         } else {

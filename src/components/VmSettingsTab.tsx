@@ -48,6 +48,7 @@ import {
   useWorkstationWarning,
 } from "@/components/VmSettingsDialogs";
 import { ReasonLine, WhyDisabled } from "@/components/WhyDisabled";
+import { useToolsImages } from "@/hooks/use-tools-images";
 import {
   api,
   errorMessage,
@@ -183,6 +184,8 @@ export function VmSettingsTab({
   const [read, setRead] = useState<{ for: string; specs: VmSpecs } | null>(null);
   const [error, setError] = useState<{ for: string; message: string } | null>(null);
   const [reading, setReading] = useState(false);
+  // VM-15: whether Workstation has the Tools image for this guest.
+  const toolsImages = useToolsImages(vm.hypervisor === "vmware");
   const [dialog, setDialog] = useState<Dialog>(askRename > renameSeen ? { kind: "rename" } : null);
   // The palette's Rename while the tab shows: handled while rendering, once per ask.
   const [lastAsk, setLastAsk] = useState(askRename);
@@ -341,11 +344,11 @@ export function VmSettingsTab({
                     <span className="flex flex-wrap items-center gap-2">
                       <ToolsLabel state={vm.toolsState} />
                       {h.toolsVersion && <span className="text-xs text-muted-foreground">{h.toolsVersion}</span>}
-                      <WhyDisabled reason={toolsReason(vm, readOnly, h)}>
+                      <WhyDisabled reason={toolsReason(vm, readOnly, h, toolsImages)}>
                         <Button
                           size="xs"
                           variant="ghost"
-                          disabled={toolsReason(vm, readOnly, h) !== null || busy}
+                          disabled={toolsReason(vm, readOnly, h, toolsImages) !== null || busy}
                           onClick={() =>
                             void onSubmit({ type: "vmDevice", targets: [ref], op: { kind: "installTools" } })
                           }

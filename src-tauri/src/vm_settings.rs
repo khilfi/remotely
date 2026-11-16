@@ -161,6 +161,12 @@ pub async fn vm_workstation_open(state: State<'_, AppState>) -> IpcResult<bool> 
     Ok(state.core.vm_settings.workstation_window_open().await)
 }
 
+/// VM-15: the VMware Tools images beside vmrun.exe, or null when Workstation's folder isn't known. A read.
+#[tauri::command]
+pub async fn vm_tools_images(state: State<'_, AppState>) -> IpcResult<Option<Vec<String>>> {
+    Ok(state.core.vm_settings.tools_images().await)
+}
+
 /// VM-23: the guest OS types the VM's hypervisor offers. A read.
 #[tauri::command]
 pub async fn vm_guest_os_types(state: State<'_, AppState>, vmx_path: String) -> IpcResult<Vec<GuestOsType>> {

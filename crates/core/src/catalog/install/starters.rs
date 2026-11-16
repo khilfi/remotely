@@ -226,4 +226,41 @@ mod tests {
         assert_eq!(windows.spec.variables.len(), 2);
         let _ = HashMap::<String, String>::new();
     }
+
+    /// VM-15: every Linux ISO starter installs open-vm-tools (on Workstation's bridged network the guest's address comes
+    /// only from VMware Tools), and as a plain package only where its install needs the archive anyway. Ubuntu's ISO
+    /// doesn't carry it for the minimal source, and neither do Rocky's and Alma's minimal ISOs (the 9.8 manifests),
+    /// whose Anaconda stops on a listed package the source lacks. Elsewhere it goes in by a late command that can't fail.
+    #[test]
+    fn linux_iso_starters_install_open_vm_tools_without_needing_the_network_for_it() {
+        let form = |id: &str| {
+            let starter = find(id).unwrap();
+            read_form(starter.kind, starter.body).form
+        };
+        // `apt-get install -y open-vm-tools` or `dnf -y install open-vm-tools`, whose failure is ignored.
+        let best_effort = |commands: &[String]| {
+            commands.iter().any(|c| {
+                c.contains("install")
+                    && c.contains(" open-vm-tools")
+                    && (c.ends_with("|| true") || c.ends_with("|| true'"))
+            })
+        };
+        for id in [
+            "starter.ubuntu-24.04-minimal",
+            "starter.rocky-9-minimal",
+            "starter.alma-9-minimal",
+        ] {
+            let form = form(id);
+            assert!(
+                !form.packages.iter().any(|p| p == "open-vm-tools"),
+                "{id}: {:?}",
+                form.packages
+            );
+            assert!(best_effort(&form.late_commands), "{id}: {:?}", form.late_commands);
+        }
+        // Docker comes from Ubuntu's archive, and Debian's starter turns the mirror on: both need the network anyway.
+        for id in ["starter.ubuntu-24.04-docker", "starter.debian-12-minimal"] {
+            assert!(form(id).packages.iter().any(|p| p == "open-vm-tools"), "{id}");
+        }
+    }
 }

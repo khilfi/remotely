@@ -373,11 +373,33 @@ pub const MAX_IP_WAIT_SECS: u32 = 60 * 60;
 /// Longest folder path a deploy takes (Windows' own limit is 260 without long paths).
 pub const MAX_FOLDER_CHARS: usize = 200;
 
+/// VM-15, VM-29: why a Workstation VM on a bridged network has no address yet, and what to do, for the step's note.
+/// Workstation's DHCP leases (`vmnetdhcp.leases`) cover only its NAT and host-only networks, so on a bridged one only
+/// VMware Tools in the guest report the address, and a Linux guest has them only with open-vm-tools.
+pub const BRIDGED_NO_TOOLS: &str = "on a bridged network Workstation learns a guest's address only from VMware Tools in the guest, and none reported one: install open-vm-tools in the guest (for example sudo apt install open-vm-tools, or sudo dnf install open-vm-tools; the Linux starters install it), or deploy on NAT or host-only, or with an address pool";
+
+/// [`BRIDGED_NO_TOOLS`] for a Windows guest, whose VMware Tools come from Workstation's own installer.
+pub const BRIDGED_NO_TOOLS_WINDOWS: &str = "on a bridged network Workstation learns a guest's address only from VMware Tools in the guest, and none reported one: install VMware Tools in the guest (Install or upgrade on the VM's Settings tab), or deploy on NAT or host-only, or with an address pool";
+
 fn invalid<T>(message: impl Into<String>) -> Result<T> {
     Err(CoreError::InvalidInput(message.into()))
 }
 
 impl DeploySpec {
+    /// VM-15, VM-29: for a Workstation deploy on a bridged network (vmnet0), where only the guest's VMware Tools tell
+    /// its address, what to do: [`BRIDGED_NO_TOOLS`] (open-vm-tools), or [`BRIDGED_NO_TOOLS_WINDOWS`] for a Windows
+    /// profile. None elsewhere.
+    pub fn unknown_address_hint(&self) -> Option<&'static str> {
+        let bridged = matches!(self.network, Some(Network::Bridged | Network::Vmnet { number: 0 }));
+        if self.hypervisor != Hypervisor::Vmware || !bridged {
+            return None;
+        }
+        Some(match self.profile.as_ref().map(|p| p.family) {
+            Some(GuestFamily::Windows) => BRIDGED_NO_TOOLS_WINDOWS,
+            _ => BRIDGED_NO_TOOLS,
+        })
+    }
+
     /// FD-02: the existing VMs the deploy clones from (a golden VM, or each VM of a bulk clone), by key. The command
     /// bus requires each to be in the workspace, as for any action on a VM.
     pub fn source_vms(&self) -> Vec<&str> {
@@ -941,6 +963,41 @@ pub(crate) mod tests {
             },
             "ubuntu",
         )
+    }
+
+    #[test]
+    fn a_bridged_workstation_vm_without_an_address_is_told_what_its_guest_needs() {
+        // VM-15: only VMware Tools in the guest tell a bridged Workstation VM's address.
+        let with = |profile: &str, hypervisor: Hypervisor, network: Network| {
+            let mut spec = DeploySpec::from_plan(
+                &plan(cloud(), profile, hypervisor, 1),
+                DeployOrigin::Custom { name: "w".into() },
+                r"C:\VMs".into(),
+                None,
+            );
+            spec.network = Some(network);
+            spec.unknown_address_hint()
+        };
+        assert_eq!(
+            with("ubuntu", Hypervisor::Vmware, Network::Bridged),
+            Some(BRIDGED_NO_TOOLS)
+        );
+        assert_eq!(
+            with("debian", Hypervisor::Vmware, Network::Vmnet { number: 0 }),
+            Some(BRIDGED_NO_TOOLS)
+        );
+        let windows = with("windows-server", Hypervisor::Vmware, Network::Bridged);
+        assert_eq!(windows, Some(BRIDGED_NO_TOOLS_WINDOWS));
+        assert!(
+            !windows.unwrap().contains("open-vm-tools"),
+            "a Windows guest isn't told to install open-vm-tools"
+        );
+        assert!(BRIDGED_NO_TOOLS.contains("open-vm-tools"));
+        // Workstation leases NAT and host-only addresses itself; VirtualBox's bridged guests report through the
+        // Guest Additions.
+        assert_eq!(with("ubuntu", Hypervisor::Vmware, Network::Nat), None);
+        assert_eq!(with("ubuntu", Hypervisor::Vmware, Network::HostOnly), None);
+        assert_eq!(with("ubuntu", Hypervisor::VirtualBox, Network::Bridged), None);
     }
 
     #[test]
