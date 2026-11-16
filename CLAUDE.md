@@ -398,7 +398,9 @@ crates/core/          remotely-core: all app logic
                       Windows image's clones taking G6's install (a seed CD and COM1 added to the clone,
                       SerialWatcher::sysprepped, its `remotely-clone` lines); runner/first_boot.rs: a VirtualBox
                       install or clone's first boot watched for vCPU 0 standing still (`debugvm statistics`) while
-                      the deploy waits for it, then reset
+                      the deploy waits for it, then reset; runner/first_stage.rs: a Windows Setup so reset before its
+                      first restart that then writes nothing to its disk (it waits at its upgrade question) failed
+                      at once
     address_pools.rs  VM-32 (0.8.0 G6, migration 0036) address pools per workspace: ranges per hypervisor network,
                       pick (pinged), claim, assign, release; store/address_pools.rs
     golden/           VM-30 (0.8.0 G7, migration 0037) golden image builds ("Golden image builds (G7)"): spec.rs
@@ -1128,7 +1130,8 @@ crates/core/          remotely-core: all app logic
                       image and its versions, its template deploying the newest, a rebuild), retention and a linked
                       clone, Debian on VirtualBox (drives, serial port and NAT rule out), the vault's wait, refusals, a
                       Windows image sysprepped and its clone's G6 delivery, a scheduled rebuild under its standing
-                      approval paused by a config change;
+                      approval paused by a config change, VirtualBox hangs reset (a Setup reset mid-way through
+                      windowsPE failed at once; one whose disk writes go on isn't);
                       files_page.rs: SS-14, BX-10 (0.8.0 G3) on the test SSH server's
                       SFTP folder and its toy find and sha256sum: find, preview and checksums as reads, bookmarks (audit,
                       lock, trash), the local pane by listing, compare and sync both ways at their tiers, pushes to five
@@ -2178,7 +2181,9 @@ VM-29 and VM-32, from 0.8.0 (`docs/plan-0.8.md`, G6), built only on what S1 to S
   the last line; Debian's partitioner as the last step title, since its dialog goes on drawing the frame and the
   progress numbers after the title) gets `controlvm reset`, at most 5 times. Any VirtualBox install whose vCPU 0 stands
   still for 3 minutes while its serial log is silent is reset too, within the same 5 (Windows Setup's restart hang, and
-  Ubuntu's before its known point's line ends: "Golden image builds (G7)", the VirtualBox hang). Debian's step titles count only whole (`Configuring apt-cdrom-setup`, a component the
+  Ubuntu's before its known point's line ends: "Golden image builds (G7)", the VirtualBox hang); a Windows Setup so
+  reset before its first restart that then stands at "It looks like you started an upgrade" fails at once (the same
+  section, a hang in the middle of Setup's first stage). Debian's step titles count only whole (`Configuring apt-cdrom-setup`, a component the
   installer loads, isn't `Configuring apt`). `<hostname> login:` counts anywhere in a line: Ubuntu's cloud-init writes
   its last lines onto the prompt's line. Done: Linux at `<hostname> login:` and an SSH banner on the guest; Windows at WinRM over HTTPS signing in.
 - **A failure, the time limit or a cancel** (`CoreError::InstallFailed`, `InstallCancelled`, recorded as cancelled):
@@ -2475,16 +2480,36 @@ seen on a real VM yet (the PR lists the checks).
     stage counts one restart too many, which only moves the stage's words ahead, since only the installed system
     writes the certificate's line the gate waits for. PR 101's review asked for the subtraction and agreed to keep the
     count once it saw this; `a_reset_that_finishes_a_hung_restart_of_setup_counts_as_that_restart` pins it.
-  - **A hang in the middle of Setup's first stage isn't recovered** (hand check 6 below, the only one seen): both vCPUs
-    stood still mid-way through windowsPE, before Setup had made the disk bootable. After the reset the firmware fell
-    through to the ISO, and Setup asked "It looks like you started an upgrade and booted from installation media ...
-    Yes / No" and waited. The count read 1, and the stage said "the image is applied". The install runs to its time
-    limit, just as it would have, hung, without the reset, so the reset is never worse. Not done: answering "No" (a
-    clean install with the same seed, through VirtualBox's `keyboardputscancode`) or failing at once when windowsPE is
-    reset; either needs a hand check.
+  - **A hang in the middle of Setup's first stage fails the install at once** (`deploy/runner/first_stage.rs`). Hand
+    check 6 below (the only natural one seen): both vCPUs stood still mid-way through windowsPE, before Setup had made
+    the disk bootable. After the reset the firmware fell through to the ISO, and Setup asked "It looks like you
+    started an upgrade and booted from installation media ... click Yes ... click No" (a message box, Yes focused,
+    `&Yes` and `&No`) and waited; the count read 1, and the stage said "the image is applied". It would have run to
+    its time limit. **Answering No doesn't get past it** (hand check 8): the N key (`controlvm <vm> keyboardputscancode
+    31 b1`) closed the message box, and Windows Server 2025's Setup then showed its spinner and did nothing for 15
+    minutes (no disk writes, no reads of the ISO, no network). So: when the vCPU 0 watch resets a Windows Setup from an
+    ISO on VirtualBox while the counter still read 0 (Setup's first restart not counted), the watcher looks for Setup
+    going on. A restart counted beyond the reset, or words on the serial port (the EFI firmware's escapes at each boot
+    don't count: hand check 8 saw 58 and 29 bytes with no words), end the watch. The guest's disk writes (`debugvm <vm>
+    statistics --pattern /Public/Storage/*BytesWritten`, every disk's `BytesWritten` summed, `DISK_WRITES`; VirtualBox
+    7.2 prints `<Counter c="..." unit="bytes" vis="used" name="/Public/Storage/AHCI0/Port0/BytesWritten"/>`, shown
+    once the disk was written to, and keeps the count across a reset) start its clock again: Setup writes a little as
+    it starts (hand check 8: 155 MB in the 15 s after the reset, then nothing). Nothing written for `setup_stuck` (3
+    minutes) of rounds in which vCPU 0 moved (a hung or paused guest is the hang watch's) fails the install at once:
+    `Setup was reset in the middle of its first stage (windowsPE), before its disk could start Windows, so the VM
+    started the install ISO again, and Setup has written nothing to the disk for about 3 minutes since: it waits at "It
+    looks like you started an upgrade ...", which it doesn't get past (answering No leaves it idle). Delete the VM and
+    deploy it again`; the failure's `<vm>-install-failed.png` shows the question (hand check 9: 8.7 minutes after
+    power-on, where the time limit is 60 minutes by default). A round whose writes can't be read
+    decides nothing, so a VirtualBox without those statistics leaves the install to its time limit, as before. Once
+    per install. A hang at Setup's first restart after all (the common one) isn't mistaken for it: Windows starts from
+    the disk, and specialize and OOBE write to it until the next restart is counted.
   - Fakes: `FakeVirtualBox::hang_next_boot` and `hang_boots` (the counter stands still until a reset, for that many
     boots), a counter that moves with the clock while the VM runs, a reset that raises `ResetCounter`, no Guest
-    Additions data while hung, `set_failing("debugvm")`.
+    Additions data while hung, `set_failing("debugvm")`; disk writes (`--pattern` with `BytesWritten`) that move with
+    the clock while the VM runs and stand still while it is hung or asks, `set_failing("debugvm disks")` (none shown),
+    `asks_after_reset(name)` (the next reset leaves Setup at its question: its own screenshot, no writes) and
+    `is_asking`.
 - **Scheduled rebuilds** (`ScheduleAction::RebuildImage`, one `ScheduleTarget::Image`): the save asks the bus for a
   standing approval of the image's next build as it would be built then (VM-27; Medium, or Critical with `keep`). Each
   run builds the command from the recipe as it is then (`GoldenImages::command_for`) and submits it under the grant: a
@@ -2600,6 +2625,24 @@ seen on a real VM yet (the PR lists the checks).
      specialize %TIME%>COM1) 2>nul & exit 0` line (written by the command the script started through `CreateProcessW`),
      `ran 0`, `handed`, and its own `remotely-winrm` line about 2 minutes after power-on. Each clone: its own name,
      SID, WinRM certificate and one-time password; `UnattendFile` and the script gone after the sign-in.
+  8. **Windows Server 2025 on VirtualBox, the build alone, reset mid-way through windowsPE on purpose (16 Nov 2026):
+     answering No doesn't recover it.** A hang can't be made on purpose, so a local harness wrapped the real VirtualBox
+     adapter: from 2 minutes after the watcher's first read, its `debugvm statistics` reads of vCPU 0 gave the same
+     value while the VM ran on. 3 minutes later the real watcher reset the real VM (5 minutes after power-on, the disk
+     file at 8.2 GB, the reset counter 0, then 1). The firmware started the ISO, and Setup asked hand check 6's
+     question. The code of the time sent N 3 minutes later (`keyboardputscancode 31 b1`): the message box closed, and
+     Setup's window showed its spinner and stayed so for 15 minutes, `/Public/Storage/AHCI0/Port0/BytesWritten`
+     unchanged, the ISO's port read 1 MB once, `/Public/NetAdapter/0` 0 bytes both ways, vCPU 0 mostly halted
+     (`cNsExecuting` 0.7 s in 20 s). Hence the failure at once above, which counts the disk's writes. Also seen: the
+     reset counter read `Value: 0` from power-on (VirtualBox 7.2.22; S3 saw `No value set!`), the serial log took only
+     the firmware's escapes at each boot (87 bytes at power-on, 58 and 29 after the reset), and two screenshots of the
+     question 2 s apart were the same bytes. The VM was deleted with the owner's OK.
+  9. **The same, with the final code: passed.** The watcher reset the VM 5 minutes after power-on (the disk file at 11.5
+     GB, 13.07 GB written, the counter 0). `BytesWritten` went on 320 MB (writes in flight), then 134 KB as Setup started
+     from the ISO, then stood still from 39 s after the reset while Setup asked its question; 3 minutes later (8.7
+     minutes after power-on) the build failed with `Setup was reset in the middle of its first stage (windowsPE) ...
+     Delete the VM and deploy it again`, its `-install-failed.png` the question, and the seed and NAT rule went as for
+     any failure. The VM was deleted with the owner's OK.
   - On every running VirtualBox VM seen (four Windows clones, the Ubuntu clone) vCPU 0's `cNsTotal` (VBoxManage prints
     `<U64 val="..." unit="ns" name="/TM/CPU/00/cNsTotal"/>`) grew with the wall clock, 15 s every 15 s; on each hung
     VM it stood still for minutes, and after a reset it jumped by the time it had stood still. 4 of the 8 VirtualBox

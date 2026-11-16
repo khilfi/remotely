@@ -1297,6 +1297,14 @@ pub struct FakeVirtualBox {
     reset_counts: Mutex<HashMap<String, u32>>,
     /// VM-30: guest properties of VMs a deploy makes, by VM name (a Windows install's reset counter).
     properties_by_name: Mutex<HashMap<String, HashMap<String, String>>>,
+    /// VM-30: VMs (by name) whose next reset leaves Windows Setup at its upgrade question, as a reset in the middle of
+    /// windowsPE does (the disk can't start Windows yet, so the install ISO starts Setup again); the VMs asking now, by
+    /// UUID (their screen shows the question, and they write nothing); each VM's bytes written to its disks
+    /// (`/Public/Storage/AHCI0/Port0/BytesWritten`) and when they were last read, which move with the clock while it
+    /// runs and stand still while it is hung, asks, or is paused or off.
+    upgrade_questions: Mutex<HashSet<String>>,
+    asking: Mutex<HashSet<String>>,
+    disk_written: Mutex<HashMap<String, (u64, std::time::Instant)>>,
 }
 
 /// The value after `--name` in a VBoxManage call.
@@ -1664,6 +1672,42 @@ impl FakeVirtualBox {
         let entry = times.entry(uuid.to_owned()).or_insert((1_000_000_000, now));
         if running && !hung {
             entry.0 += u64::try_from(now.duration_since(entry.1).as_nanos()).unwrap_or(u64::MAX);
+        }
+        entry.1 = now;
+        entry.0
+    }
+
+    /// VM-30: the next reset of the VM named `name` leaves Windows Setup at its upgrade question ("It looks like you
+    /// started an upgrade..."), where it waits and writes nothing (hand check 8: answering No leaves it idle).
+    pub fn asks_after_reset(&self, name: &str) {
+        locks::lock(&self.upgrade_questions).insert(name.to_owned());
+    }
+
+    /// VM-30: whether the VM named `name` shows Setup's upgrade question now.
+    pub fn is_asking(&self, name: &str) -> bool {
+        self.vm_named(name)
+            .is_some_and(|vm| locks::lock(&self.asking).contains(&vm.uuid))
+    }
+
+    /// VM-30: a reset of the VM `uuid` named `name`: Setup's question if one was set for it.
+    fn reset_question(&self, uuid: &str, name: &str) {
+        let mut asking = locks::lock(&self.asking);
+        asking.remove(uuid);
+        if locks::lock(&self.upgrade_questions).remove(name) {
+            asking.insert(uuid.to_owned());
+        }
+    }
+
+    /// VM-30: the bytes the VM `uuid` wrote to its disks so far: they moved with the clock (a MB a second) since the
+    /// last read while it ran, wasn't hung and wasn't waiting at Setup's question.
+    fn disk_written_now(&self, uuid: &str, running: bool) -> u64 {
+        let writes = running && !locks::lock(&self.hung).contains(uuid) && !locks::lock(&self.asking).contains(uuid);
+        let now = std::time::Instant::now();
+        let mut written = locks::lock(&self.disk_written);
+        let entry = written.entry(uuid.to_owned()).or_insert((1 << 20, now));
+        if writes {
+            let ms = u64::try_from(now.duration_since(entry.1).as_millis()).unwrap_or(u64::MAX);
+            entry.0 = entry.0.saturating_add(ms.saturating_mul(1 << 20) / 1000);
         }
         entry.1 = now;
         entry.0
@@ -2242,6 +2286,7 @@ impl FakeVirtualBox {
                     if verb == "reset" {
                         *locks::lock(&self.reset_counts).entry(uuid.clone()).or_insert(0) += 1;
                         self.boot(&uuid, &info.name);
+                        self.reset_question(&uuid, &info.name);
                     }
                     return Ok(String::new());
                 }
@@ -2277,8 +2322,19 @@ impl FakeVirtualBox {
                 if self.fails("debugvm") {
                     return Err(failed("debugvm", "The object is not ready"));
                 }
-                let ns = self.vcpu_now(&uuid, info.power_state() == PowerState::Running);
                 let name = option(args, "--pattern").unwrap_or("/TM/CPU/00/cNsTotal");
+                if name.contains("BytesWritten") {
+                    if self.fails("debugvm disks") {
+                        // A VirtualBox without those statistics: none match.
+                        return Ok("<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"no\"?>\n<Statistics>\n</Statistics>\n".into());
+                    }
+                    // VM-30: the disk's writes, as VirtualBox 7.2 prints them (hand check 8).
+                    let written = self.disk_written_now(&uuid, info.power_state() == PowerState::Running);
+                    return Ok(format!(
+                        "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"no\"?>\n<Statistics>\n<Counter c=\"{written}\" unit=\"bytes\" vis=\"used\" name=\"/Public/Storage/AHCI0/Port0/BytesWritten\"/>\n</Statistics>\n"
+                    ));
+                }
+                let ns = self.vcpu_now(&uuid, info.power_state() == PowerState::Running);
                 return Ok(format!(
                     "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"no\"?>\n<Statistics>\n<U64 val=\"{ns}\" unit=\"ns\" name=\"{name}\"/>\n</Statistics>\n"
                 ));
@@ -2781,6 +2837,10 @@ impl VirtualBoxAdapter for FakeVirtualBox {
                 "controlvm screenshotpng",
                 "Machine is not currently running",
             ));
+        }
+        if locks::lock(&self.asking).contains(uuid) {
+            // VM-30: Setup's upgrade question, the same picture until it is answered.
+            return Ok(b"\x89PNG\r\n\x1a\nquestion".to_vec());
         }
         Ok(b"\x89PNG\r\n\x1a\nfake".to_vec())
     }
