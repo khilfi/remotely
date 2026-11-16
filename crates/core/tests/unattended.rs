@@ -12,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use common::{temp_folder, Setup, VAULT_PASSWORD};
+use common::{setup_restarts_counted, temp_folder, Setup, VAULT_PASSWORD};
 use remotely_core::adapters::exec_output::OutputCollector;
 use remotely_core::adapters::hypervisor::Hypervisor;
 use remotely_core::adapters::remote::{ExecResult, ExecSession, ScriptKind, SecretPromptShown};
@@ -770,6 +770,7 @@ async fn windows_gets_the_vault_password_over_winrm_with_the_certificate_from_it
     assert!(approval.steps.contains(&ApprovalStep::VaultReauth));
     let folder = vms.join("win-1");
     // Setup restarts twice (Workstation's log), then the first sign-in writes the certificate's fingerprint.
+    let mut events = core.jobs.subscribe();
     let log = folder.join("vmware.log");
     let resets = tokio::spawn({
         let log = log.clone();
@@ -792,15 +793,23 @@ async fn windows_gets_the_vault_password_over_winrm_with_the_certificate_from_it
             }
         }
     });
-    let play = installer(
-        folder.join("win-1-serial.log"),
+    let serial = folder.join("win-1-serial.log");
+    let setup = installer(
+        serial.clone(),
         vec![
             "remotely-stage specialize 10:01:02.03 \r\n".into(),
             "pause\r\n".into(),
             "pause\r\n".into(),
-            format!("\x1b[0mremotely-winrm {fingerprint}\r\n"),
         ],
     );
+    // The installed system's line only once the watcher counted both restarts (a line read before is dropped).
+    let play = tokio::spawn(async move {
+        setup.await.unwrap();
+        if setup_restarts_counted(&mut events).await {
+            let line = format!("\x1b[0mremotely-winrm {fingerprint}\r\n");
+            installer(serial, vec![line]).await.unwrap();
+        }
+    });
     let job = approve(&core, &approval).await;
     let status = wait(&core, job).await;
     play.await.unwrap();
@@ -1017,16 +1026,22 @@ async fn windows_lab(label: &str, winrm: Arc<FakeWinrm>) -> (Core, PathBuf, Path
 }
 
 /// Setup: two restarts in Workstation's log, then `lines` on the serial port.
-fn windows_setup(folder: &Path, lines: Vec<String>) -> tokio::task::JoinHandle<()> {
-    windows_setup_with(folder, Vec::new(), lines)
+fn windows_setup(core: &Core, folder: &Path, lines: Vec<String>) -> tokio::task::JoinHandle<()> {
+    windows_setup_with(core, folder, Vec::new(), lines)
 }
 
 /// Setup as [`windows_setup`], with `before` written to the serial port before the restarts (windowsPE, a boot
-/// loader). The installed system's `lines` come a good while after the second restart, as they do on a real VM
-/// (minutes there), so the watcher has counted it first.
-fn windows_setup_with(folder: &Path, before: Vec<String>, lines: Vec<String>) -> tokio::task::JoinHandle<()> {
+/// loader). The installed system's `lines` come only once the watcher has counted the second restart, as on a real VM
+/// (minutes after it there).
+fn windows_setup_with(
+    core: &Core,
+    folder: &Path,
+    before: Vec<String>,
+    lines: Vec<String>,
+) -> tokio::task::JoinHandle<()> {
     let log = folder.join("vmware.log");
     let serial = folder.join("win-1-serial.log");
+    let mut events = core.jobs.subscribe();
     tokio::spawn(async move {
         for _ in 0..2000 {
             if serial.with_file_name("install-seed").exists() {
@@ -1053,7 +1068,9 @@ fn windows_setup_with(folder: &Path, before: Vec<String>, lines: Vec<String>) ->
                 b"In(05) vcpu-0 Chipset: The guest has requested that the virtual machine be hard reset.\n",
             );
         }
-        tokio::time::sleep(Duration::from_millis(400)).await;
+        if !setup_restarts_counted(&mut events).await {
+            return;
+        }
         for line in lines {
             tokio::time::sleep(Duration::from_millis(60)).await;
             append(&serial, line.as_bytes());
@@ -1070,7 +1087,7 @@ async fn a_connection_broken_after_the_swap_signs_in_with_the_vaults_password_an
         ..FakeWinrm::default()
     });
     let (core, dir, folder, secret, approval) = windows_lab("unattended-win-blip", winrm.clone()).await;
-    let play = windows_setup(&folder, vec![format!("remotely-winrm {FINGERPRINT}\r\n")]);
+    let play = windows_setup(&core, &folder, vec![format!("remotely-winrm {FINGERPRINT}\r\n")]);
     let job = approve(&core, &approval).await;
     let status = wait(&core, job).await;
     play.await.unwrap();
@@ -1115,7 +1132,7 @@ async fn a_locked_vault_holds_the_sign_in_until_it_is_unlocked() {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     core.vault.lock(&core.ctx()).await.unwrap();
-    let play = windows_setup(&folder, vec![format!("remotely-winrm {FINGERPRINT}\r\n")]);
+    let play = windows_setup(&core, &folder, vec![format!("remotely-winrm {FINGERPRINT}\r\n")]);
     let waited = tokio::time::timeout(Duration::from_secs(20), async {
         loop {
             if let Ok(JobEvent::TargetProgress { step, .. }) = events.recv().await {
@@ -1157,6 +1174,7 @@ async fn another_certificate_fails_the_install_loudly() {
     let (core, dir, folder, _secret, approval) = windows_lab("unattended-win-cert", winrm.clone()).await;
     // windowsPE writes a fingerprint before any restart: never taken.
     let play = windows_setup_with(
+        &core,
         &folder,
         vec!["remotely-winrm SHA256:BBBBQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU\r\n".into()],
         vec![format!("remotely-winrm {FINGERPRINT}\r\n")],
@@ -1402,7 +1420,7 @@ async fn a_swap_whose_answer_was_lost_signs_in_with_the_vaults_password_next() {
         ..FakeWinrm::default()
     });
     let (core, dir, folder, secret, approval) = windows_lab("unattended-win-lost", winrm.clone()).await;
-    let play = windows_setup(&folder, vec![format!("remotely-winrm {FINGERPRINT}\r\n")]);
+    let play = windows_setup(&core, &folder, vec![format!("remotely-winrm {FINGERPRINT}\r\n")]);
     let job = approve(&core, &approval).await;
     let status = wait(&core, job).await;
     play.await.unwrap();
@@ -1428,7 +1446,12 @@ async fn a_fingerprint_line_written_before_the_restarts_is_never_taken_however_l
     // More log than one read takes, written before the restarts, the forged line last.
     let mut before = "x".repeat(900 * 1024);
     before.push_str("\r\nremotely-winrm SHA256:BBBBQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU\r\n");
-    let play = windows_setup_with(&folder, vec![before], vec![format!("remotely-winrm {FINGERPRINT}\r\n")]);
+    let play = windows_setup_with(
+        &core,
+        &folder,
+        vec![before],
+        vec![format!("remotely-winrm {FINGERPRINT}\r\n")],
+    );
     let job = approve(&core, &approval).await;
     let status = wait(&core, job).await;
     play.await.unwrap();
@@ -1462,7 +1485,7 @@ async fn the_wait_for_the_vault_doesnt_count_against_the_time_limit() {
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
     core.vault.lock(&core.ctx()).await.unwrap();
-    let play = windows_setup(&folder, vec![format!("remotely-winrm {FINGERPRINT}\r\n")]);
+    let play = windows_setup(&core, &folder, vec![format!("remotely-winrm {FINGERPRINT}\r\n")]);
     tokio::time::sleep(Duration::from_millis(2500)).await;
     core.vault
         .unlock(

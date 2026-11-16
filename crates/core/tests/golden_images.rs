@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use common::{temp_folder, Setup, VAULT_PASSWORD};
+use common::{setup_restarts_counted, temp_folder, Setup, VAULT_PASSWORD};
 use remotely_core::adapters::exec_output::OutputCollector;
 use remotely_core::adapters::hypervisor::Hypervisor;
 use remotely_core::adapters::remote::{ExecResult, ExecSession, ScriptKind, SecretPromptShown};
@@ -1172,11 +1172,19 @@ impl WinrmSession for FakeWinrmSession {
     }
 }
 
-/// Setup's two restarts in Workstation's log once the VM's seed is there, then `lines` on its serial port.
-fn windows_setup(folder: &Path, vm: &str, resets: usize, lines: Vec<String>) -> tokio::task::JoinHandle<()> {
+/// Setup's `resets` restarts in Workstation's log once the VM's seed is there, then `lines` on its serial port: after a
+/// build's two restarts, only once the watcher has counted them (a clone counts none).
+fn windows_setup(
+    core: &Core,
+    folder: &Path,
+    vm: &str,
+    resets: usize,
+    lines: Vec<String>,
+) -> tokio::task::JoinHandle<()> {
     let log = folder.join("vmware.log");
     let serial = folder.join(format!("{vm}-serial.log"));
     let seed = folder.join("install-seed");
+    let mut events = core.jobs.subscribe();
     tokio::spawn(async move {
         for _ in 0..3000 {
             if seed.exists() {
@@ -1191,7 +1199,9 @@ fn windows_setup(folder: &Path, vm: &str, resets: usize, lines: Vec<String>) -> 
                 b"In(05) vcpu-0 Chipset: The guest has requested that the virtual machine be hard reset.\n",
             );
         }
-        tokio::time::sleep(Duration::from_millis(400)).await;
+        if resets >= 2 && !setup_restarts_counted(&mut events).await {
+            return;
+        }
         for line in lines {
             tokio::time::sleep(Duration::from_millis(60)).await;
             append(&serial, line.as_bytes());
@@ -1240,6 +1250,7 @@ async fn a_windows_image_is_sysprepped_and_its_clones_get_g6s_one_time_password_
     assert!(details.sign_in.contains("WinRM"), "{}", details.sign_in);
     let folder = lab.vms.join("winsrv-v1");
     let play = windows_setup(
+        core,
         &folder,
         "winsrv-v1",
         2,
@@ -1301,7 +1312,7 @@ async fn a_windows_image_is_sysprepped_and_its_clones_get_g6s_one_time_password_
     let web = lab.vms.join("web-1");
     // No Setup from an ISO: sysprep's answer file runs the clone's script in specialize (its lines), then the clone's
     // first sign-in writes its new certificate's line, with no restart counted.
-    let play = windows_setup(&web, "web-1", 0, clone_lines("web-1"));
+    let play = windows_setup(core, &web, "web-1", 0, clone_lines("web-1"));
     *winrm.sysprep.lock().unwrap() = None;
     let job = approve(core, &approval).await;
     let status = wait(core, job).await;
@@ -1439,8 +1450,8 @@ async fn windows_build_with(
     let approval = needs_approval(core.golden.submit(ctx, &request).await.unwrap());
     let lines = vec![format!("remotely-winrm {FINGERPRINT}\r\n")];
     let play = match hypervisor {
-        Hypervisor::Vmware => windows_setup(&lab.vms.join(vm), vm, 2, lines),
-        Hypervisor::VirtualBox => vbox_setup(Arc::clone(&lab.virtualbox), lab.vms.join(vm), vm, lines, restarts),
+        Hypervisor::Vmware => windows_setup(core, &lab.vms.join(vm), vm, 2, lines),
+        Hypervisor::VirtualBox => vbox_setup(core, Arc::clone(&lab.virtualbox), lab.vms.join(vm), vm, lines, restarts),
     };
     let job = approve(core, &approval).await;
     let status = wait(core, job).await;
@@ -1449,10 +1460,11 @@ async fn windows_build_with(
 }
 
 /// Windows Setup on the fake VirtualBox (its restarts are the reset counter's): once the VM named `vm` runs, and isn't
-/// hung (else once it was reset), `lines` on its serial port.
+/// hung (else once it was reset), and the watcher has counted both restarts, `lines` on its serial port.
 /// [`VboxRestarts::AfterHang`]: once the reset finished Setup's first restart, Setup's second is counted (the
 /// counter's own value 1, Remotely's reset the other).
 fn vbox_setup(
+    core: &Core,
     virtualbox: Arc<FakeVirtualBox>,
     folder: PathBuf,
     vm: &str,
@@ -1460,6 +1472,7 @@ fn vbox_setup(
     restarts: VboxRestarts,
 ) -> tokio::task::JoinHandle<()> {
     let vm = vm.to_owned();
+    let mut events = core.jobs.subscribe();
     tokio::spawn(async move {
         let serial = folder.join(format!("{vm}-serial.log"));
         for _ in 0..3000 {
@@ -1486,7 +1499,9 @@ fn vbox_setup(
             }
             VboxRestarts::Never => return,
         }
-        tokio::time::sleep(Duration::from_millis(400)).await;
+        if !setup_restarts_counted(&mut events).await {
+            return;
+        }
         for line in lines {
             tokio::time::sleep(Duration::from_millis(60)).await;
             append(&serial, line.as_bytes());
@@ -1648,7 +1663,13 @@ async fn windows_golden_images_build_rebuild_schedule_and_deploy() {
     assert_eq!(view.state, ScheduleState::Active);
     let v2 = lab.vms.join("allowed-v2");
     *winrm.sysprep.lock().unwrap() = Some(v2.join("allowed-v2.vmx"));
-    let play = windows_setup(&v2, "allowed-v2", 2, vec![format!("remotely-winrm {FINGERPRINT}\r\n")]);
+    let play = windows_setup(
+        core,
+        &v2,
+        "allowed-v2",
+        2,
+        vec![format!("remotely-winrm {FINGERPRINT}\r\n")],
+    );
     let at = &view.next_run.as_ref().unwrap().at;
     let due = time::OffsetDateTime::parse(at, &time::format_description::well_known::Rfc3339).unwrap();
     clock.set(due);
@@ -1674,7 +1695,7 @@ async fn windows_golden_images_build_rebuild_schedule_and_deploy() {
     let check = core.deploy.check(ctx, &deploy_of(template)).await.unwrap();
     assert!(check.problems.is_empty(), "{:?}", check.problems);
     let approval = needs_approval(core.deploy.submit(ctx, &deploy_of(template)).await.unwrap());
-    let play = windows_setup(&lab.vms.join("web-1"), "web-1", 0, clone_lines("web-1"));
+    let play = windows_setup(core, &lab.vms.join("web-1"), "web-1", 0, clone_lines("web-1"));
     let job = approve(core, &approval).await;
     let status = wait(core, job).await;
     play.await.unwrap();
@@ -1729,7 +1750,7 @@ async fn a_windows_clone_whose_specialize_script_finds_no_seed_fails_at_once_say
         "remotely-clone started\r\n".to_owned(),
         "remotely-clone failed seed\r\n".to_owned(),
     ];
-    let play = windows_setup(&lab.vms.join("web-1"), "web-1", 0, lines);
+    let play = windows_setup(core, &lab.vms.join("web-1"), "web-1", 0, lines);
     let job = approve(core, &approval).await;
     let status = wait(core, job).await;
     play.await.unwrap();

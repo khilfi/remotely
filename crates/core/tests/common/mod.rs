@@ -22,6 +22,7 @@ use remotely_core::policy::PolicyRules;
 use remotely_core::store::Store;
 use remotely_core::vault::{LocalVault, SecretString, Vault, VaultOptions};
 use remotely_core::{Adapters, Core};
+use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::broadcast::Receiver;
 use uuid::Uuid;
 
@@ -241,6 +242,28 @@ pub async fn wait_finished(rx: &mut Receiver<JobEvent>, job: Uuid) -> JobStatus 
     })
     .await
     .expect("job finished in time")
+}
+
+/// The detail a Windows install's watcher shows once it has counted Setup's second restart.
+pub const SETUP_RESTARTS_COUNTED: &str = "Windows starts for the first time";
+
+/// Waits until a Windows install's watcher says it counted Setup's second restart; false if it doesn't within a
+/// minute. Each round the watcher reads the serial log before it counts the restarts (N5), and it drops a certificate
+/// line it reads before the second restart is counted. So a test that plays Setup writes the installed system's lines
+/// only after this. They are then read in a later round, however late the watcher started or however slow a round was.
+/// `rx` must be subscribed before the restarts are written.
+pub async fn setup_restarts_counted(rx: &mut Receiver<JobEvent>) -> bool {
+    let counted = tokio::time::timeout(Duration::from_secs(60), async {
+        loop {
+            match rx.recv().await {
+                Ok(JobEvent::TargetProgress { step, .. }) if step.contains(SETUP_RESTARTS_COUNTED) => return true,
+                Err(RecvError::Closed) => return false,
+                _ => {}
+            }
+        }
+    })
+    .await;
+    counted.unwrap_or(false)
 }
 
 /// A made-up private key in OpenSSH's text form, new on every call. Only its shape is real: the vault
