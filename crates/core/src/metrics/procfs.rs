@@ -13,14 +13,18 @@ use serde::Serialize;
 /// out /proc/stat's `intr` and `softirq` lines, which run to thousands of numbers on many-CPU hosts.
 /// One process instead of six (`head` and five `cat`s), so a SIEM that logs every execve on a watched
 /// host sees two a round (the login shell and `grep`), not eight. Disk space changes slowly, so the
-/// mounts of the last `df` stand in ([`DF_EVERY`]).
-pub const GUEST_SCRIPT_WITHOUT_DF: &str =
-    "grep -v -e '^intr ' -e '^softirq ' /proc/stat /proc/meminfo /proc/loadavg /proc/uptime /proc/diskstats /proc/net/dev";
+/// mounts of the last `df` stand in ([`DF_EVERY`]). The first line names the read
+/// ([`crate::adapters::remote::READ_MARKER`]), for a SOC's allow-list; a comment starts nothing.
+pub const GUEST_SCRIPT_WITHOUT_DF: &str = concat!(
+    "# remotely:metrics\n",
+    "grep -v -e '^intr ' -e '^softirq ' /proc/stat /proc/meminfo /proc/loadavg /proc/uptime /proc/diskstats /proc/net/dev"
+);
 
 /// Everything in one exec: the /proc files, then `df` after a marker line. Plain commands and `;`
 /// only, so any login shell runs it the same way. `df -l` leaves out network mounts, which can hang.
 /// Reads only; changes nothing on the guest.
 pub const GUEST_SCRIPT: &str = concat!(
+    "# remotely:metrics\n",
     "grep -v -e '^intr ' -e '^softirq ' /proc/stat /proc/meminfo /proc/loadavg /proc/uptime /proc/diskstats /proc/net/dev",
     "; echo @@df; df -k -P -l"
 );
@@ -499,9 +503,9 @@ mod tests {
         // seven: `head`, five `cat`s and `df`.
         let programs = |script: &str| {
             script
-                .split(';')
+                .split(['\n', ';'])
                 .filter_map(|command| command.split_whitespace().next())
-                .filter(|program| *program != "echo")
+                .filter(|program| *program != "echo" && !program.starts_with('#'))
                 .count()
         };
         assert_eq!(programs(GUEST_SCRIPT_WITHOUT_DF), 1);

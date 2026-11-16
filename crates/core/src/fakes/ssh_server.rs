@@ -46,9 +46,9 @@
 //! the shell, since `exec` replaced it).
 //!
 //! MO-13, MO-14: with [`TestSshServer::with_host_facts`], the exec shell describes a Linux host from a
-//! [`HostFixture`] ([`host`]): `uname`, `lscpu`, `lsblk`, `df -PT`, `systemd-detect-virt`, `systemctl
-//! list-units`, `ss`, `who`, `last`, `ps`, `stat`, `apt` or `dnf`, and `/etc/os-release`. Its toy shell
-//! also knows `type`, `$?` and `NAME=value` before a command.
+//! [`HostFixture`] ([`host`]): `uname`, `lsblk`, `df -PT`, `systemctl list-units`, `ss`, `who`, `last`, `ps`,
+//! `stat`, `apt` or `dnf`, and the files MO-13's `grep` reads (`/etc/os-release`, `/proc/cpuinfo`, the kernel's
+//! host name, DMI...). Its toy shell also knows `type`, `$?` and `NAME=value` before a command.
 
 pub mod docker;
 pub mod host;
@@ -448,13 +448,19 @@ impl TestSshServer {
     }
 
     /// MO-13, MO-14: the exec shell describes a Linux host (see [`host`]). /proc/meminfo and /proc/uptime
-    /// are added when the test has not set them.
+    /// are added when the test has not set them, and the kernel's host name is the one `hostname` prints.
     pub fn with_host_facts(self, fixture: HostFixture) -> Self {
         for (path, text) in fixture.files() {
             self.set_file(path, &text);
         }
         {
+            let name = locks::lock(&self.state.hostname)
+                .clone()
+                .unwrap_or_else(|| "test-host".into());
             let mut files = locks::lock(&self.state.files);
+            files
+                .entry("/proc/sys/kernel/hostname".into())
+                .or_insert_with(|| format!("{name}\n"));
             files
                 .entry("/proc/meminfo".into())
                 .or_insert_with(|| crate::host_details::linux::samples::MEMINFO.into());
@@ -2349,7 +2355,7 @@ impl<'a> ToyShell<'a> {
     }
 
     fn builtin(&mut self, words: &[String]) -> u32 {
-        // `LC_ALL=C lscpu`: an assignment before the command only sets its environment.
+        // `LC_ALL=C df`: an assignment before the command only sets its environment.
         let first = &words[0];
         if first.contains('=')
             && first

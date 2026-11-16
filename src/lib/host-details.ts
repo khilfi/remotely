@@ -63,6 +63,9 @@ const VIRT: Record<string, string> = {
   openvz: "OpenVZ",
   parallels: "Parallels",
   bhyve: "bhyve",
+  google: "Google Compute Engine",
+  apple: "Apple Virtualization",
+  bochs: "Bochs",
 };
 
 export function virtualizationName(value: string | null): string | null {

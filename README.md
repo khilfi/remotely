@@ -402,6 +402,148 @@ What Remotely runs while you look at something else, and how it stays light on t
   the alert rules run on each round in memory and read names and tags at most once a minute; the services
   widget runs one command a minute on the dashboard's kept connection.
 
+### For SOC teams
+
+An EDR that logs every process start on a Linux server can read Remotely's routine reads over SSH as someone exploring
+the host ("system information discovery", MITRE T1082). This section tells a security team what those reads are, so
+they can be told apart from an intruder's and allow-listed, and how an admin turns the background ones off. Nothing
+is hidden: each read is an ordinary SSH exec request, run as the session's login user (never sudo), and its commands
+are in the command line in full.
+
+**How to recognise one.** sshd starts the login user's shell with the script, e.g.
+`bash -c "# remotely:host-facts ..."`. The first line of every script Remotely runs on its own is a comment that names
+the read, `# remotely:<name>`. It runs nothing. Each program the script starts shows as a child of that shell, and
+bash's forks before each program carry the shell's command line. Scripts are fixed strings in the source, and they
+change only with a release.
+
+| First line               | When it runs                                                                                                                                                                                                                                                                   | What it starts                                                                                                                                                                  |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `# remotely:hostname`    | Each time a terminal connects: the host's name for its title (QL-03)                                                                                                                                                                                                           | `hostname`                                                                                                                                                                      |
+| `# remotely:shell`       | Each time a terminal connects: is the login shell bash or zsh (SS-08)                                                                                                                                                                                                          | nothing (`printf` is a builtin)                                                                                                                                                 |
+| `# remotely:host-facts`  | A terminal connects and the stored facts are over a day old; the dashboard, for a watched host whose facts are over a day old (it looks at their age at most every half hour); Refresh in Host details, at once whatever their age; the inventory's "Read again first" (MO-13) | one `grep` of `/etc/os-release`, `/proc/cpuinfo`, `/proc/meminfo`, `/proc/swaps`, `/proc/uptime`, the kernel's host name and DMI's maker and model; `uname -srm`; `lsblk`; `df` |
+| `# remotely:metrics`     | Every 5, 15, 30 or 60 s for each host the dashboard watches (MO-02)                                                                                                                                                                                                            | one `grep` of `/proc` files; `df` once a minute                                                                                                                                 |
+| `# remotely:services`    | Every minute while the dashboard's services widget shows a watched host (MO-16)                                                                                                                                                                                                | `systemctl list-units` twice, or `rc-status` / `service --status-all`                                                                                                           |
+| `# remotely:admin`       | When someone opens Host details › Admin or presses Refresh there (MO-14)                                                                                                                                                                                                       | `systemctl`, `ss` or `netstat`, `who`, `last`, `ps`, `cat /proc/uptime`                                                                                                         |
+| `# remotely:ports`       | The inventory's "Read again first" (FD-05)                                                                                                                                                                                                                                     | `ss` or `netstat`                                                                                                                                                               |
+| `# remotely:updates`     | Check for updates; the inventory, when asked (MO-14, FD-05)                                                                                                                                                                                                                    | `apt list --upgradable` and `stat`, or `dnf check-update`                                                                                                                       |
+| `# remotely:packages`    | The inventory's package list, when asked (FD-05)                                                                                                                                                                                                                               | `dpkg-query -W` or `rpm -qa`                                                                                                                                                    |
+| `# remotely:editors`     | The first time a file is opened in a terminal editor on a host (SS-14)                                                                                                                                                                                                         | `/bin/sh`, with `command -v` (a builtin)                                                                                                                                        |
+| `# remotely:sftp-server` | Browse as root, before sudo starts the host's SFTP server (SS-14)                                                                                                                                                                                                              | `/bin/sh`, with `[ -x ]` (a builtin)                                                                                                                                            |
+
+The first five run on their own; the others only when someone asks. Until this was tuned, `host-facts` started eleven
+programs (`cat`, `uname`, `hostname`, `lscpu`, `lsblk`, `df`, `systemd-detect-virt`...) under one shell within a
+second, on every terminal connect when the facts were over 10 minutes old: the burst an EDR reads as exploration.
+
+**The marker is only a label.** Anyone who can run a command on the host can write `# remotely:` into it, so an
+allow-list must never trust the marker alone. Pair it with what is also true of every one of Remotely's reads:
+
+- The process is the login shell `sshd` started for an SSH exec request. That is a non-interactive `-c` command on a
+  channel with no terminal (no pty), not a shell someone is typing into.
+- The user is the account the session logs in as, one of the admins' accounts. The SSH client's address is the
+  admins' PCs or their jump host.
+- The shell's command line is exactly one of the fixed scripts below, character for character.
+
+Scripts the user types or picks are never marked: bulk runs, the command library, MultiExec, the Files page and support
+bundles. The folder prompt hook is typed into the user's own interactive bash or zsh, not run as a separate exec. It
+defines `__remotely_cwd` and runs `id -un` once per shell. Its audit entry is `folder_hook_installed`.
+
+**The exact command lines.** Each block is the shell's whole `-c` argument: the marker line, a newline, then the
+commands. Scripts change only with a Remotely release. A test checks every block here against the source, so they
+can't drift apart.
+
+`# remotely:hostname`, when a terminal connects:
+
+```sh
+# remotely:hostname
+hostname
+```
+
+`# remotely:shell`, when a terminal connects:
+
+```sh
+# remotely:shell
+printf '%s\n' "${BASH_VERSION:+bash}${ZSH_VERSION:+zsh}"
+```
+
+`# remotely:host-facts`, the host's OS and hardware:
+
+```sh
+# remotely:host-facts
+echo @@files; grep -s -v -e '^flags' -e '^bugs' -e '^vmx flags' -e '^Features' /etc/os-release /usr/lib/os-release /etc/redhat-release /proc/sys/kernel/hostname /proc/cpuinfo /sys/devices/system/cpu/cpu0/cpufreq/cpuinfo_max_freq /proc/meminfo /proc/swaps /proc/uptime /sys/class/dmi/id/sys_vendor /sys/class/dmi/id/product_name /sys/devices/system/clocksource/clocksource0/available_clocksource /sys/hypervisor/type /run/systemd/container; echo @@uname; uname -srm; echo @@lsblk; lsblk -J -b -o NAME,TYPE,SIZE,FSTYPE,MOUNTPOINT,MODEL,ROTA,TRAN 2>/dev/null || lsblk -P -b -o NAME,TYPE,SIZE,FSTYPE,MOUNTPOINT,MODEL 2>/dev/null; echo @@df; LC_ALL=C df -PT -B1 -l 2>/dev/null || LC_ALL=C df -kP -l 2>/dev/null
+```
+
+`# remotely:metrics`, each dashboard poll, then the same with `df` once a minute:
+
+```sh
+# remotely:metrics
+grep -v -e '^intr ' -e '^softirq ' /proc/stat /proc/meminfo /proc/loadavg /proc/uptime /proc/diskstats /proc/net/dev
+```
+
+```sh
+# remotely:metrics
+grep -v -e '^intr ' -e '^softirq ' /proc/stat /proc/meminfo /proc/loadavg /proc/uptime /proc/diskstats /proc/net/dev; echo @@df; df -k -P -l
+```
+
+`# remotely:services`, the dashboard's services widget:
+
+```sh
+# remotely:services
+echo @@running; systemctl list-units --type=service --state=running --no-pager --no-legend --plain 2>/dev/null; echo @@failed; systemctl list-units --type=service --state=failed --no-pager --no-legend --plain 2>/dev/null; echo @@other-init; type systemctl >/dev/null 2>&1 || rc-status 2>/dev/null || service --status-all 2>&1
+```
+
+`# remotely:admin`, Host details › Admin:
+
+```sh
+# remotely:admin
+echo @@running; systemctl list-units --type=service --state=running --no-pager --no-legend --plain 2>/dev/null; echo @@failed; systemctl list-units --type=service --state=failed --no-pager --no-legend --plain 2>/dev/null; echo @@other-init; type systemctl >/dev/null 2>&1 || rc-status 2>/dev/null || service --status-all 2>&1; echo @@ports; ss -tulpnH 2>/dev/null || ss -tulpn 2>/dev/null || netstat -tulpn 2>/dev/null; echo @@who; who; echo @@who-boot; who -b; echo @@uptime; cat /proc/uptime; echo @@last; last -x -F -n 200 2>/dev/null; echo @@ps; ps -eo pid,user,pcpu,pmem,rss,etime,comm 2>/dev/null
+```
+
+`# remotely:ports`, the inventory's listening ports:
+
+```sh
+# remotely:ports
+echo @@ports; ss -tulpnH 2>/dev/null || ss -tulpn 2>/dev/null || netstat -tulpn 2>/dev/null
+```
+
+`# remotely:updates`, pending updates:
+
+```sh
+# remotely:updates
+echo @@apt; type apt >/dev/null 2>&1 && echo present && apt list --upgradable 2>/dev/null; echo @@apt-lists; stat -c %Y /var/cache/apt/pkgcache.bin 2>/dev/null; echo @@dnf; type dnf >/dev/null 2>&1 && echo present && dnf check-update -q 2>/dev/null; echo @@dnf-status $?
+```
+
+`# remotely:packages`, the inventory's installed packages:
+
+```sh
+# remotely:packages
+echo @@dpkg; type dpkg-query >/dev/null 2>&1 && echo present && dpkg-query -W -f='${Status}\t${Package}\t${Version}\t${Architecture}\n' 2>/dev/null; echo @@rpm; type rpm >/dev/null 2>&1 && echo present && rpm -qa 2>/dev/null
+```
+
+`# remotely:editors`, the host's terminal editors:
+
+```sh
+# remotely:editors
+/bin/sh -c 'for e in nano micro vim vi nvim emacs mcedit joe ne; do command -v "$e" >/dev/null 2>&1 && printf "%s\n" "$e"; done; exit 0'
+```
+
+`# remotely:sftp-server`, before Browse as root:
+
+```sh
+# remotely:sftp-server
+/bin/sh -c 'for p in /usr/lib/openssh/sftp-server /usr/libexec/openssh/sftp-server /usr/lib/ssh/sftp-server /usr/libexec/sftp-server /usr/lib/sftp-server /usr/libexec/ssh/sftp-server; do if [ -x "$p" ]; then printf "%s\n" "$p"; exit 0; fi; done; exit 1'
+```
+
+**Turning reads off.**
+
+- Settings › Dashboard › **Read host details in the background**, per workspace. When it is off, a terminal that
+  connects and the dashboard read no facts. The facts then come only from Refresh in Host details (and the
+  inventory's "Read again first"), and the System tab says so.
+- The dashboard polls only hosts someone chose to watch.
+- Settings › Terminal turns the folder prompt hook off everywhere, and a session can turn it off for itself. A Prod
+  session has it off unless the session turns it on.
+
+Windows hosts are read over WinRM with PowerShell, not covered here.
+
 ### Safer operations on hosts
 
 0.4.3: how far a change on hosts can spread before you see it, and what the audit trail keeps.
@@ -957,16 +1099,22 @@ approval, nothing audited, nothing changed on the host, and the read-only lock d
 
 - **SSH hosts (MO-13)**: **Host details…** in a session's menu (Sessions page, the Terminal page's tree) or the
   dashboard's drill-down. The System tab shows the OS (`/etc/os-release`, or `/etc/redhat-release` on old hosts),
-  kernel and architecture, host name, virtualization (`systemd-detect-virt`, or lscpu's hypervisor), CPU model with
-  sockets, cores and threads (`lscpu`, or `/proc/cpuinfo` without it), memory and swap (`/proc/meminfo`,
-  `/proc/swaps`), disks and partitions (`lsblk`, in JSON or the `KEY="value"` form older util-linux prints) and local
-  filesystems with use (`df`; network mounts are left out because a dead one can hang df), and when it last booted.
-  The facts are read on an exec channel, never typed into a shell, so nothing shows in a terminal, its log, MultiExec
-  or the long-command notifications. They are read when a terminal to the session connects (on that terminal's own
-  connection, unless they are less than 10 minutes old), by the dashboard on its kept connection when they are more
-  than 6 hours old, and on **Refresh**. The latest read is kept per session with its time, so it shows while the host
-  is offline. Refresh with no open terminal and no dashboard connection logs in once with the saved login and keeps
-  that connection for 3 minutes for the next read; it closes with the panel.
+  kernel and architecture (`uname`), host name, virtualization (named as `systemd-detect-virt` names it, from the
+  files it reads itself: DMI's maker and model, the kernel's clock sources, `/sys/hypervisor` and systemd's container
+  file), CPU model with sockets, cores and threads (`/proc/cpuinfo`; an ARM CPU by its maker and core, as lscpu
+  names them), memory and swap (`/proc/meminfo`, `/proc/swaps`), disks and partitions (`lsblk`, in JSON or the
+  `KEY="value"` form older util-linux prints) and local filesystems with use (`df`; network mounts are left out
+  because a dead one can hang df), and when it last booted. One `grep` reads all the files, so a read starts four
+  programs ([For SOC teams](#for-soc-teams)). The facts are read on an exec channel, never typed into a shell, so
+  nothing shows in a terminal, its log, MultiExec or the long-command notifications. They are read when a terminal to
+  the session connects (on that terminal's own connection, unless they are less than a day old), and by the dashboard
+  for a watched host when they are more than a day old (it looks at their age after a good poll, at most every half
+  hour, and reads them on the poll's own connection). **Refresh** reads them at once, whatever their age. Both
+  background reads waited less before: 10 minutes on a terminal, 6 hours on the dashboard. Settings › Dashboard ›
+  **Read host details in the background** turns them off for the workspace, and the facts then come only from
+  Refresh. The latest read is kept per session with
+  its time, so it shows while the host is offline. Refresh with no open terminal and no dashboard connection logs in
+  once with the saved login and keeps that connection for 3 minutes for the next read; it closes with the panel.
 - **Admin (MO-14)**: the Admin tab reads, when you open it or press Refresh, running and failed services (systemd, or
   OpenRC's `rc-status` and SysV's `service --status-all` without it), listening ports (`ss`, or `netstat`; programs
   show only for the login user's own sockets, since Remotely doesn't use sudo here, and the tab says so), who is

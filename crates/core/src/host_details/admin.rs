@@ -16,8 +16,8 @@ use crate::adapters::network::ip_literal;
 /// `service --status-all` list services instead. Boots and shutdowns come from the latest 200 entries of
 /// the login record (`last -x`), filtered here: naming them on the command line (`last reboot shutdown`)
 /// would read like a shutdown to the policy engine's dangerous-command rule.
-pub const ADMIN_SCRIPT: &str =
-    "echo @@running; systemctl list-units --type=service --state=running --no-pager --no-legend --plain 2>/dev/null; \
+pub const ADMIN_SCRIPT: &str = "# remotely:admin\n\
+echo @@running; systemctl list-units --type=service --state=running --no-pager --no-legend --plain 2>/dev/null; \
 echo @@failed; systemctl list-units --type=service --state=failed --no-pager --no-legend --plain 2>/dev/null; \
 echo @@other-init; type systemctl >/dev/null 2>&1 || rc-status 2>/dev/null || service --status-all 2>&1; \
 echo @@ports; ss -tulpnH 2>/dev/null || ss -tulpn 2>/dev/null || netstat -tulpn 2>/dev/null; \
@@ -28,19 +28,19 @@ echo @@last; last -x -F -n 200 2>/dev/null; \
 echo @@ps; ps -eo pid,user,pcpu,pmem,rss,etime,comm 2>/dev/null";
 
 /// MO-16: the dashboard's services widget: only the services part of [`ADMIN_SCRIPT`], read every minute.
-pub const SERVICES_SCRIPT: &str =
-    "echo @@running; systemctl list-units --type=service --state=running --no-pager --no-legend --plain 2>/dev/null; \
+pub const SERVICES_SCRIPT: &str = "# remotely:services\n\
+echo @@running; systemctl list-units --type=service --state=running --no-pager --no-legend --plain 2>/dev/null; \
 echo @@failed; systemctl list-units --type=service --state=failed --no-pager --no-legend --plain 2>/dev/null; \
 echo @@other-init; type systemctl >/dev/null 2>&1 || rc-status 2>/dev/null || service --status-all 2>&1";
 
 /// FD-05: the inventory's listening ports: only the ports part of [`ADMIN_SCRIPT`].
-pub const PORTS_SCRIPT: &str =
-    "echo @@ports; ss -tulpnH 2>/dev/null || ss -tulpn 2>/dev/null || netstat -tulpn 2>/dev/null";
+pub const PORTS_SCRIPT: &str = "# remotely:ports\n\
+echo @@ports; ss -tulpnH 2>/dev/null || ss -tulpn 2>/dev/null || netstat -tulpn 2>/dev/null";
 
 /// Pending updates, from apt's lists as they are (no `apt update`: that needs root and changes them)
 /// or dnf, which refreshes its metadata first when it is old: that can take a minute or more.
-pub const UPDATES_SCRIPT: &str =
-    "echo @@apt; type apt >/dev/null 2>&1 && echo present && apt list --upgradable 2>/dev/null; \
+pub const UPDATES_SCRIPT: &str = "# remotely:updates\n\
+echo @@apt; type apt >/dev/null 2>&1 && echo present && apt list --upgradable 2>/dev/null; \
 echo @@apt-lists; stat -c %Y /var/cache/apt/pkgcache.bin 2>/dev/null; \
 echo @@dnf; type dnf >/dev/null 2>&1 && echo present && dnf check-update -q 2>/dev/null; \
 echo @@dnf-status $?";

@@ -213,11 +213,16 @@ async fn a_terminal_reads_the_hosts_facts_beside_its_shell_without_showing_them(
     }
     let log = server.log();
     assert!(
-        !log.iter().any(|l| l.starts_with("line ") && l.contains("lscpu")),
+        !log.iter()
+            .any(|l| l.starts_with("line ") && l.contains("remotely:host-facts")),
         "nothing typed into the shell: {log:?}"
     );
+    // One exec, named for a SOC's allow-list, that starts no lscpu, hostname, cat or systemd-detect-virt.
+    let reads: Vec<&String> = log.iter().filter(|l| l.contains("remotely:host-facts")).collect();
+    assert_eq!(reads.len(), 1, "{log:?}");
+    assert!(reads[0].starts_with("exec # remotely:host-facts\n"), "{}", reads[0]);
 
-    // A second terminal within ten minutes reads nothing again.
+    // A second terminal within a day reads nothing again.
     let second = core.terminals.open(&core.ctx(), id, SIZE).await.unwrap();
     let mut second_events = second.events;
     timeout(WAIT, async {
@@ -236,7 +241,7 @@ async fn a_terminal_reads_the_hosts_facts_beside_its_shell_without_showing_them(
     .unwrap();
     tokio::time::sleep(Duration::from_millis(500)).await;
     let again = core.host_details.session_specs(&core.ctx(), id).await.unwrap().unwrap();
-    assert_eq!(again.collected_at, read.collected_at, "not read twice in ten minutes");
+    assert_eq!(again.collected_at, read.collected_at, "not read twice in a day");
 
     // MO-14 on the open terminal's connection: no new login.
     let logins = server.connections();
@@ -274,9 +279,11 @@ async fn refresh_without_a_connection_logs_in_once_and_keeps_it_for_the_next_rea
     let read = core.host_details.refresh_session(&core.ctx(), id).await.unwrap();
     assert_eq!(read.collected_by, CollectedBy::Refresh);
     assert_eq!(read.specs.os.id.as_deref(), Some("rhel"));
-    // No lscpu here: /proc/cpuinfo; no lsblk JSON: its KEY="value" form.
+    // /proc/cpuinfo; no lsblk JSON: its KEY="value" form; KVM by its clock, though the firmware says QEMU.
     assert_eq!(read.specs.cpu.logical_cpus, Some(4));
     assert_eq!(read.specs.cpu.sockets, Some(1));
+    assert_eq!(read.specs.virtualization.as_deref(), Some("kvm"));
+    assert_eq!(read.specs.hostname.as_deref(), Some("web01"));
     assert!(read.specs.disks.iter().any(|d| d.name == "centos-root" && d.depth == 2));
     assert_eq!(server.connections(), 1);
 
@@ -419,6 +426,144 @@ fn every_command_host_details_runs_classifies_as_read_only() {
     for script in [linux::SPECS_SCRIPT, admin::ADMIN_SCRIPT, admin::UPDATES_SCRIPT] {
         assert_eq!(policy.classify_script(script), ActionKind::ExecReadOnly, "{script}");
     }
+}
+
+#[test]
+fn every_routine_read_names_itself_only_reads_and_is_listed_for_soc_teams() {
+    use remotely_core::adapters::remote::{HOSTNAME_PROBE, READ_MARKER, SFTP_SERVER_PROBE, SHELL_PROBE};
+    use remotely_core::host_details::{admin, linux, packages};
+    use remotely_core::metrics::procfs;
+    use remotely_core::terminal::editor::EDITOR_PROBE;
+    let policy = PolicyEngine::new(PolicyRules::default()).unwrap();
+    // A checkout with Windows line ends still quotes the scripts as they are.
+    let readme = include_str!("../../../README.md").replace("\r\n", "\n");
+    // The SS-14 probes run `/bin/sh -c '...'`, which the policy engine doesn't look into: builtins only.
+    for (name, script, rated) in [
+        ("hostname", HOSTNAME_PROBE, true),
+        ("shell", SHELL_PROBE, true),
+        ("host-facts", linux::SPECS_SCRIPT, true),
+        ("metrics", procfs::GUEST_SCRIPT, true),
+        ("metrics", procfs::GUEST_SCRIPT_WITHOUT_DF, true),
+        ("services", admin::SERVICES_SCRIPT, true),
+        ("admin", admin::ADMIN_SCRIPT, true),
+        ("ports", admin::PORTS_SCRIPT, true),
+        ("updates", admin::UPDATES_SCRIPT, true),
+        ("packages", packages::PACKAGES_SCRIPT, true),
+        ("editors", EDITOR_PROBE, false),
+        ("sftp-server", SFTP_SERVER_PROBE, false),
+    ] {
+        let marker = format!("{READ_MARKER}{name}");
+        assert!(script.starts_with(&format!("{marker}\n")), "{script}");
+        assert_eq!(script.matches(READ_MARKER).count(), 1, "{script}");
+        if rated {
+            assert_eq!(policy.classify_script(script), ActionKind::ExecReadOnly, "{script}");
+        }
+        assert!(
+            readme.contains(&format!("`{marker}`")),
+            "README's \"For SOC teams\" lists {marker}"
+        );
+        // A SOC allow-lists the exact command line, so the README quotes it as the shell gets it.
+        assert!(
+            readme.contains(&format!("```sh\n{script}\n```")),
+            "README's \"For SOC teams\" quotes {marker} exactly:\n{script}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn with_background_reads_off_a_workspace_reads_facts_only_when_asked() {
+    let password = new_password();
+    let server = server(&password, HostFixture::ubuntu()).await;
+    let s = samples::ubuntu(0);
+    for (path, text) in [
+        ("/proc/stat", s.stat.clone()),
+        ("/proc/loadavg", s.loadavg.clone()),
+        ("/proc/diskstats", s.diskstats.clone()),
+        ("/proc/net/dev", s.netdev.clone()),
+    ] {
+        server.set_file(path, &text);
+    }
+    let core = core().await;
+    trust(&core, &server).await;
+    let id = session(&core, &server, &password, None).await;
+    let ctx = core.ctx();
+    assert!(core.host_details.background_reads(&ctx).await.unwrap(), "on by default");
+
+    // A setting of the workspace: audited, refused by the read-only lock.
+    core.presentation
+        .set(Presentation {
+            enabled: true,
+            read_only: true,
+        })
+        .await
+        .unwrap();
+    assert_eq!(
+        core.host_details
+            .set_background_reads(&ctx, false)
+            .await
+            .unwrap_err()
+            .code(),
+        "read_only_lock"
+    );
+    core.presentation.set(Presentation::default()).await.unwrap();
+    assert!(!core.host_details.set_background_reads(&ctx, false).await.unwrap());
+    assert!(!core.host_details.background_reads(&ctx).await.unwrap());
+    let audit = core.store.recent_audit(&ctx, 5).await.unwrap();
+    assert!(audit
+        .iter()
+        .any(|e| e.event == "setting_changed" && e.action == "Set background reads of host facts"));
+
+    // Off: a terminal that connects and the dashboard's poll run no facts read.
+    let handle = core.terminals.open(&ctx, id, SIZE).await.unwrap();
+    let mut events = handle.events;
+    timeout(WAIT, async {
+        while let Some(event) = events.recv().await {
+            if matches!(
+                event,
+                TerminalEvent::Status {
+                    status: TerminalStatus::Connected
+                }
+            ) {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    core.metrics.set_watched(&ctx, id, true).await.unwrap();
+    core.metrics.collect_once().await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(core.host_details.session_specs(&ctx, id).await.unwrap().is_none());
+    let log = server.log();
+    assert!(
+        !log.iter().any(|l| l.contains("remotely:host-facts")),
+        "nothing read in the background: {log:?}"
+    );
+    assert!(
+        log.iter().any(|l| l.starts_with("exec # remotely:metrics\n")),
+        "the dashboard still polls: {log:?}"
+    );
+
+    // Asked: Refresh reads them, on the terminal's connection.
+    let read = core.host_details.refresh_session(&ctx, id).await.unwrap();
+    assert_eq!(read.collected_by, CollectedBy::Refresh);
+    assert_eq!(read.specs.virtualization.as_deref(), Some("vmware"));
+
+    // Another workspace keeps its own setting (FD-02).
+    let other = core
+        .workspaces
+        .create(remotely_core::workspaces::WorkspaceInput {
+            name: "Globex".into(),
+            color: None,
+        })
+        .await
+        .unwrap();
+    let other_ctx = remotely_core::domain::Context {
+        workspace_id: other.id,
+        user_id: ctx.user_id,
+    };
+    assert!(core.host_details.background_reads(&other_ctx).await.unwrap());
+    core.terminals.close_all().await;
 }
 
 fn web_hardware() -> VmHardware {

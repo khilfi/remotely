@@ -1,9 +1,10 @@
 //! MO-13, MO-14: the test server's view of itself, for host details. With
-//! [`super::TestSshServer::with_host_facts`] its exec shell has `uname`, `lscpu`, `lsblk`, `df -PT`,
-//! `systemd-detect-virt`, `systemctl list-units` and `is-active` (MO-08), `ss`, `who`, `last`, `ps`, `stat`, `apt` or
-//! `dnf`, and `dpkg-query` or `rpm` (FD-05's installed packages), printing what a real host prints (the samples in
-//! `host_details::linux`, `host_details::admin` and `host_details::packages`), and files `/etc/os-release`,
-//! `/proc/cpuinfo` and `/proc/swaps`.
+//! [`super::TestSshServer::with_host_facts`] its exec shell has `uname`, `lsblk`, `df -PT`, `systemctl list-units`
+//! and `is-active` (MO-08), `ss`, `who`, `last`, `ps`, `stat`, `apt` or `dnf`, and `dpkg-query` or `rpm` (FD-05's
+//! installed packages), printing what a real host prints (the samples in `host_details::linux`,
+//! `host_details::admin` and `host_details::packages`), and the files MO-13's `grep` reads: `/etc/os-release`,
+//! `/proc/cpuinfo`, `/proc/swaps`, the kernel's host name, DMI's maker and model and the clock sources. It has no
+//! `lscpu` or `systemd-detect-virt`: a facts script that still ran them would read less, and its tests would say.
 
 use super::docker::Ran;
 use crate::host_details::{admin::samples as admin, linux::samples as linux, packages::samples as installed};
@@ -40,8 +41,6 @@ pub struct HostFixture {
     pub os_release: String,
     /// `uname -srm`.
     pub uname: String,
-    /// `None`: no lscpu, so the script reads /proc/cpuinfo.
-    pub lscpu: Option<String>,
     pub cpuinfo: String,
     pub swaps: String,
     /// `None`: an lsblk without `-J` (util-linux before 2.27), which fails on it.
@@ -49,7 +48,11 @@ pub struct HostFixture {
     pub lsblk_pairs: String,
     /// `df -PT -B1`.
     pub df: String,
-    pub virt: String,
+    /// DMI's `sys_vendor` and `product_name`.
+    pub dmi_vendor: String,
+    pub dmi_product: String,
+    /// The kernel's `available_clocksource`.
+    pub clocksources: String,
     pub running: String,
     pub failed: String,
     pub ss: String,
@@ -67,13 +70,14 @@ impl HostFixture {
         Self {
             os_release: linux::OS_RELEASE_UBUNTU.into(),
             uname: "Linux 6.8.0-45-generic x86_64".into(),
-            lscpu: Some(linux::LSCPU_NEW.into()),
-            cpuinfo: linux::CPUINFO.into(),
+            cpuinfo: linux::CPUINFO_VMWARE.into(),
             swaps: linux::SWAPS.into(),
             lsblk_json: Some(linux::LSBLK_JSON.into()),
             lsblk_pairs: linux::LSBLK_PAIRS.into(),
             df: linux::DF_TYPED.into(),
-            virt: "vmware".into(),
+            dmi_vendor: "VMware, Inc.\n".into(),
+            dmi_product: "VMware Virtual Platform\n".into(),
+            clocksources: "tsc hpet acpi_pm \n".into(),
             running: admin::SYSTEMCTL_RUNNING.into(),
             failed: admin::SYSTEMCTL_FAILED.into(),
             ss: admin::SS.into(),
@@ -89,14 +93,16 @@ impl HostFixture {
         }
     }
 
-    /// An older RHEL-like host: no lscpu, lsblk without JSON, dnf with updates.
+    /// An older RHEL-like host on KVM: one socket of two cores, lsblk without JSON, dnf with updates.
     pub fn rhel() -> Self {
         Self {
             os_release: linux::OS_RELEASE_RHEL.into(),
             uname: "Linux 5.14.0-427.13.1.el9_4.x86_64 x86_64".into(),
-            lscpu: None,
+            cpuinfo: linux::CPUINFO.into(),
             lsblk_json: None,
-            virt: "kvm".into(),
+            dmi_vendor: "QEMU\n".into(),
+            dmi_product: "Standard PC (Q35 + ICH9, 2009)\n".into(),
+            clocksources: "kvm-clock tsc acpi_pm \n".into(),
             packages: Packages::Dnf {
                 list: admin::DNF.trim_start_matches("present\n").into(),
                 status: 100,
@@ -112,18 +118,23 @@ impl HostFixture {
             ("/etc/os-release", self.os_release.clone()),
             ("/proc/cpuinfo", self.cpuinfo.clone()),
             ("/proc/swaps", self.swaps.clone()),
+            ("/sys/class/dmi/id/sys_vendor", self.dmi_vendor.clone()),
+            ("/sys/class/dmi/id/product_name", self.dmi_product.clone()),
+            (
+                "/sys/devices/system/clocksource/clocksource0/available_clocksource",
+                self.clocksources.clone(),
+            ),
         ]
     }
 
     /// Whether `program` is one of the host's (for `type` and `command -v`).
     pub fn has(&self, program: &str) -> bool {
         match program {
-            "lscpu" => self.lscpu.is_some(),
             "apt" => matches!(self.packages, Packages::Apt { .. }),
             "dnf" => matches!(self.packages, Packages::Dnf { .. }),
             "dpkg-query" => matches!(self.installed, Installed::Dpkg(_)),
             "rpm" => matches!(self.installed, Installed::Rpm(_)),
-            "uname" | "lsblk" | "systemd-detect-virt" | "systemctl" | "ss" | "who" | "last" | "ps" | "stat" => true,
+            "uname" | "lsblk" | "systemctl" | "ss" | "who" | "last" | "ps" | "stat" => true,
             _ => false,
         }
     }
@@ -150,7 +161,6 @@ pub fn run(host: &HostFixture, program: &str, args: &[String]) -> Option<Ran> {
     let has = |flag: &str| args.iter().any(|a| a == flag);
     let ran = match program {
         "uname" => ok(format!("{}\n", host.uname)),
-        "lscpu" => ok(host.lscpu.clone()?),
         "lsblk" if has("-J") => match &host.lsblk_json {
             Some(json) => ok(json.clone()),
             None => fail("lsblk: invalid option -- 'J'", 1),
@@ -159,7 +169,6 @@ pub fn run(host: &HostFixture, program: &str, args: &[String]) -> Option<Ran> {
         "lsblk" => fail("lsblk: only -J and -P here", 1),
         "df" if has("-PT") => ok(host.df.clone()),
         "df" => return None,
-        "systemd-detect-virt" => ok(format!("{}\n", host.virt)),
         "systemctl" if args.first().is_some_and(|a| a == "list-units") => {
             if args.iter().any(|a| a == "--state=failed") {
                 ok(host.failed.clone())

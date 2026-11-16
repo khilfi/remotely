@@ -334,7 +334,7 @@ async fn a_watched_host_is_polled_at_its_interval_with_one_grep_and_df_once_a_mi
         server
             .log()
             .into_iter()
-            .filter(|l| l.starts_with("exec grep"))
+            .filter(|l| l.starts_with("exec # remotely:metrics\ngrep"))
             .collect::<Vec<_>>()
     };
 

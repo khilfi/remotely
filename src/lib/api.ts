@@ -3800,6 +3800,10 @@ export const api = {
   hostUpdates: (sessionId: string) => invoke<UpdatesCheck>("host_updates", { sessionId }),
   /** The host details panel closed: its own connection, if it made one, closes. */
   hostDetailsRelease: (sessionId: string) => invoke<void>("host_details_release", { sessionId }),
+  /** MO-13: whether this workspace reads its hosts' facts in the background (a terminal connecting, the dashboard). */
+  hostBackgroundReads: () => invoke<boolean>("host_background_reads"),
+  /** MO-13: turns this workspace's background reads of host facts on or off. Audited; refused by the read-only lock. */
+  setHostBackgroundReads: (on: boolean) => invoke<boolean>("host_background_reads_set", { on }),
   /** MO-13: a VM's hardware from its files, and its guest's facts from a linked session. */
   vmSpecs: (vmxPath: string) => invoke<VmSpecs>("vm_specs", { vmxPath }),
   // VM-23, VM-24: the commands that carry a path of this PC are built in the shell, from a dialog it opens or a

@@ -16,7 +16,7 @@ use std::time::Duration;
 use common::Setup;
 use remotely_core::adapters::containers::EngineKind;
 use remotely_core::adapters::network::SystemNetwork;
-use remotely_core::adapters::remote::{AgentSource, PtySize};
+use remotely_core::adapters::remote::{AgentSource, PtySize, HOSTNAME_PROBE};
 use remotely_core::containers::{MarkInput, SudoMode};
 use remotely_core::domain::{ContainerHost, Environment};
 use remotely_core::fakes::containers::Fixture;
@@ -528,7 +528,7 @@ async fn the_address_reached_and_the_servers_own_name_replace_dns_and_stay_on_th
     // One `hostname` on the same connection as the shell.
     let log = server.log();
     assert_eq!(server.connections(), 1);
-    assert!(log.contains(&"exec hostname".to_owned()), "{log:?}");
+    assert!(log.contains(&format!("exec {HOSTNAME_PROBE}")), "{log:?}");
 
     let saved = core.sessions.get(&core.ctx(), session.id).await.unwrap();
     assert_eq!(saved.last_ip.as_deref(), Some("127.0.0.1"));

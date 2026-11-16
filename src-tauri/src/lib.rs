@@ -573,6 +573,8 @@ fn commands() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         host_details::host_admin,
         host_details::host_updates,
         host_details::host_details_release,
+        host_details::host_background_reads,
+        host_details::host_background_reads_set,
         host_details::vm_specs,
         vm_settings::vm_pick_iso,
         vm_settings::vm_attach_dropped_iso,
