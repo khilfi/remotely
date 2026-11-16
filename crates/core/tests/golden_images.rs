@@ -27,7 +27,7 @@ use remotely_core::catalog::{
     AfterDeploy, CloneMode, HashProgress, Image, ImageInput, ImageSource, Network, SourceInput, TemplateInput,
 };
 use remotely_core::command_bus::{ApprovalAnswers, ApprovalRequest, PowerOp, StopMode, SubmitOutcome};
-use remotely_core::deploy::runner::{DeployTuning, GuestShell, LinuxGuest};
+use remotely_core::deploy::runner::{DeployTuning, GuestShell, LinuxGuest, UPGRADE_QUESTION};
 use remotely_core::deploy::service::{DeployFrom, DeployRequest};
 use remotely_core::domain::{Environment, PowerState};
 use remotely_core::fakes::{install_isos, FakeVirtualBox, FakeVmware};
@@ -1386,8 +1386,11 @@ enum VboxRestarts {
     /// Both, from the start (the reset counter reads 2 at once).
     AtStart,
     /// The first restart hangs (the VM must be set to hang) and Remotely's reset finishes it; Setup's second is
-    /// counted after that.
-    AfterHang,
+    /// counted this many ms after that (specialize writing to the disk meanwhile).
+    AfterHang(u64),
+    /// The VM hangs before Setup's first restart, and nothing follows its reset: no restart counted, no line (with
+    /// `asks_after_reset`, Setup waits at its upgrade question).
+    Never,
 }
 
 async fn windows_build_with(
@@ -1475,9 +1478,13 @@ fn vbox_setup(
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        if restarts == VboxRestarts::AfterHang {
-            tokio::time::sleep(Duration::from_millis(100)).await;
-            virtualbox.set_guest_property_for_name(&vm, "/VirtualBox/VMInfo/ResetCounter", "1");
+        match restarts {
+            VboxRestarts::AtStart => {}
+            VboxRestarts::AfterHang(ms) => {
+                tokio::time::sleep(Duration::from_millis(ms)).await;
+                virtualbox.set_guest_property_for_name(&vm, "/VirtualBox/VMInfo/ResetCounter", "1");
+            }
+            VboxRestarts::Never => return,
         }
         tokio::time::sleep(Duration::from_millis(400)).await;
         for line in lines {
@@ -1882,7 +1889,7 @@ async fn a_reset_that_finishes_a_hung_restart_of_setup_counts_as_that_restart() 
         "Counted",
         TASK_SAYS.to_vec(),
         None,
-        VboxRestarts::AfterHang,
+        VboxRestarts::AfterHang(100),
     )
     .await;
     assert_eq!(status, JobStatus::Succeeded, "{notes}");
@@ -1891,6 +1898,120 @@ async fn a_reset_that_finishes_a_hung_restart_of_setup_counts_as_that_restart() 
         "{notes}"
     );
     assert_eq!(resets(&lab).len(), 1);
+    let _ = std::fs::remove_dir_all(&lab.dir);
+}
+
+/// [`hang_tuning`], and a Setup reset before its first restart failed once it wrote nothing for 300 ms.
+fn first_stage_tuning(ssh_port: u16) -> DeployTuning {
+    DeployTuning {
+        setup_stuck: Duration::from_millis(300),
+        ..hang_tuning(ssh_port)
+    }
+}
+
+#[tokio::test]
+async fn a_windows_setup_reset_in_the_middle_of_its_first_stage_fails_at_once() {
+    // PR 101's hand check 6: both vCPUs stood still mid-way through windowsPE, before Setup's first restart was
+    // counted. After the reset the disk couldn't start Windows yet, so the firmware started the install ISO again and
+    // Setup asked "It looks like you started an upgrade and booted from installation media" until the time limit;
+    // hand check 8 saw answering No leave it idle. Now the install fails at once with the reason, long before its
+    // time limit, and keeps the VM with a picture of its screen.
+    let lab = lab("golden-vbox-first-stage", &[]).await;
+    lab.core.set_deploy_tuning(first_stage_tuning(lab.ssh));
+    lab.virtualbox.hang_next_boot("stage-v1");
+    lab.virtualbox.asks_after_reset("stage-v1");
+    let started = std::time::Instant::now();
+    let (status, notes, _) = windows_build_with(
+        &lab,
+        Hypervisor::VirtualBox,
+        "stage-v1",
+        "Stage",
+        TASK_SAYS.to_vec(),
+        None,
+        VboxRestarts::Never,
+    )
+    .await;
+    assert_eq!(status, JobStatus::Failed, "{notes}");
+    assert!(
+        notes.contains("reset the install once vCPU 0 had stood still"),
+        "{notes}"
+    );
+    assert!(
+        notes.contains("Setup was reset in the middle of its first stage (windowsPE)"),
+        "{notes}"
+    );
+    assert!(notes.contains(UPGRADE_QUESTION), "{notes}");
+    assert!(notes.contains("Delete the VM and deploy it again"), "{notes}");
+    assert!(!notes.contains("not done within"), "at once: {notes}");
+    assert!(started.elapsed() < Duration::from_secs(15), "{:?}", started.elapsed());
+    assert!(
+        lab.vms.join("stage-v1").join("stage-v1-install-failed.png").is_file(),
+        "{notes}"
+    );
+    assert!(lab.virtualbox.is_asking("stage-v1"));
+    assert_eq!(resets(&lab).len(), 1, "reset once");
+    let vm = lab.virtualbox.vm_named("stage-v1").unwrap();
+    assert!(lab.virtualbox.calls().iter().any(|c| c
+        == &format!(
+            "change debugvm {} statistics --pattern {}",
+            vm.uuid,
+            remotely_core::deploy::runner::DISK_WRITES
+        )));
+    let _ = std::fs::remove_dir_all(&lab.dir);
+}
+
+#[tokio::test]
+async fn a_setup_that_writes_to_its_disk_after_a_reset_goes_on_however_long_its_next_restart_takes() {
+    // The common hang: at Setup's first restart, which the reset finishes. The disk starts Windows, specialize writes
+    // to it all along, and Setup's next restart comes well after `setup_stuck`: the install goes on to the end.
+    let lab = lab("golden-vbox-slow-restart", &[]).await;
+    lab.core.set_deploy_tuning(first_stage_tuning(lab.ssh));
+    lab.virtualbox.hang_next_boot("slow-v1");
+    let (status, notes, _) = windows_build_with(
+        &lab,
+        Hypervisor::VirtualBox,
+        "slow-v1",
+        "Slow",
+        TASK_SAYS.to_vec(),
+        None,
+        VboxRestarts::AfterHang(1500),
+    )
+    .await;
+    assert_eq!(status, JobStatus::Succeeded, "{notes}");
+    assert!(
+        notes.contains("reset the install once vCPU 0 had stood still"),
+        "{notes}"
+    );
+    assert!(!notes.contains(UPGRADE_QUESTION), "{notes}");
+    assert_eq!(resets(&lab).len(), 1);
+    let _ = std::fs::remove_dir_all(&lab.dir);
+}
+
+#[tokio::test]
+async fn a_virtualbox_whose_disk_writes_cant_be_read_never_fails_a_setup_for_its_first_stage() {
+    // Without the disk's statistics nothing tells Setup's question from a slow specialize: the install is left to its
+    // time limit, as before.
+    let lab = lab("golden-vbox-no-disk-stats", &[]).await;
+    lab.core.set_deploy_tuning(DeployTuning {
+        install_cap: Some(Duration::from_secs(3)),
+        ..first_stage_tuning(lab.ssh)
+    });
+    lab.virtualbox.set_failing("debugvm disks", true);
+    lab.virtualbox.hang_next_boot("blind-v1");
+    lab.virtualbox.asks_after_reset("blind-v1");
+    let (status, notes, _) = windows_build_with(
+        &lab,
+        Hypervisor::VirtualBox,
+        "blind-v1",
+        "Blind",
+        TASK_SAYS.to_vec(),
+        None,
+        VboxRestarts::Never,
+    )
+    .await;
+    assert_eq!(status, JobStatus::Failed, "{notes}");
+    assert!(notes.contains("not done within"), "{notes}");
+    assert!(!notes.contains(UPGRADE_QUESTION), "{notes}");
     let _ = std::fs::remove_dir_all(&lab.dir);
 }
 

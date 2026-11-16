@@ -21,10 +21,12 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 mod first_boot;
+mod first_stage;
 mod golden;
 mod install;
 
 pub use self::first_boot::{counter as vbox_counter, VCPU0_RUN_TIME};
+pub use self::first_stage::{disk_writes as vbox_disk_writes, DISK_WRITES, UPGRADE_QUESTION};
 pub use self::golden::{GuestShell, LinuxGuest, SshGuestShell};
 pub use self::install::InstallTools;
 use super::cloud_init::{self, FirstBoot};
@@ -75,6 +77,9 @@ pub struct DeployTuning {
     pub hang_silence: Duration,
     /// VM-29: resets for such hangs, at most, per VM.
     pub max_hang_resets: u32,
+    /// VM-30: a Windows Setup the hang watch reset before its first restart that writes nothing to its disk for this
+    /// long while it runs waits at its upgrade question (`first_stage`): the install fails at once.
+    pub setup_stuck: Duration,
     /// VM-29: how long a probe of the installed system's SSH port waits.
     pub connect_wait: Duration,
     /// VM-29: Workstation's DHCP leases (`None`: not read).
@@ -95,6 +100,7 @@ impl Default for DeployTuning {
             install_cap: None,
             hang_silence: Duration::from_secs(3 * 60),
             max_hang_resets: 5,
+            setup_stuck: Duration::from_secs(3 * 60),
             connect_wait: Duration::from_secs(5),
             leases_file: Some(PathBuf::from(super::install::WORKSTATION_LEASES)),
             probe: None,

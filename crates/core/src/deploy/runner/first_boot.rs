@@ -50,12 +50,19 @@ pub(super) struct BootWatch {
     pub(super) resets: u32,
     /// Whether a reset that VirtualBox refused was noted already (once is enough).
     failed_noted: bool,
+    /// Whether the counter moved at its last read: the guest runs (neither hung nor paused).
+    moved: bool,
 }
 
 impl BootWatch {
     /// Starts the stillness clock again (after another reset, or while the VM isn't running).
     pub(super) fn restart(&mut self) {
         self.last = None;
+    }
+
+    /// Whether vCPU 0's run time moved at its last read (the guest runs, whatever it does).
+    pub(super) fn runs(&self) -> bool {
+        self.moved
     }
 }
 
@@ -98,12 +105,18 @@ impl Deployer {
         };
         let now = tokio::time::Instant::now();
         let Some(value) = read.ok().and_then(|xml| counter(&xml, VCPU0_RUN_TIME)) else {
+            watch.moved = false;
             watch.restart();
             return None;
         };
         let still = match watch.last {
-            Some((last, since)) if last == value => now.duration_since(since),
-            _ => {
+            Some((last, since)) if last == value => {
+                watch.moved = false;
+                now.duration_since(since)
+            }
+            previous => {
+                // The first read since a reset or a pause tells nothing yet.
+                watch.moved = previous.is_some();
                 watch.last = Some((value, now));
                 return None;
             }

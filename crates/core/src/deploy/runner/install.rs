@@ -752,6 +752,9 @@ impl Deployer {
             "the install"
         };
         let mut boot = super::first_boot::BootWatch::default();
+        // VM-30: Windows Setup from an ISO reset before its first restart (`first_stage`), once per install.
+        let setup_from_iso = vcpu_watch && m.flavor.windows() && !matches!(spec.source, DeploySource::GoldenVm { .. });
+        let mut first_stage: Option<super::first_stage::FirstStageReset> = None;
         let mut login_at: Option<tokio::time::Instant> = None;
         let mut windows = WindowsSignIn::default();
         let mut last_round = tokio::time::Instant::now();
@@ -779,7 +782,7 @@ impl Deployer {
                 // the installed system writes the certificate's line the gate waits for. PR 101's last check saw one
                 // (both vCPUs still mid-way through windowsPE, no guest reset in VBox.log): no count helps there, since
                 // the disk isn't bootable yet, so after the reset the firmware boots the ISO and Setup waits at "It
-                // looks like you started an upgrade" until the time limit, as it would have hung without the reset.
+                // looks like you started an upgrade", which it doesn't get past: `first_stage` fails it at once below.
                 // `a_reset_that_finishes_a_hung_restart_of_setup_counts_as_that_restart` pins this.
                 let count = self.resets(spec, key, &folder, &mut log_at, &mut reset_seen).await;
                 let events = watcher.resets(count);
@@ -820,9 +823,25 @@ impl Deployer {
                     Some(super::first_boot::Hang::Reset(note)) => {
                         notes.push(note);
                         last_growth = tokio::time::Instant::now();
+                        // Setup's first restart not counted yet: the hang may have been mid-way through windowsPE.
+                        if setup_from_iso && reset_seen == 0 && first_stage.is_none() {
+                            first_stage = Some(super::first_stage::FirstStageReset::after_reset(reset_seen));
+                        }
                     }
                     Some(super::first_boot::Hang::ResetFailed(note)) => notes.push(note),
                     None => {}
+                }
+            }
+            if let Some(reset) = first_stage.as_mut() {
+                // Words, not the escapes VirtualBox's EFI firmware writes to the port at each boot (S3).
+                let grew = crate::deploy::watch::strip_escapes(&bytes)
+                    .chars()
+                    .any(char::is_alphanumeric);
+                if let Some(why) = self
+                    .first_stage_round(key, reset, reset_seen, grew, boot.runs(), token)
+                    .await
+                {
+                    return Err(self.install_failed(spec, vm, key, watcher.stage(), &why).await);
                 }
             }
             if watcher.login_seen() && login_at.is_none() {
