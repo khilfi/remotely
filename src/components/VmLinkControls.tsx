@@ -5,7 +5,7 @@
 // with no approval step.
 
 import { useState } from "react";
-import { CheckIcon, LinkIcon, Unlink2Icon } from "lucide-react";
+import { CheckIcon, LinkIcon, SquareTerminalIcon, Unlink2Icon } from "lucide-react";
 import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -23,6 +23,9 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { api, errorMessage, type SessionRecord, type VmRecord } from "@/lib/api";
+import { linkedSshSessions } from "@/lib/vm-sessions";
+import { useReadOnlyReason } from "./Presentation";
+import { WhyDisabled } from "./WhyDisabled";
 
 /** Marks a link auto-linking made and the user has not confirmed. */
 export function AutoBadge() {
@@ -156,13 +159,20 @@ export function VmSessionLinks({
   vm,
   sessions,
   onChanged,
+  onCreate,
 }: {
   vm: VmRecord;
   /** Every saved session; the ones linked to this VM are shown. */
   sessions: SessionRecord[];
   onChanged: () => void;
+  /** QL-29: makes an SSH session from the VM, offered while none is linked. */
+  onCreate?: () => void;
 }) {
   const [open, setOpen] = useState(false);
+  const readOnly = useReadOnlyReason();
+  const creatable = onCreate !== undefined && linkedSshSessions(vm.id, sessions).length === 0;
+  const createOff =
+    readOnly ?? (vm.powerState === "running" ? null : "Start the VM first: its address shows once the guest is up.");
   const linked = sessions.filter((s) => s.vmId === vm.id);
   const others = sessions.filter((s) => s.vmId !== vm.id);
   const done = () => {
@@ -232,6 +242,24 @@ export function VmSessionLinks({
               </li>
             ))}
           </ul>
+        )}
+        {creatable && (
+          <div className="border-b p-2">
+            <WhyDisabled reason={createOff} className="w-full">
+              <Button
+                variant="outline"
+                size="sm"
+                className="w-full justify-start"
+                disabled={createOff !== null}
+                onClick={() => {
+                  setOpen(false);
+                  onCreate?.();
+                }}
+              >
+                <SquareTerminalIcon /> Create SSH session…
+              </Button>
+            </WhyDisabled>
+          </div>
         )}
         <Command>
           <CommandInput placeholder="Link a session…" />

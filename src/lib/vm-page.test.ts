@@ -209,6 +209,35 @@ test("Install guest tools leaves out Workstation guests whose Tools image Workst
   assert.equal(tools([{ ...ubuntu, hypervisor: "virtualbox" }], ["windows.iso"]), 1, "the Guest Additions");
 });
 
+test("QL-29: Create SSH sessions goes to the running VMs without one, in Organise", () => {
+  const organise = (withoutSession?: number) =>
+    moreGroups([vm({ powerState: "running" }), vm({ powerState: "running" })], {
+      snapshots: null,
+      canRelease: true,
+      canExport: false,
+      withoutSession,
+    }).find((g) => g.label === "Organise")?.items;
+  assert.deepEqual(
+    organise(1)?.map((i) => [i.id, i.count]),
+    [
+      ["addTag", 2],
+      ["environment", 2],
+      ["protect", 2],
+      ["sessions", 1],
+      ["release", 2],
+    ],
+  );
+  assert.equal(
+    organise(0)?.some((i) => i.id === "sessions"),
+    false,
+    "not offered when every VM has one",
+  );
+  assert.equal(
+    organise()?.some((i) => i.id === "sessions"),
+    false,
+  );
+});
+
 test("power goes to the VMs in a state it applies to, and to VMs in an unknown state", () => {
   const vms = [vm({ powerState: "running" }), vm({ powerState: "unknown" }), vm()];
   assert.equal(powerTargets(vms, ["running"]).length, 2);

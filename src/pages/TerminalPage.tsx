@@ -283,6 +283,8 @@ interface Props {
   /** Compare runs go through the app, which opens the approval dialog; `onJob` gets the job once queued. */
   onSubmitted: (outcome: SubmitOutcome, onJob: (jobId: string) => void) => void;
   onOpenVault: () => void;
+  /** QL-29: changes when sessions were made from VMs (the palette, the VMs page): the tree is read again. */
+  sessionsKey?: number;
 }
 
 function newKey() {
@@ -408,6 +410,7 @@ export function TerminalPage({
   vault,
   onSubmitted,
   onOpenVault,
+  sessionsKey = 0,
 }: Props) {
   // FD-03: the read-only lock turns MultiExec and uploads off (QL-08 says why); typing into one terminal stays.
   const presentation = usePresentation();
@@ -533,7 +536,7 @@ export function TerminalPage({
 
   useEffect(() => {
     if (active) loadSessions();
-  }, [active, loadSessions, version]);
+  }, [active, loadSessions, version, sessionsKey]);
   useEffect(() => {
     if (active) loadGroups();
   }, [active, loadGroups]);
@@ -2033,7 +2036,7 @@ export function TerminalPage({
                   <div className="h-full pr-3">
                     <SessionTree
                       active={active}
-                      version={version}
+                      version={version + sessionsKey}
                       openSessions={openSessions}
                       onOpen={openSession}
                       picks={treePicks}

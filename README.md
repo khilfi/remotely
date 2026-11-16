@@ -63,6 +63,17 @@ QL-14 (0.4.0): one page for VMs and their snapshots; the separate Snapshots page
   you select by snapshots, so a long VM list stays quick.
 - Ctrl+3 and "Snapshots" in the Ctrl+K palette open the snapshot view of the open or first selected VM; in the palette
   a VM's own entry has "Show its details" and "Snapshots…". The other pages keep their shortcuts.
+- **Create SSH session** (QL-29, after 0.8.1): a running VM with no SSH session linked gets one made from the VM, from
+  its details' Sessions row or its entry in the Ctrl+K palette (the session editor opens filled in), or for several at
+  once from the selection's More, Organise, **Create SSH sessions…** (a preview of each VM's session and what it lacks,
+  then **Save N sessions**). The session is the VM's display name, the address the hypervisor reports, port 22, no
+  jump host, the VM's environment and tags, linked to the VM by hand. A VM Remotely deployed also gets the deploy's
+  user and key (found in the job journal by the VM's folder, so VMs deployed before this change get them too; a key
+  no longer in the vault is left out). Any other VM leaves the user and login to fill in. A VM gets none while it
+  has an SSH session linked, isn't running, reports no address (Workstation needs VMware Tools in the guest, which on
+  Linux is `open-vm-tools`; VirtualBox needs the Guest Additions), or is only on VirtualBox's NAT, which this PC can't
+  reach: the preview or a message says which. Each session is audited as any new session, and the read-only lock
+  refuses saving. Check the address before you save: it is what the guest reports about itself.
 
 ### Oracle VirtualBox
 
@@ -211,8 +222,9 @@ launch template, or from **Custom** values typed in the dialog.
   memory.
 - After each VM: the size's CPU and memory, the boot disk grown when the size's is larger (never shrunk; not for a
   linked clone, and the job says so), the "clean" snapshot before the first boot, power on, then up to 5 minutes for
-  its IP (a VM without VMware Tools or Guest Additions may not report one: the job says so and goes on), its SSH
-  session saved and linked to it, and its console, as the template says.
+  its IP (a VM without VMware Tools or Guest Additions may not report one: the job says so and goes on, and **Create SSH
+  session** on the VM makes its session once the address shows), its SSH session saved and linked to it, and its
+  console, as the template says.
 - **Addresses on Workstation's bridged network**: Workstation's own DHCP leases cover only its NAT and host-only
   networks, so on a bridged network only VMware Tools in the guest tell a VM's address. A Linux guest has them only
   with `open-vm-tools`, which the Linux install config starters install. Ubuntu's ISO doesn't carry it for the
@@ -1585,6 +1597,7 @@ a dependency of the app. App-specific colours (risk tiers, environment labels) a
 | Command panel      | `crates/core/src/snippets/`                                       | BX-08, QL-13                                                                                                                                                      | Working: favourite commands in folders (audited), a built-in Linux library (Troubleshoot runbooks, 30 area groups, manual links), variables, marks from the policy engine                                                                                      |
 | Reachability       | `crates/core/src/reachability.rs`                                 | QL-04 (MO-08 lite), SS-07                                                                                                                                         | Working: TCP checks of the shown sessions, once per host and port, every 5 min; hosts with an open connection skipped, hosts down checked less often; the first jump host for sessions behind one                                                              |
 | VM links           | `crates/core/src/vm_links.rs`                                     | QL-01, BX-01                                                                                                                                                      | Working: sessions linked to VMs by guest IP (or a name resolving to it) or by hand; manual links kept; names looked up once at a time, never behind a jump host                                                                                                |
+| VM sessions        | `crates/core/src/vm_sessions.rs`                                  | QL-29                                                                                                                                                             | Working: an SSH session made from a VM (its name, guest address and labels, a deploy's user and key), one in the editor or several after a preview, linked by hand                                                                                             |
 | Network adapter    | `crates/core/src/adapters/network.rs`                             | QL-01, QL-03, QL-04                                                                                                                                               | Working: DNS lookups (forward and reverse, with a time limit) and the TCP probe                                                                                                                                                                                |
 | Store              | `crates/core/src/store/`, `crates/core/migrations/`               | AP-05, VM-01, VM-02, SS-01, SS-04, NFR Reliability                                                                                                                | Working: hash-chained audit log (text redacted, streamed), job journal (scripts and lines redacted), inventory, sessions, vault ciphertext, tags, saved filters; secure delete                                                                                 |
 | Retention          | `crates/core/src/retention.rs`, `save_guard.rs`                   | BX-02, BX-05, SS-10, SS-11, AP-05                                                                                                                                 | Working: job outputs and command text kept 30 days, 90 days (default), 1 year or forever; a purge at start and daily, Purge now, audited; compacting while no job runs; no save path writes into a Git working tree                                            |

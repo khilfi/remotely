@@ -526,6 +526,8 @@ fn commands() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         ipc::session_delete,
         ipc::session_link_vm,
         ipc::session_confirm_vm_link,
+        ipc::vm_session_drafts,
+        ipc::vm_sessions_create,
         ipc::vm_links_ambiguous,
         ipc::sessions_move,
         ipc::folder_create,

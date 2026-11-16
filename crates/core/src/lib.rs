@@ -123,6 +123,7 @@ pub mod updates;
 pub mod vault;
 pub mod vm_insight;
 pub mod vm_links;
+pub mod vm_sessions;
 pub mod vm_settings;
 pub mod waste;
 pub mod workspaces;

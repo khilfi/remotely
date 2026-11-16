@@ -84,6 +84,8 @@ interface Props {
   thresholds: Thresholds;
   sessions: SessionRecord[];
   onLinksChanged: () => void;
+  /** QL-29: an SSH session for this VM, filled in from it (by its id). */
+  onCreateSession?: (vmId: string) => void;
 
   /** The VM's tree, once read; undefined while it is read or when reading failed. */
   tree: VmSnapshots | undefined;
@@ -272,7 +274,7 @@ interface DetailRow {
 }
 
 /** The Overview's rows, in order: the hypervisor and its own facts first (VM-18). */
-function detailRows({ vm, usage, thresholds, sessions, onLinksChanged }: Props): DetailRow[] {
+function detailRows({ vm, usage, thresholds, sessions, onLinksChanged, onCreateSession }: Props): DetailRow[] {
   const hostCpu = usage?.hostCpuPct ?? null;
   const hostMem = usage?.hostMemPct ?? null;
   const rows: DetailRow[] = [
@@ -387,7 +389,14 @@ function detailRows({ vm, usage, thresholds, sessions, onLinksChanged }: Props):
     {
       key: "sessions",
       label: "Sessions",
-      value: <VmSessionLinks vm={vm} sessions={sessions} onChanged={onLinksChanged} />,
+      value: (
+        <VmSessionLinks
+          vm={vm}
+          sessions={sessions}
+          onChanged={onLinksChanged}
+          onCreate={onCreateSession && (() => onCreateSession(vm.id))}
+        />
+      ),
     },
     { key: "seen", label: "Last seen", value: formatWhen(vm.lastSeenAt) },
   );

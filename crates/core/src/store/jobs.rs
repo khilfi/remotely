@@ -534,6 +534,23 @@ impl Store {
         Ok(Some((row_to_summary(&r)?, serde_json::from_str(&command)?)))
     }
 
+    /// QL-29: the commands of this workspace's newest deploy and stack jobs, newest first (a command the journal
+    /// can no longer read left out), for the deploy that made a VM.
+    pub(crate) async fn deploy_commands(&self, ctx: &Context, limit: u32) -> Result<Vec<Command>> {
+        let rows: Vec<String> = sqlx::query_scalar(
+            "SELECT command_json FROM jobs WHERE workspace_id = ? AND command_type IN ('deploy', 'stack')
+             ORDER BY created_at DESC LIMIT ?",
+        )
+        .bind(ctx.workspace_id.to_string())
+        .bind(i64::from(limit))
+        .fetch_all(&self.pool)
+        .await?;
+        Ok(rows
+            .iter()
+            .filter_map(|json| serde_json::from_str::<Command>(json).ok())
+            .collect())
+    }
+
     /// A job's targets in the order they were journaled, with their output. Empty for a job of another
     /// workspace.
     pub async fn job_targets(&self, ctx: &Context, job_id: Uuid) -> Result<Vec<JobTargetRecord>> {

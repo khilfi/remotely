@@ -245,6 +245,7 @@ export type MoreItemId =
   | "environment"
   | "protect"
   | "unprotect"
+  | "sessions"
   | "release";
 
 export interface MoreItem {
@@ -270,7 +271,8 @@ export function powerTargets<T extends { powerState: PowerState }>(vms: readonly
  * The More menu for the selection: only the items that apply to at least one selected VM, in groups, and only the
  * groups that have one. `snapshots` is how many selected VMs have a snapshot (null while their trees are read, when
  * the Snapshots group is left out); `canRelease` whether they may leave this workspace; `canExport` whether export is
- * offered (one VM); `toolsImages` Workstation's Tools images (`api.vmToolsImages`; null or left out: not known).
+ * offered (one VM); `toolsImages` Workstation's Tools images (`api.vmToolsImages`; null or left out: not known);
+ * `withoutSession` how many selected VMs run without an SSH session linked (QL-29's Create SSH sessions).
  */
 export function moreGroups(
   vms: readonly SelectedVm[],
@@ -279,6 +281,7 @@ export function moreGroups(
     canRelease: boolean;
     canExport: boolean;
     toolsImages?: readonly string[] | null;
+    withoutSession?: number;
   },
 ): MoreGroup[] {
   const count = (pick: (v: SelectedVm) => boolean) => vms.filter(pick).length;
@@ -312,6 +315,7 @@ export function moreGroups(
     { id: "environment", count: vms.length },
     { id: "protect", count: count((v) => !v.protected) },
     { id: "unprotect", count: count((v) => v.protected) },
+    { id: "sessions", count: options.withoutSession ?? 0 },
     { id: "release", count: options.canRelease ? vms.length : 0 },
   ];
   const groups: MoreGroup[] = [

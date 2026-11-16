@@ -118,6 +118,8 @@ interface Props {
   active: boolean;
   /** R10: a session to show (a search result, a map node): the filters cleared, its row scrolled to and lit. */
   focus?: { sessionId: string; n: number } | null;
+  /** QL-29: changes when sessions were made from VMs (the palette, the VMs page): the lists are read again. */
+  sessionsKey?: number;
 }
 
 type DialogState =
@@ -160,6 +162,7 @@ export function SessionsPage({
   onExportInventory,
   active,
   focus = null,
+  sessionsKey = 0,
 }: Props) {
   const presentation = usePresentation();
   const [all, setAll] = useState<SessionRecord[]>([]);
@@ -222,7 +225,7 @@ export function SessionsPage({
       },
       (err) => toast.error(errorMessage(err)),
     );
-  }, [active, version]);
+  }, [active, version, sessionsKey]);
 
   useEffect(() => {
     if (!active) return;
@@ -232,7 +235,7 @@ export function SessionsPage({
       });
     }, 120);
     return () => window.clearTimeout(timer);
-  }, [active, version, text, environments, tagFilter, folderId]);
+  }, [active, version, sessionsKey, text, environments, tagFilter, folderId]);
 
   // QL-01: the VMs a session can be linked to, and the sessions several VMs match.
   const [vms, setVms] = useState<VmRecord[]>([]);

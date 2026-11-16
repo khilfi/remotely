@@ -43,6 +43,7 @@ import {
   type SecretMeta,
   type SessionAuth,
   type SessionColor,
+  type SessionDraft,
   type SessionFolder,
   type SessionInput,
   type SessionKind,
@@ -74,6 +75,7 @@ import { withVaultPassword } from "@/lib/reauth-prompt";
 import { advancedSummary, environmentNote } from "@/lib/session-editor";
 import { appliedEnvironment, vmsById } from "@/lib/session-environment";
 import { forwardsProblem, jumpChain, routeText, toInput } from "@/lib/tunnels";
+import { sentence } from "@/lib/vm-sessions";
 import { cn } from "@/lib/utils";
 import { ColorDot, SESSION_COLORS, StartupRatingBadges } from "./Badges";
 import { ConfirmDialog } from "./ConfirmDialog";
@@ -104,6 +106,10 @@ interface Props {
   folderId: string | null;
   /** BX-01: the VM a new session reaches, e.g. when linking one from a target picker. */
   vmId?: string | null;
+  /** QL-29: a new session filled in from a VM (its name, address, labels and a deploy's user and key). */
+  draft?: SessionDraft;
+  /** QL-29: what the draft says about itself (where the user and key came from), shown above the fields. */
+  draftNotes?: string[];
   folders: SessionFolder[];
   /** Candidates for the jump host. */
   sessions: SessionRecord[];
@@ -135,6 +141,8 @@ export function SessionDialog({
   session,
   folderId,
   vmId: presetVm,
+  draft,
+  draftNotes = [],
   folders,
   sessions,
   tagSuggestions,
@@ -154,16 +162,31 @@ export function SessionDialog({
   const winrmVault = protocol === "winrm" && logsInWithVault(kind);
   /** SSH and WinRM sessions may be linked to the VM they reach (its guest metrics and facts). */
   const guest = readsGuest(kind);
-  const [name, setName] = useState(session?.name ?? "");
+  const [name, setName] = useState(session?.name ?? draft?.name ?? "");
   const [folder, setFolder] = useState<string>(session ? (session.folderId ?? NONE) : (folderId ?? NONE));
-  const [host, setHost] = useState(session?.host ?? "");
-  const [port, setPort] = useState(String(session?.port ?? 22));
-  const [username, setUsername] = useState(own?.username ?? "");
-  const [method, setMethod] = useState<Method>(own?.auth.method ?? (folderId ? "folder" : "password"));
-  const [password, setPassword] = useState(own ? (idOf(own.auth, "credential") ?? NONE) : NONE);
-  const [key, setKey] = useState(own?.auth.method === "key" ? (own.auth.keyId ?? NONE) : NONE);
+  const [host, setHost] = useState(session?.host ?? draft?.host ?? "");
+  const [port, setPort] = useState(String(session?.port ?? draft?.port ?? 22));
+  const [username, setUsername] = useState(own?.username ?? draft?.username ?? "");
+  const [method, setMethod] = useState<Method>(
+    own?.auth.method ?? draft?.auth.method ?? (folderId ? "folder" : "password"),
+  );
+  const [password, setPassword] = useState(
+    own
+      ? (idOf(own.auth, "credential") ?? NONE)
+      : draft?.auth.method === "password"
+        ? (draft.auth.passwordId ?? NONE)
+        : NONE,
+  );
+  const [key, setKey] = useState(
+    own?.auth.method === "key"
+      ? (own.auth.keyId ?? NONE)
+      : draft?.auth.method === "key"
+        ? (draft.auth.keyId ?? NONE)
+        : NONE,
+  );
   const [passphrase, setPassphrase] = useState(own ? (idOf(own.auth, "passphrase") ?? NONE) : NONE);
-  const [jump, setJump] = useState(own?.jumpSessionId ?? (own?.jumpDirect ? DIRECT : NONE));
+  // QL-29: a VM's session goes straight to it, on this PC's own network.
+  const [jump, setJump] = useState(own?.jumpSessionId ?? (own?.jumpDirect || draft ? DIRECT : NONE));
   const [startup, setStartup] = useState(session?.startupCommand ?? "");
   /** SS-01: typed again after an automatic reconnect. */
   const [startupAgain, setStartupAgain] = useState(session?.startupOnReconnect ?? false);
@@ -171,12 +194,12 @@ export function SessionDialog({
   const [rated, setRated] = useState<{ command: string; environment: Environment; rating: StartupRating | null }>();
   /** SS-08: the folder prompt hook: as Settings say, on, or off. */
   const [hook, setHook] = useState<string>(session?.promptHook == null ? NONE : session.promptHook ? "on" : "off");
-  const [environment, setEnvironment] = useState<Environment>(own?.environment ?? "none");
+  const [environment, setEnvironment] = useState<Environment>(own?.environment ?? draft?.environment ?? "none");
   const [color, setColor] = useState<SessionColor | null>(session?.color ?? null);
-  const [tags, setTags] = useState((own?.tags ?? []).join(", "));
+  const [tags, setTags] = useState((own?.tags ?? draft?.tags ?? []).join(", "));
   /** QL-16: what a session in the chosen folder gets when it sets nothing itself, for the folder it was asked for. */
   const [inheritedFor, setInheritedFor] = useState<{ folder: string; values: Effective | null } | null>(null);
-  const [vm, setVm] = useState(session ? (session.vmId ?? NONE) : (presetVm ?? NONE));
+  const [vm, setVm] = useState(session ? (session.vmId ?? NONE) : (presetVm ?? draft?.vmId ?? NONE));
   const [vms, setVms] = useState<VmRecord[]>([]);
   /** SS-07: the saved port forwards; null while an edited session's are loading. */
   const [forwards, setForwards] = useState<ForwardInput[] | null>(session ? null : []);
@@ -488,7 +511,9 @@ export function SessionDialog({
             }}
           >
             <DialogHeader>
-              <DialogTitle>{session ? `Edit '${session.name}'` : "New session"}</DialogTitle>
+              <DialogTitle>
+                {session ? `Edit '${session.name}'` : draft ? `New SSH session for '${draft.name}'` : "New session"}
+              </DialogTitle>
               <DialogDescription>
                 {ssh
                   ? "Passwords and keys stay in the vault; one left out is asked when connecting."
@@ -499,6 +524,14 @@ export function SessionDialog({
                       : "Opens a terminal tab; log in at the prompt."}
               </DialogDescription>
             </DialogHeader>
+            {draft && (
+              <ul className="grid gap-1 rounded-md border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
+                <li>Filled in from the VM. Check the user and login before you save.</li>
+                {draftNotes.map((note) => (
+                  <li key={note}>{sentence(note)}</li>
+                ))}
+              </ul>
+            )}
 
             <div className="grid gap-2">
               <Label>Kind</Label>
