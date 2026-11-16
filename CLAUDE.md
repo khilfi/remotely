@@ -2213,8 +2213,12 @@ VM-29 and VM-32, from 0.8.0 (`docs/plan-0.8.md`, G6), built only on what S1 to S
   `vmnetdhcp.leases` by `ethernet0.generatedAddress`, else the hypervisor's report. Windows needs one before its password
   can be set, so a Windows deploy on a network where Remotely can't learn it (bridged, a VirtualBox host-only or
   internal network) is refused without a pool. On Workstation's bridged network (no leases) a Linux guest's address
-  comes only from open-vm-tools, which the Linux starters install (`ubuntu-server-minimal` leaves it out); without it
-  the note says so and what to do (`spec::BRIDGED_NO_TOOLS`, `DeploySpec::unknown_address_hint`).
+  comes only from open-vm-tools, which the Linux starters install: as a package in Debian's and Ubuntu's Docker one
+  (they need the archive anyway), and by a late command that can't fail in Ubuntu minimal's and Rocky's and Alma's,
+  since neither the Ubuntu ISOs' minimal source (24.04.5, 26.04.1: only the full server layer's manifest has it, and
+  `pool/main/o` doesn't) nor the Rocky 9.8 and Alma 9.8 minimal ISOs carry it, and Anaconda stops on a listed package
+  its source lacks (Rocky's DVD has it in AppStream). Without it the note says so and what to do
+  (`spec::BRIDGED_NO_TOOLS`, `BRIDGED_NO_TOOLS_WINDOWS` for a Windows profile, `DeploySpec::unknown_address_hint`).
 - **Windows' first sign-in** (`WindowsSignIn`, tried again with a backoff up to a minute): the vault's passwords are
   read first, so a locked vault sends nothing and the step waits ("waiting for the vault to be unlocked", which the
   window turns into a notification). That wait isn't counted against the time limit, for up to 4 hours; after that the error says to deploy the VM again (its password is still the one-time one, and the seed is gone). NTLM over HTTPS with only the certificate

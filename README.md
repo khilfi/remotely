@@ -215,9 +215,11 @@ launch template, or from **Custom** values typed in the dialog.
   session saved and linked to it, and its console, as the template says.
 - **Addresses on Workstation's bridged network**: Workstation's own DHCP leases cover only its NAT and host-only
   networks, so on a bridged network only VMware Tools in the guest tell a VM's address. A Linux guest has them only
-  with `open-vm-tools`, which the Linux install config starters install; without it the job ends without a session
-  and its note says what to do: install `open-vm-tools` in the guest, or deploy on NAT or host-only, or with an
-  address pool.
+  with `open-vm-tools`, which the Linux install config starters install. Ubuntu's ISO doesn't carry it for the
+  minimal install, and neither do Rocky's and Alma's minimal ISOs, so those starters fetch it from the distribution's
+  archive when the install can reach it, and an install that can't still finishes. Without it the job ends without a
+  session, and its note says what to do: install `open-vm-tools` in the guest, or deploy on NAT or host-only, or with
+  an address pool. A Windows guest's note says to install VMware Tools instead.
 - **Clone** (VM-10): pick shut-down VMs of one hypervisor on the VMs page, then Clone makes a full copy of each in one
   job, named by a pattern (`{template}` is the VM's name: `{template}-clone` by default). The copies stay off, like the
   VMs they copy: started as they are, they would use their source's name and addresses.

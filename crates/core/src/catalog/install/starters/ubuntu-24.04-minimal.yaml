@@ -1,8 +1,9 @@
 #cloud-config
 # Ubuntu Server 24.04 LTS, minimal: one admin user with sudo and your SSH key, OpenSSH, LVM over the whole disk, DHCP.
 # A starter from Remotely: copy it to change it. The admin password, picked from the vault, goes in as a SHA-512
-# hash when a VM is deployed. open-vm-tools (VMware Tools, which the minimal source leaves out) lets Workstation learn
-# the guest's address on a bridged network; on VirtualBox it doesn't start.
+# hash when a VM is deployed. open-vm-tools (VMware Tools) lets Workstation learn the guest's address on a bridged
+# network, and on VirtualBox it doesn't start. The ISO doesn't carry it for the minimal source, so it comes from
+# Ubuntu's archive when the network reaches it; the late command never fails the install, which works offline as before.
 autoinstall:
   version: 1
   source:
@@ -30,7 +31,7 @@ autoinstall:
     allow-pw: false
     authorized-keys:
       - "{{ssh_key.admin}}"
-  packages:
-    - open-vm-tools
   updates: security
+  late-commands:
+    - "curtin in-target -- sh -c 'timeout 300 apt-get install -y open-vm-tools || true'"
   shutdown: reboot
