@@ -27,11 +27,6 @@ ignore = [
   # server never writes into. Whoever could plant a `-wal` there can already read the app's memory. The fix
   # is in libsqlite3-sys 0.39, but sqlx-sqlite 0.9.0 takes only < 0.38. Revisit when sqlx allows 0.39.
   { id = "RUSTSEC-2026-0459", reason = "SQLite WAL page-size bug needs a crafted file; Remotely opens only its own database" },
-  # russh (the agent server signs with confirm-constrained keys without asking `Agent::confirm`). Remotely
-  # is an agent client only: the Windows OpenSSH agent or Pageant holds the keys and signs, not russh. It
-  # never forwards an agent. russh's agent server runs only in the `fakes` test agent, with no constrained
-  # keys. The fix is in russh 0.65, a breaking release: drop this entry when Remotely moves to it.
-  { id = "RUSTSEC-2026-0495", reason = "russh agent server bug; Remotely only uses the agent client, the server is test-only" },
 ]
 
 [bans]
@@ -49,8 +44,6 @@ skip = [
   { crate = "digest", reason = "RustCrypto 0.10 (Tauri) and 0.11 (russh, vault) digests" },
   { crate = "generic-array", reason = "RustCrypto 0.10 (Tauri) and 0.11 (russh, vault) digests" },
   { crate = "getrandom", reason = "rand_core 0.6 to 0.10 across Tauri, rustls and russh" },
-  { crate = "rand", reason = "rand 0.9 (Tauri, rustls) and 0.10 (russh, ssh-key)" },
-  { crate = "rand_core", reason = "rand 0.9 (Tauri, rustls) and 0.10 (russh, ssh-key)" },
   { crate = "sha2", reason = "RustCrypto 0.10 (Tauri) and 0.11 (russh, vault) digests" },
   { crate = "sha3", reason = "RustCrypto 0.10 (Tauri) and 0.11 (russh, vault) digests" },
 ]

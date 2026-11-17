@@ -50,7 +50,7 @@ pulldown-cmark = { version = "0.13", default-features = false, features = ["html
 # pull in.
 base64 = "0.23"
 # SSH (SS-03, BX-02, MO-02). `ring` instead of the default aws-lc-rs so Windows builds need no CMake/NASM.
-russh = { version = "0.64", default-features = false, features = ["ring", "flate2", "rsa"] }
+russh = { version = "0.65", default-features = false, features = ["ring", "flate2", "rsa"] }
 # SS-08: SFTP on a channel of the terminal's own SSH connection (client), and the test server's SFTP
 # subsystem (server). It only needs a byte stream, so it works with any russh version.
 russh-sftp = "3"

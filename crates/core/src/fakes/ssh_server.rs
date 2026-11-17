@@ -1144,7 +1144,12 @@ impl server::Handler for ServerHandler {
         Ok(if ok { self.first_factor_ok() } else { Auth::reject() })
     }
 
-    async fn auth_publickey(&mut self, user: &str, key: &PublicKey) -> Result<Auth, Self::Error> {
+    async fn auth_publickey(
+        &mut self,
+        user: &str,
+        verified: server::VerifiedPublicKey<'_>,
+    ) -> Result<Auth, Self::Error> {
+        let key = verified.public_key;
         self.user = user.to_owned();
         // Keys set with `with_key`, and (SS-09) keys a push wrote to the user's authorized_keys.
         let home = if user == "root" {
