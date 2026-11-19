@@ -142,6 +142,7 @@ import {
   type VaultInfo,
   type VmRecord,
 } from "@/lib/api";
+import { dropTarget, readDropSpot, type DropPlaces } from "@/lib/drop-target";
 import { rulesForPane } from "@/lib/highlight-rules";
 import { alertNotification, recordAlert } from "@/lib/terminal-alerts";
 import { fromCommandFinished, fromTerminalAlert } from "@/lib/notifications";
@@ -1393,12 +1394,6 @@ export function TerminalPage({
     };
   });
 
-  /** The pane under a point of the window (CSS pixels), if any. */
-  function paneAt(x: number, y: number) {
-    const el = document.elementFromPoint(x, y)?.closest<HTMLElement>("[data-pane-key]");
-    return el ? everyPane.find((p) => p.key === el.dataset.paneKey) : undefined;
-  }
-
   /** The folder a terminal's uploads go to: its shell's, or the home folder when the shell does not say. */
   async function folderOf(pane: PaneSession, terminalId: string) {
     return pane.getSnapshot().folder?.path ?? (await api.filesList(terminalId, null)).path;
@@ -1515,13 +1510,23 @@ export function TerminalPage({
       }
       // VM-23: the page on screen owns a drop (an ISO dropped on the Virtual machines page is that page's).
       if (!dropped.staged || !active) return;
-      const pane = paneAt(dropped.x, dropped.y);
-      if (!pane) {
+      // UX-14 (H1): lib/drop-target.ts chooses; a pane takes its drop into its shell folder, never as root.
+      const places: DropPlaces = {
+        panes: everyPane.map((p) => ({ key: p.key, folder: p.getSnapshot().folder?.path ?? null })),
+      };
+      const target = dropTarget(readDropSpot(dropped.x, dropped.y), places);
+      const pane =
+        target.kind === "terminal"
+          ? everyPane.find((p) => p.key === target.paneKey)
+          : target.kind === "host"
+            ? everyPane.find((p) => p.terminalId === target.terminalId)
+            : undefined;
+      if (!pane || (target.kind !== "terminal" && target.kind !== "host")) {
         void api.filesUnstage(dropped.staged.id).catch(() => undefined);
         toast.info("Drop files on a terminal to upload them into its folder.");
         return;
       }
-      void uploadStaged(pane, dropped.staged, null);
+      void uploadStaged(pane, dropped.staged, target.folder, target.asRoot);
     };
   });
 

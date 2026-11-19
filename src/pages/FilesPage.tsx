@@ -42,6 +42,7 @@ import {
   type UploadStart,
 } from "@/lib/api";
 import { uploadReason } from "@/lib/disabled-reasons";
+import { dropTarget, readDropSpot, type DropPlaces } from "@/lib/drop-target";
 import { dropAction, type DragItems } from "@/lib/files-page";
 import { filesPageApi, type LocalListing } from "@/lib/files-page-api";
 import { plural } from "@/lib/format";
@@ -428,13 +429,22 @@ export function FilesPage({ active, request, onSubmitted, onOpenTerminal, onShow
         return;
       }
       if (!dropped.staged) return;
-      const target = targetAt(dropped.x, dropped.y);
-      if (!target || target.pane !== "host") {
+      // UX-14 (H1): lib/drop-target.ts chooses: a host tab's folder (or the folder row it fell on).
+      const places: DropPlaces = {
+        hosts: tabs.map((t) => ({
+          key: t.key,
+          terminalId: t.terminalId,
+          folder: folders[t.key]?.folder ?? null,
+          asRoot: folders[t.key]?.asRoot ?? false,
+        })),
+      };
+      const target = dropTarget(readDropSpot(dropped.x, dropped.y), places);
+      if (target.kind !== "host") {
         void api.filesUnstage(dropped.staged.id).catch(() => undefined);
         toast.info("Drop files on the host's side to upload them; nothing on this PC is changed here.");
         return;
       }
-      void uploadStaged(target.terminalId, dropped.staged, target.intoFolder ?? target.folder, target.asRoot);
+      void uploadStaged(target.terminalId, dropped.staged, target.folder, target.asRoot);
     };
   });
   useEffect(() => {
