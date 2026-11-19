@@ -13,8 +13,8 @@ export interface RootStore {
   /** A number that changes with any terminal's state (what useSyncExternalStore needs). */
   version(): number;
   subscribe(listener: () => void): () => void;
-  /** Started or stopped here: known at once. */
-  set(terminalId: string, on: boolean): void;
+  /** Started or stopped here, or ended in the core: known at once. True when it changed (so it is said once). */
+  set(terminalId: string, on: boolean): boolean;
   /** Asks the core again; its answer counts unless the state was set since the read started. */
   load(terminalId: string, read: RootReader): Promise<void>;
 }
@@ -27,10 +27,11 @@ export function createRootStore(): RootStore {
   let version = 0;
 
   const change = (terminalId: string, value: boolean) => {
-    if ((on.get(terminalId) ?? false) === value && on.has(terminalId)) return;
+    if ((on.get(terminalId) ?? false) === value && on.has(terminalId)) return false;
     on.set(terminalId, value);
     version += 1;
     listeners.forEach((listener) => listener());
+    return true;
   };
 
   return {
@@ -44,7 +45,7 @@ export function createRootStore(): RootStore {
     },
     set(terminalId, value) {
       sets.set(terminalId, (sets.get(terminalId) ?? 0) + 1);
-      change(terminalId, value);
+      return change(terminalId, value);
     },
     async load(terminalId, read) {
       const asked = sets.get(terminalId) ?? 0;

@@ -142,7 +142,14 @@ import {
   type VaultInfo,
   type VmRecord,
 } from "@/lib/api";
-import { dropTarget, hostDropLabel, readDropSpot, type DropHost, type DropPlaces } from "@/lib/drop-target";
+import {
+  hostDropLabel,
+  readDropSpot,
+  terminalPageDrop,
+  type DropHost,
+  type DropSpot,
+  type TerminalPageDrop,
+} from "@/lib/drop-target";
 import { rulesForPane } from "@/lib/highlight-rules";
 import { alertNotification, recordAlert } from "@/lib/terminal-alerts";
 import { fromCommandFinished, fromTerminalAlert } from "@/lib/notifications";
@@ -1509,13 +1516,10 @@ export function TerminalPage({
 
   /** UX-14 (H1): the folder the drawer shows, for drops on it; set as it lists, without a render. */
   const drawerPlace = useRef<DropHost | null>(null);
-  /** What on this page takes a drop: every pane by its shell's folder, and the drawer while it shows. */
-  const dropPlacesRef = useRef<() => DropPlaces>(() => ({}));
+  /** Where a drop goes on this page: lib/drop-target.ts terminalPageDrop over every pane and the drawer while shown. */
+  const dropPlanRef = useRef<(spot: DropSpot) => TerminalPageDrop<PaneSession>>(() => ({ kind: "none" }));
   useEffect(() => {
-    dropPlacesRef.current = () => ({
-      panes: everyPane.map((p) => ({ key: p.key, folder: p.getSnapshot().folder?.path ?? null })),
-      hosts: filesShown && drawerPlace.current ? [drawerPlace.current] : [],
-    });
+    dropPlanRef.current = (spot) => terminalPageDrop(spot, everyPane, filesShown ? drawerPlace.current : null);
   });
 
   // Files dropped on the window: the shell staged them and says where they fell.
@@ -1532,21 +1536,16 @@ export function TerminalPage({
       }
       // VM-23: the page on screen owns a drop (an ISO dropped on the Virtual machines page is that page's).
       if (!dropped.staged || !active) return;
-      // UX-14 (H1): lib/drop-target.ts chooses. A pane takes its drop into its shell folder, never as root; the
-      // drawer into the folder it shows (as root when it browses so).
-      const target = dropTarget(readDropSpot(dropped.x, dropped.y), dropPlacesRef.current());
-      const pane =
-        target.kind === "terminal"
-          ? everyPane.find((p) => p.key === target.paneKey)
-          : target.kind === "host"
-            ? everyPane.find((p) => p.terminalId === target.terminalId)
-            : undefined;
-      if (!pane || (target.kind !== "terminal" && target.kind !== "host")) {
+      // UX-14 (H1): lib/drop-target.ts terminalPageDrop chooses (tested there). A pane takes its drop into its shell
+      // folder, never as root; the drawer into the folder it shows (as root when it browses so).
+      const drop = dropPlanRef.current(readDropSpot(dropped.x, dropped.y));
+      if (drop.kind !== "upload") {
         void api.filesUnstage(dropped.staged.id).catch(() => undefined);
-        toast.info("Drop files on a terminal to upload them into its folder.");
+        if (drop.kind === "refused") toast.info(`Not uploaded: ${drop.why}`);
+        else toast.info("Drop files on a terminal to upload them into its folder.");
         return;
       }
-      void uploadStaged(pane, dropped.staged, target.folder, target.asRoot);
+      void uploadStaged(drop.pane, dropped.staged, drop.folder, drop.asRoot);
     };
   });
 
@@ -1580,11 +1579,14 @@ export function TerminalPage({
       let label: string | null = null;
       if (pane) label = dropLabelRef.current(pane.dataset.paneKey);
       else if (files) {
-        const target = dropTarget(
-          readDropSpot(x, y, () => under),
-          dropPlacesRef.current(),
-        );
-        label = target.kind === "host" ? hostDropLabel(target) : "Open a folder first: nothing can be uploaded here";
+        // The same choice as the drop's: where it would go, or why nothing would.
+        const drop = dropPlanRef.current(readDropSpot(x, y, () => under));
+        label =
+          drop.kind === "upload" && drop.folder !== null
+            ? hostDropLabel({ folder: drop.folder, asRoot: drop.asRoot })
+            : drop.kind === "refused"
+              ? hostDropLabel(drop)
+              : "Nothing can be uploaded here";
       }
       const el = pane ?? files;
       if (el === marked && el?.getAttribute("data-drop") === label) return;

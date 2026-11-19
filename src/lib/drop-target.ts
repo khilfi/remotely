@@ -38,6 +38,8 @@ export interface DropHost {
   folder: string | null;
   /** It browses as root (its uploads go one tier higher). */
   asRoot: boolean;
+  /** Why it can't take uploads now (not connected, no folder open, the read-only lock); null: it can. */
+  why?: string | null;
 }
 
 /** What a page has on screen that takes drops. */
@@ -57,6 +59,8 @@ export type DropTarget =
   | { kind: "terminal"; paneKey: string; folder: string | null; asRoot: false }
   /** An upload into the folder a host pane shows, or the folder row it fell on, as root when the pane browses so. */
   | { kind: "host"; key: string; terminalId: string; folder: string; asRoot: boolean }
+  /** A host pane that can't take uploads now, and why. */
+  | { kind: "refused"; why: string }
   /** The files fill Many hosts' push. */
   | { kind: "many" }
   /** An ISO for a VM's CD/DVD drive. */
@@ -73,7 +77,9 @@ export function dropTarget(spot: DropSpot, places: DropPlaces): DropTarget {
   }
   if (places.hosts && spot.files === "host") {
     const host = places.hosts.find((h) => h.key === spot.filesTab);
-    if (!host?.folder) return { kind: "none" };
+    if (!host) return { kind: "none" };
+    if (host.why) return { kind: "refused", why: host.why };
+    if (!host.folder) return { kind: "refused", why: "Open a folder first" };
     return {
       kind: "host",
       key: host.key,
@@ -87,9 +93,55 @@ export function dropTarget(spot: DropSpot, places: DropPlaces): DropTarget {
   return { kind: "none" };
 }
 
-/** What a host pane says while files are dragged over it. */
-export function hostDropLabel(target: Extract<DropTarget, { kind: "host" }>): string {
+/** What a host pane says while files are dragged over it: where they would go, or why nothing would. */
+export function hostDropLabel(target: { folder: string; asRoot: boolean } | { why: string }): string {
+  if ("why" in target) return target.why;
   return `Drop to upload into ${target.folder}${target.asRoot ? " as root" : ""}`;
+}
+
+/** What the Terminal page needs of a pane to place a drop: its key, its core id and its shell's folder. */
+export interface DropPaneSource {
+  key: string;
+  terminalId: string | null;
+  getSnapshot(): { folder?: { path: string | null } | null };
+}
+
+/** What the Terminal page does with a drop. */
+export type TerminalPageDrop<P> =
+  /** An upload through `pane` into `folder` (null: its shell's folder or home, as the page has always found it). */
+  | { kind: "upload"; pane: P; folder: string | null; asRoot: boolean }
+  | { kind: "refused"; why: string }
+  | { kind: "none" };
+
+/**
+ * The Terminal page's drop, from its panes and the drawer (null while it isn't shown). A pane takes a drop on it into
+ * its own shell's folder (null: its home folder), never as root, through that pane; the drawer takes one into the folder
+ * it shows, as root while it browses so, through its terminal's pane. The page then calls
+ * `uploadStaged(pane, staged, folder, asRoot)` with exactly these. Pure.
+ */
+export function terminalPageDrop<P extends DropPaneSource>(
+  spot: DropSpot,
+  panes: readonly P[],
+  drawer: DropHost | null,
+): TerminalPageDrop<P> {
+  const target = dropTarget(spot, {
+    panes: panes.map((p) => ({ key: p.key, folder: p.getSnapshot().folder?.path ?? null })),
+    hosts: drawer ? [drawer] : [],
+  });
+  switch (target.kind) {
+    case "terminal": {
+      const pane = panes.find((p) => p.key === target.paneKey);
+      return pane ? { kind: "upload", pane, folder: target.folder, asRoot: false } : { kind: "none" };
+    }
+    case "host": {
+      const pane = panes.find((p) => p.terminalId === target.terminalId);
+      return pane ? { kind: "upload", pane, folder: target.folder, asRoot: target.asRoot } : { kind: "none" };
+    }
+    case "refused":
+      return target;
+    default:
+      return { kind: "none" };
+  }
 }
 
 /** The part of an element `readDropSpot` needs (a DOM element; a stand-in in tests). */

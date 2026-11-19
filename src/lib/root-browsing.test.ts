@@ -21,6 +21,14 @@ test("a start in one place shows in every place at once", () => {
   assert.equal(heard, 2);
 });
 
+test("an end heard in two places is said once", () => {
+  const store = createRootStore();
+  store.set("t1", true);
+  // The drawer and a Files tab on the same terminal both hear that root browsing ended.
+  assert.equal(store.set("t1", false), true);
+  assert.equal(store.set("t1", false), false);
+});
+
 test("the core's answer is what counts", async () => {
   const store = createRootStore();
   await store.load("t1", async () => true);

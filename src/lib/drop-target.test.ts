@@ -10,6 +10,7 @@ import {
   dropTarget,
   hostDropLabel,
   readDropSpot,
+  terminalPageDrop,
   type DropHost,
   type DropPlaces,
   type SpotElement,
@@ -94,8 +95,16 @@ test("a drop on a host pane's folder row uploads into that folder", () => {
   });
 });
 
-test("a host pane with no folder open, or one the page doesn't have, takes nothing", () => {
-  assert.deepEqual(dropTarget({ files: "host", filesTab: "drawer" }, terminalPage(drawers[1])), { kind: "none" });
+test("a host pane with no folder open, or one that says why, refuses; one the page doesn't have takes nothing", () => {
+  assert.deepEqual(dropTarget({ files: "host", filesTab: "drawer" }, terminalPage(drawers[1])), {
+    kind: "refused",
+    why: "Open a folder first",
+  });
+  const offline: DropHost = { ...drawers[2]!, why: "This terminal is not connected" };
+  assert.deepEqual(dropTarget({ files: "host", filesTab: "drawer" }, terminalPage(offline)), {
+    kind: "refused",
+    why: "This terminal is not connected",
+  });
   assert.deepEqual(dropTarget({ files: "host", filesTab: "drawer" }, terminalPage(null)), { kind: "none" });
   assert.deepEqual(dropTarget({ files: "host", filesTab: "tab-x" }, terminalPage(drawers[2])), { kind: "none" });
 });
@@ -135,15 +144,59 @@ test("pages without panes ignore a pane marker", () => {
   assert.deepEqual(dropTarget({ paneKey: "pane-a" }, { vms: true }), { kind: "none" });
 });
 
-test("the drawer's label says where a drop goes", () => {
-  assert.equal(
-    hostDropLabel({ kind: "host", key: "drawer", terminalId: "t", folder: "/etc", asRoot: true }),
-    "Drop to upload into /etc as root",
+test("the drawer's label says where a drop goes, or why nothing would", () => {
+  assert.equal(hostDropLabel({ folder: "/etc", asRoot: true }), "Drop to upload into /etc as root");
+  assert.equal(hostDropLabel({ folder: "/srv", asRoot: false }), "Drop to upload into /srv");
+  assert.equal(hostDropLabel({ why: "This terminal is not connected" }), "This terminal is not connected");
+});
+
+/** Stand-ins for the Terminal page's panes: a key, a core id and the shell's folder in their snapshot. */
+function pane(key: string, terminalId: string | null, folder: string | null) {
+  return { key, terminalId, getSnapshot: () => ({ folder: folder === null ? null : { path: folder } }) };
+}
+
+test("the Terminal page: a drop on a pane uploads through that pane, into its shell folder, as the login user", () => {
+  const a = pane("pane-a", "t-a", "/srv/www");
+  const b = pane("pane-b", "t-b", null);
+  const everyPane = [a, b];
+  // Whatever the drawer shows: none, another folder of the same terminal as root, another terminal as root.
+  const drawerStates: (DropHost | null)[] = [
+    null,
+    { key: "drawer", terminalId: "t-a", folder: "/home/alice", asRoot: true },
+    { key: "drawer", terminalId: "t-b", folder: "/root", asRoot: true },
+    { key: "drawer", terminalId: "t-a", folder: null, asRoot: true, why: "This terminal is not connected" },
+  ];
+  for (const drawer of drawerStates) {
+    const onA = terminalPageDrop({ paneKey: "pane-a" }, everyPane, drawer);
+    assert.equal(onA.kind, "upload");
+    if (onA.kind !== "upload") continue;
+    assert.equal(onA.pane, a, "the pane under the drop, not the drawer's");
+    assert.equal(onA.folder, "/srv/www");
+    assert.equal(onA.asRoot, false);
+    // A shell that doesn't report its folder: null, so the page asks the core for the home folder, as before.
+    const onB = terminalPageDrop({ paneKey: "pane-b" }, everyPane, drawer);
+    assert.deepEqual(onB.kind === "upload" && [onB.pane, onB.folder, onB.asRoot], [b, null, false]);
+  }
+});
+
+test("the Terminal page: a drop on the drawer uploads through its terminal's pane, into its folder, as it browses", () => {
+  const a = pane("pane-a", "t-a", "/srv/www");
+  const b = pane("pane-b", "t-b", "/tmp");
+  const drawer: DropHost = { key: "drawer", terminalId: "t-b", folder: "/etc/nginx", asRoot: true };
+  const drop = terminalPageDrop({ files: "host", filesTab: "drawer" }, [a, b], drawer);
+  assert.deepEqual(drop.kind === "upload" && [drop.pane, drop.folder, drop.asRoot], [b, "/etc/nginx", true]);
+  // A folder row in it.
+  const row = terminalPageDrop({ files: "host", filesTab: "drawer", filesFolder: "/etc/nginx/sites" }, [a, b], drawer);
+  assert.deepEqual(row.kind === "upload" && [row.pane, row.folder], [b, "/etc/nginx/sites"]);
+  // Refused, with the reason; nowhere; a drawer whose terminal has no pane any more.
+  assert.deepEqual(
+    terminalPageDrop({ files: "host", filesTab: "drawer" }, [a, b], { ...drawer, why: "Read-only while presenting" }),
+    { kind: "refused", why: "Read-only while presenting" },
   );
-  assert.equal(
-    hostDropLabel({ kind: "host", key: "drawer", terminalId: "t", folder: "/srv", asRoot: false }),
-    "Drop to upload into /srv",
-  );
+  assert.deepEqual(terminalPageDrop({}, [a, b], drawer), { kind: "none" });
+  assert.deepEqual(terminalPageDrop({ files: "host", filesTab: "drawer" }, [a], drawer), { kind: "none" });
+  // The drawer while it isn't shown takes nothing.
+  assert.deepEqual(terminalPageDrop({ files: "host", filesTab: "drawer" }, [a, b], null), { kind: "none" });
 });
 
 /** A stand-in element: the markers on it and on its parents, nearest first. */

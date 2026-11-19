@@ -7,12 +7,17 @@
 
 import { EditingSessionsList } from "@/components/EditingSessionsList";
 import { TransfersList } from "@/components/TransfersList";
-import { HostPane } from "@/components/files/HostPane";
+import { HostPane, type PaneMemory } from "@/components/files/HostPane";
 import type { FileDoubleClick, SubmitOutcome, TransferInfo } from "@/lib/api";
 import type { DropHost } from "@/lib/drop-target";
 
 /** The drawer's `data-files-tab`, for drops. */
 export const DRAWER_KEY = "drawer";
+
+/** UX-14: what the drawer showed of each terminal (a folder opened by hand, Back and Forward, the view), so switching
+ * tabs, or to Compare hosts and back, keeps it. The window loads again after a workspace switch, which clears it. */
+const remembered = new Map<string, PaneMemory>();
+const remember = (terminalId: string) => (memory: PaneMemory) => remembered.set(terminalId, memory);
 
 interface Props {
   /** The current pane's core id, once it opened. */
@@ -60,7 +65,9 @@ export function FilesDrawer({
           onUpload={onUpload}
           onSubmitted={onSubmitted}
           onEditorJob={onEditorJob}
-          onFolder={(key, folder, asRoot) => onPlace({ key, terminalId, folder, asRoot })}
+          onFolder={(key, folder, asRoot, why) => onPlace({ key, terminalId, folder, asRoot, why })}
+          remembered={remembered.get(terminalId)}
+          onRemember={remember(terminalId)}
         />
       ) : (
         <section className="flex min-h-0 flex-1 flex-col gap-2">

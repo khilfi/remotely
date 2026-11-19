@@ -116,6 +116,21 @@ export function go<T>(history: History<T>, step: -1 | 1): { history: History<T>;
   return { history: { ...history, at }, item: history.items[at] };
 }
 
+/**
+ * QL-09, UX-14: Back. Only folders that opened join the history, so after a folder that couldn't be opened Back goes to
+ * the last folder that did (the history's current place), as the drawer's Back always did; otherwise the place before.
+ * `shown` is the folder on screen and whether it failed (a folder that opened before and fails now isn't gone back to).
+ */
+export function back<T>(
+  history: History<T>,
+  shown: { item: T; failed: boolean } | null,
+  same: (a: T, b: T) => boolean,
+): { history: History<T>; item: T } | null {
+  const current = history.items[history.at];
+  if (shown?.failed && current !== undefined && !same(current, shown.item)) return { history, item: current };
+  return go(history, -1);
+}
+
 /** This PC's breadcrumbs: `This PC`, `C:\`, `C:\Users`, `C:\Users\alice`, each a path to type again. */
 export function localCrumbs(path: string | null): { label: string; path: string | null }[] {
   const out: { label: string; path: string | null }[] = [{ label: "This PC", path: null }];

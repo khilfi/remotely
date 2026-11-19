@@ -44,6 +44,8 @@ interface Props {
   dropped?: { staged: StagedFiles; n: number } | null;
   /** UX-15: opened from the support bundle dialog: fetch, on these picks. */
   request?: { mode: Mode; picks?: TargetPicks; n: number } | null;
+  /** The request was taken: the page forgets it, so coming back to this tab later starts afresh. */
+  onRequestTaken?: () => void;
   onSubmitted: (outcome: SubmitOutcome, onJob: (jobId: string) => void) => void;
   onOpenSessions: () => void;
 }
@@ -56,6 +58,7 @@ export function ManyHostsView({
   localPicked,
   dropped = null,
   request = null,
+  onRequestTaken,
   onSubmitted,
   onOpenSessions,
 }: Props) {
@@ -70,6 +73,10 @@ export function ManyHostsView({
     setMode(request.mode);
     if (request.picks) setPicks(request.picks);
   }
+  // Taken once, whether at the first render (the initial state above) or later.
+  useEffect(() => {
+    if (request) onRequestTaken?.();
+  }, [request, onRequestTaken]);
   const [folder, setFolder] = useState("");
   const [replace, setReplace] = useState(false);
   const [path, setPath] = useState("");

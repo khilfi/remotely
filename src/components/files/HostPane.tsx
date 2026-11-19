@@ -137,6 +137,7 @@ import { doubleClickAction, doubleClickTitle, editInTerminalLabel, editInTermina
 import { editingApi, type HostEditors } from "@/lib/editing-api";
 import { changeLabel } from "@/lib/file-ops";
 import {
+  back,
   canGo,
   DEFAULT_VIEW,
   emptyHistory,
@@ -185,8 +186,14 @@ interface Props {
   onEditorJob: (jobId: string, title: string) => void;
   /** A sync to this PC's folder (Compare). */
   onDownloads?: (start: DownloadStart, asRoot: boolean) => void;
-  /** The folder shown and whether it is root's, for uploads from the local pane and drops. */
-  onFolder?: (key: string, folder: string | null, asRoot: boolean) => void;
+  /**
+   * The folder shown (null while none is open or the terminal isn't connected), whether it is root's, and why uploads
+   * can't go there now (null: they can), for uploads from the local pane and drops.
+   */
+  onFolder?: (key: string, folder: string | null, asRoot: boolean, why: string | null) => void;
+  /** UX-14: what the drawer showed of this terminal last (folder, history, view), so a tab switch keeps it. */
+  remembered?: PaneMemory;
+  onRemember?: (memory: PaneMemory) => void;
   onDragStart?: (items: DragItems, at: { clientX: number; clientY: number }) => void;
   onDragEnd?: (x: number, y: number) => void;
   onShowTerminal?: (terminalId: string) => void;
@@ -194,6 +201,26 @@ interface Props {
 }
 
 const NO_SNAPSHOT = { status: { state: "closed" } };
+
+/** UX-14: what a pane remembers of a terminal across tab switches: a folder opened by hand, Back and Forward, the view. */
+export interface PaneMemory {
+  path: string | null;
+  history: History<string>;
+  view: PaneView;
+}
+
+/** The drawer shows hidden files, as Files here always did; the Files page's tab starts without them. */
+const COMPACT_VIEW: PaneView = { ...DEFAULT_VIEW, hidden: true };
+
+/** Picked rows belong to the folder they were picked in: another folder shows none of them picked. */
+interface Picks {
+  path: string;
+  names: string[];
+  anchor: string | null;
+}
+const NO_PICKS: Picks = { path: "", names: [], anchor: null };
+
+const samePath = (a: string, b: string) => a === b;
 
 /** The core's answer: does the terminal browse as root now. */
 const readRoot = (terminalId: string) => api.filesRootStatus(terminalId).then((status) => status !== null);
@@ -290,6 +317,8 @@ export function HostPane({
   onDragEnd,
   onShowTerminal,
   onCloseTab,
+  remembered,
+  onRemember,
 }: Props) {
   const terminalId = tab.terminalId;
   const presentation = usePresentation();
@@ -308,7 +337,7 @@ export function HostPane({
 
   const refresh = useUploadsDone(terminalId);
   /** A folder opened by hand; null: the start folder (in compact mode, the shell's folder, followed). */
-  const [path, setPath] = useState<string | null>(tab.pathRequest?.path ?? null);
+  const [path, setPath] = useState<string | null>(tab.pathRequest?.path ?? remembered?.path ?? null);
   const shellFolder = compact ? (snapshot.folder?.path ?? null) : null;
   const following = compact && path === null;
   const [tick, setTick] = useState(0);
@@ -318,9 +347,9 @@ export function HostPane({
   const want = `${path ?? `start:${shellFolder ?? ""}`}|${asRoot}|${tick}|${refresh}|${connected}`;
   const [answered, setAnswered] = useState<string | null>(null);
   const loading = connected && answered !== want;
-  const [history, setHistory] = useState<History<string>>(emptyHistory());
-  const [view, setView] = useState<PaneView>(DEFAULT_VIEW);
-  const [picked, setPicked] = useState<{ names: string[]; anchor: string | null }>({ names: [], anchor: null });
+  const [history, setHistory] = useState<History<string>>(remembered?.history ?? emptyHistory());
+  const [view, setView] = useState<PaneView>(remembered?.view ?? (compact ? COMPACT_VIEW : DEFAULT_VIEW));
+  const [picked, setPicked] = useState<Picks>(NO_PICKS);
   const [typed, setTyped] = useState<{ for: string; text: string } | null>(null);
   const [ask, setAsk] = useState<FileAsk | null>(null);
   const [replaceAsk, setReplaceAsk] = useState<ReplaceAsk | null>(null);
@@ -375,8 +404,9 @@ export function HostPane({
         setAnswered(want);
         // SS-14: root browsing ended (a reconnect, the vault locked): back to the login user, in both places.
         if (asRoot && errorMessage(err).includes("not browsing as root")) {
-          rootStore.set(terminalId, false);
-          toast.info("Root browsing ended; the folder shows what the login user can open");
+          if (rootStore.set(terminalId, false)) {
+            toast.info("Root browsing ended; the folder shows what the login user can open");
+          }
           return;
         }
         // The terminal can't reach its files at all: the last folder stays, so this still goes somewhere.
@@ -388,9 +418,17 @@ export function HostPane({
     };
   }, [terminalId, path, asRoot, want, connected]);
 
+  const opened = connected && listing !== null && !listing.error ? listing.path : null;
+  const uploadWhy =
+    uploadReason({ open: true, connected, readOnly }) ??
+    (!listing ? "Open a folder first" : listing.error ? "This folder couldn't be opened" : null);
   useEffect(() => {
-    onFolder?.(tab.key, listing && !listing.error ? listing.path : null, asRoot);
-  }, [tab.key, listing, asRoot, onFolder]);
+    onFolder?.(tab.key, opened, asRoot, uploadWhy);
+  }, [tab.key, opened, asRoot, uploadWhy, onFolder]);
+
+  useEffect(() => {
+    onRemember?.({ path, history, view });
+  }, [path, history, view, onRemember]);
 
   useEffect(() => {
     if (!connected) return;
@@ -421,13 +459,13 @@ export function HostPane({
   const here = listing?.path ?? "/";
   const failed = listing?.error ?? null;
   const entries = listing ? viewEntries(listing.entries, view) : [];
-  const picks = picked.names.filter((n) => entries.some((e) => e.name === n));
+  // Picks only count in the folder they were picked in: a folder change (opened, followed, Back) shows none picked.
+  const pickedHere = listing !== null && picked.path === listing.path;
+  const picks = pickedHere ? picked.names.filter((n) => entries.some((e) => e.name === n)) : [];
   const pickedEntries = entries.filter((e) => picks.includes(e.name));
   const paths = (list: RemoteEntry[]) => list.map((e) => joinPath(here, e.name));
   const changes = fileChangeReason({ connected, readOnly, folderOpen: listing !== null && !failed });
-  const upload =
-    uploadReason({ open: true, connected, readOnly }) ??
-    (!listing ? "Open a folder first" : failed ? "This folder couldn't be opened" : null);
+  const upload = uploadWhy;
   const download = downloadReason({ connected, picked: pickedEntries });
   const downloadInto = !compact && local?.path ? `Into ${local.path}` : "Into your Downloads folder";
   const pathText = typed && typed.for === here ? typed.text : here;
@@ -436,18 +474,21 @@ export function HostPane({
   function open(next: string) {
     setPath(next);
     setTyped(null);
-    setPicked({ names: [], anchor: null });
+    setPicked(NO_PICKS);
   }
 
   /** Compact mode: back to the shell's folder, followed again. */
   function follow() {
     setPath(null);
     setTyped(null);
-    setPicked({ names: [], anchor: null });
+    setPicked(NO_PICKS);
   }
 
+  /** QL-09: Back from a folder that wouldn't open goes to the last one that did (lib/files-page.ts back). */
+  const backTo = back(history, listing ? { item: listing.path, failed: failed !== null } : null, samePath);
+
   function step(dir: -1 | 1) {
-    const moved = go(history, dir);
+    const moved = dir === -1 ? backTo : go(history, dir);
     if (!moved) return;
     stepping.current = true;
     setHistory(moved.history);
@@ -470,7 +511,7 @@ export function HostPane({
     try {
       const outcome = await api.filesChange(terminalId, next, asRoot);
       setAsk(null);
-      setPicked({ names: [], anchor: null });
+      setPicked(NO_PICKS);
       onSubmitted(outcome, (jobId) => watched.current.add(jobId));
       if (outcome.status === "queued") {
         toast.success(changeLabel(next));
@@ -498,7 +539,7 @@ export function HostPane({
         api.filesRootStart(terminalId, { vaultPassword, retry, sudoPasswordId }),
       );
       rootStore.set(terminalId, true);
-      setPicked({ names: [], anchor: null });
+      setPicked(NO_PICKS);
       toast.success(started.withPassword ? "Browsing as root" : "Browsing as root (sudo asked for no password)");
     } catch (err) {
       if (isReauthCancelled(err)) return;
@@ -517,7 +558,7 @@ export function HostPane({
 
   async function stopRoot() {
     rootStore.set(terminalId, false);
-    setPicked({ names: [], anchor: null });
+    setPicked(NO_PICKS);
     try {
       await api.filesRootStop(terminalId);
     } catch (err) {
@@ -711,466 +752,465 @@ export function HostPane({
       data-files-drop="host"
       data-files-tab={tab.key}
       className={cn(
-        // `pane-drop`: while Explorer files are dragged over it, it says where they would go (the Terminal page).
-        "pane-drop @container relative flex min-h-0 min-w-0 flex-1 flex-col gap-2",
-        // The drawer scrolls as a whole when its notes and table don't fit, rather than spill over the lists below.
-        compact ? "overflow-y-auto" : "rounded-lg border p-2",
+        // `pane-drop`: while Explorer files are dragged over it, it says where they would go (the Terminal page), over
+        // what shows of it: the content scrolls inside.
+        "pane-drop @container relative flex min-h-0 min-w-0 flex-1 flex-col",
+        !compact && "rounded-lg border p-2",
       )}
     >
-      <div className="flex items-center gap-1.5">
-        {compact ? (
-          <>
-            <FolderOpenIcon className="size-4 shrink-0 text-muted-foreground" aria-hidden />
-            <h2 className="shrink-0 text-sm font-medium whitespace-nowrap">Files here</h2>
-          </>
-        ) : (
-          <ServerIcon className="size-4 shrink-0 text-muted-foreground" aria-hidden />
-        )}
-        {!compact && (
-          <h2 className="truncate text-sm font-medium" title={name}>
-            {name}
-          </h2>
-        )}
-        {asRoot && (
-          <Badge variant="outline" className="shrink-0 border-tier-high/50 font-normal text-tier-high">
-            as root
-          </Badge>
-        )}
-        {compact && (
-          <span className="truncate text-xs text-muted-foreground" title={name}>
-            {name}
-          </span>
-        )}
-        {!compact && user && !asRoot && (
-          <span className="truncate text-xs text-muted-foreground">
-            as <span data-mask="user">{user}</span>
-          </span>
-        )}
-        <div className="ml-auto flex items-center gap-1">
-          {!compact && (
+      {/* The drawer scrolls as a whole when its notes and table don't fit, rather than spill over the lists below. */}
+      <div className={cn("flex min-h-0 flex-1 flex-col gap-2", compact && "overflow-y-auto")}>
+        <div className="flex items-center gap-1.5">
+          {compact ? (
             <>
-              <Label htmlFor={`files-host-hidden-${tab.key}`} className="text-xs font-normal text-muted-foreground">
-                Hidden files
-              </Label>
-              <Switch
-                id={`files-host-hidden-${tab.key}`}
-                checked={view.hidden}
-                onCheckedChange={(hidden) => setView((v) => ({ ...v, hidden }))}
-              />
-              {onShowTerminal && (
-                <PaneButton label="Show its terminal" onClick={() => onShowTerminal(terminalId)}>
-                  <SquareTerminalIcon />
-                </PaneButton>
-              )}
+              <FolderOpenIcon className="size-4 shrink-0 text-muted-foreground" aria-hidden />
+              <h2 className="shrink-0 text-sm font-medium whitespace-nowrap">Files here</h2>
             </>
-          )}
-          {connected && (
-            <DropdownMenu>
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <DropdownMenuTrigger asChild>
-                    <Button variant="ghost" size="icon-sm" aria-label="More file actions">
-                      <MoreHorizontalIcon />
-                    </Button>
-                  </DropdownMenuTrigger>
-                </TooltipTrigger>
-                <TooltipContent>More file actions</TooltipContent>
-              </Tooltip>
-              <DropdownMenuContent align="end" className="min-w-56">
-                <DropdownMenuItem
-                  disabled={changes !== null}
-                  onSelect={() => setAsk({ kind: "newFolder", folder: here })}
-                >
-                  <FolderPlusIcon />
-                  New folder…
-                </DropdownMenuItem>
-                <DropdownMenuItem
-                  disabled={changes !== null}
-                  onSelect={() => setAsk({ kind: "newFile", folder: here })}
-                >
-                  <FilePlusIcon />
-                  New empty file…
-                </DropdownMenuItem>
-                {/* The drawer's "Upload here…" button is below its list. */}
-                {!compact && (
-                  <DropdownMenuItem disabled={upload !== null} onSelect={() => onUpload(here, asRoot, "files")}>
-                    <UploadIcon />
-                    Upload files here…
-                  </DropdownMenuItem>
-                )}
-                <DropdownMenuItem disabled={upload !== null} onSelect={() => onUpload(here, asRoot, "folder")}>
-                  <FolderUpIcon />
-                  Upload a folder here…
-                </DropdownMenuItem>
-                <DropdownMenuSeparator />
-                <DropdownMenuItem disabled={!listing || failed !== null} onSelect={() => setFinding(true)}>
-                  <FileSearchIcon />
-                  Find files…
-                </DropdownMenuItem>
-                {!compact && (
-                  <DropdownMenuItem
-                    disabled={!listing || failed !== null || !local?.path}
-                    onSelect={() => setComparing(true)}
-                  >
-                    <GitCompareIcon />
-                    Compare with this PC's folder…
-                  </DropdownMenuItem>
-                )}
-                {compact && (
-                  <DropdownMenuCheckboxItem
-                    checked={view.hidden}
-                    onCheckedChange={(hidden) => setView((v) => ({ ...v, hidden: hidden === true }))}
-                  >
-                    <EyeIcon />
-                    Hidden files
-                  </DropdownMenuCheckboxItem>
-                )}
-                {editors?.sessionId && editors.found.length > 0 && (
-                  <DropdownMenuSub>
-                    <DropdownMenuSubTrigger disabled={readOnly}>
-                      <FilePenLineIcon />
-                      Terminal editor
-                    </DropdownMenuSubTrigger>
-                    <DropdownMenuSubContent>
-                      <DropdownMenuRadioGroup
-                        value={editors.chosen ?? ""}
-                        onValueChange={(value) => void chooseEditor(value === "" ? null : value)}
-                      >
-                        <DropdownMenuRadioItem value="">First found (nano, micro, vim, vi)</DropdownMenuRadioItem>
-                        {editors.found.map((editor) => (
-                          <DropdownMenuRadioItem key={editor} value={editor}>
-                            {editor}
-                          </DropdownMenuRadioItem>
-                        ))}
-                      </DropdownMenuRadioGroup>
-                    </DropdownMenuSubContent>
-                  </DropdownMenuSub>
-                )}
-                {compact && (
-                  <DropdownMenuItem
-                    disabled={!listing || failed !== null}
-                    onSelect={() => requestLink({ kind: "files", terminalId, path: here })}
-                  >
-                    <Maximize2Icon />
-                    Expand
-                  </DropdownMenuItem>
-                )}
-                <DropdownMenuSeparator />
-                {asRoot ? (
-                  <DropdownMenuItem onSelect={() => void stopRoot()}>
-                    <ShieldOffIcon />
-                    Stop browsing as root
-                  </DropdownMenuItem>
-                ) : (
-                  <DropdownMenuItem disabled={readOnly} onSelect={() => void startRoot()}>
-                    <ShieldIcon />
-                    Browse as root…
-                  </DropdownMenuItem>
-                )}
-              </DropdownMenuContent>
-            </DropdownMenu>
-          )}
-        </div>
-      </div>
-      {!connected ? (
-        <div className="flex flex-1 flex-col items-center justify-center gap-2 text-center text-sm text-muted-foreground">
-          <p>
-            {snapshot.status.state === "connecting" || snapshot.status.state === "opening"
-              ? `Connecting…${compact ? "" : " If the host asks for anything, answer in its terminal."}`
-              : "This terminal is not connected, so its files can't be reached."}
-          </p>
-          {!compact && onShowTerminal && (
-            <Button variant="outline" size="sm" onClick={() => onShowTerminal(terminalId)}>
-              Show the terminal
-            </Button>
-          )}
-        </div>
-      ) : (
-        <>
-          {asRoot ? (
-            <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
-              <ShieldIcon className="size-3.5 shrink-0 text-tier-high" aria-hidden />
-              <span>
-                Transfers and changes here run as <span className="font-medium text-tier-high">root</span> (sudo), one
-                approval tier higher.
-              </span>
-              <HelpTip topic="filesRoot" />
-            </p>
           ) : (
-            compact &&
-            user && (
-              <p
-                className="flex items-center gap-1.5 text-xs text-muted-foreground"
-                title="Uploads, downloads and changes run over SFTP as the SSH login user, unless you browse as root."
-              >
-                <UserIcon className="size-3.5 shrink-0" aria-hidden />
-                <span>
-                  Transfers as <Who>{user}</Who>
-                </span>
-                <HelpTip topic="filesChanges" />
-              </p>
-            )
+            <ServerIcon className="size-4 shrink-0 text-muted-foreground" aria-hidden />
           )}
-          {!asRoot && <ShellUserNote user={snapshot.folder?.user} />}
-          {note && <p className="text-xs text-muted-foreground">{note}</p>}
-          {compact && multiExecTerminals > 1 && (
-            <p className="rounded-md bg-muted/60 px-2 py-1 text-xs">
-              Type in all tabs is on: uploads and downloads go through this terminal only, not all{" "}
-              {plural(multiExecTerminals, "terminal")}.
-            </p>
+          {!compact && (
+            <h2 className="truncate text-sm font-medium" title={name}>
+              {name}
+            </h2>
           )}
-          <div className="flex items-center gap-1">
-            <PaneButton
-              label="Back"
-              disabledReason={canGo(history, -1) ? null : "Nothing before this"}
-              onClick={() => step(-1)}
-            >
-              <ArrowLeftIcon />
-            </PaneButton>
-            <PaneButton
-              label="Forward"
-              disabledReason={canGo(history, 1) ? null : "Nothing after this"}
-              onClick={() => step(1)}
-            >
-              <ArrowRightIcon />
-            </PaneButton>
-            <PaneButton
-              label="Up one folder"
-              disabledReason={listing?.parent ? null : listing ? "This is the top folder" : "Open a folder first"}
-              onClick={() => listing?.parent && open(listing.parent)}
-            >
-              <ArrowUpIcon />
-            </PaneButton>
-            <PaneButton label="Home folder" onClick={() => open("~")}>
-              <HouseIcon />
-            </PaneButton>
-            <DropdownMenu>
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <DropdownMenuTrigger asChild>
-                    <Button variant="ghost" size="icon-sm" aria-label="Bookmarks">
-                      <BookmarkIcon />
-                    </Button>
-                  </DropdownMenuTrigger>
-                </TooltipTrigger>
-                <TooltipContent>Bookmarks</TooltipContent>
-              </Tooltip>
-              <DropdownMenuContent align="start" className="min-w-56">
-                <DropdownMenuLabel>Bookmarks of this session</DropdownMenuLabel>
-                {!sessionId && (
-                  <p className="px-2 py-1 text-xs text-muted-foreground">
-                    A quick connection has none: save it as a session to keep bookmarks.
-                  </p>
-                )}
-                {sessionId && bookmarks.length === 0 && (
-                  <p className="px-2 py-1 text-xs text-muted-foreground">None yet.</p>
-                )}
-                {bookmarks.map((b) => (
-                  <DropdownMenuSub key={b.id}>
-                    <DropdownMenuSubTrigger>
-                      <span className="truncate">{b.name}</span>
-                      <span className="ml-2 truncate font-mono text-xs text-muted-foreground">{b.path}</span>
-                    </DropdownMenuSubTrigger>
-                    <DropdownMenuSubContent>
-                      <DropdownMenuItem onSelect={() => open(b.path)}>
-                        <FolderOpenIcon />
-                        Open
-                      </DropdownMenuItem>
-                      <DropdownMenuItem disabled={readOnly} onSelect={() => setNaming({ bookmark: b, path: b.path })}>
-                        <PencilIcon />
-                        Rename…
-                      </DropdownMenuItem>
-                      <DropdownMenuItem
-                        variant="destructive"
-                        disabled={readOnly}
-                        onSelect={() => void removeBookmark(b)}
-                      >
-                        <Trash2Icon />
-                        Remove
-                      </DropdownMenuItem>
-                    </DropdownMenuSubContent>
-                  </DropdownMenuSub>
-                ))}
-                <DropdownMenuSeparator />
-                <DropdownMenuItem
-                  disabled={!sessionId || readOnly || !listing || failed !== null}
-                  onSelect={() => setNaming({ bookmark: null, path: here })}
-                >
-                  <BookmarkPlusIcon />
-                  Bookmark this folder…
-                </DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
-            <form className="min-w-0 flex-1" onSubmit={submit}>
-              <Input
-                aria-label="Folder on the host"
-                aria-invalid={failed ? true : undefined}
-                className="h-7 font-mono text-xs"
-                value={pathText}
-                onChange={(e) => setTyped({ for: here, text: e.target.value })}
-                placeholder="Type a folder and press Enter"
-                spellCheck={false}
-              />
-            </form>
-            {!compact && (
-              <PaneButton
-                label="Find files"
-                disabledReason={listing && !failed ? null : "Open a folder first"}
-                onClick={() => setFinding(true)}
-              >
-                <SearchIcon />
-              </PaneButton>
-            )}
-            <RefreshButton busy={loading} onClick={reload} />
-            {compact && !following && (
-              <PaneButton
-                label={followingShell ? "Follow the terminal's folder again" : "Back to the starting folder (home)"}
-                onClick={follow}
-              >
-                <CrosshairIcon />
-              </PaneButton>
-            )}
-          </div>
-          {listing && (
-            <nav aria-label="Folder path on the host" className="flex flex-wrap items-center gap-0.5 text-xs">
-              {crumbs(listing.path).map((c, i) => (
-                <span key={c.path} className="flex items-center">
-                  {i > 1 && <span className="px-0.5 text-muted-foreground">/</span>}
-                  <button
-                    type="button"
-                    className="rounded px-1 hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
-                    onClick={() => open(c.path)}
-                  >
-                    {c.label}
-                  </button>
-                </span>
-              ))}
-            </nav>
-          )}
-          <Input
-            aria-label="Filter the host's folder"
-            className="h-7 text-xs"
-            placeholder="Filter: words or a pattern such as *.log"
-            value={view.filter}
-            onChange={(e) => setView((v) => ({ ...v, filter: e.target.value }))}
-          />
-          {error && <p className="text-xs text-destructive">{error}</p>}
-          {picks.length > 0 && (
-            <SelectionBar
-              count={picks.length}
-              onClear={() => setPicked({ names: [], anchor: null })}
-              className="flex-none"
-            >
-              {actions(pickedEntries, barButton)}
-              <RowMenu label={plural(picks.length, "picked item")}>
-                {actions(pickedEntries, (key, label, icon, onSelect) =>
-                  ["downloadTo", "mode", "owner"].includes(key) ? menuItem(key, label, icon, onSelect) : null,
-                )}
-              </RowMenu>
-            </SelectionBar>
-          )}
-          {failed ? (
-            <div
-              role="alert"
-              className={cn(
-                "flex min-h-28 flex-1 flex-col gap-1.5 overflow-auto rounded-md border border-destructive/40 p-2 text-xs",
-                loading && "opacity-60",
-              )}
-            >
-              <p className="flex items-start gap-1.5 text-destructive">
-                <CircleAlertIcon className="mt-0.5 size-3.5 shrink-0" aria-hidden />
-                <span className="break-words">{failed.message}</span>
-              </p>
-              <p className="text-muted-foreground">
-                {failed.code === "permission_denied" && !asRoot && (
-                  <>
-                    {user ? (
-                      <>
-                        Transfers run as <Who>{user}</Who>, the SSH login user, unless you browse as root (the "⋯"
-                        above).{" "}
-                      </>
-                    ) : (
-                      "Browse as root (the ⋯ above) to open it as root. "
-                    )}
-                  </>
-                )}
-                Go Back, Up or Home, pick a bookmark, or type another folder.
-              </p>
-            </div>
-          ) : (
-            <FileTable
-              label={name}
-              entries={entries}
-              view={view}
-              onView={setView}
-              picked={picks}
-              anchor={picked.anchor}
-              onPick={(names, anchor) => setPicked({ names, anchor })}
-              onOpen={(e) => {
-                const at = joinPath(here, e.name);
-                if (e.kind === "folder") open(at);
-                else if (e.kind === "file") {
-                  const action = doubleClickOn(e);
-                  if (action === "editTerminal") void editInTerminal(at);
-                  else if (action === "editPc") void editOnPc(at);
-                  else void showPreview(at, e.name);
-                }
-              }}
-              folderPath={(e) => (e.kind === "folder" ? joinPath(here, e.name) : null)}
-              rowTitle={(e) =>
-                e.kind === "folder"
-                  ? compact
-                    ? "Double-click to open; drop files from Explorer on it to upload them into it"
-                    : "Double-click to open; drop files on it to upload or move them into it"
-                  : e.kind === "file"
-                    ? `${doubleClickTitle(doubleClickOn(e), doubleClick, editors)}${compact ? "" : "; drag to this PC to download"}`
-                    : "Not a regular file"
-              }
-              onDragStart={
-                onDragStart &&
-                ((names, ev) =>
-                  onDragStart(
-                    { from: "host", terminalId, folder: here, paths: names.map((n) => joinPath(here, n)), asRoot },
-                    ev,
-                  ))
-              }
-              onDragEnd={onDragEnd}
-              empty="This folder is empty."
-              loading={loading}
-              menu={(e) => actions([e], menuItem)}
-            />
-          )}
-          {listing?.more && (
-            <p className="text-xs text-muted-foreground">More is in this folder than is listed here.</p>
-          )}
-          {!compact && picks.length > 0 && (
-            <p className="text-xs text-muted-foreground">
-              {plural(picks.length, "item")} picked: drag them to this PC to download.
-            </p>
+          {asRoot && (
+            <Badge variant="outline" className="shrink-0 border-tier-high/50 font-normal text-tier-high">
+              as root
+            </Badge>
           )}
           {compact && (
-            <>
-              <div className="flex flex-wrap items-center gap-1.5">
-                <WhyDisabled reason={upload}>
-                  <Button
-                    size="xs"
-                    variant="outline"
-                    className="ml-auto"
-                    disabled={upload !== null}
-                    onClick={() => onUpload(here, asRoot, "files")}
-                  >
-                    <UploadIcon />
-                    Upload here…
-                  </Button>
-                </WhyDisabled>
-              </div>
-              <Tip id="terminal.filesDrop">
-                Drop files on a terminal or here to upload them; right-click a file name in a terminal to download it.
-              </Tip>
-            </>
+            <span className="truncate text-xs text-muted-foreground" title={name}>
+              {name}
+            </span>
           )}
-        </>
-      )}
+          {!compact && user && !asRoot && (
+            <span className="truncate text-xs text-muted-foreground">
+              as <span data-mask="user">{user}</span>
+            </span>
+          )}
+          <div className="ml-auto flex items-center gap-1">
+            {!compact && (
+              <>
+                <Label htmlFor={`files-host-hidden-${tab.key}`} className="text-xs font-normal text-muted-foreground">
+                  Hidden files
+                </Label>
+                <Switch
+                  id={`files-host-hidden-${tab.key}`}
+                  checked={view.hidden}
+                  onCheckedChange={(hidden) => setView((v) => ({ ...v, hidden }))}
+                />
+                {onShowTerminal && (
+                  <PaneButton label="Show its terminal" onClick={() => onShowTerminal(terminalId)}>
+                    <SquareTerminalIcon />
+                  </PaneButton>
+                )}
+              </>
+            )}
+            {connected && (
+              <DropdownMenu>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <DropdownMenuTrigger asChild>
+                      <Button variant="ghost" size="icon-sm" aria-label="More file actions">
+                        <MoreHorizontalIcon />
+                      </Button>
+                    </DropdownMenuTrigger>
+                  </TooltipTrigger>
+                  <TooltipContent>More file actions</TooltipContent>
+                </Tooltip>
+                <DropdownMenuContent align="end" className="min-w-56">
+                  <DropdownMenuItem
+                    disabled={changes !== null}
+                    onSelect={() => setAsk({ kind: "newFolder", folder: here })}
+                  >
+                    <FolderPlusIcon />
+                    New folder…
+                  </DropdownMenuItem>
+                  <DropdownMenuItem
+                    disabled={changes !== null}
+                    onSelect={() => setAsk({ kind: "newFile", folder: here })}
+                  >
+                    <FilePlusIcon />
+                    New empty file…
+                  </DropdownMenuItem>
+                  {/* The drawer's "Upload here…" button is below its list. */}
+                  {!compact && (
+                    <DropdownMenuItem disabled={upload !== null} onSelect={() => onUpload(here, asRoot, "files")}>
+                      <UploadIcon />
+                      Upload files here…
+                    </DropdownMenuItem>
+                  )}
+                  <DropdownMenuItem disabled={upload !== null} onSelect={() => onUpload(here, asRoot, "folder")}>
+                    <FolderUpIcon />
+                    Upload a folder here…
+                  </DropdownMenuItem>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem disabled={!listing || failed !== null} onSelect={() => setFinding(true)}>
+                    <FileSearchIcon />
+                    Find files…
+                  </DropdownMenuItem>
+                  {!compact && (
+                    <DropdownMenuItem
+                      disabled={!listing || failed !== null || !local?.path}
+                      onSelect={() => setComparing(true)}
+                    >
+                      <GitCompareIcon />
+                      Compare with this PC's folder…
+                    </DropdownMenuItem>
+                  )}
+                  {compact && (
+                    <DropdownMenuCheckboxItem
+                      checked={view.hidden}
+                      onCheckedChange={(hidden) => setView((v) => ({ ...v, hidden: hidden === true }))}
+                    >
+                      <EyeIcon />
+                      Hidden files
+                    </DropdownMenuCheckboxItem>
+                  )}
+                  {editors?.sessionId && editors.found.length > 0 && (
+                    <DropdownMenuSub>
+                      <DropdownMenuSubTrigger disabled={readOnly}>
+                        <FilePenLineIcon />
+                        Terminal editor
+                      </DropdownMenuSubTrigger>
+                      <DropdownMenuSubContent>
+                        <DropdownMenuRadioGroup
+                          value={editors.chosen ?? ""}
+                          onValueChange={(value) => void chooseEditor(value === "" ? null : value)}
+                        >
+                          <DropdownMenuRadioItem value="">First found (nano, micro, vim, vi)</DropdownMenuRadioItem>
+                          {editors.found.map((editor) => (
+                            <DropdownMenuRadioItem key={editor} value={editor}>
+                              {editor}
+                            </DropdownMenuRadioItem>
+                          ))}
+                        </DropdownMenuRadioGroup>
+                      </DropdownMenuSubContent>
+                    </DropdownMenuSub>
+                  )}
+                  {compact && (
+                    <DropdownMenuItem
+                      disabled={!listing || failed !== null}
+                      onSelect={() => requestLink({ kind: "files", terminalId, path: here })}
+                    >
+                      <Maximize2Icon />
+                      Expand
+                    </DropdownMenuItem>
+                  )}
+                  <DropdownMenuSeparator />
+                  {asRoot ? (
+                    <DropdownMenuItem onSelect={() => void stopRoot()}>
+                      <ShieldOffIcon />
+                      Stop browsing as root
+                    </DropdownMenuItem>
+                  ) : (
+                    <DropdownMenuItem disabled={readOnly} onSelect={() => void startRoot()}>
+                      <ShieldIcon />
+                      Browse as root…
+                    </DropdownMenuItem>
+                  )}
+                </DropdownMenuContent>
+              </DropdownMenu>
+            )}
+          </div>
+        </div>
+        {!connected ? (
+          <div className="flex flex-1 flex-col items-center justify-center gap-2 text-center text-sm text-muted-foreground">
+            <p>
+              {snapshot.status.state === "connecting" || snapshot.status.state === "opening"
+                ? `Connecting…${compact ? "" : " If the host asks for anything, answer in its terminal."}`
+                : "This terminal is not connected, so its files can't be reached."}
+            </p>
+            {!compact && onShowTerminal && (
+              <Button variant="outline" size="sm" onClick={() => onShowTerminal(terminalId)}>
+                Show the terminal
+              </Button>
+            )}
+          </div>
+        ) : (
+          <>
+            {asRoot ? (
+              <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                <ShieldIcon className="size-3.5 shrink-0 text-tier-high" aria-hidden />
+                <span>
+                  Transfers and changes here run as <span className="font-medium text-tier-high">root</span> (sudo), one
+                  approval tier higher.
+                </span>
+                <HelpTip topic="filesRoot" />
+              </p>
+            ) : (
+              compact &&
+              user && (
+                <p
+                  className="flex items-center gap-1.5 text-xs text-muted-foreground"
+                  title="Uploads, downloads and changes run over SFTP as the SSH login user, unless you browse as root."
+                >
+                  <UserIcon className="size-3.5 shrink-0" aria-hidden />
+                  <span>
+                    Transfers as <Who>{user}</Who>
+                  </span>
+                  <HelpTip topic="filesChanges" />
+                </p>
+              )
+            )}
+            {!asRoot && <ShellUserNote user={snapshot.folder?.user} />}
+            {note && <p className="text-xs text-muted-foreground">{note}</p>}
+            {compact && multiExecTerminals > 1 && (
+              <p className="rounded-md bg-muted/60 px-2 py-1 text-xs">
+                Type in all tabs is on: uploads and downloads go through this terminal only, not all{" "}
+                {plural(multiExecTerminals, "terminal")}.
+              </p>
+            )}
+            <div className="flex items-center gap-1">
+              <PaneButton
+                label={backTo ? `Back to ${backTo.item}` : "Back"}
+                disabledReason={backTo ? null : "Nothing before this"}
+                onClick={() => step(-1)}
+              >
+                <ArrowLeftIcon />
+              </PaneButton>
+              <PaneButton
+                label="Forward"
+                disabledReason={canGo(history, 1) ? null : "Nothing after this"}
+                onClick={() => step(1)}
+              >
+                <ArrowRightIcon />
+              </PaneButton>
+              <PaneButton
+                label="Up one folder"
+                disabledReason={listing?.parent ? null : listing ? "This is the top folder" : "Open a folder first"}
+                onClick={() => listing?.parent && open(listing.parent)}
+              >
+                <ArrowUpIcon />
+              </PaneButton>
+              <PaneButton label="Home folder" onClick={() => open("~")}>
+                <HouseIcon />
+              </PaneButton>
+              <DropdownMenu>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <DropdownMenuTrigger asChild>
+                      <Button variant="ghost" size="icon-sm" aria-label="Bookmarks">
+                        <BookmarkIcon />
+                      </Button>
+                    </DropdownMenuTrigger>
+                  </TooltipTrigger>
+                  <TooltipContent>Bookmarks</TooltipContent>
+                </Tooltip>
+                <DropdownMenuContent align="start" className="min-w-56">
+                  <DropdownMenuLabel>Bookmarks of this session</DropdownMenuLabel>
+                  {!sessionId && (
+                    <p className="px-2 py-1 text-xs text-muted-foreground">
+                      A quick connection has none: save it as a session to keep bookmarks.
+                    </p>
+                  )}
+                  {sessionId && bookmarks.length === 0 && (
+                    <p className="px-2 py-1 text-xs text-muted-foreground">None yet.</p>
+                  )}
+                  {bookmarks.map((b) => (
+                    <DropdownMenuSub key={b.id}>
+                      <DropdownMenuSubTrigger>
+                        <span className="truncate">{b.name}</span>
+                        <span className="ml-2 truncate font-mono text-xs text-muted-foreground">{b.path}</span>
+                      </DropdownMenuSubTrigger>
+                      <DropdownMenuSubContent>
+                        <DropdownMenuItem onSelect={() => open(b.path)}>
+                          <FolderOpenIcon />
+                          Open
+                        </DropdownMenuItem>
+                        <DropdownMenuItem disabled={readOnly} onSelect={() => setNaming({ bookmark: b, path: b.path })}>
+                          <PencilIcon />
+                          Rename…
+                        </DropdownMenuItem>
+                        <DropdownMenuItem
+                          variant="destructive"
+                          disabled={readOnly}
+                          onSelect={() => void removeBookmark(b)}
+                        >
+                          <Trash2Icon />
+                          Remove
+                        </DropdownMenuItem>
+                      </DropdownMenuSubContent>
+                    </DropdownMenuSub>
+                  ))}
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem
+                    disabled={!sessionId || readOnly || !listing || failed !== null}
+                    onSelect={() => setNaming({ bookmark: null, path: here })}
+                  >
+                    <BookmarkPlusIcon />
+                    Bookmark this folder…
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+              <form className="min-w-0 flex-1" onSubmit={submit}>
+                <Input
+                  aria-label="Folder on the host"
+                  aria-invalid={failed ? true : undefined}
+                  className="h-7 font-mono text-xs"
+                  value={pathText}
+                  onChange={(e) => setTyped({ for: here, text: e.target.value })}
+                  placeholder="Type a folder and press Enter"
+                  spellCheck={false}
+                />
+              </form>
+              {!compact && (
+                <PaneButton
+                  label="Find files"
+                  disabledReason={listing && !failed ? null : "Open a folder first"}
+                  onClick={() => setFinding(true)}
+                >
+                  <SearchIcon />
+                </PaneButton>
+              )}
+              <RefreshButton busy={loading} onClick={reload} />
+              {compact && !following && (
+                <PaneButton
+                  label={followingShell ? "Follow the terminal's folder again" : "Back to the starting folder (home)"}
+                  onClick={follow}
+                >
+                  <CrosshairIcon />
+                </PaneButton>
+              )}
+            </div>
+            {listing && (
+              <nav aria-label="Folder path on the host" className="flex flex-wrap items-center gap-0.5 text-xs">
+                {crumbs(listing.path).map((c, i) => (
+                  <span key={c.path} className="flex items-center">
+                    {i > 1 && <span className="px-0.5 text-muted-foreground">/</span>}
+                    <button
+                      type="button"
+                      className="rounded px-1 hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+                      onClick={() => open(c.path)}
+                    >
+                      {c.label}
+                    </button>
+                  </span>
+                ))}
+              </nav>
+            )}
+            <Input
+              aria-label="Filter the host's folder"
+              className="h-7 text-xs"
+              placeholder="Filter: words or a pattern such as *.log"
+              value={view.filter}
+              onChange={(e) => setView((v) => ({ ...v, filter: e.target.value }))}
+            />
+            {error && <p className="text-xs text-destructive">{error}</p>}
+            {picks.length > 0 && (
+              <SelectionBar count={picks.length} onClear={() => setPicked(NO_PICKS)} className="flex-none">
+                {actions(pickedEntries, barButton)}
+                <RowMenu label={plural(picks.length, "picked item")}>
+                  {actions(pickedEntries, (key, label, icon, onSelect) =>
+                    ["downloadTo", "mode", "owner"].includes(key) ? menuItem(key, label, icon, onSelect) : null,
+                  )}
+                </RowMenu>
+              </SelectionBar>
+            )}
+            {failed ? (
+              <div
+                role="alert"
+                className={cn(
+                  "flex min-h-28 flex-1 flex-col gap-1.5 overflow-auto rounded-md border border-destructive/40 p-2 text-xs",
+                  loading && "opacity-60",
+                )}
+              >
+                <p className="flex items-start gap-1.5 text-destructive">
+                  <CircleAlertIcon className="mt-0.5 size-3.5 shrink-0" aria-hidden />
+                  <span className="break-words">{failed.message}</span>
+                </p>
+                <p className="text-muted-foreground">
+                  {failed.code === "permission_denied" && !asRoot && (
+                    <>
+                      {user ? (
+                        <>
+                          Transfers run as <Who>{user}</Who>, the SSH login user, unless you browse as root (the "⋯"
+                          above).{" "}
+                        </>
+                      ) : (
+                        "Browse as root (the ⋯ above) to open it as root. "
+                      )}
+                    </>
+                  )}
+                  Go Back, Up or Home, pick a bookmark, or type another folder.
+                </p>
+              </div>
+            ) : (
+              <FileTable
+                label={name}
+                entries={entries}
+                view={view}
+                onView={setView}
+                picked={picks}
+                anchor={pickedHere ? picked.anchor : null}
+                onPick={(names, anchor) => setPicked({ path: here, names, anchor })}
+                onOpen={(e) => {
+                  const at = joinPath(here, e.name);
+                  if (e.kind === "folder") open(at);
+                  else if (e.kind === "file") {
+                    const action = doubleClickOn(e);
+                    if (action === "editTerminal") void editInTerminal(at);
+                    else if (action === "editPc") void editOnPc(at);
+                    else void showPreview(at, e.name);
+                  }
+                }}
+                folderPath={(e) => (e.kind === "folder" ? joinPath(here, e.name) : null)}
+                rowTitle={(e) =>
+                  e.kind === "folder"
+                    ? compact
+                      ? "Double-click to open; drop files from Explorer on it to upload them into it"
+                      : "Double-click to open; drop files on it to upload or move them into it"
+                    : e.kind === "file"
+                      ? `${doubleClickTitle(doubleClickOn(e), doubleClick, editors)}${compact ? "" : "; drag to this PC to download"}`
+                      : "Not a regular file"
+                }
+                onDragStart={
+                  onDragStart &&
+                  ((names, ev) =>
+                    onDragStart(
+                      { from: "host", terminalId, folder: here, paths: names.map((n) => joinPath(here, n)), asRoot },
+                      ev,
+                    ))
+                }
+                onDragEnd={onDragEnd}
+                empty="This folder is empty."
+                loading={loading}
+                menu={(e) => actions([e], menuItem)}
+              />
+            )}
+            {listing?.more && (
+              <p className="text-xs text-muted-foreground">More is in this folder than is listed here.</p>
+            )}
+            {!compact && picks.length > 0 && (
+              <p className="text-xs text-muted-foreground">
+                {plural(picks.length, "item")} picked: drag them to this PC to download.
+              </p>
+            )}
+            {compact && (
+              <>
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <WhyDisabled reason={upload}>
+                    <Button
+                      size="xs"
+                      variant="outline"
+                      className="ml-auto"
+                      disabled={upload !== null}
+                      onClick={() => onUpload(here, asRoot, "files")}
+                    >
+                      <UploadIcon />
+                      Upload here…
+                    </Button>
+                  </WhyDisabled>
+                </div>
+                <Tip id="terminal.filesDrop">
+                  Drop files on a terminal or here to upload them; right-click a file name in a terminal to download it.
+                </Tip>
+              </>
+            )}
+          </>
+        )}
+      </div>
       {ask && <FileChangeDialog ask={ask} asRoot={asRoot} onSubmit={change} onClose={() => setAsk(null)} />}
       {askSudo && (
         <SudoPasswordDialog

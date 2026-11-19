@@ -1228,8 +1228,10 @@ src/                  React + TypeScript UI
                       (RecordedLinesView, QL-12; BulkResultsView's GroupCard and OutputDiffDialog serve both), MultiExec
                       bar, WhyDisabled for QL-08, PasteConfirmDialog for QL-05,
                       FilesDrawer and TransfersList for SS-08 (UX-14, 0.9.0 H1: the drawer is files/HostPane in compact
-                      mode on the current terminal, a pane per terminal, with EditingSessionsList and TransfersList
-                      below; its folder goes to the page for drops, DRAWER_KEY; transfers pause and resume;
+                      mode on the current terminal, a pane per terminal that keeps its folder, Back and Forward and view
+                      across tab switches (hidden files shown, as before), with EditingSessionsList and TransfersList
+                      below; its folder and why it can't take uploads go to the page for drops, DRAWER_KEY; transfers
+                      pause and resume;
                       EditingSessionsList: files edited on this PC, their state, the conflict's answers and Stop
                       editing), FilesSettingsCard (UX-14: Settings › Terminal › Files, "Double-clicking a file" for both
                       places; it and TerminalSettingsCard save through saveTerminalSettings, onto the core's settings as
@@ -1400,12 +1402,14 @@ src/                  React + TypeScript UI
                       screen, at most 12, released 2 s after a pane hides, DOM after failures; FD-03 the masked copy's
                       1,000 lines written in pieces), tunnels.ts (SS-07 chains and forwards),
                       files-page.ts and files-page-api.ts (SS-14, BX-10 0.8.0 G3: each pane's view, clickPick, Back and
-                      Forward, this PC's breadcrumbs, dropAction (a local folder is never a drop target), a comparison's
+                      Forward (QL-09 back: from a folder that wouldn't open, the last one that did), this PC's breadcrumbs, dropAction (a local folder is never a drop target), a comparison's
                       rows in words and a sync's default picks; the IPC wrappers), drop-target.ts (UX-14, 0.9.0 H1:
                       dropTarget, the one choice of which target takes an Explorer drop, for the Terminal, Files and VMs
                       pages' `files://dropped` listeners, from readDropSpot's markers: a terminal pane into its shell
                       folder or home, never as root, whatever the drawer does (the owner's constraint, pinned by its
-                      test); a host pane or its folder row; Many hosts; a VM's ISO), root-browsing.ts (UX-14: which
+                      test); a host pane or its folder row, or refused with the reason it gives (not connected, no
+                      folder, the read-only lock); Many hosts; a VM's ISO; terminalPageDrop, the Terminal page's whole
+                      choice: which pane uploads, into what folder, as root or not, tested), root-browsing.ts (UX-14: which
                       terminals browse as root, the core's answer shared by the drawer and the Files page),
                       open-panes.ts (UX-14: also the Files page's editor tabs, requestEditorTab; the Terminal page's
                       panes published for the Files page's host tabs),

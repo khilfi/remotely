@@ -169,12 +169,15 @@ export function FilesPage({ active, request, onSubmitted, onOpenTerminal, onShow
   const [manyDrop, setManyDrop] = useState<{ staged: StagedFiles; n: number } | null>(null);
   /** UX-15: Many hosts asked for from elsewhere, with its mode and picks. */
   const [manyRequest, setManyRequest] = useState<{ mode: ManyMode; picks?: TargetPicks; n: number } | null>(null);
+  const forgetManyRequest = useCallback(() => setManyRequest(null), []);
   // A tab whose terminal closed goes once another tab shows (the one shown says so first).
   const tabs = allTabs.filter((t) => paneOf(t.terminalId) || t.key === activeTab);
   const [sessions, setSessions] = useState<SessionRecord[]>([]);
   const [local, setLocal] = useState<LocalListing | null>(null);
   const [localPicked, setLocalPicked] = useState<string[]>([]);
-  const [folders, setFolders] = useState<Record<string, { folder: string | null; asRoot: boolean }>>({});
+  const [folders, setFolders] = useState<
+    Record<string, { folder: string | null; asRoot: boolean; why: string | null }>
+  >({});
   const [conflict, setConflict] = useState<Conflict | null>(null);
   const [drag, setDrag] = useState<{ items: DragItems; x: number; y: number } | null>(null);
   /** Saved sessions opened from here, waiting for their terminal to open. */
@@ -264,9 +267,11 @@ export function FilesPage({ active, request, onSubmitted, onOpenTerminal, onShow
   }
 
   const onFolder = useCallback(
-    (key: string, folder: string | null, asRoot: boolean) => {
+    (key: string, folder: string | null, asRoot: boolean, why: string | null) => {
       setFolders((prev) =>
-        prev[key]?.folder === folder && prev[key]?.asRoot === asRoot ? prev : { ...prev, [key]: { folder, asRoot } },
+        prev[key]?.folder === folder && prev[key]?.asRoot === asRoot && prev[key]?.why === why
+          ? prev
+          : { ...prev, [key]: { folder, asRoot, why } },
       );
     },
     [setFolders],
@@ -521,6 +526,7 @@ export function FilesPage({ active, request, onSubmitted, onOpenTerminal, onShow
           terminalId: t.terminalId,
           folder: folders[t.key]?.folder ?? null,
           asRoot: folders[t.key]?.asRoot ?? false,
+          why: folders[t.key]?.why ?? null,
         })),
         many: activeTab === MANY,
       };
@@ -528,6 +534,11 @@ export function FilesPage({ active, request, onSubmitted, onOpenTerminal, onShow
       if (target.kind === "many") {
         const staged = dropped.staged;
         setManyDrop((prev) => ({ staged, n: (prev?.n ?? 0) + 1 }));
+        return;
+      }
+      if (target.kind === "refused") {
+        void api.filesUnstage(dropped.staged.id).catch(() => undefined);
+        toast.info(`Not uploaded: ${target.why}`);
         return;
       }
       if (target.kind !== "host") {
@@ -652,6 +663,7 @@ export function FilesPage({ active, request, onSubmitted, onOpenTerminal, onShow
               localPicked={localPicked}
               dropped={manyDrop}
               request={manyRequest}
+              onRequestTaken={forgetManyRequest}
               onSubmitted={(outcome, onJob) => onSubmitted(outcome, onJob)}
               onOpenSessions={onOpenSessions}
             />
