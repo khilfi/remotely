@@ -48,7 +48,9 @@ export type AppLink =
   /** FD-09: a tool of the Toolbox, with a session, VM or host filled in. */
   | { kind: "toolbox"; tool: ToolboxTool; target?: ToolTarget }
   /** MO-08: the Dashboard's Checks tab: a check's history, or a new check on a session, VM or host. */
-  | { kind: "checks"; checkId?: string; add?: ToolTarget };
+  | { kind: "checks"; checkId?: string; add?: ToolTarget }
+  /** UX-16: a saved group opened on the Terminal page (Open group), or Manage groups without an id. */
+  | { kind: "group"; groupId?: string };
 
 export type AppLinkKind = AppLink["kind"];
 
@@ -72,6 +74,7 @@ const KINDS: Record<AppLinkKind, readonly string[]> = {
   toolbox: ["tool"],
   files: [],
   checks: [],
+  group: [],
 };
 
 /** A value (from the core, say) is a link this version can open: a known kind with its text fields. */
@@ -157,5 +160,7 @@ export function linkLabel(link: AppLink): string {
       return link.add ? "Add a check" : link.checkId ? "Show the check" : "Show the checks";
     case "files":
       return "Open in Files";
+    case "group":
+      return link.groupId ? "Open the group" : "Manage groups";
   }
 }

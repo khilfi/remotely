@@ -12,7 +12,8 @@
 //!   IP), so a VM whose only links are automatic is listed in [`ResolvedTargets::vms_unconfirmed`]
 //!   instead of being reached, until the user confirms the link.
 //!   Tags pick sessions and VMs; saved filters pick VMs; an open terminal picks its saved session (a
-//!   quick connection that was not saved has none to run on).
+//!   quick connection that was not saved has none to run on). UX-16: a saved MultiExec group (QL-19) picks
+//!   its sessions, from the shown workspace's groups only.
 //! * BX-03: finished hosts group by exit code and output (stdout and stderr, hashed whole as they
 //!   arrived, so a cut output still groups right), optionally ignoring trailing whitespace. Hosts that
 //!   failed before their command ran group by cause.
@@ -45,8 +46,8 @@ use crate::terminal::{PaneKind, Terminals};
 
 // ---- BX-01: targets ----------------------------------------------------------------------------
 
-/// What the user picked: tabs and sessions in the Terminal page's tree (Compare), or sessions, VMs,
-/// tags and filters (the SS-09 key push). Every list may be empty.
+/// What the user picked in `BulkTargetPicker` (UX-16: one picker for every bulk job, Compare hosts included): tabs,
+/// sessions (the Terminal page's tree too), VMs, tags, saved filters and saved groups. Every list may be empty.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct TargetPicks {
@@ -59,6 +60,9 @@ pub struct TargetPicks {
     pub tags: Vec<String>,
     /// Saved VM filters (VM-02), by id.
     pub filter_ids: Vec<String>,
+    /// UX-16: saved MultiExec groups (QL-19), by id: a read of the group's sessions in the shown workspace. Another
+    /// workspace's group, or one deleted since, picks nothing and says so.
+    pub group_ids: Vec<Uuid>,
     /// BX-13: WinRM sessions are hosts too (Compare hosts, support bundles); off for what runs over SSH only (the
     /// SS-09 key push), which leaves them out with a note.
     pub winrm: bool,
@@ -78,7 +82,7 @@ pub struct BulkHost {
     pub protected: bool,
     /// The VM the session reaches, if one is linked.
     pub vm_name: Option<String>,
-    /// How it was picked, e.g. "session", "VM 'web01'", "tag 'web'", "filter 'Lab'".
+    /// How it was picked, e.g. "session", "VM 'web01'", "tag 'web'", "filter 'Lab'", "group 'web servers'".
     pub via: Vec<String>,
     /// BX-13: what a run's script runs in there: a shell over SSH, or PowerShell over WinRM.
     pub script_kind: ScriptKind,
@@ -1463,6 +1467,29 @@ impl BulkRuns {
                 };
                 for vm in vms.iter().filter(|v| saved.filter.matches(v)) {
                     picked.vm(vm, &linked, &by_id, format!("filter '{}'", saved.name));
+                }
+            }
+        }
+        // UX-16: a saved group picks its members, read from the shown workspace's groups only (rule 8): another
+        // workspace's group id isn't found there, so it picks nothing. A read, not audited (QL-19 groups only choose).
+        if !picks.group_ids.is_empty() {
+            let groups = self.store.list_multiexec_groups(ctx).await?;
+            for id in &picks.group_ids {
+                let Some(group) = groups.iter().find(|g| &g.id == id) else {
+                    let note = "A picked group isn't saved in this workspace (deleted meanwhile?).".to_owned();
+                    if !picked.notes.contains(&note) {
+                        picked.notes.push(note);
+                    }
+                    continue;
+                };
+                if group.members.is_empty() {
+                    picked
+                        .notes
+                        .push(format!("Group '{}' has no sessions left.", group.name));
+                }
+                let via = format!("group '{}'", group.name);
+                for member in group.members.iter().filter(|m| by_id.contains_key(&m.session_id)) {
+                    picked.session(member.session_id, via.clone());
                 }
             }
         }

@@ -1,17 +1,21 @@
-// BX-01 target picker (the SS-09 key push; Compare output picks tabs and tree sessions instead): saved sessions, VMs
-// (reached through the session linked to
-// each), tags and saved VM filters. The core turns the picks into hosts, each session once, and lists
-// the picked VMs no session reaches: commands reach a VM over SSH, and running them through VMware
-// Tools without SSH (VM-09) comes in a later version. A4, H11: a VM linked only automatically (by the
-// address its guest reports, which a hostile guest can make up) is reached once the user confirms the link.
+// BX-01 target picker, UX-16 (0.9.0 H2) the one picker for every bulk job: Compare hosts, the SS-09 key push, support
+// bundles, the Files page's push and fetch, and the Ansible inventory. It picks saved sessions, VMs (reached through
+// the session linked to each), tags, saved VM filters and saved groups (QL-19's MultiExec groups, a read of their
+// sessions). The core turns the picks into hosts, each session once, and lists the picked VMs no session reaches:
+// commands reach a VM over SSH, and running them through VMware Tools without SSH (VM-09) comes in a later version.
+// A4, H11: a VM linked only automatically (by the address its guest reports, which a hostile guest can make up) is
+// reached once the user confirms the link.
+// UX-16 `compact`: one summary line ("12 hosts: 6 picked tabs, folder 'Web', tag 'db'") with Change…, which opens the
+// tabs below it; Compare hosts uses it, filled with the picked tabs and the tree's picks (lib/bulk-picks.ts).
 // SS-12: only SSH sessions are listed for a key push, which goes over SSH; BX-13: a support bundle lists WinRM
-// sessions too (`winrm`). The core leaves out any other kind a tag brings in, saying so. F6's Ansible inventory picks
-// with `purpose="export"`: nothing runs, so WinRM sessions are listed too, protected hosts are counted (they go in, in
-// their own group) and nothing picked is every SSH and WinRM session.
+// sessions too (`winrm`). The core leaves out any other kind a tag or group brings in, saying so. F6's Ansible inventory
+// picks with `purpose="export"`: nothing runs, so WinRM sessions are listed too, protected hosts are counted (they go
+// in, in their own group) and nothing picked is every SSH and WinRM session.
 
 import { useEffect, useMemo, useState } from "react";
 import {
   FilterIcon,
+  LayersIcon,
   LinkIcon,
   ListTreeIcon,
   SearchIcon,
@@ -31,14 +35,18 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import {
   api,
   errorMessage,
+  type MultiExecGroup,
   type ResolvedTargets,
   type SavedFilter,
+  type SessionFolder,
   type SessionRecord,
   type Tag,
   type TargetPicks,
   type VmRecord,
 } from "@/lib/api";
+import { anyPicks, picksParts, picksSummary, togglePick, type PickKind, type TabsPart } from "@/lib/bulk-picks";
 import { plural } from "@/lib/format";
+import { memberNames } from "@/lib/multiexec-groups";
 import { kindOf } from "@/lib/session-kinds";
 import { EnvBadge } from "./Badges";
 
@@ -57,13 +65,13 @@ interface Props {
    * Ansible inventory: protected hosts go in, in their own group, and nothing picked is every SSH session).
    */
   purpose?: "run" | "export";
-}
-
-type Kind = "sessionIds" | "vmPaths" | "tags" | "filterIds";
-
-function toggle(list: string[] | undefined, value: string, on: boolean) {
-  const rest = (list ?? []).filter((v) => v !== value);
-  return on ? [...rest, value] : rest;
+  /**
+   * UX-16: one summary line with Change… instead of the tabs (Compare hosts). `tabs` are the picked tabs the summary
+   * counts (picked on the tab row, not here).
+   */
+  compact?: { tabs: TabsPart };
+  /** The page shows the core's notes itself (Compare hosts' alert). */
+  hideNotes?: boolean;
 }
 
 function matches(needle: string, ...fields: (string | null | undefined)[]) {
@@ -75,6 +83,9 @@ function sessionAddress(s: SessionRecord) {
   return `${s.username ? `${s.username}@` : ""}${s.host}:${s.port}`;
 }
 
+/** UX-16: five tabs in a side panel (Compare hosts): narrower than 28rem, smaller tabs and no icons (`@max-md`). */
+const NARROW_TAB = "h-7 @max-md:px-0.5 @max-md:text-xs";
+
 export function BulkTargetPicker({
   active,
   picks,
@@ -83,6 +94,8 @@ export function BulkTargetPicker({
   onOpenSessions,
   winrm = false,
   purpose = "run",
+  compact,
+  hideNotes = false,
 }: Props) {
   const exporting = purpose === "export";
   const [allSessions, setSessions] = useState<SessionRecord[]>([]);
@@ -100,21 +113,36 @@ export function BulkTargetPicker({
   const [vms, setVms] = useState<VmRecord[]>([]);
   const [tags, setTags] = useState<Tag[]>([]);
   const [filters, setFilters] = useState<SavedFilter[]>([]);
+  const [groups, setGroups] = useState<MultiExecGroup[]>([]);
+  const [folders, setFolders] = useState<SessionFolder[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [text, setText] = useState("");
   const [reload, setReload] = useState(0);
   const [confirming, setConfirming] = useState<string | null>(null);
+  /** UX-16: compact mode's tabs, opened with Change…. */
+  const [changing, setChanging] = useState(false);
+  const isCompact = compact !== undefined;
 
   useEffect(() => {
     if (!active) return;
     let stale = false;
-    Promise.all([api.sessions(), api.vmList(), api.tags(), api.savedFilters()]).then(
-      ([s, v, t, f]) => {
+    Promise.all([
+      api.sessions(),
+      api.vmList(),
+      api.tags(),
+      api.savedFilters(),
+      api.multiExecGroups(),
+      // The summary names whole folders the tree picked.
+      isCompact ? api.sessionFolders() : Promise.resolve([] as SessionFolder[]),
+    ]).then(
+      ([s, v, t, f, g, folderList]) => {
         if (stale) return;
         setSessions(s);
         setVms(v);
         setTags(t);
         setFilters(f);
+        setGroups(g);
+        setFolders(folderList);
         setError(null);
       },
       (err) => {
@@ -124,7 +152,7 @@ export function BulkTargetPicker({
     return () => {
       stale = true;
     };
-  }, [active, reload]);
+  }, [active, reload, isCompact]);
 
   // Which session each VM is reached through: the first linked one by name, as the core picks it. A4, H11: only a
   // link the user chose or confirmed; an automatic one waits for a confirm.
@@ -154,22 +182,23 @@ export function BulkTargetPicker({
     }
   }
 
-  const set = (kind: Kind, value: string, on: boolean) =>
-    onPicksChange({ ...picks, [kind]: toggle(picks[kind], value, on) });
-  const has = (kind: Kind, value: string) => (picks[kind] ?? []).includes(value);
+  const set = (kind: PickKind, value: string, on: boolean) => onPicksChange(togglePick(picks, kind, value, on));
+  const has = (kind: PickKind, value: string) => (picks[kind] ?? []).includes(value);
   const shownSessions = sessions.filter((s) => matches(text, s.name, s.host, s.username, ...s.tags));
   const shownVms = vms.filter((v) => matches(text, v.displayName, v.vmxPath, v.ipAddress, ...v.tags));
   const shownTags = tags.filter((t) => matches(text, t.name));
   const shownFilters = filters.filter((f) => matches(text, f.name));
-  const picked = (kind: Kind) => (picks[kind] ?? []).length;
-  const anyPicked = (["sessionIds", "vmPaths", "tags", "filterIds"] as Kind[]).some((k) => picked(k) > 0);
+  const shownGroups = groups.filter((g) => matches(text, g.name, ...g.members.map((m) => m.name)));
+  const picked = (kind: PickKind) => (picks[kind] ?? []).length;
+  const anyPicked = anyPicks(picks);
   const hosts = resolved?.hosts ?? [];
   const skipped = hosts.filter((h) => h.protected);
   const prod = hosts.filter((h) => h.environment === "prod" && !h.protected);
   const without = resolved?.vmsWithoutSession ?? [];
   const unconfirmed = resolved?.vmsUnconfirmed ?? [];
+  const hostCount = exporting ? hosts.length : hosts.length - skipped.length;
 
-  function countBadge(kind: Kind) {
+  function countBadge(kind: PickKind) {
     const n = picked(kind);
     return n > 0 ? (
       <Badge variant="secondary" className="ml-1 h-4 min-w-4 px-1 text-[10px] tabular-nums">
@@ -178,183 +207,253 @@ export function BulkTargetPicker({
     ) : null;
   }
 
+  const badges = (
+    <>
+      {skipped.length > 0 && (
+        <Badge variant="outline" className="font-normal">
+          {exporting ? `${skipped.length} protected` : `${skipped.length} protected, skipped`}
+        </Badge>
+      )}
+      {prod.length > 0 && (
+        <Badge variant="outline" className="border-env-prod/50 font-normal text-env-prod">
+          {prod.length} Prod
+        </Badge>
+      )}
+    </>
+  );
+
+  const summary = compact && (
+    <div className="flex min-w-0 flex-wrap items-center gap-2 text-sm">
+      <span className="min-w-0 flex-1 font-medium break-words" title={hosts.map((h) => h.name).join(", ")}>
+        {picksSummary(hostCount, picksParts(picks, compact.tabs, { sessions, folders, vms, filters, groups }))}
+      </span>
+      {badges}
+      <Button
+        variant={changing ? "ghost" : "outline"}
+        size="sm"
+        aria-expanded={changing}
+        onClick={() => setChanging((open) => !open)}
+      >
+        {changing ? "Done" : "Change…"}
+      </Button>
+    </div>
+  );
+
   return (
-    <div className="grid gap-3">
-      <Tabs defaultValue="sessions" className="gap-3">
-        <TabsList className="w-full">
-          <TabsTrigger value="sessions">
-            <ListTreeIcon />
-            Sessions
-            {countBadge("sessionIds")}
-          </TabsTrigger>
-          <TabsTrigger value="vms">
-            <ServerIcon />
-            VMs
-            {countBadge("vmPaths")}
-          </TabsTrigger>
-          <TabsTrigger value="tags">
-            <TagIcon />
-            Tags
-            {countBadge("tags")}
-          </TabsTrigger>
-          <TabsTrigger value="filters">
-            <FilterIcon />
-            Filters
-            {countBadge("filterIds")}
-          </TabsTrigger>
-        </TabsList>
+    <div className="@container grid min-w-0 grid-cols-1 gap-3">
+      {summary}
+      {(!isCompact || changing) && (
+        <>
+          <Tabs defaultValue="sessions" className="gap-3">
+            <TabsList className="w-full flex-wrap group-data-horizontal/tabs:h-auto">
+              <TabsTrigger value="sessions" className={NARROW_TAB}>
+                <ListTreeIcon className="@max-md:hidden" />
+                Sessions
+                {countBadge("sessionIds")}
+              </TabsTrigger>
+              <TabsTrigger value="vms" className={NARROW_TAB}>
+                <ServerIcon className="@max-md:hidden" />
+                VMs
+                {countBadge("vmPaths")}
+              </TabsTrigger>
+              <TabsTrigger value="tags" className={NARROW_TAB}>
+                <TagIcon className="@max-md:hidden" />
+                Tags
+                {countBadge("tags")}
+              </TabsTrigger>
+              <TabsTrigger value="filters" className={NARROW_TAB}>
+                <FilterIcon className="@max-md:hidden" />
+                Filters
+                {countBadge("filterIds")}
+              </TabsTrigger>
+              <TabsTrigger value="groups" className={NARROW_TAB}>
+                <LayersIcon className="@max-md:hidden" />
+                Groups
+                {countBadge("groupIds")}
+              </TabsTrigger>
+            </TabsList>
 
-        <div className="relative">
-          <SearchIcon className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground" />
-          <Input
-            className="pl-8"
-            placeholder="Search"
-            aria-label="Search the list"
-            value={text}
-            onChange={(e) => setText(e.currentTarget.value)}
-          />
-        </div>
-
-        <TabsContent value="sessions">
-          <PickList
-            empty={
-              sessions.length > 0
-                ? "No session matches."
-                : otherKinds > 0
-                  ? withWinrm
-                    ? "No SSH or WinRM sessions yet."
-                    : "No SSH sessions yet."
-                  : "No saved sessions yet."
-            }
-          >
-            {shownSessions.map((s) => (
-              <PickRow
-                key={s.id}
-                id={`pick-session-${s.id}`}
-                checked={has("sessionIds", s.id)}
-                onChange={(on) => set("sessionIds", s.id, on)}
-                title={s.name}
-                detail={sessionAddress(s)}
-                mono
-                extra={
-                  <>
-                    {s.protected && <ShieldIcon className="size-3.5 text-muted-foreground" aria-label="Protected" />}
-                    <EnvBadge env={s.environment} />
-                  </>
-                }
+            <div className="relative">
+              <SearchIcon className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground" />
+              <Input
+                className="pl-8"
+                placeholder="Search"
+                aria-label="Search the list"
+                value={text}
+                onChange={(e) => setText(e.currentTarget.value)}
               />
-            ))}
-          </PickList>
-          {otherKinds > 0 && (
-            <p className="mt-2 text-xs text-muted-foreground">
-              {exporting
-                ? `${plural(otherKinds, "remote desktop, VNC, Telnet or serial session")} not listed: the inventory takes SSH and WinRM sessions.`
-                : winrm
-                  ? `${plural(otherKinds, "remote desktop, VNC, Telnet or serial session")} not listed: this works over SSH and WinRM only.`
-                  : `${plural(otherKinds, "session")} of other kinds not listed: this works over SSH only.`}
+            </div>
+
+            <TabsContent value="sessions">
+              <PickList
+                empty={
+                  sessions.length > 0
+                    ? "No session matches."
+                    : otherKinds > 0
+                      ? withWinrm
+                        ? "No SSH or WinRM sessions yet."
+                        : "No SSH sessions yet."
+                      : "No saved sessions yet."
+                }
+              >
+                {shownSessions.map((s) => (
+                  <PickRow
+                    key={s.id}
+                    id={`pick-session-${s.id}`}
+                    checked={has("sessionIds", s.id)}
+                    onChange={(on) => set("sessionIds", s.id, on)}
+                    title={s.name}
+                    detail={sessionAddress(s)}
+                    mono
+                    extra={
+                      <>
+                        {s.protected && (
+                          <ShieldIcon className="size-3.5 text-muted-foreground" aria-label="Protected" />
+                        )}
+                        <EnvBadge env={s.environment} />
+                      </>
+                    }
+                  />
+                ))}
+              </PickList>
+              {otherKinds > 0 && (
+                <p className="mt-2 text-xs text-muted-foreground">
+                  {exporting
+                    ? `${plural(otherKinds, "remote desktop, VNC, Telnet or serial session")} not listed: the inventory takes SSH and WinRM sessions.`
+                    : winrm
+                      ? `${plural(otherKinds, "remote desktop, VNC, Telnet or serial session")} not listed: this works over SSH and WinRM only.`
+                      : `${plural(otherKinds, "session")} of other kinds not listed: this works over SSH only.`}
+                </p>
+              )}
+            </TabsContent>
+
+            <TabsContent value="vms">
+              <PickList empty={vms.length === 0 ? "No VMs found yet. Refresh the VM list." : "No VM matches."}>
+                {shownVms.map((v) => {
+                  const via = linked.get(v.id);
+                  const auto = autoLinked.get(v.id);
+                  return (
+                    <PickRow
+                      key={v.id}
+                      id={`pick-vm-${v.id}`}
+                      checked={has("vmPaths", v.vmxPath)}
+                      onChange={(on) => set("vmPaths", v.vmxPath, on)}
+                      title={v.displayName}
+                      detail={
+                        via ? (
+                          `through ${via[0].name}${via.length > 1 ? ` (+${via.length - 1} more linked)` : ""}`
+                        ) : auto ? (
+                          <span className="text-tier-medium">
+                            Linked automatically to {auto[0].name}: confirm the link to run on it
+                          </span>
+                        ) : (
+                          <span className="text-tier-medium">No linked session: can&apos;t run commands yet</span>
+                        )
+                      }
+                      extra={<EnvBadge env={v.environment} />}
+                    />
+                  );
+                })}
+              </PickList>
+            </TabsContent>
+
+            <TabsContent value="tags">
+              <PickList empty={tags.length === 0 ? "No tags yet." : "No tag matches."}>
+                {shownTags.map((t) => (
+                  <PickRow
+                    key={t.id}
+                    id={`pick-tag-${t.id}`}
+                    checked={has("tags", t.name)}
+                    onChange={(on) => set("tags", t.name, on)}
+                    title={t.name}
+                    detail={[t.sessionCount && plural(t.sessionCount, "session"), t.vmCount && plural(t.vmCount, "VM")]
+                      .filter(Boolean)
+                      .join(", ")}
+                  />
+                ))}
+              </PickList>
+            </TabsContent>
+
+            <TabsContent value="filters">
+              <PickList
+                empty={
+                  filters.length === 0
+                    ? "No saved filters yet. Save one on the Virtual machines page."
+                    : "No filter matches."
+                }
+              >
+                {shownFilters.map((f) => (
+                  <PickRow
+                    key={f.id}
+                    id={`pick-filter-${f.id}`}
+                    checked={has("filterIds", f.id)}
+                    onChange={(on) => set("filterIds", f.id, on)}
+                    title={f.name}
+                    detail="Saved VM filter"
+                  />
+                ))}
+              </PickList>
+            </TabsContent>
+
+            <TabsContent value="groups">
+              <PickList
+                empty={
+                  groups.length === 0
+                    ? "No saved groups yet. Save picked tabs as a group on the Terminal page."
+                    : "No group matches."
+                }
+              >
+                {shownGroups.map((g) => (
+                  <PickRow
+                    key={g.id}
+                    id={`pick-group-${g.id}`}
+                    checked={has("groupIds", g.id)}
+                    onChange={(on) => set("groupIds", g.id, on)}
+                    title={g.name}
+                    detail={
+                      g.members.length === 0 ? (
+                        <span className="text-tier-medium">No sessions left: edit it in Manage groups</span>
+                      ) : (
+                        `${plural(g.members.length, "session")}: ${memberNames(g.members)}`
+                      )
+                    }
+                  />
+                ))}
+              </PickList>
+            </TabsContent>
+          </Tabs>
+
+          {error && (
+            <p className="text-sm text-destructive" role="alert">
+              {error}
             </p>
           )}
-        </TabsContent>
 
-        <TabsContent value="vms">
-          <PickList empty={vms.length === 0 ? "No VMs found yet. Refresh the VM list." : "No VM matches."}>
-            {shownVms.map((v) => {
-              const via = linked.get(v.id);
-              const auto = autoLinked.get(v.id);
-              return (
-                <PickRow
-                  key={v.id}
-                  id={`pick-vm-${v.id}`}
-                  checked={has("vmPaths", v.vmxPath)}
-                  onChange={(on) => set("vmPaths", v.vmxPath, on)}
-                  title={v.displayName}
-                  detail={
-                    via ? (
-                      `through ${via[0].name}${via.length > 1 ? ` (+${via.length - 1} more linked)` : ""}`
-                    ) : auto ? (
-                      <span className="text-tier-medium">
-                        Linked automatically to {auto[0].name}: confirm the link to run on it
-                      </span>
-                    ) : (
-                      <span className="text-tier-medium">No linked session: can&apos;t run commands yet</span>
-                    )
-                  }
-                  extra={<EnvBadge env={v.environment} />}
-                />
-              );
-            })}
-          </PickList>
-        </TabsContent>
-
-        <TabsContent value="tags">
-          <PickList empty={tags.length === 0 ? "No tags yet." : "No tag matches."}>
-            {shownTags.map((t) => (
-              <PickRow
-                key={t.id}
-                id={`pick-tag-${t.id}`}
-                checked={has("tags", t.name)}
-                onChange={(on) => set("tags", t.name, on)}
-                title={t.name}
-                detail={[t.sessionCount && plural(t.sessionCount, "session"), t.vmCount && plural(t.vmCount, "VM")]
-                  .filter(Boolean)
-                  .join(", ")}
-              />
-            ))}
-          </PickList>
-        </TabsContent>
-
-        <TabsContent value="filters">
-          <PickList
-            empty={
-              filters.length === 0
-                ? "No saved filters yet. Save one on the Virtual machines page."
-                : "No filter matches."
-            }
-          >
-            {shownFilters.map((f) => (
-              <PickRow
-                key={f.id}
-                id={`pick-filter-${f.id}`}
-                checked={has("filterIds", f.id)}
-                onChange={(on) => set("filterIds", f.id, on)}
-                title={f.name}
-                detail="Saved VM filter"
-              />
-            ))}
-          </PickList>
-        </TabsContent>
-      </Tabs>
-
-      {error && (
+          <div className="flex flex-wrap items-center gap-2 text-sm">
+            {isCompact ? null : exporting && !anyPicked ? (
+              <span className="text-muted-foreground">Nothing picked, so every SSH and WinRM session goes in</span>
+            ) : (
+              <span className="font-medium">{plural(hostCount, "host")}</span>
+            )}
+            {!isCompact && badges}
+            {anyPicked && (
+              <Button
+                variant="ghost"
+                size="sm"
+                className="ml-auto"
+                onClick={() => onPicksChange({ winrm: picks.winrm, terminalIds: picks.terminalIds })}
+              >
+                {isCompact ? "Clear these picks" : "Clear"}
+              </Button>
+            )}
+          </div>
+        </>
+      )}
+      {isCompact && !changing && error && (
         <p className="text-sm text-destructive" role="alert">
           {error}
         </p>
       )}
-
-      <div className="flex flex-wrap items-center gap-2 text-sm">
-        {exporting && !anyPicked ? (
-          <span className="text-muted-foreground">Nothing picked, so every SSH and WinRM session goes in</span>
-        ) : (
-          <span className="font-medium">
-            {plural(exporting ? hosts.length : hosts.length - skipped.length, "host")}
-          </span>
-        )}
-        {skipped.length > 0 && (
-          <Badge variant="outline" className="font-normal">
-            {exporting ? `${skipped.length} protected` : `${skipped.length} protected, skipped`}
-          </Badge>
-        )}
-        {prod.length > 0 && (
-          <Badge variant="outline" className="border-env-prod/50 font-normal text-env-prod">
-            {prod.length} Prod
-          </Badge>
-        )}
-        {anyPicked && (
-          <Button variant="ghost" size="sm" className="ml-auto" onClick={() => onPicksChange({})}>
-            Clear
-          </Button>
-        )}
-      </div>
 
       {without.length > 0 && (
         <Alert>
@@ -410,11 +509,12 @@ export function BulkTargetPicker({
           </AlertDescription>
         </Alert>
       )}
-      {resolved?.notes.map((note) => (
-        <p key={note} className="text-xs text-muted-foreground">
-          {note}
-        </p>
-      ))}
+      {!hideNotes &&
+        resolved?.notes.map((note) => (
+          <p key={note} className="text-xs text-muted-foreground">
+            {note}
+          </p>
+        ))}
     </div>
   );
 }

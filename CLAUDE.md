@@ -907,7 +907,10 @@ crates/core/          remotely-core: all app logic
                       and TrackedRemote, the remote adapter every service uses, noting kept connections: dashboard,
                       Containers page, host details); SS-07 the first jump host's for a session behind one, never the
                       session itself
-    bulk.rs           BX-01 targets (picked tabs, tree sessions, VMs, tags, filters; A4, H11 a VM only through a
+    bulk.rs           BX-01 targets (picked tabs, tree sessions, VMs, tags, filters; UX-16 (0.9.0 H2)
+                      TargetPicks.group_ids: a QL-19 group's sessions, read from the shown workspace's groups only (another
+                      workspace's id picks nothing, with a note; tests/workspaces.rs), "group '<name>'" in each host's
+                      `via`, a read, not audited; A4, H11 a VM only through a
                       chosen or confirmed link, else ResolvedTargets::vms_unconfirmed; BX-13 TargetPicks.winrm: WinRM
                       sessions and PowerShell tabs are hosts for Compare hosts and support bundles, never the SS-09 key
                       push; BulkHost.script_kind), BX-03 grouped results and diff,
@@ -989,7 +992,7 @@ crates/core/          remotely-core: all app logic
                       characters, 1 to 100 sessions, 200 groups); audited multiexec_group_changed with the member
                       sessions as targets, refused by the read-only lock (Change::MultiExecGroups); a deleted session
                       leaves its groups; open_terminals lists a group's open terminals. Groups only choose MultiExec's
-                      targets
+                      targets and (UX-16) a bulk job's hosts (bulk.rs TargetPicks.group_ids), never run anything
     known_hosts.rs    SS-05 trusted host keys (first-use prompt, changed key blocks; audited; a new key type for a host
                       with a trusted key blocks in bulk runs and is an FD-07 conflict; key_types for the handshake's
                       preferred host key algorithms)
@@ -1112,7 +1115,9 @@ crates/core/          remotely-core: all app logic
                       hypervisors (copies by FakeDiskTools into VM folders in the temp folder, the refusals, Prod) and
                       CV-04 a System_Disk and Data_Disk pair imported as one VM (SATA, firmware from the partition
                       table, the seed read back with read_joliet); workspaces.rs: FD-02 isolation of every service and
-                      switching; change_ids.rs: AP-08; vm_sessions.rs: QL-29 (a deploy's user and key, refusals, the
+                      switching (UX-16: another workspace's group refused as a pick); bulk.rs: BX-01 to BX-07, UX-16 a run
+                      on a tag, a saved filter, a group and picked VMs rated and skipped as hosts picked one by one;
+                      change_ids.rs: AP-08; vm_sessions.rs: QL-29 (a deploy's user and key, refusals, the
                       bulk save, the lock, another workspace's VM); support_bundle.rs: FD-04 on the test SSH server,
                       zips in the temp folder; reports.rs: FD-05, BX-12, FD-08 on the test SSH server's Ubuntu and RHEL
                       hosts and
@@ -1224,8 +1229,12 @@ src-tauri/            Tauri 2 shell (VM-30 0.8.0 G7: golden.rs the build dialog'
 src/                  React + TypeScript UI
   components/ui/      shadcn/ui components (generated)
   components/         app components (approval dialog, badges, Compare panel with its one-shot and MultiExec views
-                      (RecordedLinesView, QL-12; BulkResultsView's GroupCard and OutputDiffDialog serve both), MultiExec
-                      bar, WhyDisabled for QL-08, PasteConfirmDialog for QL-05,
+                      (RecordedLinesView, QL-12; BulkResultsView's GroupCard and OutputDiffDialog serve both; UX-16 its
+                      hosts from BulkTargetPicker's compact mode: one summary line, lib/bulk-picks.ts, with Change…),
+                      BulkTargetPicker (BX-01, UX-16 the one host picker of every bulk job: sessions, VMs, tags, saved
+                      filters and a Groups tab; `compact`), MultiExec
+                      bar (UX-16: its Pick tabs menu in both states, with the saved groups), WhyDisabled for QL-08,
+                      PasteConfirmDialog for QL-05,
                       FilesDrawer and TransfersList for SS-08 (SS-14: each row's "⋯" and the selection bar rename, move,
                       copy, delete, set permissions or the owner; the header's "⋯" makes folders and files, uploads a
                       folder and browses as root; transfers pause and resume; no permissions or owner on a link; G4: a
@@ -1278,7 +1287,8 @@ src/                  React + TypeScript UI
                       and FD-07's);
                       QL-16 FolderDefaultsDialog (a folder's Defaults…) and SessionDialog's "from folder X" values;
                       SS-12 SessionDialog's kind first and SessionKindFields (each kind's fields, the COM port);
-                      MultiExecGroupsMenu and MultiExecGroupsDialog for QL-19; ScrollbackSearchPanel for QL-18
+                      MultiExecGroupsMenu (UX-16: MultiExecGroupsItems, inside the MultiExec bar's Pick tabs; no longer
+                      Terminal ⋯) and MultiExecGroupsDialog for QL-19; ScrollbackSearchPanel for QL-18
                       (Ctrl+Shift+G); TerminalRulesCard for QL-17; R10: StatusBar (QL-22), NotificationCentre and
                       NotificationSources (QL-25: jobs and MO-07 alerts kept whatever page shows), ShortcutSheet
                       (QL-24, Ctrl+/), FirstRunWizard (QL-23: the Vault page's SetupCard, the import dialog); VM-14,
@@ -1314,7 +1324,9 @@ src/                  React + TypeScript UI
                       "Add a check" opens a `checks` link; 0.7.0 F5: NoteSheet (FD-06, hosted once by App and opened by
                       a `note` AppLink; the core's HTML, the web link confirm, Send to terminal), StarButton (QL-26),
                       TrashCard (QL-27, Settings › Privacy and data), BulkEditDialog (QL-28, the Sessions page's selection
-                      bar, which also has FD-04's Support bundle for the SSH sessions picked); QL-29 VmSessionsDialog
+                      bar, which also has FD-04's Support bundle for the SSH sessions picked and BX-01's "Run a command
+                      on these…", also in the VMs page's More › Organise: Compare hosts opened on those picks through
+                      App's runCommandOn and TerminalPage's `compareWith`); QL-29 VmSessionsDialog
                       (hosted by App: NewVmSessionDialog, SessionDialog's `draft` for one VM, from VmSessionLinks'
                       Create SSH session… and the palette's VM entry; VmSessionsDialog the preview for the selection's
                       More › Organise; lib/vm-sessions.ts); SS-14, BX-10 (0.8.0 G3)
@@ -1369,7 +1381,9 @@ src/                  React + TypeScript UI
                       Type in all tabs, one kind at a time, and why a tab can't), console-open.ts (SS-12 an RDP or VNC
                       window from the Terminal or Sessions page; the presenting notice), multiexec.ts,
                       multiexec-groups.ts (QL-19 which
-                      tabs a group picks or opens, saving picked tabs, editor checks), scrollback-search.ts (QL-18
+                      tabs a group picks or opens, saving picked tabs, editor checks), bulk-picks.ts (UX-16, BX-01 the
+                      picker's summary line with whole folders, which tabs Compare hosts runs on (compareTabKeys: the
+                      current tab only while nothing else is picked), a selection's picks), scrollback-search.ts (QL-18
                       logical lines, matching, caps, grouping by tab), scrollback-xterm.ts (QL-18 reading a pane's
                       buffer, showing a match with a decoration), highlight-rules.ts (QL-17 scope, compile, match a
                       logical line to cells, colours per theme, time budget), terminal-highlights.ts (QL-17 xterm
@@ -1437,7 +1451,9 @@ src/                  React + TypeScript UI
                       mentions it, presentation-rescan.ts), presentation-state.ts; R10: links.ts (AppLink, isAppLink:
                       every search result, map node, status bar item and notification), search.ts (QL-20 ranking:
                       every word matches a field, name > address > tag > detail), search-sources.ts (each kind's
-                      items), search-providers.ts (SEARCH_PROVIDERS: later packages add theirs), settings-index.ts
+                      items; UX-16 groupItems: "Open group: <name>", a `group` AppLink that TerminalPage's
+                      `groupRequest` opens, or Manage groups without an id), search-providers.ts (SEARCH_PROVIDERS: later
+                      packages add theirs), settings-index.ts
                       (UX-10 Settings' groups for the side list and its sections by label, for the page's search and
                       the palette's), settings-summary.ts (UX-10 the tools table's rows and the approval rules'
                       summary), approval.ts (UX-11 the approval dialog's tier line, type-to-confirm phrase, and the
