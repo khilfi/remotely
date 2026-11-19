@@ -1171,7 +1171,8 @@ src-tauri/            Tauri 2 shell (VM-30 0.8.0 G7: golden.rs the build dialog'
                       settings and versions; SS-14, BX-10 0.8.0 G3: files_page.rs the Files page's IPC: the local pane's
                       listings with the shell's Home and Downloads, uploads from a listing, downloads into one, find, preview,
                       checksums, bookmarks, compare and sync, push and fetch with the push's file dialog and the fetch's
-                      folder dialog): window, IPC commands (ipc.rs), terminal bridge, MultiExec (multiexec.rs; groups.rs
+                      folder dialog): window, IPC commands (ipc.rs; UX-19 metrics_watched, every watched session and
+                      the poll interval, a read), terminal bridge, MultiExec (multiexec.rs; groups.rs
                       QL-19 saved MultiExec groups; terminal_rules.rs QL-17 rules), command
                       panel, notifications and QL-13 manual links opened with ShellExecute after the core's check
                       (command_panel.rs; QL-17 notify_terminal_alert), clipboard.rs (the clipboard read for right-click paste, and QL-05/SS-11
@@ -1255,8 +1256,11 @@ src/                  React + TypeScript UI
                       ContainerHostDialog, ContainerDetailsPanel (Overview, Logs, Stats) and ContainerResources (images,
                       volumes, networks) for CT-01; HostDetailsSheet (MO-13 System, MO-14 Admin) for a session,
                       VmSystemTab (MO-13: a VM's System tab), ThisPcMemoryChart (MO-15) and MetricChart's own legend
-                      and dashed limit lines; MO-06, MO-07, MO-16 RangePicker, AlertsWidget, AlertRulesSheet,
-                      AlertNotifier (one Windows notification per round of alerts, masked), DashboardGrid (pointer
+                      and dashed limit lines; MO-06, MO-07, MO-16 RangePicker, AlertsWidget, AlertRulesSheet (UX-19,
+                      0.9.0: hosted by DashboardPage, so the widget's Rules, "Alert rules…" in the header's "⋯" on the
+                      Metrics tab and `alerts` links reach it: the palette's Alert rules asks for it, and the status
+                      bar's alerts open the widget, or the sheet when the layout has no Alerts widget, monitor.ts
+                      alertsOpens), AlertNotifier (one Windows notification per round of alerts, masked), DashboardGrid (pointer
                       drag, keyboard moves, resize; no drag-and-drop library), WidgetSettings, ServicesWidget,
                       MetricChartWidget, DashboardHistoryCard; QL-15 ErrorBoundary: one per page and one for the app, with Reload;
                       SS-04: NewPasswordField (strength meter from password_strength, Generate, hidden while
@@ -1318,10 +1322,30 @@ src/                  React + TypeScript UI
                       Check ports; CertificateTool, SubnetTool, WakeTool, FileServerTool: the form, the running server
                       and its requests), TargetField and ToolboxMenu, the "Toolbox"
                       submenu of session rows and the palette's VM and session views, and ToolboxIconMenu in the VM
-                      details panel's header; no recent inputs are offered while presenting, since a native dropdown
-                      is out of the masker's reach); MO-08 checks/: ChecksTab (the Dashboard's Checks tab), CheckDialog,
-                      CheckHistorySheet, ChecksWidget (MO-16) and CheckBits (status badge, sparkline); the row menus'
-                      "Add a check" opens a `checks` link; 0.7.0 F5: NoteSheet (FD-06, hosted once by App and opened by
+                      details panel's header (UX-19: the probes only; "Add a check" is Monitor ▸'s); UX-19 KeepChecking
+                      ("Keep checking this…" under Ping, Check ports (a port picked from those checked), Certificate
+                      (a server's, not a file's; what the read found untrusted is said in the editor, since the check
+                      fails on it until allowed) and DNS lookup (A and AAAA) results, filled in from what the run was
+                      asked; disabled with the reason under the read-only lock and for a check the editor and the core
+                      would refuse, monitor.ts keepCheckingProblem); no recent inputs are offered while presenting,
+                      since a native dropdown
+                      is out of the masker's reach); MO-08 checks/: ChecksTab (the Dashboard's Checks tab, with the
+                      one CheckDialog every new check opens in: its own Add a check and empty state set it directly;
+                      Monitor ▸'s and the palette's "Add a check" and the Toolbox's "Keep checking this…" through a
+                      `checks` link, ChecksRequest, its `spec` filled in by monitor.ts requestedCheck), CheckDialog
+                      (checkProblem in lib/checks.ts follows the core's checks/spec.rs: hostProblem as
+                      toolbox::check_host, ipLiteral as network::ip_literal),
+                      CheckHistorySheet, ChecksWidget (MO-16) and CheckBits (status badge, sparkline); UX-19 (0.9.0)
+                      MonitorMenu: Monitor ▸ in session rows (the Sessions page and SessionTree; not serial ones) and
+                      MonitorIconMenu in the VM details panel's header, beside ToolboxIconMenu: "Watch its metrics" or
+                      "Stop watching" (MO-02's metrics_watch; a VM through a linked SSH or WinRM session; any watched
+                      session can be stopped, whatever its kind now; disabled with the reason when it can't be
+                      watched) and "Add a check" (disabled with the reason under the read-only lock), each with its
+                      cost line (monitor.ts: a check behind a jump host goes through it and keeps its login between
+                      runs), every watched session and the poll interval read from `metrics_watched` as the menu opens
+                      (hooks/use-watched.ts; the overview names one watched session per VM); the palette's VM and
+                      session views have the same Monitor group, its items disabled with their reasons alike;
+                      0.7.0 F5: NoteSheet (FD-06, hosted once by App and opened by
                       a `note` AppLink; the core's HTML, the web link confirm, Send to terminal), StarButton (QL-26),
                       TrashCard (QL-27, Settings › Privacy and data), BulkEditDialog (QL-28, the Sessions page's selection
                       bar, which also has FD-04's Support bundle for the SSH sessions picked and BX-01's "Run a command
@@ -1366,7 +1390,9 @@ src/                  React + TypeScript UI
                       transfers store through useSyncExternalStore); use-debounced.ts (Compare reloads once per burst
                       of job events; Activity coalesces its own asks, at most one read a second);
                       use-chart-points.ts (MO-06 a series' live rounds, or a history range carried on with them);
-                      use-password-strength.ts; use-mobile.ts is shadcn's
+                      use-password-strength.ts; use-watched.ts (UX-19: every watched session and the poll interval
+                      from `metrics_watched`, read when a Monitor menu or the palette opens; watch and stop);
+                      use-mobile.ts is shadcn's
   lib/                api.ts (typed IPC wrappers; FD-03: every answer's host, IP and user fields are learnt by the
                       masker), reauth.ts and reauth-prompt.ts (SS-04, AP-06: on `reauth_required` ask for the vault
                       password in ReauthDialog and send the request again; the vault idle lock's activity ping),
@@ -1474,7 +1500,11 @@ src/                  React + TypeScript UI
                       and types), subnet.ts (the subnet calculator, IPv4 and IPv6 with BigInt), file-server.ts and
                       file-server-api.ts (the File server tab's form, checks and wording; wrappers and types) and
                       hooks/use-probe-run.ts (a run's id, progress and Stop); MO-08 checks.ts (kinds, defaults, the
-                      editor's checks, wording, the sparkline's path) and checks-api.ts; 0.7.0 F5: comfort-api.ts
+                      editor's checks, wording, the sparkline's path) and checks-api.ts; UX-19 (0.9.0) monitor.ts
+                      (Monitor ▸'s watch state: a session that reads its guest, a VM through a linked one, any
+                      watched session stoppable; the cost lines, checkVia's jump host; where an `alerts` link leads;
+                      the check a `checks` link opens, and Keep checking this…'s ping, port, certificate (with what the
+                      read found untrusted) and DNS specs, keepCheckingProblem); 0.7.0 F5: comfort-api.ts
                       (notes, stars, recents, trash, bulk edit: types and wrappers), notes.ts (FD-06 link actions and
                       titles, excerpts, the note link), note-send.ts (a code block to the Terminal page's current pane, its
                       last line break taken off, and asked about whatever the paste setting when it has more lines:

@@ -41,6 +41,7 @@ import {
   GitCompareArrowsIcon,
   HistoryIcon,
   BellIcon,
+  BellRingIcon,
   BoxesIcon,
   CompassIcon,
   KeyboardIcon,
@@ -325,6 +326,8 @@ export default function App() {
   const [filesRequest, setFilesRequest] = useState<FilesRequest | null>(null);
   /** MO-08: a check's history, or a new check on a row, for the Dashboard's Checks tab. */
   const [checksRequest, setChecksRequest] = useState<ChecksRequest | null>(null);
+  /** MO-07, UX-19: an `alerts` link for the Dashboard: the Alerts widget, or the alert rules. */
+  const [alertsRequest, setAlertsRequest] = useState<{ rules: boolean; n: number } | null>(null);
   // QL-25, QL-24, QL-23: the notification centre, the shortcut sheet and the first-run wizard.
   const [centreOpen, setCentreOpen] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
@@ -780,10 +783,18 @@ export default function App() {
           setPage("terminal");
           break;
         case "alerts":
+          // UX-19: the Dashboard opens the Alerts widget, or the rules when asked or when its layout has no widget.
+          setAlertsRequest((prev) => ({ rules: link.rules === true, n: (prev?.n ?? 0) + 1 }));
           go({ page: "dashboard", tab: "metrics" });
           break;
         case "checks":
-          setChecksRequest((prev) => ({ checkId: link.checkId, add: link.add, n: (prev?.n ?? 0) + 1 }));
+          setChecksRequest((prev) => ({
+            checkId: link.checkId,
+            add: link.add,
+            spec: link.spec,
+            untrusted: link.untrusted,
+            n: (prev?.n ?? 0) + 1,
+          }));
           go({ page: "dashboard", tab: "checks" });
           break;
         case "schedule":
@@ -1014,6 +1025,14 @@ export default function App() {
       icon: GaugeIcon,
       keywords: "metrics monitoring guest",
       run: () => go({ page: "dashboard", tab: "metrics" }),
+    },
+    {
+      // UX-19: the alert rules, whatever the dashboard's layout holds.
+      id: "alert-rules",
+      label: "Alert rules",
+      icon: BellRingIcon,
+      keywords: "alerts rules thresholds monitoring notify cpu memory disk down certificate",
+      run: () => openLink({ kind: "alerts", rules: true }),
     },
     {
       id: "new-terminal",
@@ -1401,6 +1420,7 @@ export default function App() {
                   onOpenVms={show.vms}
                   onOpenSessions={show.sessions}
                   checksRequest={checksRequest}
+                  alertsRequest={alertsRequest}
                 />
               </ErrorBoundary>
             </section>

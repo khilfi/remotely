@@ -5,8 +5,9 @@
 // chart of its own. MO-13: "Host details…" opens the session's host details. MO-02: a guest polled less often than
 // the host side (Settings, Dashboard) keeps its line on a VM's charts (chart-gaps.ts). MO-06: the dashboard's one range
 // (UX-07), which the sheet's picker changes for the whole page, shows the last hour to the last week from the history on
-// disk, carried on with the live rounds. UX-03: watching a host has one home, the page's Watch hosts; the sheet says
-// how a VM's guest gets watched, and a host whose key isn't trusted opens a terminal that asks about it.
+// disk, carried on with the live rounds. UX-03: watching a host is the page's Watch hosts (UX-19, 0.9.0: and rows'
+// Monitor ▸ elsewhere), not this sheet's; the sheet says how a VM's guest gets watched, and a host whose key isn't
+// trusted opens a terminal that asks about it.
 
 import { useEffect, useState } from "react";
 import { HardDriveIcon, RotateCwIcon, SquareTerminalIcon, ZapIcon } from "lucide-react";

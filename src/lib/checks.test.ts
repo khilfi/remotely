@@ -10,6 +10,8 @@ import {
   cleanCheckInput,
   defaultSpec,
   everyText,
+  hostProblem,
+  ipLiteral,
   kindTakes,
   needingLook,
   newCheckInput,
@@ -79,6 +81,43 @@ test("the editor refuses what the core refuses, with a reason", () => {
   assert.match(checkProblem(input({ target: { kind: "address", host: "192.0.2.10" }, spec: dns }))!, /not an address/);
   assert.match(checkProblem(input({ spec: { ...dns, expect: "web01" } }))!, /expected address/);
   assert.equal(checkProblem(input({ spec: { ...dns, expect: "192.0.2.10", server: "2001:db8::53" } })), null);
+  // UX-19: as the core's checks/spec.rs and network::ip_literal read them.
+  assert.equal(checkProblem(input({ spec: { ...dns, server: "[2001:db8::53]" } })), null, "brackets");
+  assert.equal(checkProblem(input({ spec: { ...dns, server: "fe80::1%12" } })), null, "a zone");
+  assert.match(checkProblem(input({ spec: { ...dns, server: "dns.example.com" } }))!, /DNS server/);
+  assert.match(
+    checkProblem(input({ target: { kind: "address", host: "[2001:db8::1]" }, spec: dns }))!,
+    /not an address/,
+  );
+  assert.match(checkProblem(input({ spec: { ...dns, expect: "2001:db8::10" } }))!, /IPv4 for A/);
+  assert.match(checkProblem(input({ spec: { ...dns, recordType: "AAAA", expect: "192.0.2.10" } }))!, /IPv6 for AAAA/);
+  assert.equal(checkProblem(input({ spec: { ...dns, expect: "::ffff:192.0.2.10" } })), null, "IPv4 written as IPv6");
+});
+
+test("UX-19: hosts and addresses as the core takes them (toolbox::check_host, network::ip_literal)", () => {
+  assert.equal(ipLiteral("192.0.2.10"), 4);
+  assert.equal(ipLiteral(" 2001:db8::53 "), 6);
+  assert.equal(ipLiteral("[2001:db8::53]"), 6);
+  assert.equal(ipLiteral("fe80::1%12"), 6);
+  assert.equal(ipLiteral("fe80::1%eth0"), 6);
+  assert.equal(ipLiteral("::ffff:192.0.2.10"), 4);
+  assert.equal(ipLiteral("192.0.2.1%x"), 4, "the zone is dropped whatever the address");
+  for (const no of ["", "web01", "192.0.2", "192.0.2.256", "01.2.3.4", "1::2::3", "2001:db8::g", "[2001:db8::1"]) {
+    assert.equal(ipLiteral(no), null, no);
+  }
+  assert.equal(hostProblem(" web01.example.com "), null);
+  assert.equal(hostProblem("[2001:db8::1]"), null);
+  assert.equal(hostProblem("fe80::1%12"), null);
+  assert.match(hostProblem("  ")!, /Type a host name/);
+  assert.match(hostProblem("bücher.example.com")!, /isn't a host name/);
+  assert.match(hostProblem("web01 example")!, /isn't a host name/);
+  assert.match(hostProblem("web01.example.com/admin")!, /isn't a host name/);
+  assert.match(hostProblem("a".repeat(254))!, /isn't a host name/);
+  // Every check's typed host, and a certificate's server name, go through it.
+  assert.match(checkProblem(input({ target: { kind: "address", host: "bücher.example.com" } }))!, /isn't a host name/);
+  const cert = { kind: "certificate", port: 443, serverName: "www.exämple.com", allowUntrusted: false } as const;
+  assert.match(checkProblem(input({ spec: cert }))!, /isn't a host name/);
+  assert.equal(checkProblem(input({ spec: { ...cert, serverName: "www.example.com" } })), null);
 });
 
 test("the input is cleaned before it goes to the core", () => {

@@ -26,8 +26,12 @@ import { checkProblem, cleanCheckInput, defaultSpec, everyText, INTERVALS, KINDS
 import type { ProbeTarget } from "@/lib/toolbox-api";
 
 interface Props {
-  /** A new check, prefilled (from a row's "Add a check"), or the check edited. */
-  start: { kind: "new"; input: CheckInput } | { kind: "edit"; check: HealthCheck };
+  /**
+   * A new check, prefilled (from a row's "Add a check" or a Toolbox result's "Keep checking this…"), or the check
+   * edited. UX-19: `untrusted`, what the Toolbox's certificate read found ("isn't trusted by this PC"), said under the
+   * switch that allows it while that is off, since the check is down from its first run until it is on.
+   */
+  start: { kind: "new"; input: CheckInput; untrusted?: string } | { kind: "edit"; check: HealthCheck };
   onClose: () => void;
   onSaved: (check: HealthCheck) => void;
 }
@@ -248,7 +252,14 @@ export function CheckDialog({ start, onClose, onSaved }: Props) {
             </Select>
             <p className="text-xs text-muted-foreground">{KINDS.find((k) => k.value === input.spec.kind)?.hint}</p>
           </Field>
-          <KindFields spec={input.spec} port={port} setPort={setPort} setSpec={setSpec} windowsService={windowsService}>
+          <KindFields
+            spec={input.spec}
+            port={port}
+            setPort={setPort}
+            setSpec={setSpec}
+            windowsService={windowsService}
+            untrusted={start.kind === "new" ? (start.untrusted ?? null) : null}
+          >
             {input.spec.kind === "http" && (
               <div className="grid grid-cols-2 gap-3">
                 <Field id="check-status-min" label="Status from">
@@ -370,6 +381,7 @@ function KindFields({
   setPort,
   setSpec,
   windowsService,
+  untrusted,
   children,
 }: {
   spec: CheckSpec;
@@ -378,6 +390,8 @@ function KindFields({
   setSpec: (spec: CheckSpec) => void;
   /** F4: the session is a WinRM one: the service is a Windows service. */
   windowsService: boolean;
+  /** UX-19: what the Toolbox's read of this certificate found that the check fails on unless it is allowed. */
+  untrusted: string | null;
   children?: ReactNode;
 }) {
   const portField = (placeholder?: string) => (
@@ -464,6 +478,12 @@ function KindFields({
             checked={spec.allowUntrusted}
             onChange={(allowUntrusted) => setSpec({ ...spec, allowUntrusted })}
           />
+          {untrusted && !spec.allowUntrusted && (
+            <p className="text-xs text-muted-foreground" role="note">
+              The certificate read in the Toolbox {untrusted}: this check is down from its first run unless you allow
+              it.
+            </p>
+          )}
         </div>
       );
     case "dns":

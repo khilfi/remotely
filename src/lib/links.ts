@@ -4,6 +4,7 @@
 // as plain JSON, so `isAppLink` checks them before they are opened. Tested in links.test.ts.
 
 import type { ContainerHost, EngineKind } from "./api.ts";
+import type { CheckSpec } from "./checks-api.ts";
 import { isToolboxTool, type ToolboxTool, type ToolTarget } from "./toolbox.ts";
 import type { VmView } from "./vm-snapshots.ts";
 
@@ -31,8 +32,11 @@ export type AppLink =
   | { kind: "setting"; section: string }
   /** BX-08: a command in the Terminal page's command panel. */
   | { kind: "snippet"; command: string }
-  /** MO-07: the dashboard's alert list. */
-  | { kind: "alerts" }
+  /**
+   * MO-07: the dashboard's Alerts widget, or (UX-19) the alert rules when the layout has no Alerts widget or `rules`
+   * asks for them.
+   */
+  | { kind: "alerts"; rules?: boolean }
   /** FD-14: the update banner, or Settings' Updates card when nothing is offered. */
   | { kind: "update" }
   /** SS-04: the Vault page. */
@@ -47,8 +51,12 @@ export type AppLink =
   | { kind: "note"; noteKind: "session" | "vm" | "folder"; key: string; title?: string }
   /** FD-09: a tool of the Toolbox, with a session, VM or host filled in. */
   | { kind: "toolbox"; tool: ToolboxTool; target?: ToolTarget }
-  /** MO-08: the Dashboard's Checks tab: a check's history, or a new check on a session, VM or host. */
-  | { kind: "checks"; checkId?: string; add?: ToolTarget }
+  /**
+   * MO-08: the Dashboard's Checks tab: a check's history, or a new check on a session, VM or host (UX-19: `spec`, what
+   * a Toolbox result's "Keep checking this…" filled in; `untrusted`, what its certificate read found that the check
+   * will fail on unless it allows it, in words).
+   */
+  | { kind: "checks"; checkId?: string; add?: ToolTarget; spec?: CheckSpec; untrusted?: string }
   /** UX-16: a saved group opened on the Terminal page (Open group), or Manage groups without an id. */
   | { kind: "group"; groupId?: string };
 
@@ -141,7 +149,7 @@ export function linkLabel(link: AppLink): string {
     case "snippet":
       return "Show the command";
     case "alerts":
-      return "Show the alerts";
+      return link.rules ? "Show the alert rules" : "Show the alerts";
     case "update":
       return "Show the update";
     case "vault":

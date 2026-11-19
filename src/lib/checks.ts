@@ -142,12 +142,43 @@ export function specText(spec: CheckSpec): string {
 const UNIT = /^[A-Za-z0-9][A-Za-z0-9:_.@-]{0,254}$/;
 /** F4: a Windows service's name: letters, digits, spaces and _ - . $ @ + #, no wildcards (the core checks again). */
 const WINDOWS_SERVICE = /^[\p{L}\p{N} _.$@+#-]{1,256}$/u;
-const IPV4 = /^(25[0-5]|2[0-4]\d|1?\d?\d)(\.(25[0-5]|2[0-4]\d|1?\d?\d)){3}$/;
+/** Dotted decimal without leading zeros, as Rust's Ipv4Addr reads it. */
+const IPV4 = /^(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}$/;
 
-/** An IPv4 address, or something IPv6-shaped (the core checks it properly). */
-export function looksLikeIp(text: string): boolean {
-  const t = text.trim();
-  return IPV4.test(t) || (t.includes(":") && /^[0-9a-fA-F:.]+$/.test(t));
+/** A host without the brackets of `[2001:db8::1]`, as the core's network::bare_host takes it. */
+function bareHost(text: string): string {
+  return text.startsWith("[") && text.endsWith("]") ? text.slice(1, -1) : text;
+}
+
+/**
+ * UX-19: whether `text` is an IP address as the core reads one (adapters/network.rs ip_literal): trimmed, without
+ * brackets, a zone (`%12`, `%eth0`) dropped; an IPv4 address written as IPv6 (`::ffff:192.0.2.10`) counts as IPv4.
+ * The version, or null when it isn't one.
+ */
+export function ipLiteral(text: string): 4 | 6 | null {
+  const ip = bareHost(text.trim()).split("%")[0];
+  if (IPV4.test(ip)) return 4;
+  if (!ip.includes(":") || !/^[0-9a-fA-F:.]+$/.test(ip)) return null;
+  try {
+    // The URL parser reads IPv6 as the standard has it, and writes a mapped IPv4 address as ::ffff:x:y.
+    const host = new URL(`http://[${ip}]/`).hostname.slice(1, -1).toLowerCase();
+    return /^::ffff:[0-9a-f]{1,4}:[0-9a-f]{1,4}$/.test(host) ? 4 : 6;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * UX-19: why the core (toolbox::check_host) refuses a typed host name or address, or null: brackets dropped, at most
+ * 253 characters of ASCII letters, digits and . - _ : %.
+ */
+export function hostProblem(host: string): string | null {
+  const bare = bareHost(host.trim());
+  if (!bare) return "Type a host name or an IP address.";
+  if (bare.length > 253 || !/^[A-Za-z0-9._:%-]+$/.test(bare)) {
+    return `'${host.trim()}' isn't a host name or an IP address.`;
+  }
+  return null;
 }
 
 /** Why the check can't be saved yet, or null. The core checks the same things. */
@@ -159,7 +190,10 @@ export function checkProblem(input: CheckInput, windowsService = false): string 
   const name = input.name.trim();
   if (!name) return "Give the check a name.";
   if (name.length > 80) return "A check's name can be at most 80 characters.";
-  if (input.target.kind === "address" && !input.target.host.trim()) return "Type a host name or an IP address.";
+  if (input.target.kind === "address") {
+    const problem = hostProblem(input.target.host);
+    if (problem) return problem;
+  }
   if (input.target.kind === "session" && !input.target.sessionId) return "Choose a session.";
   if (input.target.kind === "vm" && !input.target.vmKey) return "Choose a VM.";
   if (!kindTakes(input.spec.kind, input.target.kind)) {
@@ -179,8 +213,11 @@ export function checkProblem(input: CheckInput, windowsService = false): string 
   const spec = input.spec;
   switch (spec.kind) {
     case "tcp":
+      if (!port(spec.port)) return "Choose a port from 1 to 65535.";
+      break;
     case "certificate":
       if (!port(spec.port)) return "Choose a port from 1 to 65535.";
+      if (spec.serverName?.trim()) return hostProblem(spec.serverName);
       break;
     case "http":
       if (!port(spec.port)) return "Choose a port from 1 to 65535.";
@@ -198,13 +235,20 @@ export function checkProblem(input: CheckInput, windowsService = false): string 
       }
       if ((spec.bodyContains ?? "").length > 200) return "The text to find can be at most 200 characters.";
       break;
-    case "dns":
-      if (input.target.kind === "address" && looksLikeIp(input.target.host)) {
+    case "dns": {
+      // As the core's checks/spec.rs: a name (never an address), and the server and expected address as IP addresses,
+      // the expected one of the record's family.
+      if (input.target.kind === "address" && ipLiteral(input.target.host) !== null) {
         return "A DNS check looks up a name: type a host name, not an address.";
       }
-      if (spec.server && !looksLikeIp(spec.server)) return "Type the DNS server as an IP address.";
-      if (spec.expect && !looksLikeIp(spec.expect)) return "Type the expected address as an IP address.";
+      if (spec.server?.trim() && ipLiteral(spec.server) === null) return "Type the DNS server as an IP address.";
+      const expected = spec.expect?.trim() ? ipLiteral(spec.expect) : null;
+      if (spec.expect?.trim() && expected === null) return "Type the expected address as an IP address.";
+      if (expected !== null && expected !== (spec.recordType === "A" ? 4 : 6)) {
+        return "The expected address must match the record: IPv4 for A, IPv6 for AAAA.";
+      }
       break;
+    }
     case "service":
       if (windowsService) {
         if (!WINDOWS_SERVICE.test(spec.unit.trim())) {

@@ -1459,6 +1459,27 @@ pub async fn metrics_watch(state: State<'_, AppState>, session_id: Uuid, watch: 
     Ok(core.metrics.set_watched(&core.ctx(), session_id, watch).await?)
 }
 
+/// UX-19 (MO-02): the sessions watched for guest metrics, and how often each is read.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WatchedHosts {
+    /// Every watched session of the shown workspace: the overview names one per VM, however many of its linked
+    /// sessions are watched.
+    sessions: Vec<Uuid>,
+    /// Seconds between two polls of a watched host.
+    interval_secs: u64,
+}
+
+/// UX-19: what Monitor ▸ and the palette read when they open. A read: no approval, not audited.
+#[tauri::command]
+pub async fn metrics_watched(state: State<'_, AppState>) -> IpcResult<WatchedHosts> {
+    let core = &state.core;
+    Ok(WatchedHosts {
+        sessions: core.metrics.watched().await?,
+        interval_secs: core.guest_poll_secs(),
+    })
+}
+
 /// MO-02, CT-01: Retry on a host whose background logins are parked (a refused login or sudo, a
 /// changed host key, no saved password) or waiting for the hourly cap. The dashboard and the
 /// Containers page log in again on their next read.

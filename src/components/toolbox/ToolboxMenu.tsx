@@ -1,22 +1,13 @@
 // FD-09: the Toolbox's items in a session's or VM's row menu: Ping, Trace route, Check ports, View certificate and
-// Wake up, each opening its tab with the row filled in (a `toolbox` link, so no page needs a callback for it). MO-08's
-// "Add a check" sits with them: a `checks` link opens the Dashboard's Checks tab with a new check on the row.
+// Wake up, each opening its tab with the row filled in (a `toolbox` link, so no page needs a callback for it). UX-19
+// (0.9.0 H4): MO-08's "Add a check" moved to Monitor ▸ (MonitorMenu.tsx), beside watching its metrics.
 
-import {
-  ActivityIcon,
-  HeartPulseIcon,
-  NetworkIcon,
-  PowerIcon,
-  RouteIcon,
-  ShieldCheckIcon,
-  WrenchIcon,
-} from "lucide-react";
+import { ActivityIcon, NetworkIcon, PowerIcon, RouteIcon, ShieldCheckIcon, WrenchIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
-  DropdownMenuSeparator,
   DropdownMenuSub,
   DropdownMenuSubContent,
   DropdownMenuSubTrigger,
@@ -46,7 +37,7 @@ export function ToolboxIconMenu({ target }: { target: ToolTarget }) {
               type="button"
               variant="ghost"
               size="icon-sm"
-              aria-label="Toolbox: ping, ports, wake up, add a check"
+              aria-label="Toolbox: ping, ports, certificate, wake up"
             >
               <WrenchIcon />
             </Button>
@@ -61,11 +52,6 @@ export function ToolboxIconMenu({ target }: { target: ToolTarget }) {
             {label}
           </DropdownMenuItem>
         ))}
-        <DropdownMenuSeparator />
-        <DropdownMenuItem onSelect={() => requestLink({ kind: "checks", add: target })}>
-          <HeartPulseIcon />
-          Add a check
-        </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
   );
@@ -85,11 +71,6 @@ export function ToolboxMenu({ target }: { target: ToolTarget }) {
             {label}
           </DropdownMenuItem>
         ))}
-        <DropdownMenuSeparator />
-        <DropdownMenuItem onSelect={() => requestLink({ kind: "checks", add: target })}>
-          <HeartPulseIcon />
-          Add a check
-        </DropdownMenuItem>
       </DropdownMenuSubContent>
     </DropdownMenuSub>
   );

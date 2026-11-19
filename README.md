@@ -1300,6 +1300,13 @@ local storage, and offers none while presenting.
 - **Wake up**: a Wake-on-LAN magic packet (UDP, port 9 by default) for a MAC from the VM's hardware, the VM a session
   is linked to, or typed, sent from an adapter to its subnet broadcast or to an address you type (a directed
   broadcast such as `192.0.2.255`). It is a command: Low, Medium for a Prod target, audited.
+- **Keep checking this…** (0.9.0): a Ping, Check ports, Certificate or DNS lookup result opens the health check editor
+  on the dashboard's Checks tab, filled in with what the tool just ran: a ping check, a TCP check of a port you pick
+  from those checked, a certificate check on the same port and server name, or a DNS check of an A or AAAA record at
+  the same server (expecting the address it found when there was only one). A certificate this PC doesn't trust, or
+  one naming another host, is still checked strictly by default: the editor says the check will be down until you
+  allow it. The button is off, with the reason, for what a check can't take (a lookup of an address rather than a
+  name, a name with letters outside ASCII) and while the read-only lock is on. Nothing is saved until you add the check.
 
 ### Dashboard: history, alerts and layout
 
@@ -1320,8 +1327,20 @@ local storage, and offers none while presenting.
   a VM stopped without a Remotely action, a watched host's disk above 85% for 5 minutes, a watched host unreachable for
   5 minutes, this PC's memory above 90% for 5 minutes; off until you turn them on: a VM's CPU above 90% for 5 minutes,
   a VM's memory above 95% for 10 minutes and a watched host's CPU above 90% for 5 minutes (builds and caches push these
-  high on purpose). The Rules button on the alert list edits them. Rule changes and acknowledgements are audited, and
-  the read-only lock refuses them. Desktop only: no email, Teams or Slack.
+  high on purpose). The rules open from the alert list's **Rules**, from **Alert rules…** in the dashboard's "⋯" on the
+  Metrics tab and from **Alert rules** in Ctrl+K, so removing the Alerts widget leaves them reachable. Rule changes and
+  acknowledgements are audited, and the read-only lock refuses them. Desktop only: no email, Teams or Slack.
+- **Monitor** (0.9.0): a session's row menu (the Sessions page and the Terminal page's tree), the radar button in a
+  VM's details and a VM's or session's actions in Ctrl+K have **Monitor**: **Watch its metrics** (or **Stop watching**)
+  and **Add a check**, each with a line on what it costs. Watching keeps a login to the host open and reads it every
+  few seconds (Settings, Dashboard sets how often), as **Watch hosts** on the dashboard does; a VM is watched through
+  an SSH or WinRM session linked to it, and the item says why not when it has none. A watched session can always be
+  stopped, even after it was changed into another kind. **Add a check** opens the health check editor on the
+  dashboard's Checks tab, filled in with the row; a check probes from this PC every minute unless you choose otherwise,
+  and a session behind a jump host is checked through it, which keeps a login to the jump host open between runs (for
+  checks every 10 minutes or more often). While the read-only lock is on, **Add a check** says so and is off. Watching
+  is audited as before, with no approval; a new check is audited when you add it. "Add a check" is no longer in the
+  Toolbox menu.
 - **Layout** (MO-16): **Customize** adds, removes, moves and resizes the widgets (the overview grid, host capacity,
   this PC's memory, the alerts, a watched host's services, and charts of a VM, a watched host or this PC) on a grid of
   four columns: drag a widget's handle or press the arrow keys on it, drag its corner or pick its size. **Save** keeps
@@ -1348,8 +1367,9 @@ local storage, and offers none while presenting.
   or have a tunnel open; a switch shows the rest. Opening the map reads no VM file it has read before; **Read the VMs
   again** reads every one. Presentation mode masks the map like every other page.
 - **Status bar** (QL-22): along the bottom, the vault's lock countdown, the jobs running, the tunnels open, the open
-  alerts and the update state; each opens what it is about. It reads nothing on its own: the countdown starts again
-  each time you type or click.
+  alerts and the update state; each opens what it is about (the alerts open the dashboard's Alerts widget, or the
+  alert rules when the dashboard has no Alerts widget). It reads nothing on its own: the countdown starts again each
+  time you type or click.
 - **Notification centre** (QL-25): the bell at the right of the status bar lists what notified since Remotely started:
   metric alerts (fired and resolved), terminal alert rules, long commands that finished, jobs that finished or failed,
   an update, and toasts worth keeping (protected targets skipped, a VM still running after its shutdown, a canary
