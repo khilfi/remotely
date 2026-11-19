@@ -3,9 +3,13 @@
 // targets (sessions, VMs through their linked sessions, tags, filters). Each runs as one job through the approval
 // rules (a push asks once, and for the full approval from 5 hosts; a fetch from a Prod host asks once), and its results
 // show like Compare hosts': hosts that got or hold the same bytes grouped, and two groups diffed.
+//
+// UX-15 (0.9.0 H1): files dropped on this tab from Explorer fill the push's list (`data-files-drop="many"`,
+// lib/drop-target.ts). Fetch leads to the support bundle (many files and commands from each host, in one zip), and the
+// bundle dialog back here, each with the hosts picked.
 
-import { useEffect, useState } from "react";
-import { DownloadIcon, FileUpIcon, UploadIcon } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { ArchiveIcon, DownloadIcon, FileUpIcon, UploadIcon } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -28,6 +32,7 @@ import {
 import { READ_ONLY_REASON } from "@/lib/disabled-reasons";
 import { plural } from "@/lib/format";
 import { filesPageApi, type FetchTo, type LocalListing, type PushFrom } from "@/lib/files-page-api";
+import { requestLink } from "@/lib/links";
 import { readOnlyLocked } from "@/lib/presentation-state";
 
 interface Props {
@@ -35,17 +40,36 @@ interface Props {
   /** The local pane's folder and what is picked there. */
   local: LocalListing | null;
   localPicked: string[];
+  /** UX-15: files dropped on this tab from Explorer, for the push; `n` counts the drops. */
+  dropped?: { staged: StagedFiles; n: number } | null;
+  /** UX-15: opened from the support bundle dialog: fetch, on these picks. */
+  request?: { mode: Mode; picks?: TargetPicks; n: number } | null;
   onSubmitted: (outcome: SubmitOutcome, onJob: (jobId: string) => void) => void;
   onOpenSessions: () => void;
 }
 
-type Mode = "push" | "fetch";
+export type Mode = "push" | "fetch";
 
-export function ManyHostsView({ active, local, localPicked, onSubmitted, onOpenSessions }: Props) {
+export function ManyHostsView({
+  active,
+  local,
+  localPicked,
+  dropped = null,
+  request = null,
+  onSubmitted,
+  onOpenSessions,
+}: Props) {
   const presentation = usePresentation();
-  const [picks, setPicks] = useState<TargetPicks>({});
+  const [picks, setPicks] = useState<TargetPicks>(request?.picks ?? {});
   const [resolved, setResolved] = useState<ResolvedTargets | null>(null);
-  const [mode, setMode] = useState<Mode>("push");
+  const [mode, setMode] = useState<Mode>(request?.mode ?? "push");
+  // A request from elsewhere (the support bundle dialog), once per ask.
+  const [handledRequest, setHandledRequest] = useState(request?.n ?? 0);
+  if (request && request.n !== handledRequest) {
+    setHandledRequest(request.n);
+    setMode(request.mode);
+    if (request.picks) setPicks(request.picks);
+  }
   const [folder, setFolder] = useState("");
   const [replace, setReplace] = useState(false);
   const [path, setPath] = useState("");
@@ -90,21 +114,39 @@ export function ManyHostsView({ active, local, localPicked, onSubmitted, onOpenS
           ? "Type the file's full path on the hosts, such as /etc/hosts"
           : null;
 
+  /** The push's files: chosen in the dialog or dropped here, in place of what was chosen before. */
+  function take(next: StagedFiles, verb: "pick" | "drop") {
+    if (staged && staged.id !== next.id) void api.filesUnstage(staged.id).catch(() => undefined);
+    if (next.files.some((f) => f.folder)) {
+      void api.filesUnstage(next.id).catch(() => undefined);
+      setStaged(null);
+      toast.error(`A push sends files: ${verb} files, not folders.`);
+      return;
+    }
+    setMode("push");
+    setStaged(next);
+  }
+
   async function choose() {
     try {
       const next = await filesPageApi.pickPush();
-      if (!next) return;
-      if (staged) void api.filesUnstage(staged.id).catch(() => undefined);
-      if (next.files.some((f) => f.folder)) {
-        void api.filesUnstage(next.id).catch(() => undefined);
-        toast.error("A push sends files: pick files, not folders.");
-        return;
-      }
-      setStaged(next);
+      if (next) take(next, "pick");
     } catch (err) {
       toast.error(errorMessage(err));
     }
   }
+
+  // UX-15: files from Explorer dropped on this tab fill the push's list.
+  const takeRef = useRef(take);
+  useEffect(() => {
+    takeRef.current = take;
+  });
+  const seenDrop = useRef(dropped?.n ?? 0);
+  useEffect(() => {
+    if (!dropped || dropped.n === seenDrop.current) return;
+    seenDrop.current = dropped.n;
+    takeRef.current(dropped.staged, "drop");
+  }, [dropped]);
 
   async function go(to?: FetchTo) {
     setBusy(true);
@@ -125,7 +167,7 @@ export function ManyHostsView({ active, local, localPicked, onSubmitted, onOpenS
   }
 
   return (
-    <div className="@container min-h-0 flex-1 overflow-auto">
+    <div className="@container min-h-0 flex-1 overflow-auto" data-files-drop="many">
       <div className="grid gap-4 @4xl:grid-cols-[minmax(0,1fr)_minmax(0,1.2fr)]">
         <div className="grid content-start gap-4">
           <BulkTargetPicker
@@ -167,7 +209,7 @@ export function ManyHostsView({ active, local, localPicked, onSubmitted, onOpenS
                     ? `${plural(staged.files.length, "file")} chosen`
                     : localFiles.length > 0
                       ? `${plural(localFiles.length, "file")} picked on this PC's side`
-                      : "or pick files on this PC's side"}
+                      : "or pick files on this PC's side, or drop them here from Explorer"}
                 </span>
                 {staged && (
                   <Button
@@ -250,6 +292,18 @@ export function ManyHostsView({ active, local, localPicked, onSubmitted, onOpenS
             <p className="text-xs text-muted-foreground">
               Each host's file goes into a folder of its own under <span className="font-mono">{local.path}</span>.
             </p>
+          )}
+          {mode === "fetch" && (
+            <div>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => requestLink({ kind: "bundle", sessionIds: resolved?.hosts.map((h) => h.sessionId) })}
+              >
+                <ArchiveIcon data-icon="inline-start" />
+                Collect a support bundle instead…
+              </Button>
+            </div>
           )}
           {jobId && (
             <div className="rounded-lg border p-3">

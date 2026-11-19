@@ -32,6 +32,13 @@ export function isToolboxTool(value: unknown): value is ToolboxTool {
 }
 
 /** What a tool is pointed at, with the name to show for a session or VM. */
+/** UX-15 (0.9.0 H1): what the file server is to serve, a pick the core keeps: its token, the path shown, a folder or not. */
+export interface ServePick {
+  token: string;
+  path: string;
+  folder: boolean;
+}
+
 export type ToolTarget =
   | { kind: "address"; host: string }
   | { kind: "session"; sessionId: string; label: string }

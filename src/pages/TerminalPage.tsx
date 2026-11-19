@@ -99,8 +99,8 @@ import { EmptyState } from "@/components/EmptyState";
 import { PageHeader } from "@/components/PageHeader";
 import { Tip } from "@/components/Tip";
 import { ComparePanel, type CompareView } from "@/components/ComparePanel";
-import { FilesDrawer } from "@/components/FilesDrawer";
-import { publishPanes } from "@/lib/open-panes";
+import { DRAWER_KEY, FilesDrawer } from "@/components/FilesDrawer";
+import { onEditorTabRequest, publishPanes } from "@/lib/open-panes";
 import { HostDetailsSheet } from "@/components/HostDetailsSheet";
 import { HostKeyDialog } from "@/components/HostKeyDialog";
 import { MultiExecBar, type MultiExecNote } from "@/components/MultiExecBar";
@@ -142,7 +142,7 @@ import {
   type VaultInfo,
   type VmRecord,
 } from "@/lib/api";
-import { dropTarget, readDropSpot, type DropPlaces } from "@/lib/drop-target";
+import { dropTarget, hostDropLabel, readDropSpot, type DropHost, type DropPlaces } from "@/lib/drop-target";
 import { rulesForPane } from "@/lib/highlight-rules";
 import { alertNotification, recordAlert } from "@/lib/terminal-alerts";
 import { fromCommandFinished, fromTerminalAlert } from "@/lib/notifications";
@@ -1496,6 +1496,28 @@ export function TerminalPage({
     }
   }
 
+  /** SS-14 (G4): an editor job's own tab, named after the file; UX-14 (H1): the Files page's edits open here too. */
+  function openEditorTab(jobId: string, title: string) {
+    const tab = addTab(createPane({ kind: "editor", jobId }, title, true));
+    setActiveTab(tab);
+  }
+  const editorTabRef = useRef(openEditorTab);
+  useEffect(() => {
+    editorTabRef.current = openEditorTab;
+  });
+  useEffect(() => onEditorTabRequest((jobId, title) => editorTabRef.current(jobId, title)), []);
+
+  /** UX-14 (H1): the folder the drawer shows, for drops on it; set as it lists, without a render. */
+  const drawerPlace = useRef<DropHost | null>(null);
+  /** What on this page takes a drop: every pane by its shell's folder, and the drawer while it shows. */
+  const dropPlacesRef = useRef<() => DropPlaces>(() => ({}));
+  useEffect(() => {
+    dropPlacesRef.current = () => ({
+      panes: everyPane.map((p) => ({ key: p.key, folder: p.getSnapshot().folder?.path ?? null })),
+      hosts: filesShown && drawerPlace.current ? [drawerPlace.current] : [],
+    });
+  });
+
   // Files dropped on the window: the shell staged them and says where they fell.
   const dropRef = useRef<(dropped: DroppedFiles) => void>(() => undefined);
   useEffect(() => {
@@ -1510,11 +1532,9 @@ export function TerminalPage({
       }
       // VM-23: the page on screen owns a drop (an ISO dropped on the Virtual machines page is that page's).
       if (!dropped.staged || !active) return;
-      // UX-14 (H1): lib/drop-target.ts chooses; a pane takes its drop into its shell folder, never as root.
-      const places: DropPlaces = {
-        panes: everyPane.map((p) => ({ key: p.key, folder: p.getSnapshot().folder?.path ?? null })),
-      };
-      const target = dropTarget(readDropSpot(dropped.x, dropped.y), places);
+      // UX-14 (H1): lib/drop-target.ts chooses. A pane takes its drop into its shell folder, never as root; the
+      // drawer into the folder it shows (as root when it browses so).
+      const target = dropTarget(readDropSpot(dropped.x, dropped.y), dropPlacesRef.current());
       const pane =
         target.kind === "terminal"
           ? everyPane.find((p) => p.key === target.paneKey)
@@ -1530,7 +1550,7 @@ export function TerminalPage({
     };
   });
 
-  // While files are dragged over the window, the pane under them says where they would go.
+  // While files are dragged over the window, the pane (or the drawer) under them says where they would go.
   const dropLabelRef = useRef<(key: string | undefined) => string>(() => "");
   useEffect(() => {
     dropLabelRef.current = (key) => {
@@ -1552,12 +1572,25 @@ export function TerminalPage({
         return;
       }
       const scale = window.devicePixelRatio || 1;
-      const under = document.elementFromPoint(p.position.x / scale, p.position.y / scale);
-      const el = under?.closest<HTMLElement>("[data-pane-key]") ?? null;
-      if (el === marked) return;
+      const [x, y] = [p.position.x / scale, p.position.y / scale];
+      const under = document.elementFromPoint(x, y) as HTMLElement | null;
+      const pane = under?.closest<HTMLElement>("[data-pane-key]") ?? null;
+      // UX-14: the drawer says where a drop would go too (the folder shown, or the folder row under the files).
+      const files = pane ? null : (under?.closest<HTMLElement>(`[data-files-tab="${DRAWER_KEY}"]`) ?? null);
+      let label: string | null = null;
+      if (pane) label = dropLabelRef.current(pane.dataset.paneKey);
+      else if (files) {
+        const target = dropTarget(
+          readDropSpot(x, y, () => under),
+          dropPlacesRef.current(),
+        );
+        label = target.kind === "host" ? hostDropLabel(target) : "Open a folder first: nothing can be uploaded here";
+      }
+      const el = pane ?? files;
+      if (el === marked && el?.getAttribute("data-drop") === label) return;
       clear();
-      if (el) {
-        el.setAttribute("data-drop", dropLabelRef.current(el.dataset.paneKey));
+      if (el && label) {
+        el.setAttribute("data-drop", label);
         marked = el;
       }
     });
@@ -1589,8 +1622,6 @@ export function TerminalPage({
   const drawer = (
     <FilesDrawer
       terminalId={currentPane?.terminalId ?? null}
-      snapshot={currentSnapshot}
-      name={currentPane ? nameOf(currentPane) : "No terminal"}
       multiExecTerminals={multiExec ? pickedPanes.length : 0}
       onUpload={(folder, asRoot, pick) => void pickAndUpload(currentPane, folder, asRoot, pick)}
       onDownload={(paths, to, asRoot) => {
@@ -1598,12 +1629,9 @@ export function TerminalPage({
       }}
       onRetry={(t) => void retryTransfer(t)}
       onSubmitted={onSubmitted}
-      onEditorJob={(jobId, title) => {
-        // SS-14 (G4): the editor's own tab, named after the file.
-        const tab = addTab(createPane({ kind: "editor", jobId }, title, true));
-        setActiveTab(tab);
-      }}
+      onEditorJob={openEditorTab}
       doubleClick={doubleClick}
+      onPlace={(place) => (drawerPlace.current = place)}
     />
   );
 

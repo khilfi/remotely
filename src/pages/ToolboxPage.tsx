@@ -1,6 +1,7 @@
 // FD-09: the Toolbox, in the sidebar's Remote group. A tab per tool: Ping, Trace route, DNS lookup, Check ports,
 // Certificate, Subnet calculator, Wake up and File server. Session and VM row menus open a tool with their target
-// filled in, through a `toolbox` link (lib/links.ts); the palette opens the page.
+// filled in, through a `toolbox` link (lib/links.ts); the palette opens the page. UX-15 (0.9.0 H1): the Files page's This
+// PC rows open the file server with what they serve filled in (a pick the core keeps).
 //
 // Every tool but Wake up and File server only reads (no tier, not audited, allowed while presenting with the read-only
 // lock). Each tab keeps its last 20 inputs in the window's local storage (lib/toolbox.ts); the file server keeps its
@@ -26,13 +27,22 @@ import { DnsTool, PingTool, PortsTool, TraceTool, type Incoming } from "@/compon
 import { SubnetTool } from "@/components/toolbox/SubnetTool";
 import { WakeTool } from "@/components/toolbox/WakeTool";
 import type { SubmitOutcome } from "@/lib/api";
-import { recentScope, setRecentScope, TOOLBOX_TOOLS, type ToolboxTool, type ToolTarget } from "@/lib/toolbox";
+import {
+  recentScope,
+  setRecentScope,
+  TOOLBOX_TOOLS,
+  type ServePick,
+  type ToolboxTool,
+  type ToolTarget,
+} from "@/lib/toolbox";
 import { workspacesApi } from "@/lib/workspaces-api";
 
 /** A tool asked for from a row, a link or the palette; `n` counts the asks. */
 export interface ToolboxRequest {
   tool: ToolboxTool;
   target?: ToolTarget;
+  /** UX-15: what the file server is to serve (the Files page's This PC pane). */
+  serve?: ServePick;
   n: number;
 }
 
@@ -64,6 +74,16 @@ function cleanTarget(target: unknown): ToolTarget | null {
   return null;
 }
 
+/** A pick from a link only when it is one. */
+function cleanServe(serve: unknown): ServePick | null {
+  if (typeof serve !== "object" || serve === null) return null;
+  const s = serve as Record<string, unknown>;
+  const text = (v: unknown) => typeof v === "string" && v.length > 0 && v.length <= 4096;
+  return text(s.token) && text(s.path) && typeof s.folder === "boolean"
+    ? { token: s.token as string, path: s.path as string, folder: s.folder }
+    : null;
+}
+
 interface Props {
   /** True while the page is shown: Wake up reads this PC's adapters only then (P6). */
   active: boolean;
@@ -84,6 +104,10 @@ export function ToolboxPage({ active, request, onSubmitted }: Props) {
   const [tab, setTab] = useState<ToolboxTool>(request?.tool ?? "ping");
   const [handled, setHandled] = useState(request?.n ?? 0);
   // What each tool was handed last, so each tab takes only its own.
+  const [serve, setServe] = useState<{ pick: ServePick; n: number } | null>(() => {
+    const pick = cleanServe(request?.serve);
+    return request && pick ? { pick, n: request.n } : null;
+  });
   const [incoming, setIncoming] = useState<Partial<Record<ToolboxTool, Incoming>>>(() => {
     const target = cleanTarget(request?.target);
     return request && target ? { [request.tool]: { target, n: request.n } } : {};
@@ -93,6 +117,8 @@ export function ToolboxPage({ active, request, onSubmitted }: Props) {
     setTab(request.tool);
     const target = cleanTarget(request.target);
     if (target) setIncoming((prev) => ({ ...prev, [request.tool]: { target, n: request.n } }));
+    const pick = cleanServe(request.serve);
+    if (pick) setServe({ pick, n: request.n });
   }
 
   return (
@@ -137,7 +163,7 @@ export function ToolboxPage({ active, request, onSubmitted }: Props) {
           <WakeTool incoming={incoming.wake ?? null} shown={active && tab === "wake"} onSubmitted={onSubmitted} />
         </TabsContent>
         <TabsContent value="fileServer" forceMount className="data-[state=inactive]:hidden">
-          <FileServerTool shown={active && tab === "fileServer"} onSubmitted={onSubmitted} />
+          <FileServerTool shown={active && tab === "fileServer"} serve={serve} onSubmitted={onSubmitted} />
         </TabsContent>
       </Tabs>
     </div>

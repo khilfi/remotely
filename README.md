@@ -926,6 +926,13 @@ SS-08: files go up and down over SFTP on each terminal's own SSH connection, so 
   (sh, fish, network gear) get nothing typed: the drawer starts in the home folder, and you open folders by
   double-clicking, the breadcrumb, Up, Home, Back or a typed path. Sort by name, size or date; tick files to download
   them.
+- **One file pane** (UX-14, 0.9.0): the drawer is the Files page's host pane in a compact form, so a file has the same
+  "⋯" menu in both places (edit in the terminal or on this PC, preview, SHA-256 checksum, download, rename, move, copy,
+  permissions, owner, delete), with find, bookmarks and Browse as root. Root browsing started in one place shows in
+  the other. Expand (the drawer's "⋯") opens the Files page at the same folder.
+- **Double-click** (UX-14): Settings › Terminal › Files has one setting for the drawer and the Files page: edit the file
+  in the terminal on the host (the default) or on this PC. When that can't be done (the host has no editor Remotely
+  knows, a link, the read-only lock), a double-click previews the file instead; Preview is also in the "⋯" menu.
 - **A folder that can't be opened** (QL-09), say one only another user may read: the drawer keeps its path in the path
   box and the breadcrumb, says why (`alice can't open the folder /home/bob/.app on the host (permission denied)`), and
   Up, Home, Back (to the last folder that opened), the breadcrumb, a typed path (relative paths go on from the folder
@@ -947,7 +954,9 @@ SS-08: files go up and down over SFTP on each terminal's own SSH connection, so 
   (ZoneId=3, without the host's name), so SmartScreen and Office's Protected View treat it as one; on a FAT or exFAT
   drive, which can't hold the mark, the transfers list says so.
 - **Upload**: drop files on a terminal, or use the upload button (toolbar or drawer). They go into the terminal's
-  folder (the drawer's upload goes into the folder it shows). Uploads are changes, so they go through the command bus:
+  folder (the drawer's upload goes into the folder it shows). Files dropped on a terminal always go into its folder (or
+  its home folder), never as root, whatever the drawer shows. Files dropped on the drawer (UX-14) go into the folder it
+  shows, or the folder row they fall on, as root (one tier higher) while it browses as root. Uploads are changes, so they go through the command bus:
   Low, a Prod session raises it one tier, and a file that is there already is replaced only after you say so and
   confirm (replacing is at least Medium; Settings won't take less). Files are written as the logged-in user and never
   with sudo: a folder you can't write to fails with a message saying so. Each uploaded file is audited with its name,
@@ -957,6 +966,11 @@ SS-08: files go up and down over SFTP on each terminal's own SSH connection, so 
   the host; a file being replaced stays as it was (see [Safer operations on hosts](#safer-operations-on-hosts)).
 - With MultiExec on, uploads and downloads still go through one terminal: the current one. ZMODEM (`sz`/`rz`) is not
   supported.
+- **The Files page** (UX-15, 0.9.0) opens on its first host tab, or on "No host open" with "Open a host"; Many hosts is
+  a tab beside them. Files dropped from Explorer on Many hosts fill its push. Its fetch offers "Collect a support bundle
+  instead…" (many files and commands from each host in one zip), and the support bundle dialog offers "Fetch one file
+  from each…", each with the same hosts. A file or folder of This PC's "⋯" has "Serve this over TFTP or HTTP…", which
+  opens the Toolbox's file server with it filled in; starting the server asks for approval as it always does.
 
 ### Jump hosts and tunnels
 

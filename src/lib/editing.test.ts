@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   applyEdit,
+  doubleClickAction,
   doubleClickTitle,
   editInTerminalLabel,
   editInTerminalReason,
@@ -42,18 +43,41 @@ test("a file's name is its path's last part", () => {
 });
 
 test("a double-click says what it does, as the setting and the host's editors say", () => {
-  assert.equal(doubleClickTitle(undefined, null), "Double-click to edit in the terminal");
   assert.equal(
-    doubleClickTitle("terminalEditor", editors(["nano", "vi"], "nano")),
+    doubleClickTitle("editTerminal", "terminalEditor", editors(["nano", "vi"], "nano")),
     "Double-click to edit in nano on the host",
   );
-  assert.equal(doubleClickTitle("thisPc", editors(["nano"], "nano")), "Double-click to edit on this PC");
-  assert.match(doubleClickTitle("terminalEditor", editors([], null)), /no terminal editor/);
+  assert.equal(doubleClickTitle("editPc", "thisPc", editors(["nano"], "nano")), "Double-click to edit on this PC");
+  assert.match(doubleClickTitle("preview", "terminalEditor", editors([], null)), /preview .*no terminal editor/);
+  assert.equal(doubleClickTitle("preview", "terminalEditor", null), "Double-click to preview");
   assert.equal(editInTerminalLabel(editors(["vim"], "vim")), "Edit in vim");
   assert.equal(editInTerminalLabel(null), "Edit in the terminal");
   assert.equal(editInTerminalReason(editors(["vi"], "vi")), null);
   assert.match(editInTerminalReason(editors([], null)) ?? "", /on this PC instead/);
   assert.equal(editInTerminalReason(null), null, "not known yet: the core says when it opens");
+});
+
+test("UX-14: a double-click does what Settings says when it can, else previews", () => {
+  const nano = editors(["nano"], "nano");
+  const file = { link: false };
+  const link = { link: true };
+  const here = { asRoot: false, canChange: true };
+  const root = { asRoot: true, canChange: true };
+  // The default: a terminal editor the host has.
+  assert.equal(doubleClickAction("terminalEditor", nano, file, here), "editTerminal");
+  assert.equal(doubleClickAction(undefined, nano, file, root), "editTerminal");
+  // No editor known: not read yet, or the host has none.
+  assert.equal(doubleClickAction("terminalEditor", null, file, here), "preview");
+  assert.equal(doubleClickAction("terminalEditor", editors([], null), file, here), "preview");
+  // sudoedit edits no link.
+  assert.equal(doubleClickAction("terminalEditor", nano, link, root), "preview");
+  assert.equal(doubleClickAction("terminalEditor", nano, link, here), "editTerminal");
+  // Edit on this PC, never through a link.
+  assert.equal(doubleClickAction("thisPc", null, file, root), "editPc");
+  assert.equal(doubleClickAction("thisPc", nano, link, here), "preview");
+  // Changes off (the read-only lock): a read.
+  assert.equal(doubleClickAction("thisPc", nano, file, { asRoot: false, canChange: false }), "preview");
+  assert.equal(doubleClickAction("terminalEditor", nano, file, { asRoot: false, canChange: false }), "preview");
 });
 
 test("a session's saves, time left and state are in words", () => {

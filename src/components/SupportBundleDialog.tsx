@@ -2,11 +2,12 @@
 // confirmed link), presets and custom commands and files, and the run's options (sudo from the vault, a time limit
 // per host, one host first, a stop after failures). Collect opens the shell's save dialog for the zip, then the app's
 // approval dialog asks what the tier needs (the presets only read: Low, Medium on Prod). Each host's progress shows
-// live; once the job ends, Show folder opens Explorer at the zip.
+// live; once the job ends, Show folder opens Explorer at the zip. UX-15 (0.9.0 H1): "Fetch one file from each…" opens
+// the Files page's Many hosts fetch on the same picks, and that fetch links back here.
 
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
-import { ChevronRightIcon, FolderOpenIcon, KeyRoundIcon, PackageIcon } from "lucide-react";
+import { ChevronRightIcon, FolderInputIcon, FolderOpenIcon, KeyRoundIcon, PackageIcon } from "lucide-react";
 import { Alert, AlertAction, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -46,6 +47,7 @@ import {
   type VaultInfo,
 } from "@/lib/api";
 import { plural } from "@/lib/format";
+import { requestLink } from "@/lib/links";
 import { readOnlyLocked } from "@/lib/presentation-state";
 import { compareOptionsSummary, parseStopAfter } from "@/lib/rollout";
 import {
@@ -534,6 +536,22 @@ export function SupportBundleDialog({ sessionIds, vault, onSubmit, onOpenSession
           </p>
         )}
         <DialogFooter>
+          {!jobId && (
+            // UX-15: one file from each host is the Files page's fetch, on the same picks (SSH hosts only).
+            <Button
+              type="button"
+              variant="ghost"
+              className="sm:mr-auto"
+              disabled={busy}
+              onClick={() => {
+                requestLink({ kind: "files", many: "fetch", picks: { ...picks, winrm: false } });
+                onClose();
+              }}
+            >
+              <FolderInputIcon data-icon="inline-start" />
+              Fetch one file from each…
+            </Button>
+          )}
           <Button type="button" variant="outline" onClick={onClose} disabled={busy}>
             {jobId ? "Close" : "Cancel"}
           </Button>

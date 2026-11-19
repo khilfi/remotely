@@ -2,7 +2,8 @@
 //! it and the dialogs that choose what is served and where uploads go.
 //!
 //! * The served file or folder and the upload folder are chosen in dialogs opened here and kept by the core, which
-//!   hands the window a token for each (`file_server_pick`): no path comes back from the window.
+//!   hands the window a token for each (`file_server_pick`): no path comes back from the window. UX-15: or the Files
+//!   page's This PC pane names a file or folder by its listing (`file_server_pick_listed`), and gets a token the same way.
 //! * Starting is a command on the bus that the core builds after checking the folders and the address
 //!   (`file_server_start`): Medium serving, High with uploads; the approval dialog answers it like any other.
 //! * Stop, the status (the running server, or the last one in this workspace) and `fileserver://event` (started,
@@ -93,6 +94,30 @@ pub async fn file_server_pick(
         .into_path()
         .map_err(|err| CoreError::InvalidInput(format!("can't use that: {err}")))?;
     Ok(Some(core.file_server.remember_pick(&ctx, purpose, path).await?))
+}
+
+/// UX-15 (0.9.0 H1): "Serve this over TFTP or HTTP…" on a file or folder of the Files page's This PC pane. The window
+/// names it by its listing and name there, never by a path (`LocalFiles::paths_of`, which refuses links); the core
+/// checks and keeps it like a dialog's choice, and the window gets its token for the File server tab. Uploads' folder
+/// is only ever chosen in that tab's dialog.
+#[tauri::command]
+pub async fn file_server_pick_listed(
+    state: State<'_, AppState>,
+    listing: Uuid,
+    name: String,
+    purpose: PickFor,
+) -> IpcResult<PickedPath> {
+    if purpose == PickFor::Uploads {
+        return Err(CoreError::InvalidInput("The uploads folder is chosen in the File server tab.".into()).into());
+    }
+    let core = &state.core;
+    let path = core
+        .local_files
+        .paths_of(listing, std::slice::from_ref(&name))?
+        .into_iter()
+        .next()
+        .ok_or_else(|| CoreError::InvalidInput(format!("'{name}' is not in that folder.")))?;
+    Ok(core.file_server.remember_pick(&core.ctx(), purpose, path).await?)
 }
 
 /// Checks the choices against this PC (the paths from the picks' tokens or this workspace's last choices) and submits

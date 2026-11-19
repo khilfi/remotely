@@ -65,6 +65,25 @@ export function filePanes(list: readonly OpenPane[]): OpenPane[] {
   return list.filter((p) => p.ssh && p.terminalId !== null);
 }
 
+/** UX-14 (0.9.0 H1): an editor tab asked for by the Files page ("Edit in the terminal"), which the Terminal page opens. */
+export type EditorTabHandler = (jobId: string, title: string) => void;
+let editorTabs: EditorTabHandler | null = null;
+
+/** The Terminal page's side: it opens the tab of an editor job. Returns the unsubscribe. */
+export function onEditorTabRequest(handler: EditorTabHandler): () => void {
+  editorTabs = handler;
+  return () => {
+    if (editorTabs === handler) editorTabs = null;
+  };
+}
+
+/** Opens an editor job's tab on the Terminal page; false when no Terminal page listens. */
+export function requestEditorTab(jobId: string, title: string): boolean {
+  if (!editorTabs) return false;
+  editorTabs(jobId, title);
+  return true;
+}
+
 /** Tests only. */
 export function resetPanes() {
   panes = [];

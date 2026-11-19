@@ -1,6 +1,6 @@
-// SS-14, SS-08 (0.8.0 G4): pure helpers for editing a host's files from Files here: what a double-click does, the
-// editing sessions list's words, and keeping that list up to date from `files://edit` events. Tested in
-// editing.test.ts.
+// SS-14, SS-08 (0.8.0 G4): pure helpers for editing a host's files from Files here and (UX-14, 0.9.0 H1) the Files
+// page alike: what a double-click does, the editing sessions list's words, and keeping that list up to date from
+// `files://edit` events. Tested in editing.test.ts.
 
 import type { FileDoubleClick } from "./api.ts";
 import type { EditInfo, EditState, HostEditors } from "./editing-api.ts";
@@ -11,11 +11,43 @@ export function fileName(path: string): string {
   return parts[parts.length - 1] ?? path;
 }
 
+/** What a double-click on a file does. */
+export type DoubleClickAction = "editTerminal" | "editPc" | "preview";
+
+/**
+ * UX-14 (0.9.0 H1): what a double-click on a file does, in Files here and on the Files page alike: Settings' choice
+ * when it can be done, else a preview (a read). A terminal editor needs one the host is known to have; a link is never
+ * edited on this PC, nor as root (sudoedit edits none); and while changes are off (the read-only lock, a folder that
+ * couldn't be opened) it previews.
+ */
+export function doubleClickAction(
+  setting: FileDoubleClick | undefined,
+  editors: HostEditors | null,
+  file: { link: boolean },
+  place: { asRoot: boolean; canChange: boolean },
+): DoubleClickAction {
+  if (!place.canChange) return "preview";
+  if (setting === "thisPc") return file.link ? "preview" : "editPc";
+  if (place.asRoot && file.link) return "preview";
+  return editors?.uses ? "editTerminal" : "preview";
+}
+
 /** The row's tooltip for a file: what a double-click does. */
-export function doubleClickTitle(setting: FileDoubleClick | undefined, editors: HostEditors | null): string {
-  if (setting === "thisPc") return "Double-click to edit on this PC";
-  if (editors && !editors.uses) return "Double-click: the host has no terminal editor Remotely knows";
-  return editors?.uses ? `Double-click to edit in ${editors.uses} on the host` : "Double-click to edit in the terminal";
+export function doubleClickTitle(
+  action: DoubleClickAction,
+  setting: FileDoubleClick | undefined,
+  editors: HostEditors | null,
+): string {
+  switch (action) {
+    case "editPc":
+      return "Double-click to edit on this PC";
+    case "editTerminal":
+      return `Double-click to edit in ${editors?.uses ?? "the terminal"} on the host`;
+    case "preview":
+      return setting !== "thisPc" && editors && !editors.uses
+        ? "Double-click to preview (the host has no terminal editor Remotely knows)"
+        : "Double-click to preview";
+  }
 }
 
 /** "Edit in nano", or the plain words before the host's editors are known. */

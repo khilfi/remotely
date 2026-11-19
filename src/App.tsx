@@ -802,16 +802,31 @@ export default function App() {
           setNoteTarget({ kind: link.noteKind, key: link.key, title: link.title });
           break;
         case "toolbox":
-          setToolboxRequest((prev) => ({ tool: link.tool, target: link.target, n: (prev?.n ?? 0) + 1 }));
+          setToolboxRequest((prev) => ({
+            tool: link.tool,
+            target: link.target,
+            serve: link.serve,
+            n: (prev?.n ?? 0) + 1,
+          }));
           setPage("toolbox");
           break;
         case "files":
-          setFilesRequest((prev) => ({ terminalId: link.terminalId, path: link.path, n: (prev?.n ?? 0) + 1 }));
+          setFilesRequest((prev) => ({
+            terminalId: link.terminalId,
+            path: link.path,
+            many: link.many,
+            picks: link.picks,
+            n: (prev?.n ?? 0) + 1,
+          }));
           setPage("files");
+          break;
+        case "bundle":
+          // UX-15: from Many hosts' fetch, on the hosts it picked.
+          openSupportBundle(link.sessionIds?.filter((id) => typeof id === "string") ?? []);
           break;
       }
     },
-    [go, openVms, openSchedules, openVmsPanel],
+    [go, openVms, openSchedules, openVmsPanel, openSupportBundle],
   );
 
   // UX-04: links from components without an onOpenLink prop (a HelpTip's "Open the setting").
