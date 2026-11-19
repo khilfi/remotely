@@ -12,8 +12,9 @@
 // VM the session reaches makes it Prod) and where it comes from when it is not the session's own.
 // 0.7.0: QL-28 rows can be selected (the selection bar's Edit changes them all at once, and FD-04 its Support bundle
 // collects from the SSH ones), QL-26 a star on each row, FD-06 a session's and a folder's note in their menus, and
-// QL-27 a delete's toast offers Undo (the item is in the trash). UX-19 (0.9.0): a row's Monitor ▸ watches its metrics
-// or adds a health check, beside its Toolbox ▸.
+// QL-27 a delete's toast offers Undo (the item is in the trash). 0.9.0 BX-01, UX-16: the selection bar's "Run a
+// command on these…" opens the Terminal page's Compare hosts with the SSH and WinRM sessions picked. UX-19 (0.9.0): a
+// row's Monitor ▸ watches its metrics or adds a health check, beside its Toolbox ▸.
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
@@ -25,6 +26,7 @@ import {
   FolderIcon,
   FolderOpenIcon,
   FolderPlusIcon,
+  GitCompareArrowsIcon,
   ImportIcon,
   KeyRoundIcon,
   LaptopIcon,
@@ -87,9 +89,11 @@ import {
   type SessionFolder,
   type SessionRecord,
   type Tag,
+  type TargetPicks,
   type VaultInfo,
   type VmRecord,
 } from "@/lib/api";
+import { selectionPicks } from "@/lib/bulk-picks";
 import { flattenFolders, folderPath, subtree } from "@/lib/folders";
 import { formatWhen, plural } from "@/lib/format";
 import { requestLink } from "@/lib/links";
@@ -117,6 +121,8 @@ interface Props {
   onExportAnsible: (sessionIds: string[]) => void;
   /** FD-05: the inventory to Excel. */
   onExportInventory: () => void;
+  /** BX-01, UX-16: "Run a command on these…": Compare hosts on the Terminal page with these picks. */
+  onRunCommand?: (picks: TargetPicks) => void;
   /** True while the page is shown, so the lists are read again when the user comes back. */
   active: boolean;
   /** R10: a session to show (a search result, a map node): the filters cleared, its row scrolled to and lit. */
@@ -163,6 +169,7 @@ export function SessionsPage({
   onSupportBundle,
   onExportAnsible,
   onExportInventory,
+  onRunCommand,
   active,
   focus = null,
   sessionsKey = 0,
@@ -412,6 +419,20 @@ export function SessionsPage({
               <PencilIcon data-icon="inline-start" />
               Edit…
             </Button>
+            {/* BX-01, UX-16: Compare hosts on the Terminal page, with these sessions picked (SSH and WinRM only). */}
+            {onRunCommand && (
+              <WhyDisabled reason={selectedHosts.length === 0 ? "Commands run on SSH and WinRM sessions only" : null}>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  disabled={selectedHosts.length === 0}
+                  onClick={() => onRunCommand(selectionPicks({ sessionIds: selectedHosts.map((s) => s.id) }))}
+                >
+                  <GitCompareArrowsIcon data-icon="inline-start" />
+                  Run a command on these…
+                </Button>
+              </WhyDisabled>
+            )}
             {/* BX-13: bundles collect over SSH and WinRM; the dialog leaves other kinds out with a note. */}
             <WhyDisabled
               reason={selectedHosts.length === 0 ? "Support bundles collect from SSH and WinRM sessions only" : null}

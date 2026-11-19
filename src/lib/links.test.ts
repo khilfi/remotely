@@ -42,6 +42,8 @@ const EVERY: AppLink[] = [
   { kind: "hostNetworks" },
   { kind: "toolbox", tool: "ports", target: { kind: "session", sessionId: "s-1", label: "web01" } },
   { kind: "files", terminalId: "t-1", path: "/srv/www" },
+  { kind: "group", groupId: "g-1" },
+  { kind: "group" },
 ];
 
 test("every kind of link is one, and has words for its button", () => {

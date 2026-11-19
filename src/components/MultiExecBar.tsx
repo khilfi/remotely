@@ -4,7 +4,9 @@
 // says what the last keys did: a line sent or waiting for approval, keys passed straight through at a password prompt
 // or to a full-screen program, and the tabs left out of a line, with why. While it is off and several tabs are picked
 // (Ctrl+click), it says so; the toolbar's Type in all tabs and Compare hosts then use them. Either way it holds the
-// picked tabs' Output menu, and ✕ (or Esc) turns typing off or clears the picks.
+// picked tabs' Output menu, and ✕ (or Esc) turns typing off or clears the picks. UX-16 (0.9.0 H2): its "Pick tabs"
+// menu, in both states, also holds the saved groups (Open group, Select group, Save picked tabs as a group…, Manage
+// groups…), which were Terminal ⋯ › Saved groups.
 
 import { useMemo, type ReactNode } from "react";
 import { CircleAlertIcon, LayoutGridIcon, ListChecksIcon, LoaderCircleIcon, RadioTowerIcon, XIcon } from "lucide-react";
@@ -58,6 +60,10 @@ interface Props {
   onClose: () => void;
   /** The picked tabs' Output menu (a DropdownMenu). */
   output: ReactNode;
+  /** UX-16: the saved groups' items, at the end of "Pick tabs" (MultiExecGroupsItems). */
+  groups?: ReactNode;
+  /** "Pick tabs" opened: the groups are read again. */
+  onPickMenu?: () => void;
 }
 
 export function MultiExecBar({
@@ -74,8 +80,11 @@ export function MultiExecBar({
   onPick,
   onClose,
   output,
+  groups,
+  onPickMenu,
 }: Props) {
   const closeLabel = on ? "Turn off Type in all tabs" : "Clear the picked tabs";
+  const pickMenu = <PickTabsMenu tabs={tabs} folders={folders} onPick={onPick} groups={groups} onOpen={onPickMenu} />;
   return (
     <div
       role="toolbar"
@@ -98,10 +107,9 @@ export function MultiExecBar({
           waitingOtherKind={waitingOtherKind}
           status={status}
           note={note}
-          folders={folders}
           tile={tile}
           onTile={onTile}
-          onPick={onPick}
+          pickMenu={pickMenu}
           output={output}
         />
       ) : (
@@ -109,6 +117,7 @@ export function MultiExecBar({
           <span className="font-medium whitespace-nowrap tabular-nums" aria-live="polite">
             {pickedTabsText(picked, terminals)}
           </span>
+          {pickMenu}
           {output}
           <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground">
             Type in all tabs and Compare hosts use them
@@ -134,26 +143,104 @@ export function MultiExecBar({
   );
 }
 
+/** "Pick tabs": all, by folder, by environment, the quick connections; then (UX-16) the saved groups. */
+function PickTabsMenu({
+  tabs,
+  folders,
+  onPick,
+  groups,
+  onOpen,
+}: Pick<Props, "tabs" | "folders" | "onPick" | "groups"> & { onOpen?: () => void }) {
+  const subtrees = useMemo(() => new Map(folders.map((f) => [f.id, subtree(folders, f.id)])), [folders]);
+  const counts = useMemo(() => folderCounts(tabs, subtrees), [tabs, subtrees]);
+  const folderRows = flattenFolders(folders).filter((row) => counts.has(row.folder.id));
+  const labels = labelChoices(tabs);
+  const unsaved = tabs.filter((t) => t.unsaved).length;
+  return (
+    <DropdownMenu onOpenChange={(open) => open && onOpen?.()}>
+      <DropdownMenuTrigger asChild>
+        <Button size="sm" variant="ghost">
+          <ListChecksIcon data-icon="inline-start" />
+          Pick tabs
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="start" className="w-72">
+        <DropdownMenuItem onSelect={() => onPick(pickTabs(tabs, { kind: "all" }))}>
+          All {tabs.length} tabs
+        </DropdownMenuItem>
+        <DropdownMenuSub>
+          <DropdownMenuSubTrigger disabled={folderRows.length === 0}>
+            <span>
+              By folder
+              <ReasonLine reason={folderRows.length === 0 ? "No open tab is in a folder" : null} />
+            </span>
+          </DropdownMenuSubTrigger>
+          <DropdownMenuSubContent className="max-h-80 overflow-auto">
+            {folderRows.map(({ folder, depth }) => (
+              <DropdownMenuItem
+                key={folder.id}
+                style={{ paddingLeft: `${0.5 + depth * 0.75}rem` }}
+                onSelect={() => onPick(pickTabs(tabs, { kind: "folder", under: subtrees.get(folder.id) ?? new Set() }))}
+              >
+                <span className="truncate">{folder.name}</span>
+                <span className="ml-auto text-xs text-muted-foreground">{counts.get(folder.id)}</span>
+              </DropdownMenuItem>
+            ))}
+          </DropdownMenuSubContent>
+        </DropdownMenuSub>
+        <DropdownMenuSub>
+          <DropdownMenuSubTrigger disabled={labels.length === 0}>
+            <span>
+              By environment
+              <ReasonLine reason={labels.length === 0 ? "No open tab is Lab, Staging or Prod" : null} />
+            </span>
+          </DropdownMenuSubTrigger>
+          <DropdownMenuSubContent>
+            {labels.map(({ environment, count }) => (
+              <DropdownMenuItem
+                key={environment}
+                onSelect={() => onPick(pickTabs(tabs, { kind: "label", environment }))}
+              >
+                {ENVIRONMENT_NAMES[environment]}
+                <span className="ml-auto text-xs text-muted-foreground">{count}</span>
+              </DropdownMenuItem>
+            ))}
+          </DropdownMenuSubContent>
+        </DropdownMenuSub>
+        <DropdownMenuItem disabled={unsaved === 0} onSelect={() => onPick(pickTabs(tabs, { kind: "unsaved" }))}>
+          <span>
+            Quick connections ({unsaved})
+            <ReasonLine reason={unsaved === 0 ? "Every open tab is a saved session" : null} />
+          </span>
+        </DropdownMenuItem>
+        {groups && (
+          <>
+            <DropdownMenuSeparator />
+            {groups}
+          </>
+        )}
+        <DropdownMenuSeparator />
+        <DropdownMenuLabel className="font-normal text-muted-foreground">
+          Or Ctrl+click a tab to add or remove it.
+        </DropdownMenuLabel>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
 function Typing({
   tabs,
   picked,
   waitingOtherKind = 0,
   status,
   note,
-  folders,
   tile,
   onTile,
-  onPick,
+  pickMenu,
   output,
-}: Pick<
-  Props,
-  "tabs" | "picked" | "waitingOtherKind" | "status" | "note" | "folders" | "tile" | "onTile" | "onPick" | "output"
->) {
-  const subtrees = useMemo(() => new Map(folders.map((f) => [f.id, subtree(folders, f.id)])), [folders]);
-  const counts = useMemo(() => folderCounts(tabs, subtrees), [tabs, subtrees]);
-  const folderRows = flattenFolders(folders).filter((row) => counts.has(row.folder.id));
-  const labels = labelChoices(tabs);
-  const unsaved = tabs.filter((t) => t.unsaved).length;
+}: Pick<Props, "tabs" | "picked" | "waitingOtherKind" | "status" | "note" | "tile" | "onTile" | "output"> & {
+  pickMenu: ReactNode;
+}) {
   const receiving = status?.targets.filter((t) => t.receives).length ?? 0;
   const idle = status ? multiExecIdleReason(status.targets) : null;
   const tileReason = picked < 2 ? "Pick two or more tabs to see them side by side" : null;
@@ -175,70 +262,7 @@ function Typing({
           </span>
         )}
       </span>
-      <DropdownMenu>
-        <DropdownMenuTrigger asChild>
-          <Button size="sm" variant="ghost">
-            <ListChecksIcon data-icon="inline-start" />
-            Pick tabs
-          </Button>
-        </DropdownMenuTrigger>
-        <DropdownMenuContent align="start" className="w-64">
-          <DropdownMenuItem onSelect={() => onPick(pickTabs(tabs, { kind: "all" }))}>
-            All {tabs.length} tabs
-          </DropdownMenuItem>
-          <DropdownMenuSub>
-            <DropdownMenuSubTrigger disabled={folderRows.length === 0}>
-              <span>
-                By folder
-                <ReasonLine reason={folderRows.length === 0 ? "No open tab is in a folder" : null} />
-              </span>
-            </DropdownMenuSubTrigger>
-            <DropdownMenuSubContent className="max-h-80 overflow-auto">
-              {folderRows.map(({ folder, depth }) => (
-                <DropdownMenuItem
-                  key={folder.id}
-                  style={{ paddingLeft: `${0.5 + depth * 0.75}rem` }}
-                  onSelect={() =>
-                    onPick(pickTabs(tabs, { kind: "folder", under: subtrees.get(folder.id) ?? new Set() }))
-                  }
-                >
-                  <span className="truncate">{folder.name}</span>
-                  <span className="ml-auto text-xs text-muted-foreground">{counts.get(folder.id)}</span>
-                </DropdownMenuItem>
-              ))}
-            </DropdownMenuSubContent>
-          </DropdownMenuSub>
-          <DropdownMenuSub>
-            <DropdownMenuSubTrigger disabled={labels.length === 0}>
-              <span>
-                By environment
-                <ReasonLine reason={labels.length === 0 ? "No open tab is Lab, Staging or Prod" : null} />
-              </span>
-            </DropdownMenuSubTrigger>
-            <DropdownMenuSubContent>
-              {labels.map(({ environment, count }) => (
-                <DropdownMenuItem
-                  key={environment}
-                  onSelect={() => onPick(pickTabs(tabs, { kind: "label", environment }))}
-                >
-                  {ENVIRONMENT_NAMES[environment]}
-                  <span className="ml-auto text-xs text-muted-foreground">{count}</span>
-                </DropdownMenuItem>
-              ))}
-            </DropdownMenuSubContent>
-          </DropdownMenuSub>
-          <DropdownMenuItem disabled={unsaved === 0} onSelect={() => onPick(pickTabs(tabs, { kind: "unsaved" }))}>
-            <span>
-              Quick connections ({unsaved})
-              <ReasonLine reason={unsaved === 0 ? "Every open tab is a saved session" : null} />
-            </span>
-          </DropdownMenuItem>
-          <DropdownMenuSeparator />
-          <DropdownMenuLabel className="font-normal text-muted-foreground">
-            Or Ctrl+click a tab to add or remove it.
-          </DropdownMenuLabel>
-        </DropdownMenuContent>
-      </DropdownMenu>
+      {pickMenu}
       <WhyDisabled reason={tileReason}>
         <Toggle
           size="sm"

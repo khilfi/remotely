@@ -1,10 +1,14 @@
 // BX-03 Compare output, in the Terminal page (post-MVP P6; it replaces the Bulk run page). One command runs once on
-// each host of the picked tabs and of the sessions picked in the tree, as a one-shot job through the bulk engine
+// each host picked, as a one-shot job through the bulk engine
 // (exec channels, not the terminals; BX-02 to BX-07): the parallel limit, sudo with a password from the vault, the
 // approval tier shown while typing and the dangerous-command rules (BX-06), then the results grouped by output ("48
 // same, 2 differ"), the diff between two groups, retry of the failed hosts and CSV, JSON or HTML export. Hosts are
 // saved sessions: a tab of a quick connection that was not saved can't be reached. QL-08: Run says why it is
 // disabled.
+// UX-16 (0.9.0 H2): the hosts are picked with BulkTargetPicker in its compact mode, the one picker of every bulk job:
+// it opens filled with the picked tabs and the tree's Ctrl+clicks (the tree's picks are its sessions), and Change…
+// adds sessions, VMs, tags, saved filters and saved groups. BX-01: the Sessions and VMs pages' "Run a command on
+// these…" open it with their selection.
 //
 // QL-12: a second view, MultiExec, shows the lines MultiExec recorded in the terminals, grouped the same way
 // (RecordedLinesView), so a line typed in the terminals can be compared without typing it again here.
@@ -34,6 +38,7 @@ import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { TierBadge } from "@/components/Badges";
 import { BulkResultsView } from "@/components/BulkResultsView";
+import { BulkTargetPicker } from "@/components/BulkTargetPicker";
 import { HelpTip } from "@/components/HelpTip";
 import { RecordedLinesView } from "@/components/RecordedLinesView";
 import { WhyDisabled } from "@/components/WhyDisabled";
@@ -49,8 +54,11 @@ import {
   type ResolvedTargets,
   type SecretMeta,
   type SubmitOutcome,
+  type TargetPicks,
   type VaultInfo,
 } from "@/lib/api";
+import { pickCount, type TabsPart } from "@/lib/bulk-picks";
+import { requestLink } from "@/lib/links";
 import { EmptyState } from "@/components/EmptyState";
 import { compareRunReason, sudoWindowsReason } from "@/lib/disabled-reasons";
 import { formatWhen, plural } from "@/lib/format";
@@ -68,15 +76,21 @@ interface Props {
   onViewChange: (view: CompareView) => void;
   /** MultiExec is on: lines typed in the picked terminals are recorded. */
   multiExecOn: boolean;
-  /** The picked tabs' terminals (each reaches its saved session). */
-  terminalIds: string[];
-  /** Sessions picked in the tree, with no tab needed. */
-  sessionIds: string[];
+  /**
+   * UX-16: what the run reaches: the picked tabs' terminals (each reaches its saved session), and the picker's picks
+   * (its sessions are the tree's Ctrl+clicks too).
+   */
+  picks: TargetPicks;
+  /** The picker changed its picks (tabs are picked on the tab row, so `terminalIds` is ignored). */
+  onPicksChange: (picks: TargetPicks) => void;
+  /** The tabs in `picks.terminalIds`, for the summary: picked ones, or the current tab. */
+  tabs: TabsPart;
+  /** UX-16: changes when a saved group changes (Manage groups), so its picks are resolved again before a run. */
+  groupsKey?: string;
   /** How many of the picked tabs are quick connections that were not saved. */
   unsavedTabs: number;
   /** Saved sessions on this computer. */
   savedSessions: number;
-  onClearTree: () => void;
   /** Goes through the app, which opens the approval dialog; `onJob` gets the job id once queued. */
   onSubmit: (outcome: SubmitOutcome, onJob: (jobId: string) => void) => void;
   onOpenVault: () => void;
@@ -85,8 +99,6 @@ interface Props {
 /** sudo gets each session's own login password. */
 const LOGIN = "login";
 const DEFAULT_TIMEOUT = "600";
-/** Hosts named in the summary before "and N more". */
-const NAMES_SHOWN = 6;
 
 function stepsText(steps: ApprovalStep[]) {
   if (steps.length === 0) return "Runs at once; logged.";
@@ -101,11 +113,12 @@ export function ComparePanel({
   view,
   onViewChange,
   multiExecOn,
-  terminalIds,
-  sessionIds,
+  picks,
+  onPicksChange,
+  tabs,
+  groupsKey = "",
   unsavedTabs,
   savedSessions,
-  onClearTree,
   onSubmit,
   onOpenVault,
 }: Props) {
@@ -130,9 +143,12 @@ export function ComparePanel({
   const [runsVersion, setRunsVersion] = useState(0);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  /** The picker asked for the hosts again with the same picks (a link it just confirmed). */
+  const [resolveAgain, setResolveAgain] = useState(0);
   const recorded = useRecordedCount(active);
 
-  const picksKey = JSON.stringify([terminalIds, sessionIds]);
+  // BX-13: WinRM hosts too: their commands run in PowerShell, rated by the PowerShell rules.
+  const picksKey = JSON.stringify({ ...picks, winrm: true });
   const hosts = useMemo(() => resolved?.hosts ?? [], [resolved]);
   const timeoutSecs = timeout.trim() === "" ? null : Number(timeout);
   const timeoutOk =
@@ -164,7 +180,7 @@ export function ComparePanel({
   const shownPreview = script.trim() && preview?.key === commandKey ? preview.preview : null;
   const notReady = compareRunReason({
     savedSessions,
-    picked: terminalIds.length + sessionIds.length,
+    picked: pickCount(picks),
     hosts,
     unsavedTabs,
     script,
@@ -190,12 +206,10 @@ export function ComparePanel({
     };
   }, [active]);
 
-  // BX-01: the hosts the picked tabs and tree sessions reach.
+  // BX-01, UX-16: the hosts the picks reach.
   useEffect(() => {
     let stale = false;
-    const [terminals, sessions] = JSON.parse(picksKey) as [string[], string[]];
-    // BX-13: WinRM hosts too: their commands run in PowerShell, rated by the PowerShell rules.
-    api.bulkTargets({ terminalIds: terminals, sessionIds: sessions, winrm: true }).then(
+    api.bulkTargets(JSON.parse(picksKey) as TargetPicks).then(
       (r) => {
         if (!stale) setResolved(r);
       },
@@ -206,7 +220,8 @@ export function ComparePanel({
     return () => {
       stale = true;
     };
-  }, [picksKey, active]);
+    // groupsKey: a picked group edited in Manage groups runs on its members as they are now.
+  }, [picksKey, active, resolveAgain, groupsKey]);
 
   // BX-06: the tier and any dangerous-command rule, shown while typing.
   useEffect(() => {
@@ -265,20 +280,6 @@ export function ComparePanel({
 
   const vaultLocked = vault?.status !== "unlocked";
   const runCount = hosts.filter((h) => !h.protected).length;
-  const protectedCount = hosts.length - runCount;
-  const names = hosts.map((h) => h.name);
-  const shownNames =
-    names.length > NAMES_SHOWN
-      ? `${names.slice(0, NAMES_SHOWN).join(", ")} and ${names.length - NAMES_SHOWN} more`
-      : names.join(", ");
-
-  /** Where the hosts come from: "2 tabs and 3 sessions from the tree". */
-  const sources = [
-    terminalIds.length > 0 && plural(terminalIds.length, "tab"),
-    sessionIds.length > 0 && `${plural(sessionIds.length, "session")} from the tree`,
-  ]
-    .filter(Boolean)
-    .join(" and ");
 
   return (
     <div className="flex h-full min-h-0 flex-col rounded-lg border bg-background">
@@ -303,22 +304,7 @@ export function ComparePanel({
             </TabsList>
           </Tabs>
         </div>
-        {view === "run" ? (
-          <div className="flex min-w-0 items-center gap-2 text-sm text-muted-foreground">
-            <span className="min-w-0 flex-1 truncate" title={names.join(", ")}>
-              {hosts.length === 0
-                ? "Ctrl+click tabs, or sessions in the tree, to run on them."
-                : `Runs once on ${plural(runCount, "host")}: ${shownNames}`}
-              {protectedCount > 0 && ` (${protectedCount} protected, skipped)`}
-              {sources && hosts.length > 0 && <span className="text-xs"> · {sources}</span>}
-            </span>
-            {sessionIds.length > 0 && (
-              <Button size="sm" variant="ghost" onClick={onClearTree}>
-                Clear the tree picks
-              </Button>
-            )}
-          </div>
-        ) : (
+        {view === "multiExec" && (
           <p className="truncate text-sm text-muted-foreground">
             {multiExecOn
               ? "Each line typed in all tabs, with what each terminal answered."
@@ -333,6 +319,21 @@ export function ComparePanel({
           ) : (
             <div className="grid grid-cols-1 gap-4 @5xl:grid-cols-[minmax(0,26rem)_minmax(0,1fr)]">
               <div className="grid min-w-0 grid-cols-1 content-start gap-3">
+                {/* UX-16: the one host picker, as one line until Change… */}
+                <BulkTargetPicker
+                  active={active}
+                  picks={picks}
+                  onPicksChange={(next) => {
+                    setResolveAgain((n) => n + 1);
+                    onPicksChange(next);
+                  }}
+                  resolved={resolved}
+                  onOpenSessions={() => requestLink({ kind: "page", page: "sessions" })}
+                  winrm
+                  compact={{ tabs }}
+                  refresh={groupsKey}
+                  hideNotes
+                />
                 {resolved && resolved.notes.length > 0 && (
                   <Alert>
                     <SquareTerminalIcon />

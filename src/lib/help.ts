@@ -284,7 +284,7 @@ export const HELP = {
     title: "Compare hosts",
     body: [
       "Runs one command once on each picked host, in its own login shell (PowerShell on a Windows host) rather than in your terminals, and groups the hosts whose output is the same. Each host is rated by its own rules: the shell's or PowerShell's.",
-      "Its second view compares the lines you typed in all tabs, with what each terminal answered, so you don't type them again.",
+      "The hosts start as the picked tabs and the sessions Ctrl+clicked in the tree (with nothing picked, the current tab); Change… adds sessions, VMs, tags, saved filters and saved groups. Its second view compares the lines you typed in all tabs, with what each terminal answered.",
     ],
   },
   "reports.inventory": {

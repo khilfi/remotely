@@ -13,6 +13,7 @@ use std::time::Duration;
 use common::{listed, vm, vmx, wait_finished, Setup, VAULT_PASSWORD};
 use remotely_core::adapters::remote::{AgentSource, PtySize};
 use remotely_core::alerts::{AlertMetric, AlertRuleInput, AlertScope, Severity};
+use remotely_core::bulk::TargetPicks;
 use remotely_core::catalog::sizes::{DiskSpec, Provisioning, SizeInput};
 use remotely_core::command_bus::{Command, PowerOp, SubmitOutcome};
 use remotely_core::containers::{MarkInput, SudoMode};
@@ -413,6 +414,71 @@ async fn the_catalogue_rules_groups_container_marks_and_notifications_are_per_wo
     assert_eq!(custom_alerts(&core), 1, "Acme's rule is back with Acme");
     assert_eq!(own_rules(core.terminal_rules.list(&acme).await.unwrap()), 1);
     assert_eq!(core.notifications.list(&acme).entries.len(), 1);
+}
+
+/// UX-16: a saved group is a pick in every bulk job's picker; it is read from the shown workspace's groups only, so
+/// another workspace's group id is refused (picks nothing, says so) and none of its sessions is reached.
+#[tokio::test]
+async fn another_workspaces_group_is_refused_as_a_pick() {
+    let core = Setup::new(FakeVmware::default()).build().await;
+    let acme = core.ctx();
+    let web = core
+        .sessions
+        .create(&acme, session_input("web01", "web01.example.com", 22, None))
+        .await
+        .unwrap();
+    let group = core
+        .groups
+        .create(
+            &acme,
+            GroupInput {
+                name: "acme web".into(),
+                session_ids: vec![web.id],
+            },
+        )
+        .await
+        .unwrap();
+    let picks = TargetPicks {
+        group_ids: vec![group.id],
+        ..TargetPicks::default()
+    };
+    let entries = audit_of(&core, &acme).await.len();
+    let here = core.bulk.resolve(&acme, &picks).await.unwrap();
+    assert_eq!(here.hosts.len(), 1, "Acme's group picks its session in Acme");
+    assert_eq!(here.hosts[0].via, ["group 'acme web'"]);
+    assert_eq!(
+        audit_of(&core, &acme).await.len(),
+        entries,
+        "a group used as a pick is a read: nothing audited"
+    );
+
+    let globex = create(&core, "Globex").await;
+    switch(&core, &globex).await;
+    let b = core.ctx();
+    let there = core.bulk.resolve(&b, &picks).await.unwrap();
+    assert!(there.hosts.is_empty(), "Acme's group reaches nothing from Globex");
+    assert_eq!(
+        there.notes,
+        ["A picked group isn't saved in this workspace (deleted meanwhile?)."]
+    );
+    // The other pickers take the same picks through the same resolve: Ansible's read, and the Files page's push, which
+    // finds no host to push to and refuses before anything is submitted.
+    let ansible = core.reports.ansible_targets(&b, &picks).await.unwrap();
+    assert!(ansible.hosts.is_empty());
+    let folder = common::temp_folder("h2-group-push");
+    let file = folder.join("app.conf");
+    std::fs::write(&file, "listen 8080\n").unwrap();
+    let err = core
+        .bulk_files
+        .push(&picks, vec![file], "/home/alice", false, false)
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("None of what is picked reaches a host"),
+        "{err}"
+    );
+    assert_eq!(core.jobs.open_user_jobs(b.workspace_id), 0, "nothing submitted");
+    std::fs::remove_dir_all(&folder).ok();
 }
 
 #[tokio::test]

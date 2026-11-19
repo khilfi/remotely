@@ -2684,6 +2684,8 @@ export interface TargetPicks {
   tags?: string[];
   /** Saved VM filters, by id. */
   filterIds?: string[];
+  /** UX-16: saved groups (QL-19), by id; a read of each group's sessions in the shown workspace. */
+  groupIds?: string[];
   /** BX-13: WinRM sessions are hosts too (Compare hosts, support bundles); the key push leaves them out. */
   winrm?: boolean;
 }
@@ -2699,7 +2701,7 @@ export interface BulkHost {
   /** AP-04: skipped by the run. */
   protected: boolean;
   vmName: string | null;
-  /** How it was picked: "session", "VM 'web01'", "tag 'web'", "filter 'Lab'". */
+  /** How it was picked: "session", "VM 'web01'", "tag 'web'", "filter 'Lab'", "group 'web servers'". */
   via: string[];
   /** BX-13: a shell over SSH, or PowerShell over WinRM. */
   scriptKind: ScriptKind;

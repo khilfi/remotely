@@ -209,6 +209,26 @@ test("Install guest tools leaves out Workstation guests whose Tools image Workst
   assert.equal(tools([{ ...ubuntu, hypervisor: "virtualbox" }], ["windows.iso"]), 1, "the Guest Additions");
 });
 
+test("BX-01: Run a command on these goes to every picked VM, in Organise, where the page offers it", () => {
+  const organise = (runCommand?: boolean) =>
+    moreGroups([vm({ powerState: "running" }), vm()], {
+      snapshots: null,
+      canRelease: true,
+      canExport: false,
+      runCommand,
+    })
+      .find((g) => g.label === "Organise")
+      ?.items.map((i) => [i.id, i.count]);
+  assert.deepEqual(organise(true), [
+    ["addTag", 2],
+    ["environment", 2],
+    ["protect", 2],
+    ["runCommand", 2],
+    ["release", 2],
+  ]);
+  assert.ok(!organise(false)?.some(([id]) => id === "runCommand"));
+});
+
 test("QL-29: Create SSH sessions goes to the running VMs without one, in Organise", () => {
   const organise = (withoutSession?: number) =>
     moreGroups([vm({ powerState: "running" }), vm({ powerState: "running" })], {

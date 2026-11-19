@@ -56,7 +56,9 @@ export type AppLink =
    * a Toolbox result's "Keep checking this…" filled in; `untrusted`, what its certificate read found that the check
    * will fail on unless it allows it, in words).
    */
-  | { kind: "checks"; checkId?: string; add?: ToolTarget; spec?: CheckSpec; untrusted?: string };
+  | { kind: "checks"; checkId?: string; add?: ToolTarget; spec?: CheckSpec; untrusted?: string }
+  /** UX-16: a saved group opened on the Terminal page (Open group), or Manage groups without an id. */
+  | { kind: "group"; groupId?: string };
 
 export type AppLinkKind = AppLink["kind"];
 
@@ -80,6 +82,7 @@ const KINDS: Record<AppLinkKind, readonly string[]> = {
   toolbox: ["tool"],
   files: [],
   checks: [],
+  group: [],
 };
 
 /** A value (from the core, say) is a link this version can open: a known kind with its text fields. */
@@ -165,5 +168,7 @@ export function linkLabel(link: AppLink): string {
       return link.add ? "Add a check" : link.checkId ? "Show the check" : "Show the checks";
     case "files":
       return "Open in Files";
+    case "group":
+      return link.groupId ? "Open the group" : "Manage groups";
   }
 }
