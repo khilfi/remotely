@@ -566,6 +566,8 @@ function SessionRow({
             <MonitorMenu
               target={{
                 check: { kind: "session", sessionId: session.id, label: session.name },
+                // The session's own jump host: the last of the chain.
+                checkVia: via.length > 0 ? via[via.length - 1] : null,
                 watch: sessionSource(session),
               }}
             />

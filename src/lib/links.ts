@@ -53,9 +53,10 @@ export type AppLink =
   | { kind: "toolbox"; tool: ToolboxTool; target?: ToolTarget }
   /**
    * MO-08: the Dashboard's Checks tab: a check's history, or a new check on a session, VM or host (UX-19: `spec`, what
-   * a Toolbox result's "Keep checking this…" filled in).
+   * a Toolbox result's "Keep checking this…" filled in; `untrusted`, what its certificate read found that the check
+   * will fail on unless it allows it, in words).
    */
-  | { kind: "checks"; checkId?: string; add?: ToolTarget; spec?: CheckSpec };
+  | { kind: "checks"; checkId?: string; add?: ToolTarget; spec?: CheckSpec; untrusted?: string };
 
 export type AppLinkKind = AppLink["kind"];
 

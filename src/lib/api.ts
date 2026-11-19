@@ -3004,6 +3004,12 @@ export interface DashboardOverview {
   cost: CollectorCost;
 }
 
+/** UX-19 (MO-02): every session the dashboard watches, and the seconds between two polls of each. */
+export interface WatchedHosts {
+  sessions: string[];
+  intervalSecs: number;
+}
+
 export type CapacityWarning =
   | { kind: "ram"; assignedMb: number; physicalMb: number }
   | { kind: "disk"; drive: string; freePct: number }
@@ -3815,6 +3821,11 @@ export const api = {
   metricsHostUsage: () => invoke<VmHostUsage[]>("metrics_host_usage"),
   /** MO-02: watching a session logs in to it over SSH every round. Audited; returns the watched ids. */
   metricsWatch: (sessionId: string, watch: boolean) => invoke<string[]>("metrics_watch", { sessionId, watch }),
+  /**
+   * UX-19: every watched session (the overview's rows name one per VM, however many of its sessions are watched) and
+   * the seconds between two polls. A read.
+   */
+  metricsWatched: () => invoke<WatchedHosts>("metrics_watched"),
   /**
    * MO-02, CT-01: Retry on a host whose background logins are parked (refused login or sudo, changed
    * host key, no saved password) or capped for the hour. The dashboard and Containers page log in again.

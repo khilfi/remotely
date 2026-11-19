@@ -32,13 +32,15 @@ import { requestedCheck } from "@/lib/monitor";
 import type { ToolTarget } from "@/lib/toolbox";
 
 /**
- * What another page asked the tab to show: a check's history, or a new check on a row (UX-19: Monitor ▸'s "Add a
- * check", or a Toolbox result's "Keep checking this…" with its `spec`). Every one opens this tab's CheckDialog.
+ * What another page asked the tab to show (a `checks` link): a check's history, or a new check on a row (UX-19:
+ * Monitor ▸'s and the palette's "Add a check", or a Toolbox result's "Keep checking this…" with its `spec` and what its
+ * certificate read found, `untrusted`). Each opens this tab's one CheckDialog, as its own Add a check does.
  */
 export interface ChecksRequest {
   checkId?: string;
   add?: ToolTarget;
   spec?: CheckSpec;
+  untrusted?: string;
   /** Counts up so the same request can come twice. */
   n: number;
 }
@@ -52,7 +54,7 @@ interface Props {
   addRequest: number;
 }
 
-type Editing = { kind: "new"; input: CheckInput } | { kind: "edit"; check: HealthCheck } | null;
+type Editing = { kind: "new"; input: CheckInput; untrusted?: string } | { kind: "edit"; check: HealthCheck } | null;
 
 /** The longest the sparklines and uptime wait to be read again while runs come in. */
 const FULL_READ_MS = 30_000;
@@ -128,7 +130,7 @@ export function ChecksTab({ active, range, onRangeChange, request, addRequest }:
   if (request && request.n !== handled) {
     setHandled(request.n);
     if (request.add) {
-      setEditing({ kind: "new", input: requestedCheck(request.add, request.spec) });
+      setEditing({ kind: "new", input: requestedCheck(request.add, request.spec), untrusted: request.untrusted });
     } else if (request.checkId) {
       setHistoryOf(request.checkId);
     }

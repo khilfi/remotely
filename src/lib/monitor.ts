@@ -1,13 +1,15 @@
 // UX-19 (0.9.0 H4): monitoring setup, as pure functions (tested in monitor.test.ts). Monitor ▸ on session rows, the VM
-// details panel and the palette's VM and session views: whether its metrics can be watched (MO-02: a session that
-// reads its guest, over SSH or WinRM; a VM through a session linked to it), and one line on what watching or a check
-// costs. Where the status bar's alerts link leads (MO-07: the Alerts widget, or the rules sheet when the layout has
-// none). And "Keep checking this…" on the Toolbox's Ping, Check ports, Certificate and DNS results (FD-09): the
-// `checks` link that opens the check editor (MO-08) filled in, the same dialog every "Add a check" opens.
+// details panel and the palette's VM and session views: whether its metrics can be watched or stopped (MO-02: a
+// session that reads its guest, over SSH or WinRM; a VM through a session linked to it; any watched session can be
+// stopped), and one line on what watching or a check costs (a check behind a jump host goes through it). Where the
+// status bar's alerts link leads (MO-07: the Alerts widget, or the rules sheet when the layout has none). And "Keep
+// checking this…" on the Toolbox's Ping, Check ports, Certificate and DNS results (FD-09): the `checks` link that
+// opens the check editor (MO-08) filled in, the same dialog every "Add a check" opens, offered only for a check the
+// editor and the core would take.
 
 import type { SessionKind } from "./api.ts";
 import type { CheckInput, CheckSpec, DnsRecordKind } from "./checks-api.ts";
-import { kindTakes, newCheckInput } from "./checks.ts";
+import { checkProblem, kindTakes, newCheckInput } from "./checks.ts";
 import type { AppLink } from "./links.ts";
 import type { DnsRecord, RecordType } from "./toolbox-api.ts";
 import { kindOf, readsGuest } from "./session-kinds.ts";
@@ -53,20 +55,36 @@ export type WatchState =
   { can: true; sessionId: string; watching: boolean; via: string | null } | { can: false; reason: string };
 
 /**
- * Whether a row can be watched, and through which session. A VM is watched through a linked session that reads its
- * guest: the one already watched, else the first.
+ * The watched sessions as `metrics_watched` gives them: every one, where the overview's rows name one per VM however
+ * many of its linked sessions are watched. A poll interval the core didn't give is the default 5 s.
+ */
+export function watchedFrom(hosts: { sessions: readonly string[]; intervalSecs: number }): {
+  watched: Set<string>;
+  intervalSecs: number;
+} {
+  return {
+    watched: new Set(hosts.sessions),
+    intervalSecs: Number.isFinite(hosts.intervalSecs) && hosts.intervalSecs > 0 ? hosts.intervalSecs : 5,
+  };
+}
+
+/**
+ * Whether a row can be watched or stopped, and through which session. A watched session can always be stopped, whatever
+ * its kind now (an edit may have made it RDP). A VM is watched through a linked session: one already watched, else
+ * the first that reads its guest.
  */
 export function watchState(source: WatchSource, watched: ReadonlySet<string>): WatchState {
   if (source.kind === "session") {
     const s = source.session;
+    if (watched.has(s.id)) return { can: true, sessionId: s.id, watching: true, via: null };
     if (!s.readsGuest) return { can: false, reason: "Only SSH and WinRM sessions report their metrics." };
-    return { can: true, sessionId: s.id, watching: watched.has(s.id), via: null };
+    return { can: true, sessionId: s.id, watching: false, via: null };
   }
-  const readers = source.sessions.filter((s) => s.readsGuest);
-  if (readers.length === 0) return { can: false, reason: "Link an SSH or WinRM session to it first." };
-  const on = readers.find((s) => watched.has(s.id));
-  const s = on ?? readers[0];
-  return { can: true, sessionId: s.id, watching: on !== undefined, via: s.name };
+  const on = source.sessions.find((s) => watched.has(s.id));
+  if (on) return { can: true, sessionId: on.id, watching: true, via: on.name };
+  const reader = source.sessions.find((s) => s.readsGuest);
+  if (!reader) return { can: false, reason: "Link an SSH or WinRM session to it first." };
+  return { can: true, sessionId: reader.id, watching: false, via: reader.name };
 }
 
 /** "every 5 s", "every 1 min". */
@@ -82,15 +100,34 @@ export function watchCostText(state: Extract<WatchState, { can: true }>, interva
   return `Keeps a login${through} open and reads it ${pollText(intervalSecs)}`;
 }
 
-/** What a check costs, in one line: a probe from this PC each interval (a new check runs every minute). */
-export function checkCostText(intervalSecs = 60): string {
+/** A check that runs at most this often keeps its jump host's login open between runs (checks/probe.rs). */
+export const HOLD_UP_TO_SECS = 600;
+
+/**
+ * What a check costs, in one line (a new check runs every minute): a probe from this PC each interval, or, for a
+ * session behind a jump host (`via`, its name), a probe through it, with the login to it kept open between runs
+ * up to every 10 minutes (checks/probe.rs hold_for), else made for each run.
+ */
+export function checkCostText(via: string | null = null, intervalSecs = 60): string {
   const every =
     intervalSecs >= 60 && intervalSecs % 60 === 0
       ? intervalSecs === 60
         ? "every minute"
         : `every ${intervalSecs / 60} minutes`
       : `every ${intervalSecs} seconds`;
-  return `A probe from this PC ${every}`;
+  if (!via) return `A probe from this PC ${every}`;
+  return intervalSecs <= HOLD_UP_TO_SECS
+    ? `A probe through ${via} ${every}; the login to it stays open between runs`
+    : `A probe through ${via} ${every}, logging in to it each time`;
+}
+
+/** The jump host a session's checks go through (its own, or its folder's), by name; null when it has none. */
+export function checkVia(
+  session: { jumpSessionId: string | null },
+  sessions: readonly { id: string; name: string }[],
+): string | null {
+  if (!session.jumpSessionId) return null;
+  return sessions.find((s) => s.id === session.jumpSessionId)?.name ?? "its jump host";
 }
 
 // ---- Alert rules ----
@@ -107,14 +144,24 @@ export function alertsOpens(link: { rules?: boolean }, widgetKinds: Iterable<str
 type ChecksLink = Extract<AppLink, { kind: "checks" }>;
 
 /**
- * The new check a `checks` link asks for: on its target, named after it, with the spec a Toolbox result filled in
- * when it gave one the target takes, else the editor's default kind.
+ * The new check a `checks` link asks for: on its target, named after it. Without a spec, the editor's default
+ * (HTTP(S)); with one the target takes, that spec as a Toolbox result filled it in; with one it can't take (DNS on a
+ * VM), a TCP check, newCheckInput's fallback.
  */
 export function requestedCheck(target: ToolTarget, spec?: CheckSpec): CheckInput {
   const name = target.kind === "address" ? target.host : target.label;
   const on = probeTarget(target);
   const input = newCheckInput(on, name, spec?.kind);
   return spec && kindTakes(spec.kind, on.kind) ? { ...input, spec } : input;
+}
+
+/**
+ * Why "Keep checking this…" can't open its check, or null: what the editor, and the core after it, would refuse in the
+ * check it opens with (a DNS lookup of an address, a name the core can't take, a server that isn't an IP address).
+ */
+export function keepCheckingProblem(link: ChecksLink | null): string | null {
+  if (!link?.add) return "This result can't become a check.";
+  return checkProblem(requestedCheck(link.add, link.spec));
 }
 
 function keep(target: ToolTarget, spec: CheckSpec): ChecksLink {
@@ -131,14 +178,40 @@ export function portCheck(target: ToolTarget, port: number): ChecksLink {
   return keep(target, { kind: "tcp", port });
 }
 
-/** A certificate check of what was read: its port and the server name typed, if any. Untrusted ones aren't allowed. */
-export function certificateCheck(target: ToolTarget, port: number, serverName: string): ChecksLink {
-  return keep(target, {
+/**
+ * What the read found that a certificate check refuses unless it allows untrusted certificates (checks/probe.rs: not
+ * trusted, or naming another host), in words for the editor: "isn't trusted by this PC", "doesn't name web01"; null
+ * when neither.
+ */
+export function certificateFinding(
+  report: { trusted: boolean; nameMatches: boolean | null; serverName: string | null; host: string | null },
+  serverName: string,
+): string | null {
+  const name = serverName.trim() || report.serverName || report.host || "the host";
+  const parts = [
+    report.trusted ? null : "isn't trusted by this PC",
+    report.nameMatches === false ? `doesn't name ${name}` : null,
+  ].filter((p): p is string => p !== null);
+  return parts.length === 0 ? null : parts.join(" and ");
+}
+
+/**
+ * A certificate check of what was read: its port and the server name typed, if any. Untrusted ones aren't allowed;
+ * `finding` (certificateFinding) tells the editor that this one will be down until they are.
+ */
+export function certificateCheck(
+  target: ToolTarget,
+  port: number,
+  serverName: string,
+  finding: string | null = null,
+): ChecksLink {
+  const link = keep(target, {
     kind: "certificate",
     port,
     serverName: serverName.trim() ? serverName.trim() : null,
     allowUntrusted: false,
   });
+  return finding ? { ...link, untrusted: finding } : link;
 }
 
 /** Why a DNS lookup can't become a check, or null: a check looks up A or AAAA records. */

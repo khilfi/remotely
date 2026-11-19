@@ -16,8 +16,8 @@
 // sessions (lib/palette.ts). The actions on every running VM at once show only when the search asks for them
 // (typedForBulk), never at the top of an empty search. A term found by the search shows its definition in the list.
 //
-// UX-19 (0.9.0): a VM's and a session's views have a Monitor group (watch its metrics, add a check, each with what it
-// costs) before the Toolbox group, as Monitor ▸ on the rows.
+// UX-19 (0.9.0): a VM's and a session's views have a Monitor group (watch its metrics or stop, add a check, each with
+// what it costs, disabled with the reason when it can't be done) before the Toolbox group, as Monitor ▸ on the rows.
 
 import { useEffect, useMemo, useState } from "react";
 import {
@@ -43,7 +43,6 @@ import {
   WrenchIcon,
   type LucideIcon,
 } from "lucide-react";
-import { toast } from "sonner";
 import {
   CommandDialog,
   CommandEmpty,
@@ -62,7 +61,17 @@ import { linkedSshSessions } from "@/lib/vm-sessions";
 import type { AppLink } from "@/lib/links";
 import type { ToolTarget } from "@/lib/toolbox";
 import { TOOLBOX_ROW_ITEMS } from "@/components/toolbox/ToolboxMenu";
-import { checkCostText, sessionSource, vmSource, watchCostText, watchState, type WatchSource } from "@/lib/monitor";
+import { useReadOnlyReason } from "@/components/Presentation";
+import { useWatched } from "@/hooks/use-watched";
+import {
+  checkCostText,
+  checkVia,
+  sessionSource,
+  vmSource,
+  watchCostText,
+  watchState,
+  type WatchSource,
+} from "@/lib/monitor";
 import { kindOf } from "@/lib/session-kinds";
 import { groupRanked, rankItems, type SearchItem } from "@/lib/search";
 import { SEARCH_PROVIDERS, loadSearchItems } from "@/lib/search-providers";
@@ -75,7 +84,6 @@ import { vmwareToolsReason } from "@/lib/vm-settings";
 import { useToolsImages } from "@/hooks/use-tools-images";
 import {
   api,
-  errorMessage,
   type Command,
   type PowerOp,
   type PowerState,
@@ -137,6 +145,9 @@ interface VmAction {
 }
 
 const ON: PowerState[] = ["running", "paused"];
+
+/** No session watched yet (the read hasn't come back). */
+const NONE_WATCHED: ReadonlySet<string> = new Set();
 
 function power(vms: VmRecord[], op: PowerOp): Command {
   return { type: "vmPower", targets: vms.map((v) => ({ kind: "vm", vmxPath: v.vmxPath })), op };
@@ -209,9 +220,10 @@ export function CommandPalette({
   const [search, setSearch] = useState("");
   const [vms, setVms] = useState<VmRecord[]>([]);
   const [sessions, setSessions] = useState<SessionRecord[]>([]);
-  const [watched, setWatched] = useState<Set<string>>(new Set());
-  /** MO-02: seconds between two reads of a watched host, for Monitor's cost line. */
-  const [watchInterval, setWatchInterval] = useState(5);
+  // MO-02, UX-19: every watched session (not the overview's one per VM) and the poll interval, read per opening.
+  const watchedHosts = useWatched(open);
+  const watched = watchedHosts.watched ?? NONE_WATCHED;
+  const readOnly = useReadOnlyReason();
   const [tiers, setTiers] = useState<Record<string, Tier>>({});
   const [found, setFound] = useState<SearchItem[]>([]);
   const toolsImages = useToolsImages(open);
@@ -227,13 +239,6 @@ export function CommandPalette({
     void loadSearchItems({ vms: vmRead.catch(() => []), sessions: sessionRead.catch(() => []) }).then((items) => {
       if (!stale) setFound(items);
     });
-    api.metricsOverview().then(
-      (o) => {
-        setWatched(new Set(o.rows.flatMap((r) => (r.watchedSession ? [r.watchedSession] : []))));
-        if (o.cost.guestIntervalSecs > 0) setWatchInterval(o.cost.guestIntervalSecs);
-      },
-      () => setWatched(new Set()),
-    );
     return () => {
       stale = true;
     };
@@ -360,27 +365,33 @@ export function CommandPalette({
   }
 
   /**
-   * UX-19: Monitor, as on the rows (MonitorMenu.tsx): watch its metrics (MO-02, a VM through a linked session; left out
-   * when it can't be watched) and a health check on it (MO-08), each with what it costs.
+   * UX-19: Monitor, as on the rows (MonitorMenu.tsx): watch its metrics or stop (MO-02, a VM through a linked session;
+   * disabled with the reason when it can't be watched) and a health check on it (MO-08; disabled with the reason under
+   * the read-only lock), each with what it costs. `checkVia`: the jump host a session's check goes through.
    */
-  function monitorGroup(check: ToolTarget, source: WatchSource) {
-    const state = watchState(source, watched);
+  function monitorGroup(check: ToolTarget, checkVia: string | null, source: WatchSource) {
+    const state = watchedHosts.watched === null ? null : watchState(source, watched);
+    const watching = state?.can === true && state.watching;
     return (
       <CommandGroup heading="Monitor">
-        {state.can && (
-          <CommandItem
-            value={state.watching ? "monitor stop watching guest metrics" : "monitor watch its metrics guest dashboard"}
-            onSelect={() => void watch(state.sessionId, !state.watching)}
-          >
-            {state.watching ? <EyeOffIcon /> : <EyeIcon />}
-            <span className="shrink-0">{state.watching ? "Stop watching" : "Watch its metrics"}</span>
-            <span className="min-w-0 truncate text-xs text-muted-foreground">
-              {watchCostText(state, watchInterval)}
-            </span>
-          </CommandItem>
-        )}
+        <CommandItem
+          value={watching ? "monitor stop watching guest metrics" : "monitor watch its metrics guest dashboard"}
+          disabled={state === null || !state.can}
+          onSelect={() => {
+            if (!state?.can) return;
+            close();
+            void watchedHosts.watch(state.sessionId, !state.watching);
+          }}
+        >
+          {watching ? <EyeOffIcon /> : <EyeIcon />}
+          <span className="shrink-0">{watching ? "Stop watching" : "Watch its metrics"}</span>
+          <span className="min-w-0 truncate text-xs text-muted-foreground">
+            {state === null ? "Reading…" : state.can ? watchCostText(state, watchedHosts.intervalSecs) : state.reason}
+          </span>
+        </CommandItem>
         <CommandItem
           value="monitor add a health check"
+          disabled={readOnly !== null}
           onSelect={() => {
             close();
             onOpenLink({ kind: "checks", add: check });
@@ -388,7 +399,7 @@ export function CommandPalette({
         >
           <HeartPulseIcon />
           <span className="shrink-0">Add a check</span>
-          <span className="min-w-0 truncate text-xs text-muted-foreground">{checkCostText()}</span>
+          <span className="min-w-0 truncate text-xs text-muted-foreground">{readOnly ?? checkCostText(checkVia)}</span>
         </CommandItem>
       </CommandGroup>
     );
@@ -397,18 +408,6 @@ export function CommandPalette({
   async function run(command: Command) {
     close();
     await onSubmit(command);
-  }
-
-  async function watch(id: string, on: boolean) {
-    close();
-    try {
-      await api.metricsWatch(id, on);
-      toast.success(
-        on ? "Watching it on the dashboard. The first reading arrives within a round." : "Stopped watching",
-      );
-    } catch (err) {
-      toast.error(errorMessage(err));
-    }
   }
 
   function choose(item: SearchItem) {
@@ -619,7 +618,12 @@ export function CommandPalette({
                 )}
               </CommandGroup>
               <CommandSeparator />
-              {monitorGroup({ kind: "vm", vmKey: vm.vmxPath, label: vm.displayName }, vmSource(vm.id, sessions))}
+              {monitorGroup(
+                { kind: "vm", vmKey: vm.vmxPath, label: vm.displayName },
+                // A VM's check probes its guest address from this PC.
+                null,
+                vmSource(vm.id, sessions),
+              )}
               <CommandSeparator />
               {toolboxGroup({ kind: "vm", vmKey: vm.vmxPath, label: vm.displayName })}
             </>
@@ -667,6 +671,7 @@ export function CommandPalette({
                   <CommandSeparator />
                   {monitorGroup(
                     { kind: "session", sessionId: session.id, label: session.name },
+                    checkVia(session, sessions),
                     sessionSource(session),
                   )}
                 </>

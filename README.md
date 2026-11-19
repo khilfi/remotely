@@ -1056,7 +1056,10 @@ local storage, and offers none while presenting.
 - **Keep checking this…** (0.9.0): a Ping, Check ports, Certificate or DNS lookup result opens the health check editor
   on the dashboard's Checks tab, filled in with what the tool just ran: a ping check, a TCP check of a port you pick
   from those checked, a certificate check on the same port and server name, or a DNS check of an A or AAAA record at
-  the same server (expecting the address it found when there was only one). Nothing is saved until you add the check.
+  the same server (expecting the address it found when there was only one). A certificate this PC doesn't trust, or
+  one naming another host, is still checked strictly by default: the editor says the check will be down until you
+  allow it. The button is off, with the reason, for what a check can't take (a lookup of an address rather than a
+  name, a name with letters outside ASCII) and while the read-only lock is on. Nothing is saved until you add the check.
 
 ### Dashboard: history, alerts and layout
 
@@ -1084,10 +1087,13 @@ local storage, and offers none while presenting.
   VM's details and a VM's or session's actions in Ctrl+K have **Monitor**: **Watch its metrics** (or **Stop watching**)
   and **Add a check**, each with a line on what it costs. Watching keeps a login to the host open and reads it every
   few seconds (Settings, Dashboard sets how often), as **Watch hosts** on the dashboard does; a VM is watched through
-  an SSH or WinRM session linked to it, and says so when it has none. **Add a check** opens the health check editor on
-  the dashboard's Checks tab, filled in with the row; a check probes from this PC every minute unless you choose
-  otherwise. Watching is audited as before, with no approval; a new check is audited when you add it. "Add a check" is
-  no longer in the Toolbox menu.
+  an SSH or WinRM session linked to it, and the item says why not when it has none. A watched session can always be
+  stopped, even after it was changed into another kind. **Add a check** opens the health check editor on the
+  dashboard's Checks tab, filled in with the row; a check probes from this PC every minute unless you choose otherwise,
+  and a session behind a jump host is checked through it, which keeps a login to the jump host open between runs (for
+  checks every 10 minutes or more often). While the read-only lock is on, **Add a check** says so and is off. Watching
+  is audited as before, with no approval; a new check is audited when you add it. "Add a check" is no longer in the
+  Toolbox menu.
 - **Layout** (MO-16): **Customize** adds, removes, moves and resizes the widgets (the overview grid, host capacity,
   this PC's memory, the alerts, a watched host's services, and charts of a VM, a watched host or this PC) on a grid of
   four columns: drag a widget's handle or press the arrow keys on it, drag its corner or pick its size. **Save** keeps

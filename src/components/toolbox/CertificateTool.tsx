@@ -1,6 +1,7 @@
 // FD-09: the Toolbox's Certificate tab: the certificate a TLS server sends (any chain, so a bad one can be read too),
 // checked against Windows' trust store and the server name, or a certificate file. A read. UX-19 (0.9.0): a server's
-// report offers "Keep checking this…", a certificate check on the host, port and server name it was read with.
+// report offers "Keep checking this…", a certificate check on the host, port and server name it was read with; the
+// editor says when the read found it untrusted or naming another host, which the check fails on unless allowed.
 
 import { useState, type ReactNode } from "react";
 import { FileBadgeIcon, ShieldCheckIcon, ShieldXIcon } from "lucide-react";
@@ -12,7 +13,7 @@ import { WhyDisabled } from "@/components/WhyDisabled";
 import { useProbeRun } from "@/hooks/use-probe-run";
 import { certificateVerdict, daysLeftText, hasTarget, probeTarget, type ToolTarget } from "@/lib/toolbox";
 import { toolboxApi, type CertificateInfo, type CertificateReport } from "@/lib/toolbox-api";
-import { certificateCheck } from "@/lib/monitor";
+import { certificateCheck, certificateFinding } from "@/lib/monitor";
 import { KeepCheckingButton } from "./KeepChecking";
 import type { Incoming } from "./ProbeTools";
 import { Field, RunError, TargetField, useRecent } from "./TargetField";
@@ -199,7 +200,14 @@ export function CertificateTool({ incoming }: { incoming: Incoming | null }) {
           report={run.result}
           keep={
             ran && run.result.host !== null ? (
-              <KeepCheckingButton link={certificateCheck(ran.target, ran.port, ran.serverName)} />
+              <KeepCheckingButton
+                link={certificateCheck(
+                  ran.target,
+                  ran.port,
+                  ran.serverName,
+                  certificateFinding(run.result, ran.serverName),
+                )}
+              />
             ) : null
           }
         />

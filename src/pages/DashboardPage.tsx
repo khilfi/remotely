@@ -858,8 +858,13 @@ export function DashboardPage({
     return () => void unlisten.then((stop) => stop());
   }, []);
 
+  /** The layout couldn't be read: an `alerts` link opens the rules rather than wait for it. */
+  const [layoutFailed, setLayoutFailed] = useState(false);
   useEffect(() => {
-    dashboardApi.layout().then(setLayoutInfo, (err) => toast.error(errorMessage(err), { id: "dashboard-layout" }));
+    dashboardApi.layout().then(setLayoutInfo, (err) => {
+      setLayoutFailed(true);
+      toast.error(errorMessage(err), { id: "dashboard-layout" });
+    });
   }, []);
   const layout = draft ?? layoutInfo?.layout ?? null;
   const editing = draft !== null;
@@ -915,10 +920,10 @@ export function DashboardPage({
 
   // MO-07, UX-19: an `alerts` link: the rules sheet when the link asks for it (at once), else once the layout is known,
   // the Alerts widget scrolled into view, or the rules when the layout (as shown, a customizing draft included) has no
-  // Alerts widget.
+  // Alerts widget. When the layout couldn't be read there is no widget on screen: the rules open.
   const [seenAlerts, setSeenAlerts] = useState(0);
   const [scrollAlerts, setScrollAlerts] = useState(0);
-  if (alertsRequest && alertsRequest.n !== seenAlerts && (layout || alertsRequest.rules)) {
+  if (alertsRequest && alertsRequest.n !== seenAlerts && (layout || layoutFailed || alertsRequest.rules)) {
     setSeenAlerts(alertsRequest.n);
     if (alertsOpens(alertsRequest, kinds) === "rules") setRulesOpen(true);
     else setScrollAlerts((n) => n + 1);

@@ -784,6 +784,7 @@ export default function App() {
             checkId: link.checkId,
             add: link.add,
             spec: link.spec,
+            untrusted: link.untrusted,
             n: (prev?.n ?? 0) + 1,
           }));
           go({ page: "dashboard", tab: "checks" });

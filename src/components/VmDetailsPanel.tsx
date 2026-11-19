@@ -198,6 +198,8 @@ export function VmDetailsPanel(props: Props) {
         <MonitorIconMenu
           target={{
             check: { kind: "vm", vmKey: vm.vmxPath, label: vm.displayName },
+            // A VM's check probes its guest address from this PC.
+            checkVia: null,
             watch: vmSource(vm.id, props.sessions),
           }}
         />

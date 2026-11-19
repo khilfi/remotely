@@ -94,7 +94,7 @@ import { flattenFolders, folderPath, subtree } from "@/lib/folders";
 import { formatWhen, plural } from "@/lib/format";
 import { requestLink } from "@/lib/links";
 import { useThresholds } from "@/lib/metrics";
-import { sessionSource } from "@/lib/monitor";
+import { checkVia, sessionSource } from "@/lib/monitor";
 import { noteLink } from "@/lib/notes";
 import { toastDeleted } from "@/lib/undo-delete";
 import { withVaultPassword } from "@/lib/reauth-prompt";
@@ -786,6 +786,7 @@ export function SessionsPage({
                                   <MonitorMenu
                                     target={{
                                       check: { kind: "session", sessionId: s.id, label: s.name },
+                                      checkVia: checkVia(s, all),
                                       watch: sessionSource(s),
                                     }}
                                   />

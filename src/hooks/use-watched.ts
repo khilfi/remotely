@@ -1,10 +1,12 @@
-// UX-19 (0.9.0 H4): the sessions the dashboard watches (MO-02) and how often it reads them, for Monitor ▸. Read when
-// a menu opens (`enabled`), as the palette reads them each time it opens: never in the background. `watch` starts or
-// stops watching (audited by the core, a read: no approval) and reads again.
+// UX-19 (0.9.0 H4): the sessions the dashboard watches (MO-02) and how often it reads them, for Monitor ▸ and the
+// palette. Read when a menu or the palette opens (`enabled`), never in the background, from `metrics_watched`: the
+// whole list, since the overview's rows name one watched session per VM, however many of its sessions are watched.
+// `watch` starts or stops watching (audited by the core, a read: no approval) and keeps the list it returns.
 
 import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
 import { api, errorMessage } from "@/lib/api";
+import { watchedFrom } from "@/lib/monitor";
 
 export interface Watched {
   /** null until read. */
@@ -18,27 +20,29 @@ export function useWatched(enabled: boolean): Watched {
   const [watched, setWatched] = useState<Set<string> | null>(null);
   const [intervalSecs, setIntervalSecs] = useState(5);
 
-  const read = useCallback(
-    () =>
-      api.metricsOverview().then(
-        (o) => {
-          setWatched(new Set(o.rows.flatMap((r) => (r.watchedSession ? [r.watchedSession] : []))));
-          if (o.cost.guestIntervalSecs > 0) setIntervalSecs(o.cost.guestIntervalSecs);
-        },
-        // Unread, it offers to watch: watching a watched session again changes nothing.
-        () => setWatched(new Set()),
-      ),
-    [],
-  );
-
   useEffect(() => {
-    if (enabled) void read();
-  }, [enabled, read]);
+    if (!enabled) return;
+    let stale = false;
+    api.metricsWatched().then(
+      (hosts) => {
+        if (stale) return;
+        const read = watchedFrom(hosts);
+        setWatched(read.watched);
+        setIntervalSecs(read.intervalSecs);
+      },
+      // Unread, it offers to watch: watching a watched session again changes nothing.
+      () => {
+        if (!stale) setWatched(new Set());
+      },
+    );
+    return () => {
+      stale = true;
+    };
+  }, [enabled]);
 
   const watch = useCallback(async (sessionId: string, on: boolean) => {
     try {
-      const now = await api.metricsWatch(sessionId, on);
-      setWatched(new Set(now));
+      setWatched(new Set(await api.metricsWatch(sessionId, on)));
       toast.success(
         on ? "Watching it on the dashboard. The first reading arrives within a round." : "Stopped watching",
       );
