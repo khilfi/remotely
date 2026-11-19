@@ -154,6 +154,8 @@ async fn main() {
             .with_sftp_file("/home/bob/notes.txt", b"bob's notes\n")
             .with_unreadable("/home/bob/.app")
             .with_sftp_file("/home/bob/.app/app.ini", b"[app]\n")
+            // SS-14 (G4), UX-14: terminal editors for "Edit in the terminal" (fake ones: Ctrl+X or q quits).
+            .with_host_editors(&["nano", "vi"])
             // CT-01: Docker and Podman with a small shop; from the second server on, Docker needs sudo.
             .with_containers(EngineKind::Docker, Fixture::sample())
             .with_containers(EngineKind::Podman, Fixture::sample());
@@ -183,6 +185,7 @@ async fn main() {
     println!("MultiExec and Compare output commands: hostname, uptime, cat /etc/os-release, seq <n>, sleep <s>");
     println!("Files: cd <dir> and pwd move the shell (the drawer follows); /etc refuses uploads");
     println!("  and for QL-09: cd /home/bob/.app (alice can't open it over SFTP); su [-] [user] switches user");
+    println!("  and for editing: nano and vi are fake editors (Ctrl+X or q quits); sudoedit takes the same password");
     println!("Containers: docker and podman on every server; from the second on, docker needs sudo");
     println!("Guest metrics: watch a session on 127.0.0.1 on the dashboard; its counters move every 5 s");
     println!("Host details: open a terminal (or Refresh in Host details) to read OS and specs; Admin lists services, ports, users");

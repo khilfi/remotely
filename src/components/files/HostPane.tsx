@@ -299,7 +299,8 @@ export function HostPane({
   const pane = paneOf(terminalId);
   const subscribe = useCallback((listener: () => void) => pane?.subscribe(listener) ?? (() => undefined), [pane]);
   const snapshot = useSyncExternalStore(subscribe, () => pane?.getSnapshot() ?? NO_SNAPSHOT) as PaneSnapshot;
-  const connected = pane !== undefined && snapshot.status.state === "connected";
+  // Only an SSH terminal has files here (SFTP on its connection); nothing is asked of any other kind of tab.
+  const connected = pane !== undefined && pane.ssh && snapshot.status.state === "connected";
   const name = pane?.title ?? "Closed terminal";
   const sessionId = pane?.sessionId ?? null;
   // UX-14: one answer for the drawer and the Files page.
@@ -689,6 +690,17 @@ export function HostPane({
       </section>
     );
   }
+  // An editor tab, Telnet, serial, a tunnel or PowerShell: no SFTP (the Files page only opens SSH terminals).
+  if (!pane.ssh) {
+    return (
+      <section className="flex min-h-0 min-w-0 flex-1 flex-col gap-2">
+        {compact && <h2 className="text-sm font-medium">Files here</h2>}
+        <p className="text-sm text-muted-foreground">
+          This tab has no files to show: Files here is for SSH terminals. Pick one of those tabs.
+        </p>
+      </section>
+    );
+  }
 
   const note = compact ? trackingNote(snapshot.folder?.tracking, following) : null;
   const followingShell = snapshot.folder?.tracking === "following";
@@ -701,7 +713,8 @@ export function HostPane({
       className={cn(
         // `pane-drop`: while Explorer files are dragged over it, it says where they would go (the Terminal page).
         "pane-drop @container relative flex min-h-0 min-w-0 flex-1 flex-col gap-2",
-        !compact && "rounded-lg border p-2",
+        // The drawer scrolls as a whole when its notes and table don't fit, rather than spill over the lists below.
+        compact ? "overflow-y-auto" : "rounded-lg border p-2",
       )}
     >
       <div className="flex items-center gap-1.5">

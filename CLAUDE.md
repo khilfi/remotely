@@ -2819,7 +2819,8 @@ seen on a real VM yet (the PR lists the checks).
   serves moving /proc counters, so watching it on the dashboard shows live guest metrics, and SFTP from a temp folder
   (SS-08) with a bash login, so the "Files here" drawer follows `cd` (QL-09: `cd /home/bob/.app`, a folder alice
   can't open over SFTP, and `su bob` to switch user; SS-14: the drawer's "Browse as root" starts its sftp-server under
-  the toy sudo, which takes the same password, so /etc and /root open and change as root). SS-07: the servers reach
+  the toy sudo, which takes the same password, so /etc and /root open and change as root; UX-14: fake nano and vi
+  for Edit in the terminal, sudoedit with the same password). SS-07: the servers reach
   each other as
   `dev-host-01.test`, `dev-host-02.test`... (names this PC can't resolve, so they need a jump host) and a web page as
   `web.test:80`, for trying chains and tunnels. CT-01: each has `docker` and `podman` with a small shop of containers

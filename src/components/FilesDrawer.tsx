@@ -17,6 +17,8 @@ export const DRAWER_KEY = "drawer";
 interface Props {
   /** The current pane's core id, once it opened. */
   terminalId: string | null;
+  /** The current tab is an editor, Telnet, serial, tunnel or PowerShell tab: no files to show. */
+  notSsh: boolean;
   /** SS-10: terminals Type in all tabs types into; uploads still go to this one only. */
   multiExecTerminals: number;
   /** SS-14: `asRoot` through root browsing; `folder`: pick a folder to upload with what is in it. */
@@ -33,6 +35,7 @@ interface Props {
 
 export function FilesDrawer({
   terminalId,
+  notSsh,
   multiExecTerminals,
   onUpload,
   onDownload,
@@ -44,7 +47,7 @@ export function FilesDrawer({
 }: Props) {
   return (
     <div className="flex h-full min-h-0 flex-col gap-2 rounded-lg border p-2">
-      {terminalId ? (
+      {terminalId && !notSsh ? (
         // A pane of its own per terminal, so a folder opened by hand doesn't carry over to another terminal.
         <HostPane
           key={terminalId}
@@ -62,7 +65,11 @@ export function FilesDrawer({
       ) : (
         <section className="flex min-h-0 flex-1 flex-col gap-2">
           <h2 className="text-sm font-medium">Files here</h2>
-          <p className="text-sm text-muted-foreground">Open a terminal: its files show here.</p>
+          <p className="text-sm text-muted-foreground">
+            {notSsh
+              ? "This tab has no files to show: Files here is for SSH terminals. Pick one of those tabs."
+              : "Open a terminal: its files show here."}
+          </p>
         </section>
       )}
       <div className="flex max-h-[35%] min-h-0 shrink-0 flex-col gap-2 overflow-hidden">

@@ -1622,6 +1622,7 @@ export function TerminalPage({
   const drawer = (
     <FilesDrawer
       terminalId={currentPane?.terminalId ?? null}
+      notSsh={currentPane !== undefined && currentPane.kind !== "ssh"}
       multiExecTerminals={multiExec ? pickedPanes.length : 0}
       onUpload={(folder, asRoot, pick) => void pickAndUpload(currentPane, folder, asRoot, pick)}
       onDownload={(paths, to, asRoot) => {
