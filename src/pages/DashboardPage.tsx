@@ -10,8 +10,13 @@
 // health checks on a schedule (ChecksTab); the grid can hold a Checks widget too.
 //
 // UX-03, UX-07 (0.6.0): one range for the page's charts (in the header, and in a drill-down, which changes the same
-// one), the round's timing behind "Updated hh:mm", Watch hosts as the one place to watch or stop watching a host,
-// a row's click as the one way to its details, and Customize in the header's "⋯".
+// one), the round's timing behind "Updated hh:mm", Watch hosts as this page's place to watch or stop watching a host
+// (UX-19, 0.9.0: rows elsewhere have Monitor ▸ too), a row's click as the one way to its details, and Customize in the
+// header's "⋯".
+//
+// UX-19 (0.9.0): the page hosts the alert rules sheet, so the rules are reachable whatever the layout holds: from the
+// Alerts widget's Rules, "Alert rules…" in the header's "⋯" on the Metrics tab, and `alerts` links (the palette's
+// "Alert rules", and the status bar's alerts, which open the widget or, with none on the layout, the rules).
 //
 // P8: the page follows the core's rounds only while it shows and the window is visible (shouldPoll): hidden, it reads
 // nothing and renders nothing each round; shown again, it reads once at once and then follows the rounds. Each widget
@@ -19,6 +24,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import {
+  BellRingIcon,
   CheckIcon,
   GaugeIcon,
   HeartPulseIcon,
@@ -52,7 +58,8 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Toggle } from "@/components/ui/toggle";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
-import { AlertsWidget } from "@/components/AlertsWidget";
+import { AlertRulesSheet } from "@/components/AlertRulesSheet";
+import { ALERTS_WIDGET_ID, AlertsWidget } from "@/components/AlertsWidget";
 import { ChecksTab, type ChecksRequest } from "@/components/checks/ChecksTab";
 import { ChecksWidget } from "@/components/checks/ChecksWidget";
 import { EnvBadge, StateBadge } from "@/components/Badges";
@@ -119,6 +126,7 @@ import {
   useThresholds,
   type Thresholds,
 } from "@/lib/metrics";
+import { alertsOpens } from "@/lib/monitor";
 import type { DashboardTab } from "@/lib/navigation";
 import { shouldPoll } from "@/lib/polling";
 import type { ResolvedTheme } from "@/lib/theme";
@@ -143,6 +151,8 @@ interface Props {
   onOpenSessions: () => void;
   /** MO-08: a check's history, or a new check on a row, asked for by a link. */
   checksRequest: ChecksRequest | null;
+  /** MO-07, UX-19: an `alerts` link: the Alerts widget, or the rules (asked for, or no widget on the layout). */
+  alertsRequest: { rules: boolean; n: number } | null;
 }
 
 type SortKey =
@@ -797,6 +807,7 @@ export function DashboardPage({
   onConnect,
   onActions,
   checksRequest,
+  alertsRequest,
 }: Props) {
   const [overview, setOverview] = useState<DashboardOverview | null>(null);
   const [capacity, setCapacity] = useState<HostCapacity | null>(null);
@@ -819,6 +830,8 @@ export function DashboardPage({
   /** MO-08: the Checks tab's range (the history only), and its header button's presses. */
   const [checksRange, setChecksRange] = useState<HistoryRange>("24h");
   const [addCheck, setAddCheck] = useState(0);
+  /** MO-07, UX-19: the alert rules sheet, hosted here so no widget is needed to reach it. */
+  const [rulesOpen, setRulesOpen] = useState(false);
   const readOnly = useReadOnlyReason();
 
   // P8: rounds count only while the page shows and the window is visible; showing it again counts as a round, so
@@ -900,6 +913,20 @@ export function DashboardPage({
     if (focus) setSelected(focus.key);
   }
 
+  // MO-07, UX-19: an `alerts` link: the rules sheet when the link asks for it (at once), else once the layout is known,
+  // the Alerts widget scrolled into view, or the rules when the layout (as shown, a customizing draft included) has no
+  // Alerts widget.
+  const [seenAlerts, setSeenAlerts] = useState(0);
+  const [scrollAlerts, setScrollAlerts] = useState(0);
+  if (alertsRequest && alertsRequest.n !== seenAlerts && (layout || alertsRequest.rules)) {
+    setSeenAlerts(alertsRequest.n);
+    if (alertsOpens(alertsRequest, kinds) === "rules") setRulesOpen(true);
+    else setScrollAlerts((n) => n + 1);
+  }
+  useEffect(() => {
+    if (scrollAlerts > 0) document.getElementById(ALERTS_WIDGET_ID)?.scrollIntoView({ block: "nearest" });
+  }, [scrollAlerts]);
+
   const watch = useCallback(
     async (sessionId: string, on: boolean) => {
       try {
@@ -980,6 +1007,7 @@ export function DashboardPage({
             onOpenTarget={(target) =>
               target.kind === "check" ? requestLink({ kind: "checks", checkId: target.key }) : setSelected(target.key)
             }
+            onOpenRules={() => setRulesOpen(true)}
           />
         );
       case "checks":
@@ -1034,14 +1062,22 @@ export function DashboardPage({
           ) : undefined
         }
         tools={
-          tab === "metrics" && layout && !editing ? (
-            <DropdownMenuItem disabled={readOnly !== null} onSelect={() => setDraft(structuredClone(layout))}>
-              <LayoutDashboardIcon />
-              <div>
-                Customize the dashboard
-                <ReasonLine reason={readOnly} />
-              </div>
-            </DropdownMenuItem>
+          tab === "metrics" ? (
+            <>
+              <DropdownMenuItem onSelect={() => setRulesOpen(true)}>
+                <BellRingIcon />
+                Alert rules…
+              </DropdownMenuItem>
+              {layout && !editing && (
+                <DropdownMenuItem disabled={readOnly !== null} onSelect={() => setDraft(structuredClone(layout))}>
+                  <LayoutDashboardIcon />
+                  <div>
+                    Customize the dashboard
+                    <ReasonLine reason={readOnly} />
+                  </div>
+                </DropdownMenuItem>
+              )}
+            </>
           ) : undefined
         }
         tabs={
@@ -1146,6 +1182,7 @@ export function DashboardPage({
           }}
         />
         <HostDetailsSheet session={hostDetails} thresholds={thresholds} onClose={() => setHostDetails(null)} />
+        <AlertRulesSheet open={rulesOpen} onClose={() => setRulesOpen(false)} />
         {confirmReset && (
           <ConfirmDialog
             title="Reset the dashboard?"

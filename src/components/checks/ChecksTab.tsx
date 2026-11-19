@@ -18,15 +18,27 @@ import { CheckDialog } from "@/components/checks/CheckDialog";
 import { CheckHistorySheet } from "@/components/checks/CheckHistorySheet";
 import { CheckStatusBadge, Sparkline } from "@/components/checks/CheckBits";
 import { errorMessage } from "@/lib/api";
-import { checksApi, type CheckInput, type CheckRow, type ChecksOverview, type HealthCheck } from "@/lib/checks-api";
+import {
+  checksApi,
+  type CheckInput,
+  type CheckRow,
+  type CheckSpec,
+  type ChecksOverview,
+  type HealthCheck,
+} from "@/lib/checks-api";
 import { agoText, everyText, newCheckInput, specText, tookText, uptimeText, waitText, withResult } from "@/lib/checks";
 import type { HistoryRange } from "@/lib/dashboard-api";
-import { probeTarget, type ToolTarget } from "@/lib/toolbox";
+import { requestedCheck } from "@/lib/monitor";
+import type { ToolTarget } from "@/lib/toolbox";
 
-/** What another page asked the tab to show: a check's history, or a new check on a row. */
+/**
+ * What another page asked the tab to show: a check's history, or a new check on a row (UX-19: Monitor ▸'s "Add a
+ * check", or a Toolbox result's "Keep checking this…" with its `spec`). Every one opens this tab's CheckDialog.
+ */
 export interface ChecksRequest {
   checkId?: string;
   add?: ToolTarget;
+  spec?: CheckSpec;
   /** Counts up so the same request can come twice. */
   n: number;
 }
@@ -116,9 +128,7 @@ export function ChecksTab({ active, range, onRangeChange, request, addRequest }:
   if (request && request.n !== handled) {
     setHandled(request.n);
     if (request.add) {
-      const target = request.add;
-      const name = target.kind === "address" ? target.host : target.label;
-      setEditing({ kind: "new", input: newCheckInput(probeTarget(target), name) });
+      setEditing({ kind: "new", input: requestedCheck(request.add, request.spec) });
     } else if (request.checkId) {
       setHistoryOf(request.checkId);
     }

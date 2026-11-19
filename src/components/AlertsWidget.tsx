@@ -1,7 +1,8 @@
 // MO-07: the alert list on the dashboard: firing alerts first (critical on top), with acknowledge, and the history of
-// resolved ones on request; the rules open beside it. Read when the dashboard shows and again as alerts fire, resolve
-// or are acknowledged (alerts://event), never while it is hidden. Acknowledging is audited and refused while presenting
-// with the read-only lock.
+// resolved ones on request; its Rules button opens the rules sheet, which the Dashboard page hosts (UX-19: so the
+// header's "⋯", the palette and the status bar reach the rules without this widget). Read when the dashboard shows and
+// again as alerts fire, resolve or are acknowledged (alerts://event), never while it is hidden. Acknowledging is
+// audited and refused while presenting with the read-only lock.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { BellRingIcon, CheckCheckIcon, CheckIcon, HistoryIcon, ListChecksIcon, TriangleAlertIcon } from "lucide-react";
@@ -9,7 +10,6 @@ import { toast } from "sonner";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Toggle } from "@/components/ui/toggle";
-import { AlertRulesSheet } from "@/components/AlertRulesSheet";
 import { useReadOnlyReason } from "@/components/Presentation";
 import { WhyDisabled } from "@/components/WhyDisabled";
 import { errorMessage } from "@/lib/api";
@@ -102,18 +102,23 @@ function AlertRow({
   );
 }
 
+/** The widget's element id: an `alerts` link scrolls it into view. */
+export const ALERTS_WIDGET_ID = "dashboard-alerts";
+
 export function AlertsWidget({
   live,
   onOpenTarget,
+  onOpenRules,
 }: {
   /** The dashboard shows and the window is visible. */
   live: boolean;
   /** Opens the drill-down of an alert's VM or host. */
   onOpenTarget?: (target: AlertTarget) => void;
+  /** Opens the alert rules (the Dashboard page's sheet). */
+  onOpenRules: () => void;
 }) {
   const [list, setList] = useState<AlertList | null>(null);
   const [history, setHistory] = useState(false);
-  const [rulesOpen, setRulesOpen] = useState(false);
   const readOnly = useReadOnlyReason();
   const liveRef = useRef(live);
   useEffect(() => {
@@ -158,7 +163,11 @@ export function AlertsWidget({
   const alerts = sortAlerts(list?.alerts ?? []);
   const fresh = unacknowledged(alerts);
   return (
-    <section aria-label="Alerts" className="flex h-full min-h-0 flex-col rounded-lg border bg-card p-3">
+    <section
+      id={ALERTS_WIDGET_ID}
+      aria-label="Alerts"
+      className="flex h-full min-h-0 scroll-mt-4 flex-col rounded-lg border bg-card p-3"
+    >
       <div className="mb-2 flex flex-wrap items-center gap-2">
         <BellRingIcon className="size-4 text-muted-foreground" />
         <span className="text-sm font-medium">Alerts</span>
@@ -189,7 +198,7 @@ export function AlertsWidget({
               <CheckCheckIcon /> All
             </Button>
           </WhyDisabled>
-          <Button size="sm" variant="ghost" onClick={() => setRulesOpen(true)}>
+          <Button size="sm" variant="ghost" onClick={onOpenRules}>
             <ListChecksIcon /> Rules
           </Button>
         </div>
@@ -215,7 +224,6 @@ export function AlertsWidget({
           </ul>
         )}
       </div>
-      <AlertRulesSheet open={rulesOpen} onClose={() => setRulesOpen(false)} />
     </section>
   );
 }

@@ -1246,8 +1246,11 @@ src/                  React + TypeScript UI
                       ContainerHostDialog, ContainerDetailsPanel (Overview, Logs, Stats) and ContainerResources (images,
                       volumes, networks) for CT-01; HostDetailsSheet (MO-13 System, MO-14 Admin) for a session,
                       VmSystemTab (MO-13: a VM's System tab), ThisPcMemoryChart (MO-15) and MetricChart's own legend
-                      and dashed limit lines; MO-06, MO-07, MO-16 RangePicker, AlertsWidget, AlertRulesSheet,
-                      AlertNotifier (one Windows notification per round of alerts, masked), DashboardGrid (pointer
+                      and dashed limit lines; MO-06, MO-07, MO-16 RangePicker, AlertsWidget, AlertRulesSheet (UX-19,
+                      0.9.0: hosted by DashboardPage, so the widget's Rules, "Alert rules…" in the header's "⋯" on the
+                      Metrics tab and `alerts` links reach it: the palette's Alert rules asks for it, and the status
+                      bar's alerts open the widget, or the sheet when the layout has no Alerts widget, monitor.ts
+                      alertsOpens), AlertNotifier (one Windows notification per round of alerts, masked), DashboardGrid (pointer
                       drag, keyboard moves, resize; no drag-and-drop library), WidgetSettings, ServicesWidget,
                       MetricChartWidget, DashboardHistoryCard; QL-15 ErrorBoundary: one per page and one for the app, with Reload;
                       SS-04: NewPasswordField (strength meter from password_strength, Generate, hidden while
@@ -1308,10 +1311,20 @@ src/                  React + TypeScript UI
                       Check ports; CertificateTool, SubnetTool, WakeTool, FileServerTool: the form, the running server
                       and its requests), TargetField and ToolboxMenu, the "Toolbox"
                       submenu of session rows and the palette's VM and session views, and ToolboxIconMenu in the VM
-                      details panel's header; no recent inputs are offered while presenting, since a native dropdown
-                      is out of the masker's reach); MO-08 checks/: ChecksTab (the Dashboard's Checks tab), CheckDialog,
-                      CheckHistorySheet, ChecksWidget (MO-16) and CheckBits (status badge, sparkline); the row menus'
-                      "Add a check" opens a `checks` link; 0.7.0 F5: NoteSheet (FD-06, hosted once by App and opened by
+                      details panel's header (UX-19: the probes only; "Add a check" is Monitor ▸'s); UX-19 KeepChecking
+                      ("Keep checking this…" under Ping, Check ports (a port picked from those checked), Certificate
+                      (a server's, not a file's) and DNS lookup (A and AAAA) results, filled in from what the run was
+                      asked); no recent inputs are offered while presenting, since a native dropdown
+                      is out of the masker's reach); MO-08 checks/: ChecksTab (the Dashboard's Checks tab, whose
+                      CheckDialog every "Add a check" and "Keep checking this…" opens through a `checks` link, its
+                      `spec` filled in by monitor.ts requestedCheck), CheckDialog,
+                      CheckHistorySheet, ChecksWidget (MO-16) and CheckBits (status badge, sparkline); UX-19 (0.9.0)
+                      MonitorMenu: Monitor ▸ in session rows (the Sessions page and SessionTree; not serial ones) and
+                      MonitorIconMenu in the VM details panel's header, beside ToolboxIconMenu: "Watch its metrics" or
+                      "Stop watching" (MO-02's metrics_watch; a VM through a linked SSH or WinRM session, or why not)
+                      and "Add a check", each with its cost line (monitor.ts), the watched sessions read as the menu
+                      opens (hooks/use-watched.ts); the palette's VM and session views have the same Monitor group;
+                      0.7.0 F5: NoteSheet (FD-06, hosted once by App and opened by
                       a `note` AppLink; the core's HTML, the web link confirm, Send to terminal), StarButton (QL-26),
                       TrashCard (QL-27, Settings › Privacy and data), BulkEditDialog (QL-28, the Sessions page's selection
                       bar, which also has FD-04's Support bundle for the SSH sessions picked); QL-29 VmSessionsDialog
@@ -1354,7 +1367,8 @@ src/                  React + TypeScript UI
                       transfers store through useSyncExternalStore); use-debounced.ts (Compare reloads once per burst
                       of job events; Activity coalesces its own asks, at most one read a second);
                       use-chart-points.ts (MO-06 a series' live rounds, or a history range carried on with them);
-                      use-password-strength.ts; use-mobile.ts is shadcn's
+                      use-password-strength.ts; use-watched.ts (UX-19: the watched sessions and the poll interval,
+                      read when a Monitor menu opens; watch and stop); use-mobile.ts is shadcn's
   lib/                api.ts (typed IPC wrappers; FD-03: every answer's host, IP and user fields are learnt by the
                       masker), reauth.ts and reauth-prompt.ts (SS-04, AP-06: on `reauth_required` ask for the vault
                       password in ReauthDialog and send the request again; the vault idle lock's activity ping),
@@ -1456,7 +1470,10 @@ src/                  React + TypeScript UI
                       and types), subnet.ts (the subnet calculator, IPv4 and IPv6 with BigInt), file-server.ts and
                       file-server-api.ts (the File server tab's form, checks and wording; wrappers and types) and
                       hooks/use-probe-run.ts (a run's id, progress and Stop); MO-08 checks.ts (kinds, defaults, the
-                      editor's checks, wording, the sparkline's path) and checks-api.ts; 0.7.0 F5: comfort-api.ts
+                      editor's checks, wording, the sparkline's path) and checks-api.ts; UX-19 (0.9.0) monitor.ts
+                      (Monitor ▸'s watch state: a session that reads its guest, a VM through a linked one; the cost
+                      lines; where an `alerts` link leads; the check a `checks` link opens, and Keep checking this…'s
+                      ping, port, certificate and DNS specs); 0.7.0 F5: comfort-api.ts
                       (notes, stars, recents, trash, bulk edit: types and wrappers), notes.ts (FD-06 link actions and
                       titles, excerpts, the note link), note-send.ts (a code block to the Terminal page's current pane, its
                       last line break taken off, and asked about whatever the paste setting when it has more lines:

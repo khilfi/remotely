@@ -15,6 +15,9 @@
 // UX-03, UX-07 (0.6.0): opened, it lists the pages, then what makes something new, then the other actions, VMs and
 // sessions (lib/palette.ts). The actions on every running VM at once show only when the search asks for them
 // (typedForBulk), never at the top of an empty search. A term found by the search shows its definition in the list.
+//
+// UX-19 (0.9.0): a VM's and a session's views have a Monitor group (watch its metrics, add a check, each with what it
+// costs) before the Toolbox group, as Monitor ▸ on the rows.
 
 import { useEffect, useMemo, useState } from "react";
 import {
@@ -59,6 +62,8 @@ import { linkedSshSessions } from "@/lib/vm-sessions";
 import type { AppLink } from "@/lib/links";
 import type { ToolTarget } from "@/lib/toolbox";
 import { TOOLBOX_ROW_ITEMS } from "@/components/toolbox/ToolboxMenu";
+import { checkCostText, sessionSource, vmSource, watchCostText, watchState, type WatchSource } from "@/lib/monitor";
+import { kindOf } from "@/lib/session-kinds";
 import { groupRanked, rankItems, type SearchItem } from "@/lib/search";
 import { SEARCH_PROVIDERS, loadSearchItems } from "@/lib/search-providers";
 import { splitActions, typedForBulk } from "@/lib/palette";
@@ -205,6 +210,8 @@ export function CommandPalette({
   const [vms, setVms] = useState<VmRecord[]>([]);
   const [sessions, setSessions] = useState<SessionRecord[]>([]);
   const [watched, setWatched] = useState<Set<string>>(new Set());
+  /** MO-02: seconds between two reads of a watched host, for Monitor's cost line. */
+  const [watchInterval, setWatchInterval] = useState(5);
   const [tiers, setTiers] = useState<Record<string, Tier>>({});
   const [found, setFound] = useState<SearchItem[]>([]);
   const toolsImages = useToolsImages(open);
@@ -221,7 +228,10 @@ export function CommandPalette({
       if (!stale) setFound(items);
     });
     api.metricsOverview().then(
-      (o) => setWatched(new Set(o.rows.flatMap((r) => (r.watchedSession ? [r.watchedSession] : [])))),
+      (o) => {
+        setWatched(new Set(o.rows.flatMap((r) => (r.watchedSession ? [r.watchedSession] : []))));
+        if (o.cost.guestIntervalSecs > 0) setWatchInterval(o.cost.guestIntervalSecs);
+      },
       () => setWatched(new Set()),
     );
     return () => {
@@ -345,15 +355,40 @@ export function CommandPalette({
             <Icon /> {label}
           </CommandItem>
         ))}
-        {/* MO-08: a health check on the VM or session, in the Dashboard's Checks tab. */}
+      </CommandGroup>
+    );
+  }
+
+  /**
+   * UX-19: Monitor, as on the rows (MonitorMenu.tsx): watch its metrics (MO-02, a VM through a linked session; left out
+   * when it can't be watched) and a health check on it (MO-08), each with what it costs.
+   */
+  function monitorGroup(check: ToolTarget, source: WatchSource) {
+    const state = watchState(source, watched);
+    return (
+      <CommandGroup heading="Monitor">
+        {state.can && (
+          <CommandItem
+            value={state.watching ? "monitor stop watching guest metrics" : "monitor watch its metrics guest dashboard"}
+            onSelect={() => void watch(state.sessionId, !state.watching)}
+          >
+            {state.watching ? <EyeOffIcon /> : <EyeIcon />}
+            <span className="shrink-0">{state.watching ? "Stop watching" : "Watch its metrics"}</span>
+            <span className="min-w-0 truncate text-xs text-muted-foreground">
+              {watchCostText(state, watchInterval)}
+            </span>
+          </CommandItem>
+        )}
         <CommandItem
-          value="toolbox add a health check"
+          value="monitor add a health check"
           onSelect={() => {
             close();
-            onOpenLink({ kind: "checks", add: target });
+            onOpenLink({ kind: "checks", add: check });
           }}
         >
-          <HeartPulseIcon /> Add a check
+          <HeartPulseIcon />
+          <span className="shrink-0">Add a check</span>
+          <span className="min-w-0 truncate text-xs text-muted-foreground">{checkCostText()}</span>
         </CommandItem>
       </CommandGroup>
     );
@@ -368,7 +403,9 @@ export function CommandPalette({
     close();
     try {
       await api.metricsWatch(id, on);
-      toast.success(on ? "Watching the guest on the dashboard" : "Stopped guest metrics");
+      toast.success(
+        on ? "Watching it on the dashboard. The first reading arrives within a round." : "Stopped watching",
+      );
     } catch (err) {
       toast.error(errorMessage(err));
     }
@@ -582,6 +619,8 @@ export function CommandPalette({
                 )}
               </CommandGroup>
               <CommandSeparator />
+              {monitorGroup({ kind: "vm", vmKey: vm.vmxPath, label: vm.displayName }, vmSource(vm.id, sessions))}
+              <CommandSeparator />
               {toolboxGroup({ kind: "vm", vmKey: vm.vmxPath, label: vm.displayName })}
             </>
           )}
@@ -608,30 +647,30 @@ export function CommandPalette({
               >
                 <ServerIcon /> Show it in Sessions
               </CommandItem>
-              {watched.has(session.id) ? (
-                <>
-                  <CommandItem
-                    value="show metrics dashboard"
-                    onSelect={() => {
-                      close();
-                      onShowMetrics(session.id);
-                    }}
-                  >
-                    <GaugeIcon /> Show its metrics
-                  </CommandItem>
-                  <CommandItem value="stop guest metrics" onSelect={() => void watch(session.id, false)}>
-                    <EyeOffIcon /> Stop guest metrics
-                  </CommandItem>
-                </>
-              ) : (
-                <CommandItem value="watch guest metrics dashboard" onSelect={() => void watch(session.id, true)}>
-                  <EyeIcon /> Watch its guest metrics (Linux, over SSH)
+              {watched.has(session.id) && (
+                <CommandItem
+                  value="show metrics dashboard"
+                  onSelect={() => {
+                    close();
+                    onShowMetrics(session.id);
+                  }}
+                >
+                  <GaugeIcon /> Show its metrics
                 </CommandItem>
               )}
             </CommandGroup>
           )}
           {view.kind === "session" && session && (
             <>
+              {kindOf(session).protocol !== "serial" && (
+                <>
+                  <CommandSeparator />
+                  {monitorGroup(
+                    { kind: "session", sessionId: session.id, label: session.name },
+                    sessionSource(session),
+                  )}
+                </>
+              )}
               <CommandSeparator />
               {toolboxGroup({ kind: "session", sessionId: session.id, label: session.name })}
             </>

@@ -14,7 +14,7 @@
 // group picks every session in it, for large runs); the Compare hosts panel shows and runs on them (UX-03: the page
 // opens it on the first pick, so the tree has no button of its own).
 // UX-12: each row shows the environment that applies (a Prod VM it reaches makes it Prod), and its tooltip says
-// where it comes from.
+// where it comes from. UX-19 (0.9.0): a row's menu has Monitor ▸ (watch its metrics, add a check) and Toolbox ▸.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
@@ -70,7 +70,9 @@ import { formatWhen } from "@/lib/format";
 import { sessionAddress } from "@/lib/terminal-session";
 import { kindLabel, kindOf, readsGuest } from "@/lib/session-kinds";
 import { cn } from "@/lib/utils";
+import { MonitorMenu } from "@/components/MonitorMenu";
 import { ToolboxMenu } from "@/components/toolbox/ToolboxMenu";
+import { sessionSource } from "@/lib/monitor";
 
 const GROUPING_KEY = "remotely.terminal.treeGrouping";
 const OPEN_KEY = "remotely.terminal.treeOpen";
@@ -560,7 +562,15 @@ function SessionRow({
           {starredRow ? "Unstar" : "Star"}
         </DropdownMenuItem>
         {session.kind?.protocol !== "serial" && (
-          <ToolboxMenu target={{ kind: "session", sessionId: session.id, label: session.name }} />
+          <>
+            <MonitorMenu
+              target={{
+                check: { kind: "session", sessionId: session.id, label: session.name },
+                watch: sessionSource(session),
+              }}
+            />
+            <ToolboxMenu target={{ kind: "session", sessionId: session.id, label: session.name }} />
+          </>
         )}
       </RowMenu>
     </div>

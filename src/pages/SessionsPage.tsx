@@ -12,7 +12,8 @@
 // VM the session reaches makes it Prod) and where it comes from when it is not the session's own.
 // 0.7.0: QL-28 rows can be selected (the selection bar's Edit changes them all at once, and FD-04 its Support bundle
 // collects from the SSH ones), QL-26 a star on each row, FD-06 a session's and a folder's note in their menus, and
-// QL-27 a delete's toast offers Undo (the item is in the trash).
+// QL-27 a delete's toast offers Undo (the item is in the trash). UX-19 (0.9.0): a row's Monitor ▸ watches its metrics
+// or adds a health check, beside its Toolbox ▸.
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
@@ -74,6 +75,7 @@ import { StarButton } from "@/components/StarButton";
 import { SessionDialog } from "@/components/SessionDialog";
 import { TransferImportDialog } from "@/components/TransferImportDialog";
 import { SessionVmLink } from "@/components/VmLinkControls";
+import { MonitorMenu } from "@/components/MonitorMenu";
 import { ToolboxMenu } from "@/components/toolbox/ToolboxMenu";
 import { ReasonLine, WhyDisabled } from "@/components/WhyDisabled";
 import {
@@ -92,6 +94,7 @@ import { flattenFolders, folderPath, subtree } from "@/lib/folders";
 import { formatWhen, plural } from "@/lib/format";
 import { requestLink } from "@/lib/links";
 import { useThresholds } from "@/lib/metrics";
+import { sessionSource } from "@/lib/monitor";
 import { noteLink } from "@/lib/notes";
 import { toastDeleted } from "@/lib/undo-delete";
 import { withVaultPassword } from "@/lib/reauth-prompt";
@@ -779,7 +782,15 @@ export function SessionsPage({
                               </DropdownMenuItem>
                               <DropdownMenuItem onSelect={() => void duplicate(s)}>Duplicate</DropdownMenuItem>
                               {kindOf(s).protocol !== "serial" && (
-                                <ToolboxMenu target={{ kind: "session", sessionId: s.id, label: s.name }} />
+                                <>
+                                  <MonitorMenu
+                                    target={{
+                                      check: { kind: "session", sessionId: s.id, label: s.name },
+                                      watch: sessionSource(s),
+                                    }}
+                                  />
+                                  <ToolboxMenu target={{ kind: "session", sessionId: s.id, label: s.name }} />
+                                </>
                               )}
                               <DropdownMenuSub>
                                 <DropdownMenuSubTrigger>Move to</DropdownMenuSubTrigger>
