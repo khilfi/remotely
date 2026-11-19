@@ -264,6 +264,21 @@ Files on hosts (0.8.0, SS-14, `docs/plan-0.8.md` "Approval tiers"). Every change
 | Edit the Files page's bookmarks (per session) | No tier; audited (`file_bookmark_changed`), refused by the read-only lock |
 | Start or stop root browsing | No tier; audited (`files_root_started`, `files_root_stopped` with why it ended: stopped, the vault locked, the connection ended, sudo refused; `files_root_refused`); a vault password new to the host asks for the vault password (AP-06); its transfers are cancelled when it ends |
 
+One home per job (0.9.0, `docs/plan-0.9.md` "Approval tiers"; UX-14 to UX-22, BX-01, QL-30, QL-31, SS-04). 0.9.0 moves and merges screens onto the commands that exist, so what it moves keeps its tier; a Prod-labelled target moves the rest up one tier, and protected targets are skipped:
+
+| Action | Tier |
+| --- | --- |
+| The file pane, the host picker, the results list, reports, Monitor ▸ and Disk images, moved or merged (UX-14 to UX-22) | Unchanged: the same commands, tiers and audit entries |
+| A drop on an SSH terminal | Unchanged: an upload, Low; replacing a file at least Medium; never as root |
+| A drop on the Terminal's Files pane (UX-14) | As an upload from the Files page's host pane: into the folder shown; one tier higher as root when the pane browses as root |
+| A drop on Files › Many hosts (UX-15), or "Push to the N picked hosts" after a drop on a terminal while typing in all tabs (QL-30) | A push (BX-10): Medium; High from the bulk threshold for commands on hosts (5) |
+| A saved MultiExec group used as a pick (UX-16) | A read: no tier, not audited |
+| Run a command on the sessions or VMs picked on the Sessions or VMs page (BX-01) | As a Compare hosts run (BX-06): read-only Low; any other command Medium on up to 4 hosts, High on 5 or more; a dangerous one High |
+| Retry a bulk job's failed hosts from Activity (UX-18) | As the run it retries: the same command resubmitted on the bus |
+| Keep a typed line as a run (QL-31) | No tier; audited (the line, the terminals, where it is kept; never the output), refused by the read-only lock |
+| Move command stars into favourites, once per workspace (UX-20) | No tier; audited as favourite adds |
+| Change the vault's idle lock, 1 to 60 minutes (SS-04) | No tier; audited, refused by the read-only lock |
+
 | ID | Requirement | Phase |
 | --- | --- | --- |
 | AP-01 | A policy engine classes every state-changing action into a tier; tier rules are editable | MVP |
