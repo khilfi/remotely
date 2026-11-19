@@ -21,6 +21,7 @@ import { groupRanked, matchQuality, normalise, queryWords, rankItems, scoreItem,
 import {
   actionItems,
   containerItems,
+  groupItems,
   hostNetworkItems,
   imageItems,
   pageItems,
@@ -309,6 +310,33 @@ test("schedules are found by name, their VMs and tags, and what they do; choosin
   assert.equal(items[0].detail, "Take a snapshot, keep the last 7 · Daily at 02:00");
   for (const query of ["nightly", "web01", "lab", "snapshot", "daily"]) {
     assert.equal(rankItems(query, items).length, 1, query);
+  }
+});
+
+test("UX-16: saved groups are found by name, their sessions and 'open group', and open on the Terminal page", () => {
+  const items = groupItems([
+    {
+      id: "g1",
+      name: "web servers",
+      members: [
+        { sessionId: "s1", name: "web01" },
+        { sessionId: "s2", name: "web02" },
+      ],
+      createdAt: "",
+      updatedAt: "",
+    },
+    { id: "g2", name: "old", members: [], createdAt: "", updatedAt: "" },
+  ]);
+  assert.deepEqual(
+    items.map((i) => [i.title, i.detail]),
+    [
+      ["Open group: web servers", "2 sessions"],
+      ["Open group: old", "no sessions (deleted)"],
+    ],
+  );
+  assert.deepEqual(items[0].target, { open: { kind: "group", groupId: "g1" } });
+  for (const query of ["web servers", "web02", "open group web"]) {
+    assert.equal(rankItems(query, items)[0]?.item.id, "group:g1", query);
   }
 });
 

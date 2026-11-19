@@ -36,6 +36,7 @@ import {
   FlagIcon,
   FolderPlusIcon,
   FolderSearchIcon,
+  GitCompareArrowsIcon,
   InfoIcon,
   MonitorOffIcon,
   NetworkIcon,
@@ -124,11 +125,13 @@ import {
   type SnapshotNode,
   type SubmitOutcome,
   type Tag,
+  type TargetPicks,
   type VmFilter,
   type VmHostUsage,
   type VmRecord,
   type VmSnapshots,
 } from "@/lib/api";
+import { selectionPicks } from "@/lib/bulk-picks";
 import { useVisibility } from "@/hooks/use-poll";
 import { useToolsImages } from "@/hooks/use-tools-images";
 import { CloneDialog } from "@/components/CloneDialog";
@@ -206,6 +209,11 @@ interface Props {
   onSchedules?: (ask: ScheduleAsk) => void;
   /** QL-29: SSH sessions for VMs without one (by id): one opens the editor filled in, several a preview. */
   onCreateSessions?: (vmIds: string[]) => void;
+  /**
+   * BX-01, UX-16: More › Organise's "Run a command on these…": Compare hosts on the Terminal page with these VMs
+   * picked, reached only through confirmed links (its picker names the VMs with none).
+   */
+  onRunCommand?: (picks: TargetPicks) => void;
   /** QL-29: changes when sessions were made from VMs, so the linked sessions are read again. */
   sessionsKey?: number;
 }
@@ -366,6 +374,7 @@ export function VmsPage({
   refreshKey,
   onSchedules,
   onCreateSessions,
+  onRunCommand,
   sessionsKey = 0,
 }: Props) {
   // FD-03: power actions, snapshots, protection, tags and labels are off while the read-only lock applies (the core
@@ -941,6 +950,7 @@ export function VmsPage({
     canExport: onExport !== undefined && selectedVms.length === 1,
     toolsImages,
     withoutSession: sessionTargets.length,
+    runCommand: onRunCommand !== undefined,
   });
 
   /** One item of the More menu. The count says how many of the selected VMs it goes to, when not all of them. */
@@ -1101,6 +1111,16 @@ export function VmsPage({
             <SquareTerminalIcon />
             {sessionTargets.length === 1 ? "Create SSH session…" : "Create SSH sessions…"}
             {n}
+          </DropdownMenuItem>
+        );
+      case "runCommand":
+        return (
+          <DropdownMenuItem
+            key={id}
+            onSelect={() => onRunCommand?.(selectionPicks({ vmPaths: selectedVms.map((v) => v.vmxPath) }))}
+          >
+            <GitCompareArrowsIcon />
+            Run a command on these…
           </DropdownMenuItem>
         );
       case "release":

@@ -22,6 +22,7 @@ import { BulkTargetPicker } from "@/components/BulkTargetPicker";
 import { HelpTip } from "@/components/HelpTip";
 import { WhyDisabled } from "@/components/WhyDisabled";
 import { errorMessage, type ResolvedTargets, type TargetPicks } from "@/lib/api";
+import { pickCount } from "@/lib/bulk-picks";
 import { plural } from "@/lib/format";
 import {
   reportsApi,
@@ -47,14 +48,9 @@ const GROUPS: { key: keyof GroupBy; label: string }[] = [
   { key: "workspace", label: "Workspace" },
 ];
 
+/** Nothing picked means every SSH and WinRM session; UX-16: a saved group alone is a pick too (pickCount counts it). */
 function nothingPicked(picks: TargetPicks): boolean {
-  return (
-    !picks.sessionIds?.length &&
-    !picks.terminalIds?.length &&
-    !picks.vmPaths?.length &&
-    !picks.tags?.length &&
-    !picks.filterIds?.length
-  );
+  return pickCount(picks) === 0;
 }
 
 export function AnsibleExportDialog({ sessionIds, onOpenSessions, onClose }: Props) {

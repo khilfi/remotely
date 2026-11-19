@@ -10,6 +10,9 @@
 //
 // VM-18: the hypervisor comes first in the Overview's rows, then its own facts (a VirtualBox VM's UUID), and the
 // guest tools row is named for it ("VMware Tools" or "Guest Additions").
+//
+// UX-19 (0.9.0): the header's Monitor menu watches the VM's metrics through a linked SSH or WinRM session, or adds a
+// health check on it; the Toolbox menu beside it has the probes.
 
 import { useEffect, useState, type ReactNode } from "react";
 import {
@@ -63,6 +66,8 @@ import { formatPct, HOST_SHARE_HINT, type Thresholds } from "@/lib/metrics";
 import { viewOfTab, VM_TABS, vmTabOf, type VmTab } from "@/lib/vm-page";
 import { approvalHint, PROTECTED_REASON, takeReason, type VmView } from "@/lib/vm-snapshots";
 import { ToolboxIconMenu } from "@/components/toolbox/ToolboxMenu";
+import { MonitorIconMenu } from "@/components/MonitorMenu";
+import { vmSource } from "@/lib/monitor";
 
 interface Props {
   vm: VmRecord;
@@ -190,6 +195,14 @@ export function VmDetailsPanel(props: Props) {
           onClick={() => requestLink(noteLink("vm", vm.vmxPath, vm.displayName))}
         />
         <IconAction label="Actions: power and protection" icon={<ZapIcon />} onClick={onActions} />
+        <MonitorIconMenu
+          target={{
+            check: { kind: "vm", vmKey: vm.vmxPath, label: vm.displayName },
+            // A VM's check probes its guest address from this PC.
+            checkVia: null,
+            watch: vmSource(vm.id, props.sessions),
+          }}
+        />
         <ToolboxIconMenu target={{ kind: "vm", vmKey: vm.vmxPath, label: vm.displayName }} />
         <IconAction label="Close the details" icon={<XIcon />} onClick={onClose} />
       </div>

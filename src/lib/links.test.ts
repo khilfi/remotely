@@ -26,6 +26,15 @@ const EVERY: AppLink[] = [
   { kind: "setting", section: "updates" },
   { kind: "snippet", command: "disk usage" },
   { kind: "alerts" },
+  // UX-19: the palette's Alert rules.
+  { kind: "alerts", rules: true },
+  { kind: "checks", checkId: "c-1" },
+  // UX-19: a Toolbox result's "Keep checking this…".
+  {
+    kind: "checks",
+    add: { kind: "address", host: "web01.example.com" },
+    spec: { kind: "tcp", port: 443 },
+  },
   { kind: "update" },
   { kind: "vault" },
   { kind: "map" },
@@ -36,6 +45,8 @@ const EVERY: AppLink[] = [
   { kind: "files", terminalId: "t-1", path: "/srv/www" },
   { kind: "files", many: "fetch", picks: { sessionIds: ["s-1"] } },
   { kind: "bundle", sessionIds: ["s-1", "s-2"] },
+  { kind: "group", groupId: "g-1" },
+  { kind: "group" },
 ];
 
 test("every kind of link is one, and has words for its button", () => {

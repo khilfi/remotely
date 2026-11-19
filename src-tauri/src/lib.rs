@@ -567,6 +567,7 @@ fn commands() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         ipc::metrics_host_usage,
         ipc::metrics_capacity,
         ipc::metrics_watch,
+        ipc::metrics_watched,
         ipc::background_login_retry,
         ipc::session_startup_rating,
         host_details::metrics_this_pc,

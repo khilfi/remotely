@@ -1,7 +1,9 @@
 // FD-09: the Toolbox's Certificate tab: the certificate a TLS server sends (any chain, so a bad one can be read too),
-// checked against Windows' trust store and the server name, or a certificate file. A read.
+// checked against Windows' trust store and the server name, or a certificate file. A read. UX-19 (0.9.0): a server's
+// report offers "Keep checking this…", a certificate check on the host, port and server name it was read with; the
+// editor says when the read found it untrusted or naming another host, which the check fails on unless allowed.
 
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { FileBadgeIcon, ShieldCheckIcon, ShieldXIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -11,6 +13,8 @@ import { WhyDisabled } from "@/components/WhyDisabled";
 import { useProbeRun } from "@/hooks/use-probe-run";
 import { certificateVerdict, daysLeftText, hasTarget, probeTarget, type ToolTarget } from "@/lib/toolbox";
 import { toolboxApi, type CertificateInfo, type CertificateReport } from "@/lib/toolbox-api";
+import { certificateCheck, certificateFinding } from "@/lib/monitor";
+import { KeepCheckingButton } from "./KeepChecking";
 import type { Incoming } from "./ProbeTools";
 import { Field, RunError, TargetField, useRecent } from "./TargetField";
 
@@ -48,22 +52,25 @@ function Details({ cert }: { cert: CertificateInfo }) {
   );
 }
 
-function Report({ report }: { report: CertificateReport }) {
+function Report({ report, keep }: { report: CertificateReport; keep: ReactNode }) {
   const verdict = certificateVerdict(report);
   const leaf = report.chain[0];
   const Icon = verdict.ok ? ShieldCheckIcon : ShieldXIcon;
   return (
     <div className="flex flex-col gap-3">
       <div className="grid gap-1">
-        <p
-          className={
-            verdict.ok ? "flex items-center gap-2 text-sm" : "flex items-center gap-2 text-sm text-destructive"
-          }
-          role="status"
-        >
-          <Icon className="size-4 shrink-0" aria-hidden />
-          {verdict.text}
-        </p>
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <p
+            className={
+              verdict.ok ? "flex items-center gap-2 text-sm" : "flex items-center gap-2 text-sm text-destructive"
+            }
+            role="status"
+          >
+            <Icon className="size-4 shrink-0" aria-hidden />
+            {verdict.text}
+          </p>
+          {keep}
+        </div>
         <p className="text-sm text-muted-foreground">
           {report.source}
           {report.via ? ` · read from the jump host '${report.via}'` : ""}
@@ -124,12 +131,15 @@ export function CertificateTool({ incoming }: { incoming: Incoming | null }) {
   const [port, setPort] = useState("443");
   const [serverName, setServerName] = useState("");
   const run = useProbeRun<CertificateReport>();
+  /** What the last read asked a server for (null after a file), for "Keep checking this…". */
+  const [ran, setRan] = useState<{ target: ToolTarget; port: number; serverName: string } | null>(null);
   const portNumber = Number(port);
   const portOk = Number.isInteger(portNumber) && portNumber >= 1 && portNumber <= 65535;
   const reason = !hasTarget(target) ? "Choose a host first" : !portOk ? "Type a port from 1 to 65535" : null;
   const read = () => {
     if (reason) return;
     if (target.kind === "address") remember(target.host);
+    setRan({ target, port: portNumber, serverName });
     void run.start((id) =>
       toolboxApi.certificate(id, {
         target: probeTarget(target),
@@ -139,12 +149,14 @@ export function CertificateTool({ incoming }: { incoming: Incoming | null }) {
       }),
     );
   };
-  const openFile = () =>
+  const openFile = () => {
+    setRan(null);
     void run.start(async () => {
       const report = await toolboxApi.certificateFile();
       if (!report) throw new Error("No file was chosen.");
       return report;
     });
+  };
   return (
     <div className="flex max-w-4xl flex-col gap-4">
       <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_6rem_minmax(0,1fr)_auto] sm:items-end">
@@ -183,7 +195,23 @@ export function CertificateTool({ incoming }: { incoming: Incoming | null }) {
         </div>
       </div>
       <RunError error={run.error === "No file was chosen." ? null : run.error} />
-      {run.result && <Report report={run.result} />}
+      {run.result && (
+        <Report
+          report={run.result}
+          keep={
+            ran && run.result.host !== null ? (
+              <KeepCheckingButton
+                link={certificateCheck(
+                  ran.target,
+                  ran.port,
+                  ran.serverName,
+                  certificateFinding(run.result, ran.serverName),
+                )}
+              />
+            ) : null
+          }
+        />
+      )}
     </div>
   );
 }

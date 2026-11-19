@@ -1,5 +1,7 @@
 // FD-09: the Toolbox's Ping, Trace route, DNS lookup and Check ports tabs. Each reads only: nothing here goes through
 // the approval rules, and each works while presenting with the read-only lock. One filled button per tab: its run.
+// UX-19 (0.9.0): Ping's, DNS lookup's and Check ports' results offer "Keep checking this…" (KeepChecking.tsx), filled
+// in from what the run was asked, not from fields changed since.
 
 import { useState } from "react";
 import { ActivityIcon, NetworkIcon, RouteIcon, SearchIcon, SquareIcon } from "lucide-react";
@@ -35,6 +37,8 @@ import {
   type TraceHop,
   type TraceSummary,
 } from "@/lib/toolbox-api";
+import { dnsCheck, dnsCheckProblem, pingCheck } from "@/lib/monitor";
+import { KeepCheckingButton, KeepCheckingPorts } from "./KeepChecking";
 import { Field, RunError, TargetField, useRecent } from "./TargetField";
 
 /** A session, VM or host handed over from a row, counted so the same one again still arrives. */
@@ -102,12 +106,15 @@ export function PingTool({ incoming }: { incoming: Incoming | null }) {
   const [count, setCount] = useState("4");
   const [size, setSize] = useState("32");
   const run = useProbeRun<PingSummary>();
+  /** What the last run pinged, for "Keep checking this…". */
+  const [ran, setRan] = useState<ToolTarget | null>(null);
   const replies: PingReply[] = run.result
     ? run.result.replies
     : run.progress.flatMap((p) => (p.kind === "ping" ? [p.reply] : []));
   const ping = () => {
     if (!hasTarget(target)) return;
     if (target.kind === "address") remember(target.host);
+    setRan(target);
     void run.start((id) =>
       toolboxApi.ping(id, {
         target: probeTarget(target),
@@ -155,11 +162,14 @@ export function PingTool({ incoming }: { incoming: Incoming | null }) {
         </div>
       )}
       {run.result && (
-        <p className="text-sm" role="status">
-          {run.result.label !== run.result.address ? `${run.result.label} (${run.result.address}): ` : ""}
-          {pingSummaryText(run.result)}
-          {run.result.cancelled ? " · stopped" : ""}
-        </p>
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <p className="text-sm" role="status">
+            {run.result.label !== run.result.address ? `${run.result.label} (${run.result.address}): ` : ""}
+            {pingSummaryText(run.result)}
+            {run.result.cancelled ? " · stopped" : ""}
+          </p>
+          {ran && <KeepCheckingButton link={pingCheck(ran)} />}
+        </div>
       )}
     </div>
   );
@@ -249,9 +259,12 @@ export function DnsTool() {
   const [server, setServer] = useState("");
   const [recent, remember] = useRecent("dns");
   const run = useProbeRun<DnsResult>();
+  /** What the last lookup asked, for "Keep checking this…". */
+  const [ran, setRan] = useState<{ name: string; type: RecordType; server: string } | null>(null);
   const lookUp = () => {
     if (!name.trim()) return;
     remember(name);
+    setRan({ name, type, server });
     void run.start((id) =>
       toolboxApi.dns(id, { name: name.trim(), recordType: type, server: server.trim() ? server.trim() : null }),
     );
@@ -344,9 +357,17 @@ export function DnsTool() {
               </Table>
             </div>
           )}
-          <p className="text-sm text-muted-foreground">
-            {dnsServerText(result.server)} · {rttText(result.tookMs)}
-          </p>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <p className="text-sm text-muted-foreground">
+              {dnsServerText(result.server)} · {rttText(result.tookMs)}
+            </p>
+            {ran && (
+              <KeepCheckingButton
+                link={dnsCheck(ran.name, ran.type, ran.server, result.records)}
+                reason={dnsCheckProblem(ran.type)}
+              />
+            )}
+          </div>
         </>
       )}
     </div>
@@ -365,12 +386,15 @@ export function PortsTool({ incoming }: { incoming: Incoming | null }) {
   const [ports, setPorts] = useState("22, 80, 443");
   const [banner, setBanner] = useState(false);
   const run = useProbeRun<PortSummary>();
+  /** What the last run checked, for "Keep checking this…". */
+  const [ran, setRan] = useState<ToolTarget | null>(null);
   const results: PortResult[] = run.result
     ? run.result.results
     : run.progress.flatMap((p) => (p.kind === "port" ? [p.result] : []));
   const check = () => {
     if (!hasTarget(target)) return;
     if (target.kind === "address") remember(target.host);
+    setRan(target);
     void run.start((id) => toolboxApi.ports(id, { target: probeTarget(target), ports, timeoutMs: 3000, banner }));
   };
   const summary = run.result;
@@ -435,15 +459,18 @@ export function PortsTool({ incoming }: { incoming: Incoming | null }) {
         </div>
       )}
       {summary && (
-        <p className="text-sm" role="status">
-          {summary.open} of {summary.results.length} open
-          {summary.via
-            ? ` · checked from the jump host '${summary.via}'`
-            : summary.address
-              ? ` · ${summary.address}`
-              : ""}
-          {summary.cancelled ? " · stopped" : ""}
-        </p>
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <p className="text-sm" role="status">
+            {summary.open} of {summary.results.length} open
+            {summary.via
+              ? ` · checked from the jump host '${summary.via}'`
+              : summary.address
+                ? ` · ${summary.address}`
+                : ""}
+            {summary.cancelled ? " · stopped" : ""}
+          </p>
+          {ran && summary.results.length > 0 && <KeepCheckingPorts target={ran} results={summary.results} />}
+        </div>
       )}
     </div>
   );

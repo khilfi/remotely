@@ -1001,6 +1001,298 @@ async fn targets_come_from_sessions_vms_with_a_linked_session_tags_and_saved_fil
     assert_eq!(web.vm_id.as_deref(), Some(web_vm.as_str()));
 }
 
+/// UX-16: Compare hosts picks with `BulkTargetPicker`, so one run can target a tag, a saved filter, a saved group
+/// and picked VMs; each host is rated and a protected one skipped exactly as when picked one by one.
+#[tokio::test]
+async fn a_run_targets_a_tag_a_saved_filter_a_saved_group_and_picked_vms() {
+    let core = lab_core(FakeRemote::default()).await;
+    let ctx = &core.ctx();
+    let session = |name: &str, host: &str, vm_id: Option<String>, tags: Vec<String>| SessionInput {
+        host: host.into(),
+        vm_id,
+        tags,
+        ..session_input(name, 22, SessionAuth::Agent)
+    };
+    let web = core
+        .sessions
+        .create(
+            ctx,
+            session("web", "web.example.com", Some(vm_id(&core, "web").await), vec![]),
+        )
+        .await
+        .unwrap();
+    let db = core
+        .sessions
+        .create(
+            ctx,
+            session("db", "db.example.com", Some(vm_id(&core, "db").await), vec![]),
+        )
+        .await
+        .unwrap();
+    core.sessions
+        .create(
+            ctx,
+            session("bastion", "bastion.example.org", None, vec!["jump".into()]),
+        )
+        .await
+        .unwrap();
+    let app = core
+        .sessions
+        .create(ctx, session("app", "app.example.com", None, vec![]))
+        .await
+        .unwrap();
+    let filter = core
+        .store
+        .save_filter(
+            ctx,
+            "db only",
+            &VmFilter {
+                text: "db".into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let group = core
+        .groups
+        .create(
+            ctx,
+            remotely_core::multiexec_groups::GroupInput {
+                name: "web servers".into(),
+                session_ids: vec![app.id, web.id],
+            },
+        )
+        .await
+        .unwrap();
+
+    let picks = TargetPicks {
+        vm_paths: vec![vmx("web")],
+        tags: vec!["jump".into()],
+        filter_ids: vec![filter.id.clone()],
+        group_ids: vec![group.id],
+        winrm: true,
+        ..Default::default()
+    };
+    let resolve = || async { core.bulk.resolve(ctx, &picks).await.unwrap() };
+    let resolved = resolve().await;
+    let names: Vec<&str> = resolved.hosts.iter().map(|h| h.name.as_str()).collect();
+    assert_eq!(names, ["app", "bastion", "db", "web"], "each session once, by name");
+    let via = |name: &str| resolved.hosts.iter().find(|h| h.name == name).unwrap().via.clone();
+    assert_eq!(via("app"), ["group 'web servers'"]);
+    assert_eq!(via("bastion"), ["tag 'jump'"]);
+    assert_eq!(via("db"), ["filter 'db only'"]);
+    assert_eq!(via("web"), ["VM 'web'", "group 'web servers'"]);
+    assert!(resolved.notes.is_empty(), "{:?}", resolved.notes);
+    let targets: Vec<Uuid> = resolved.hosts.iter().map(|h| h.session_id).collect();
+
+    // Lab hosts and a read-only command: Low, as on hosts picked one by one.
+    let mut events = core.jobs.subscribe();
+    let SubmitOutcome::Queued {
+        job_id, tier, skipped, ..
+    } = core.bus.submit(ctx, exec("uptime", &targets)).await.unwrap()
+    else {
+        panic!("a read-only command on Lab hosts is Low");
+    };
+    assert_eq!(tier, Tier::Low);
+    assert!(skipped.is_empty());
+    assert_eq!(finished(&mut events, job_id).await, JobStatus::Succeeded);
+
+    // The filter's VM made Prod: its session is Prod too and the run goes up one tier.
+    core.inventory
+        .set_environment(ctx, &[vmx("db")], Environment::Prod)
+        .await
+        .unwrap();
+    let resolved = resolve().await;
+    let db_host = resolved.hosts.iter().find(|h| h.session_id == db.id).unwrap();
+    assert_eq!(db_host.environment, Environment::Prod);
+    let SubmitOutcome::NeedsApproval { request } = core.bus.submit(ctx, exec("uptime", &targets)).await.unwrap() else {
+        panic!("a Prod host moves the run up one tier");
+    };
+    assert_eq!(request.tier, Tier::Medium);
+    core.bus.cancel_approval(request.id).await.unwrap();
+    core.inventory
+        .set_environment(ctx, &[vmx("db")], Environment::Lab)
+        .await
+        .unwrap();
+
+    // AP-04: the picked VM protected: its session, picked by the VM and by the group, is skipped.
+    let job = run(
+        &core,
+        Command::VmProtect {
+            targets: vec![vm("web")],
+            protected: true,
+        },
+    )
+    .await;
+    finished(&mut events, job).await;
+    let resolved = resolve().await;
+    let protected: Vec<&str> = resolved
+        .hosts
+        .iter()
+        .filter(|h| h.protected)
+        .map(|h| h.name.as_str())
+        .collect();
+    assert_eq!(protected, ["web"]);
+    let SubmitOutcome::Queued { skipped, job_id, .. } = core.bus.submit(ctx, exec("uptime", &targets)).await.unwrap()
+    else {
+        panic!("still Low on the hosts left");
+    };
+    let skipped: Vec<&str> = skipped.iter().map(|t| t.name.as_str()).collect();
+    assert_eq!(skipped, ["web"]);
+    assert_eq!(finished(&mut events, job_id).await, JobStatus::Succeeded);
+}
+
+/// UX-16: a group deleted since it was picked picks nothing and says so.
+#[tokio::test]
+async fn a_deleted_group_picks_nothing_and_says_so() {
+    let core = lab_core(FakeRemote::default()).await;
+    let ctx = &core.ctx();
+    let app = core
+        .sessions
+        .create(ctx, session_input("app", 22, SessionAuth::Agent))
+        .await
+        .unwrap();
+    let group = core
+        .groups
+        .create(
+            ctx,
+            remotely_core::multiexec_groups::GroupInput {
+                name: "apps".into(),
+                session_ids: vec![app.id],
+            },
+        )
+        .await
+        .unwrap();
+    let picks = TargetPicks {
+        group_ids: vec![group.id],
+        ..Default::default()
+    };
+    let resolved = core.bulk.resolve(ctx, &picks).await.unwrap();
+    assert_eq!(resolved.hosts.len(), 1);
+    assert_eq!(resolved.hosts[0].via, ["group 'apps'"]);
+
+    core.groups.delete(ctx, group.id).await.unwrap();
+    let resolved = core.bulk.resolve(ctx, &picks).await.unwrap();
+    assert!(resolved.hosts.is_empty());
+    assert_eq!(
+        resolved.notes,
+        ["A picked group isn't saved in this workspace (deleted meanwhile?)."]
+    );
+}
+
+/// UX-16: a WinRM group under a job that goes over SSH only (the key push, the Files page's push) reaches no host and
+/// says why, as a WinRM session picked any other way does; under Compare hosts (`winrm`) it reaches its sessions.
+#[tokio::test]
+async fn a_winrm_group_under_an_ssh_only_job_is_left_out_with_its_note() {
+    use remotely_core::sessions::kinds::{WinrmCertificate, WinrmOptions, WinrmSignIn, WinrmTransport};
+    let core = lab_core(FakeRemote::default()).await;
+    let ctx = &core.ctx();
+    let win = core
+        .sessions
+        .create(
+            ctx,
+            SessionInput {
+                host: "win01.example.com".into(),
+                port: 5986,
+                kind: remotely_core::sessions::SessionKind::Winrm(WinrmOptions {
+                    transport: WinrmTransport::Https,
+                    sign_in: WinrmSignIn::Basic,
+                    certificate: WinrmCertificate::Windows,
+                }),
+                ..session_input("win01", 5986, SessionAuth::Password { password_id: None })
+            },
+        )
+        .await
+        .unwrap();
+    let group = core
+        .groups
+        .create(
+            ctx,
+            remotely_core::multiexec_groups::GroupInput {
+                name: "windows".into(),
+                session_ids: vec![win.id],
+            },
+        )
+        .await
+        .unwrap();
+    let ssh_only = TargetPicks {
+        group_ids: vec![group.id],
+        ..Default::default()
+    };
+    let resolved = core.bulk.resolve(ctx, &ssh_only).await.unwrap();
+    assert!(resolved.hosts.is_empty());
+    assert_eq!(
+        resolved.notes,
+        ["'win01' is a WinRM session, so it was left out: this works over SSH only."]
+    );
+    let compare = core
+        .bulk
+        .resolve(
+            ctx,
+            &TargetPicks {
+                winrm: true,
+                ..ssh_only
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(compare.hosts.len(), 1);
+    assert_eq!(compare.hosts[0].via, ["group 'windows'"]);
+}
+
+/// UX-16: a member moved to the trash leaves its groups (QL-27), so a picked group reaches the others; once every
+/// member is gone, the pick says the group has no sessions left.
+#[tokio::test]
+async fn a_trashed_member_leaves_the_group_and_an_empty_group_says_so() {
+    let core = lab_core(FakeRemote::default()).await;
+    let ctx = &core.ctx();
+    let mut ids = Vec::new();
+    for name in ["app01", "app02"] {
+        let s = core
+            .sessions
+            .create(
+                ctx,
+                SessionInput {
+                    host: format!("{name}.example.com"),
+                    ..session_input(name, 22, SessionAuth::Agent)
+                },
+            )
+            .await
+            .unwrap();
+        ids.push(s.id);
+    }
+    let group = core
+        .groups
+        .create(
+            ctx,
+            remotely_core::multiexec_groups::GroupInput {
+                name: "apps".into(),
+                session_ids: ids.clone(),
+            },
+        )
+        .await
+        .unwrap();
+    let picks = TargetPicks {
+        group_ids: vec![group.id],
+        ..Default::default()
+    };
+
+    core.sessions.delete(ctx, ids[0]).await.unwrap();
+    assert!(
+        core.trash.list(ctx).await.unwrap().iter().any(|i| i.name == "app01"),
+        "in the trash"
+    );
+    let resolved = core.bulk.resolve(ctx, &picks).await.unwrap();
+    let names: Vec<&str> = resolved.hosts.iter().map(|h| h.name.as_str()).collect();
+    assert_eq!(names, ["app02"], "the trashed member isn't reached");
+    assert!(resolved.notes.is_empty(), "{:?}", resolved.notes);
+
+    core.sessions.delete(ctx, ids[1]).await.unwrap();
+    let resolved = core.bulk.resolve(ctx, &picks).await.unwrap();
+    assert!(resolved.hosts.is_empty());
+    assert_eq!(resolved.notes, ["Group 'apps' has no sessions left."]);
+}
+
 #[tokio::test]
 async fn compare_runs_on_the_sessions_of_picked_tabs_and_says_which_tabs_it_cannot_reach() {
     let core = ssh_core().await;

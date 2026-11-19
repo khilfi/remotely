@@ -17,6 +17,7 @@ import {
   ServerIcon,
   SettingsIcon,
   SquareChevronRightIcon,
+  UsersIcon,
   type LucideIcon,
 } from "lucide-react";
 import { api, type LibraryEntry, type SessionRecord, type VmRecord } from "@/lib/api";
@@ -28,6 +29,7 @@ import { glossaryTerms } from "@/lib/glossary";
 import {
   containerItems,
   glossaryItems,
+  groupItems,
   hostNetworkItems,
   imageItems,
   noteItems,
@@ -95,6 +97,8 @@ export const SEARCH_PROVIDERS: readonly SearchProvider[] = [
     icon: CalendarClockIcon,
     load: async () => scheduleItems(await schedulesApi.list()),
   },
+  // UX-16: "Open group: <name>" for each saved group.
+  { id: "groups", heading: "Saved groups", icon: UsersIcon, load: async () => groupItems(await api.multiExecGroups()) },
   {
     id: "snippets",
     heading: "Commands",

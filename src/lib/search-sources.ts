@@ -1,7 +1,16 @@
 // QL-20: what each kind of thing is found by, as pure functions from what the app already read to search items
 // (search.ts ranks them; search-providers.ts loads the data). Tested in search.test.ts.
 
-import type { Favourite, Image, LaunchTemplate, LibraryEntry, SessionRecord, Size, VmRecord } from "./api.ts";
+import type {
+  Favourite,
+  Image,
+  LaunchTemplate,
+  LibraryEntry,
+  MultiExecGroup,
+  SessionRecord,
+  Size,
+  VmRecord,
+} from "./api.ts";
 import type { Note } from "./comfort-api.ts";
 import { noteExcerpt } from "./notes.ts";
 import type { CachedContainers } from "./container-cache.ts";
@@ -250,6 +259,28 @@ const SCHEDULE_STATE: Record<ScheduleView["state"], string> = {
 };
 
 /** VM-14, VM-27: schedules by name, the VMs and tags they act on, what they do and when; choosing one shows its runs. */
+/**
+ * UX-16: "Open group: <name>" for each saved group (QL-19), by its name, its sessions' names and "group"; choosing one
+ * opens it on the Terminal page (a tab for each session, Type in all tabs on).
+ */
+export function groupItems(groups: readonly MultiExecGroup[]): SearchItem[] {
+  return groups.map((g) => ({
+    id: `group:${g.id}`,
+    provider: "groups",
+    title: `Open group: ${g.name}`,
+    detail:
+      g.members.length === 0
+        ? "no sessions (deleted)"
+        : `${g.members.length} ${g.members.length === 1 ? "session" : "sessions"}`,
+    fields: [
+      ...field(g.name, "name"),
+      { text: "open group", kind: "detail" as const },
+      ...g.members.map((m) => ({ text: m.name, kind: "detail" as const })),
+    ],
+    target: { open: { kind: "group", groupId: g.id } },
+  }));
+}
+
 export function scheduleItems(schedules: readonly ScheduleView[]): SearchItem[] {
   return schedules.map((s) => ({
     id: `schedule:${s.id}`,

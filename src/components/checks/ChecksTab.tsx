@@ -18,15 +18,29 @@ import { CheckDialog } from "@/components/checks/CheckDialog";
 import { CheckHistorySheet } from "@/components/checks/CheckHistorySheet";
 import { CheckStatusBadge, Sparkline } from "@/components/checks/CheckBits";
 import { errorMessage } from "@/lib/api";
-import { checksApi, type CheckInput, type CheckRow, type ChecksOverview, type HealthCheck } from "@/lib/checks-api";
+import {
+  checksApi,
+  type CheckInput,
+  type CheckRow,
+  type CheckSpec,
+  type ChecksOverview,
+  type HealthCheck,
+} from "@/lib/checks-api";
 import { agoText, everyText, newCheckInput, specText, tookText, uptimeText, waitText, withResult } from "@/lib/checks";
 import type { HistoryRange } from "@/lib/dashboard-api";
-import { probeTarget, type ToolTarget } from "@/lib/toolbox";
+import { requestedCheck } from "@/lib/monitor";
+import type { ToolTarget } from "@/lib/toolbox";
 
-/** What another page asked the tab to show: a check's history, or a new check on a row. */
+/**
+ * What another page asked the tab to show (a `checks` link): a check's history, or a new check on a row (UX-19:
+ * Monitor ▸'s and the palette's "Add a check", or a Toolbox result's "Keep checking this…" with its `spec` and what its
+ * certificate read found, `untrusted`). Each opens this tab's one CheckDialog, as its own Add a check does.
+ */
 export interface ChecksRequest {
   checkId?: string;
   add?: ToolTarget;
+  spec?: CheckSpec;
+  untrusted?: string;
   /** Counts up so the same request can come twice. */
   n: number;
 }
@@ -40,7 +54,7 @@ interface Props {
   addRequest: number;
 }
 
-type Editing = { kind: "new"; input: CheckInput } | { kind: "edit"; check: HealthCheck } | null;
+type Editing = { kind: "new"; input: CheckInput; untrusted?: string } | { kind: "edit"; check: HealthCheck } | null;
 
 /** The longest the sparklines and uptime wait to be read again while runs come in. */
 const FULL_READ_MS = 30_000;
@@ -116,9 +130,7 @@ export function ChecksTab({ active, range, onRangeChange, request, addRequest }:
   if (request && request.n !== handled) {
     setHandled(request.n);
     if (request.add) {
-      const target = request.add;
-      const name = target.kind === "address" ? target.host : target.label;
-      setEditing({ kind: "new", input: newCheckInput(probeTarget(target), name) });
+      setEditing({ kind: "new", input: requestedCheck(request.add, request.spec), untrusted: request.untrusted });
     } else if (request.checkId) {
       setHistoryOf(request.checkId);
     }

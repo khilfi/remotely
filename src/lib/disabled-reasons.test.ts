@@ -33,14 +33,17 @@ test("Compare runs only once there is something to run on and something to run",
     compareRunReason({ ...ready, savedSessions: 0, picked: 0, hosts: [] }),
     "No saved sessions on this computer: add or import sessions first",
   );
-  assert.equal(compareRunReason({ ...ready, picked: 0, hosts: [] }), "Pick tabs, or sessions in the tree, to run on");
+  assert.equal(
+    compareRunReason({ ...ready, picked: 0, hosts: [] }),
+    "Pick hosts: Ctrl+click tabs or sessions in the tree, or use Change…",
+  );
   assert.equal(
     compareRunReason({ ...ready, hosts: [], unsavedTabs: 2 }),
     "The picked tabs are quick connections: save them as sessions first",
   );
   assert.equal(
     compareRunReason({ ...ready, hosts: [{ protected: true }, { protected: true }] }),
-    "Every picked tab is Protected",
+    "Every picked host is Protected",
   );
   assert.equal(compareRunReason({ ...ready, script: "   " }), "Type a command first");
   assert.match(compareRunReason({ ...ready, timeoutOk: false }) ?? "", /^The time limit must be/);

@@ -246,6 +246,8 @@ export type MoreItemId =
   | "protect"
   | "unprotect"
   | "sessions"
+  /** BX-01, UX-16: Compare hosts on the Terminal page with these VMs picked (through their confirmed links). */
+  | "runCommand"
   | "release";
 
 export interface MoreItem {
@@ -282,6 +284,8 @@ export function moreGroups(
     canExport: boolean;
     toolsImages?: readonly string[] | null;
     withoutSession?: number;
+    /** BX-01: the page can open Compare hosts on the selection. */
+    runCommand?: boolean;
   },
 ): MoreGroup[] {
   const count = (pick: (v: SelectedVm) => boolean) => vms.filter(pick).length;
@@ -316,6 +320,8 @@ export function moreGroups(
     { id: "protect", count: count((v) => !v.protected) },
     { id: "unprotect", count: count((v) => v.protected) },
     { id: "sessions", count: options.withoutSession ?? 0 },
+    // Every picked VM: Compare hosts' picker says which have no confirmed link to run through.
+    { id: "runCommand", count: options.runCommand ? vms.length : 0 },
     { id: "release", count: options.canRelease ? vms.length : 0 },
   ];
   const groups: MoreGroup[] = [

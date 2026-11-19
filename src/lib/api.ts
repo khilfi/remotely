@@ -2684,6 +2684,8 @@ export interface TargetPicks {
   tags?: string[];
   /** Saved VM filters, by id. */
   filterIds?: string[];
+  /** UX-16: saved groups (QL-19), by id; a read of each group's sessions in the shown workspace. */
+  groupIds?: string[];
   /** BX-13: WinRM sessions are hosts too (Compare hosts, support bundles); the key push leaves them out. */
   winrm?: boolean;
 }
@@ -2699,7 +2701,7 @@ export interface BulkHost {
   /** AP-04: skipped by the run. */
   protected: boolean;
   vmName: string | null;
-  /** How it was picked: "session", "VM 'web01'", "tag 'web'", "filter 'Lab'". */
+  /** How it was picked: "session", "VM 'web01'", "tag 'web'", "filter 'Lab'", "group 'web servers'". */
   via: string[];
   /** BX-13: a shell over SSH, or PowerShell over WinRM. */
   scriptKind: ScriptKind;
@@ -3002,6 +3004,12 @@ export interface DashboardRow {
 export interface DashboardOverview {
   rows: DashboardRow[];
   cost: CollectorCost;
+}
+
+/** UX-19 (MO-02): every session the dashboard watches, and the seconds between two polls of each. */
+export interface WatchedHosts {
+  sessions: string[];
+  intervalSecs: number;
 }
 
 export type CapacityWarning =
@@ -3815,6 +3823,11 @@ export const api = {
   metricsHostUsage: () => invoke<VmHostUsage[]>("metrics_host_usage"),
   /** MO-02: watching a session logs in to it over SSH every round. Audited; returns the watched ids. */
   metricsWatch: (sessionId: string, watch: boolean) => invoke<string[]>("metrics_watch", { sessionId, watch }),
+  /**
+   * UX-19: every watched session (the overview's rows name one per VM, however many of its sessions are watched) and
+   * the seconds between two polls. A read.
+   */
+  metricsWatched: () => invoke<WatchedHosts>("metrics_watched"),
   /**
    * MO-02, CT-01: Retry on a host whose background logins are parked (refused login or sudo, changed
    * host key, no saved password) or capped for the hour. The dashboard and Containers page log in again.
