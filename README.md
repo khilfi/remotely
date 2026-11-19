@@ -49,8 +49,9 @@ QL-14 (0.4.0): one page for VMs and their snapshots; the separate Snapshots page
   tags, labels and the **Snapshots** button (take, revert or delete a snapshot by name on every selected VM that has
   it) work on the selection.
 - **Click a VM's name** for its details beside the list (drag the edge to resize it; the close button or dragging it
-  shut hides it). The Details tab has what the inventory knows (guest OS, CPUs, RAM, IP, Tools, share of this host,
-  label, protection, tags, linked sessions); **Actions…** opens the Ctrl+K palette on the VM. The Snapshots tab has
+  shut hides it). Its tabs are Overview, Snapshots, Settings, Log and Activity. The Overview tab has what the
+  inventory knows (guest OS, CPUs, RAM, IP, Tools, share of this host, label, protection, tags, linked sessions) and
+  the VM's hardware (see [Host details](#host-details)); **Actions…** opens the Ctrl+K palette on the VM. The Snapshots tab has
   its tree: "You are here", creation times, descriptions, old and safety snapshots marked, and Take, Revert and Delete
   with the tier each would get (Prod raises it), then the approval dialog with its impact preview and the safety
   snapshot offer.
@@ -61,8 +62,10 @@ QL-14 (0.4.0): one page for VMs and their snapshots; the separate Snapshots page
   deleting the golden VM itself is refused the same way.
 - Snapshot trees are read for the VM you open, the selection when you open its Snapshots menu and the VMs shown when
   you select by snapshots, so a long VM list stays quick.
-- Ctrl+3 and "Snapshots" in the Ctrl+K palette open the snapshot view of the open or first selected VM; in the palette
-  a VM's own entry has "Show its details" and "Snapshots…". The other pages keep their shortcuts.
+- "Snapshots: take, revert or delete…" in the Ctrl+K palette opens the snapshot view of the open or first selected VM;
+  in the palette a VM's own entry has "Show its details", whose Snapshots tab is one click away. Snapshots has no shortcut of its own since
+  0.6.0: Ctrl+3 is the Schedules page (see [Search, map, status bar and notifications](#search-map-status-bar-and-notifications)
+  for every page shortcut).
 - **Create SSH session** (QL-29, after 0.8.1): a running VM with no SSH session linked gets one made from the VM, from
   its details' Sessions row or its entry in the Ctrl+K palette (the session editor opens filled in), or for several at
   once from the selection's More, Organise, **Create SSH sessions…** (a preview of each VM's session and what it lacks,
@@ -78,7 +81,8 @@ QL-14 (0.4.0): one page for VMs and their snapshots; the separate Snapshots page
 ### Oracle VirtualBox
 
 VM-18 (0.4.0): VirtualBox 7.0 or later, on the same page as Workstation's VMs. Without VirtualBox the list just has no
-VirtualBox VMs; the sidebar shows whether it was found.
+VirtualBox VMs; Settings, Tools and VMs shows whether it was found (the sidebar warns only when neither hypervisor
+is).
 
 - **Listing**: every VM registered in VirtualBox, with a **Hypervisor** column and filter. A VirtualBox VM is known by
   its UUID, so renaming or moving it keeps its label, protection, tags and links; the line under its name shows its
@@ -129,7 +133,7 @@ with its size, and a VM it would refuse (running, snapshots in the way).
   approval. More also has Install or upgrade guest tools (for the running VMs whose guest can take them) and Delete
   with their files.
 - **Lifecycle**: Delete (Critical; Workstation deletes the VM's own files and keeps the folder when anything else is in
-  it, VirtualBox unregisters it and deletes its files), Rename, **Add VM…** (a `.vmx` joins the list; a `.vbox` is
+  it, VirtualBox unregisters it and deletes its files), Rename, **Add an existing VM…** in the New VM menu (a `.vmx` joins the list; a `.vbox` is
   registered with VirtualBox) and **Console** (the hypervisor's own window: a Workstation tab without powering the VM on,
   or VirtualBox's window on a running VM; a VirtualBox VM that is off starts with its window). The console changes
   nothing, so it has no tier, but it is in the audit log and off while presenting with the read-only lock. ISOs, shared
@@ -144,9 +148,10 @@ through the bus and its approvals like anywhere else.
   `VBox.log.N`, read only, with search. It shows a log's last 256 KB (a huge log is never read whole) and, for the
   current log of a running VM, follows it: what was added is read every 2 seconds, only while the tab shows and the
   window is visible.
-- **Timeline tab**: everything Remotely did to the VM, from the audit log (approvals, jobs, label changes, Open
-  console...) with each job's outcome for this VM from the job journal, newest first, 50 at a time.
-- **Networks** (the VMs page's button, or the palette): Workstation's vmnets and VirtualBox's host-only interfaces,
+- **Activity tab** (the timeline): everything Remotely did to the VM, from the audit log (approvals, jobs, label
+  changes, Open console...) with each job's outcome for this VM from the job journal, newest first, 50 at a time. The
+  same tab lists the VM's schedules.
+- **Networks** (the VMs page's Tools menu, or the palette): Workstation's vmnets and VirtualBox's host-only interfaces,
   NAT networks, bridged and internal networks, the VMs on each, and their NAT port forwards: a Workstation NAT vmnet's,
   a VirtualBox NAT network's rules and each VirtualBox VM's NAT adapter rules. Adding or removing one is **High** (it
   reaches every VM on the network; Critical when a VM on it is labelled Prod), and the approval says who can reach it
@@ -155,7 +160,7 @@ through the bus and its approvals like anywhere else.
   Network Editor, or start Remotely with Run as administrator. VirtualBox's need no administrator rights. The
   topology map names its networks the way Workstation and VirtualBox list them, shows the ones no VM is on yet, and
   opens Networks from a network's box; the palette's search finds the networks the map or Networks read last.
-- **Waste finder** (the VMs page's button, or the palette): running VMs idle for days (from the dashboard's history:
+- **Waste finder** (the VMs page's Tools menu, or the palette): running VMs idle for days (from the dashboard's history:
   their busiest hour under 2% of this PC's CPU, and their guest's CPU and network quiet when a linked session is
   watched), suspended VMs and what their saved state takes, long or large snapshot chains, and folders with VM files no
   VM in the list uses. Only the scanned folders and the hypervisors' and launch templates' VM folders are searched,
@@ -164,8 +169,10 @@ through the bus and its approvals like anywhere else.
 
 ### VM templates: sizes, images and launch templates
 
-VM-19 to VM-21 (0.5.0): the Templates page (Ctrl+9) describes VMs the way a cloud provider does, and **Deploy**
-makes VMs from it (see "Deploy" below).
+VM-19 to VM-21 (0.5.0): the Templates page (Ctrl+2) describes VMs the way a cloud provider does, and **Deploy**
+makes VMs from it (see "Deploy" below). Its tabs follow a first deploy's steps: Images, Sizes, Install configs,
+Address pools, Launch templates, Stacks and Disk images. It opens on Images until there is one, then on Launch
+templates.
 
 - **Sizes**: CPU (sockets × cores per socket), RAM and disks (the first boots; each thin, taking only what the guest
   writes, or thick). Twelve built-ins, read only: `gp.nano` (1 vCPU, 512 MB, 8 GB), `gp.micro`, `gp.small`,
@@ -199,7 +206,7 @@ makes VMs from it (see "Deploy" below).
 
 ### Deploy
 
-VM-21, VM-22, VM-10 (0.5.0): **Deploy** on the VMs page, the command palette or a template's row makes VMs from a
+VM-21, VM-22, VM-10 (0.5.0): **Deploy** in the VMs page's New VM menu, the command palette or a template's row makes VMs from a
 launch template, or from **Custom** values typed in the dialog.
 
 - Pick the template (or Custom), how many VMs and their names (from the naming pattern; you can change each). The
@@ -229,7 +236,8 @@ launch template, or from **Custom** values typed in the dialog.
   networks, so on a bridged network only VMware Tools in the guest tell a VM's address. A Linux guest has them only
   with `open-vm-tools`, which the Linux install config starters install. Ubuntu's ISO doesn't carry it for the
   minimal install, and neither do Rocky's and Alma's minimal ISOs, so those starters fetch it from the distribution's
-  archive when the install can reach it, and an install that can't still finishes. Without it the job ends without a
+  archive when the install can reach it, and an install that can't still finishes (Rocky's and Alma's are Kickstart
+  files, which don't deploy yet: see [Install configs](#install-configs-and-unattended-installs)). Without it the job ends without a
   session, and its note says what to do: install `open-vm-tools` in the guest, or deploy on NAT or host-only, or with
   an address pool. A Windows guest's note says to install VMware Tools instead.
 - **Clone** (VM-10): pick shut-down VMs of one hypervisor on the VMs page, then Clone makes a full copy of each in one
@@ -242,6 +250,98 @@ launch template, or from **Custom** values typed in the dialog.
   Disk counts thin disks at their full size per drive. When the RAM won't fit, it names the running VMs to suspend to
   make room (never a protected or paused VM, Prod only when nothing else frees enough, as few as it can) and offers
   **Suspend**, the usual power command with its approval. Suspending writes each VM's memory to its folder's drive.
+
+### Install configs and unattended installs
+
+VM-28, VM-29 and VM-32 (0.8.0): the Templates page's **Install configs** and **Address pools** tabs. An install
+config is an answer file that installs a VM from its ISO with nobody at the console.
+
+- **Kinds**: Ubuntu autoinstall, Kickstart (RHEL, Rocky, Alma, Oracle Linux, Fedora, CentOS Stream), Debian preseed,
+  cloud-init user data and Windows unattend. Eight read-only **starters**, listed after your own configs: Ubuntu 24.04
+  server (minimal, and with Docker), Rocky Linux 9 and AlmaLinux 9 (minimal), Debian 12 (minimal), Windows Server
+  2022 and 2025 with WinRM over HTTPS, and a cloud image's first boot. **View…** shows one and **Make a copy…** makes
+  it yours to edit.
+- **What deploys today**: Ubuntu autoinstall, Debian preseed and Windows unattend, the three that were tried by hand.
+  Kickstart and cloud-init configs can be written and checked, but a deploy refuses them for now.
+- **The editor** edits one file two ways: the **Form** (hostname, locale, keyboard, time zone, disk layout, network,
+  users, SSH, packages, updates, proxy, mirror, commands after the install), which changes only the lines of the
+  fields you change, and the file itself. It checks as you type (the placeholders, then the kind's own syntax, schema
+  and lint on a sample render), lists each problem with a link to its line, and says what size the disk layout needs.
+  **Preview** shows one VM's file with every password masked (`$6$••••••••`).
+- **Placeholders**: `{{hostname}}`, `{{ip}}`, `{{n}}` (the VM's number), `{{template}}`, `{{date}}` (YYYYMMDD), and
+  variables of your own, each with a default that the Deploy dialog can change per VM; `\{{` writes `{{`. A value is
+  one line, checked for the kind (quotes, `$` and `;` are refused in the text kinds; unattend's XML is escaped), so
+  it can't change the file around it.
+- **No secrets in the file**: a password or hash typed into it refuses saving. Passwords and SSH keys come from the
+  vault through `{{password.<name>}}` and `{{ssh_key.<name>}}`, each picked under **Values and vault**. A Linux
+  password goes into each VM's file as a SHA-512 crypt hash with a fresh salt. Windows gets a one-time password of 24
+  random characters, which the deploy replaces with the vault's over WinRM once the install is done. A line break that
+  the installer would read but the checks wouldn't (U+2028, a lone CR and the like) refuses saving in every kind but
+  unattend, and so does YAML or XML that doesn't read, since it can't be checked for a secret.
+- **Changes** are audited (`catalog_changed`, the file named by its SHA-256, never its text) and refused by the
+  read-only lock; a deleted config goes to the trash. The export to another laptop carries your configs with their
+  variables, and each vault pick is matched to that laptop's item or left to pick again.
+- **A launch template** names one of your configs under **Advanced** (copy a starter first). A config of another kind
+  or OS than the template's image, one with errors, or a disk layout larger than the size's boot disk stops the
+  deploy, and the template says why.
+
+**Unattended deploys**, from an ISO on Workstation or VirtualBox:
+
+- The ISO is copied once per deploy with its boot menu changed; the original is only read. Each VM's own answer file
+  goes on a small `cidata` seed CD, in a folder only your Windows user can open. Each VM's serial port writes to
+  `<vm>-serial.log`, which Remotely watches, so the job's step for each VM shows the stage: installer booted,
+  installing, rebooted, first sign-in, done. Up to 10 VMs install at once, within a time limit (60 minutes by
+  default, 1 to 240).
+- The Deploy dialog's unattended install part sets each VM's values and its address: typed for each VM (rows can be
+  pasted), as the install config sets them, or from an address pool. Each VM's answer file can be previewed with its
+  secrets masked.
+- A Linux VM is done at its login prompt with SSH answering; a Windows VM when it signs in over WinRM over HTTPS (the
+  certificate it reports on its serial port is pinned) and its one-time password is replaced. Then the seed CD and
+  the ISO copy come out, and the template's after-deploy steps run (the "clean" snapshot, the session).
+- It is a deploy with a deploy's tiers: Medium, High from 5 VMs or for Prod. A vault password going into an answer file
+  asks for the vault password in the approval, and a config or ISO changed since the approval stops the job.
+- **A failed, timed-out or cancelled install keeps its VM**, with its ISO copy, its serial log and its pool address,
+  for a look, unlike other deploys: only the seed CD (with the answer file) is taken out and deleted, and VirtualBox's
+  NAT rule removed. A cancelled VM goes on installing. Delete it from the VMs page when you are done.
+
+**Address pools** (VM-32), per workspace:
+
+- A pool is a range of IPv4 addresses on one hypervisor network (Workstation's NAT, host-only, bridged or a custom
+  vmnet; VirtualBox's host-only or bridged), with its prefix and, optionally, a gateway and DNS servers. The gateway,
+  DNS servers, prefix and netmask fill the install config's variables of those names.
+- A deploy takes the lowest addresses no workspace holds, never the gateway or a DNS server, and only those that answer
+  neither a ping nor ARP; the job checks them again when it runs. A pool needs an install config that uses `{{ip}}`.
+  A Windows deploy needs one on any network but Workstation's NAT, host-only and custom vmnets and VirtualBox's NAT:
+  elsewhere Remotely can't learn a new Windows VM's address in time to set its password.
+- An address stays the VM's until Remotely deletes the VM (a stack teardown too). A VM deleted outside Remotely keeps
+  it until you free it (**Show addresses…**, **Free the address…**), and a pool can't be deleted while VMs hold
+  addresses. Pool changes are audited (`address_pool_changed`) and refused by the read-only lock; pools don't go to
+  the trash and don't travel in exports.
+
+### Golden image builds
+
+VM-30 (0.8.0): **Build an image…** in the Images tab's **⋯** makes an image from an ISO and an install config (Ubuntu
+autoinstall, Debian preseed or Windows unattend). Remotely installs one VM unattended, makes it generic, powers it off
+and snapshots it, and launch templates clone it like any golden VM.
+
+- **A build** installs one VM, `<image>-v<N>`, as an unattended deploy does (its address by DHCP: no pool, no
+  `{{ip}}`). A Linux VM is then made generic over SSH, as the config's first user with its vault key and sudo:
+  cloud-init's state, the machine ID, the SSH host keys (made again at each clone's first boot), the answer files,
+  logs, shell history and DHCP leases, each step reported done, within 45 minutes. A Windows VM gets a task, as
+  SYSTEM, that removes the WinRM HTTPS listener and its certificate, Setup's answer files, PowerShell history and the
+  event logs, then runs sysprep (`/generalize /oobe`) and shuts down. Then the VM's install CDs, serial port and NAT
+  rule come out, and it gets the snapshot `Remotely image v<N>`.
+- **Versions**: each build is a new version, and launch templates deploy the newest. **Versions…** lists them with
+  their VM, snapshot, install config and linked clones. **Keep only the newest N versions** (1 to 20) deletes older
+  versions' VMs after a build, never one a linked clone uses or a protected VM.
+- **Tiers**: a build is Medium; one that keeps only the newest N is Critical, since it deletes VMs. One build of an
+  image runs at a time, and a vault password going into the answer file asks for the vault password, as a deploy
+  does.
+- **Rebuild** and **Build settings…** are on the image's row. The Schedules page's **Rebuild an image** runs a build on
+  a timetable under the approval given when the schedule was saved, and pauses to ask again when the install config,
+  the ISO or the build settings change.
+- A clone of a sysprepped Windows image takes its version's install config for its first boot (from a seed CD, no
+  ISO), and only while that config is unchanged.
 
 ### Stacks
 
@@ -265,13 +365,14 @@ Workstation and VirtualBox.
 - Stack edits are the app's own data: audited, refused while presenting read-only, and carried by **Export** with the
   launch templates (each step points at what its template became on the other laptop; instances stay on this PC).
 
-### Image tools, Import and Export
+### Disk images, Import and Export
 
 CV-01 to CV-03, VM-17 (0.5.0): Remotely reads and writes other hypervisors' disk and VM formats (Hyper-V, KVM and
 QEMU, Proxmox, ESXi, Azure and other clouds). It never manages those hypervisors, and it never changes a source: every
 conversion writes new files.
 
-- **Image tools** (Ctrl+;, in the sidebar after Templates; or the palette) makes no VM. **Inspect** reads an image's header: its
+- **Disk images**, the Templates page's last tab (Ctrl+;, or the palette; it was the Image tools page until 0.6.0),
+  makes no VM. **Inspect** reads an image's header: its
   format (VMDK, VDI, VHD, VHDX, qcow2, raw), layout (growable, preallocated, stream-optimized...), virtual size, size
   on disk, and its parent or backing file. **Convert** turns it into VMDK (growable, preallocated, stream-optimized,
   or ESXi's own preallocated layout), VDI, VHD or VHDX (dynamic or fixed), qcow2 (thin or preallocated) or raw. It asks
@@ -281,14 +382,15 @@ conversion writes new files.
   qemu-img their contents.
 - **The tools**: the hypervisors' own first, which come with Workstation (`vmware-vdiskmanager`, `ovftool`) and
   VirtualBox (`VBoxManage clonemedium`, `convertfromraw`, `export`). qcow2 and VHDX need **qemu-img**, which Remotely
-  never ships (it is GPL-licensed): install QEMU for Windows from QEMU's own download page (Image tools links to it)
+  never ships (it is GPL-licensed): install QEMU for Windows from QEMU's own download page (the Disk images tab links to it)
   and Remotely finds `qemu-img.exe` in its default folder, through `REMOTELY_QEMU_IMG`, or at the path in Settings
   (Conversion tools). Without it, each output that needs it says so. qemu-img is always told the input's format, so it
   never guesses one, and it never reads a disk with a parent: a Workstation snapshot chain is flattened with
   vmware-vdiskmanager first, a VirtualBox one with VBoxManage, and a foreign differencing disk is refused (convert the
   whole chain where it was made). VirtualBox adds the images it converts to its media list; Remotely takes them out
   again.
-- **Import** (VMs page, Image tools or the palette) makes a new VM from an OVA or OVF of any vendor, a disk image (VHD
+- **Import** (the VMs page's New VM menu, **Import it as a VM…** after an Inspect on the Disk images tab, or the
+  palette) makes a new VM from an OVA or OVF of any vendor, a disk image (VHD
   and VHDX from Hyper-V or Azure; qcow2, raw and `.img` from KVM, Proxmox or OpenStack; a VDI for Workstation, a VMDK
   for VirtualBox), or a VM's own description: a libvirt domain XML (`virsh dumpxml`) or a Proxmox `.conf`, with its
   disks in the same folder. CPU, memory and firmware come from the description when there is one (it is read as
@@ -325,8 +427,9 @@ closes it at once: no SSH handshake, no login, nothing audited.
 
 ### Schedules
 
-VM-14 and VM-27 (0.5.0): the **Schedules** page (Ctrl+., in the sidebar under Templates; the palette's "New schedule"
-and a VM's **Schedules** tab open it too) runs actions on VMs on a timetable, or suspends VMs that sit idle.
+VM-14 and VM-27 (0.5.0): the **Schedules** page (Ctrl+3, or Ctrl+. as in 0.5.0; in the sidebar under Templates; the
+palette's "New schedule" and a VM's **Activity** tab open it too) runs actions on VMs on a timetable, or suspends VMs
+that sit idle.
 
 - **What**: take a snapshot of each VM, optionally keeping only the last N it took; start; shut down (through the
   guest); suspend; or resume (only the suspended VMs: the ones that are off stay off). A power action leaves alone the
@@ -658,7 +761,7 @@ and colour) and switches to another; **New workspace…**, **Rename or recolour 
 - Creating, renaming, recolouring, archiving, restoring and switching are audited, and the read-only lock refuses them.
 
 AP-08 (0.5.0): High and Critical approvals, a schedule's standing approval included, have a **Change ID** field for a
-ticket or change number. It is optional; Settings, Approval rules, **Change IDs** makes it required for actions on Prod
+ticket or change number. It is optional; Settings, Approvals, **Change IDs** makes it required for actions on Prod
 targets in the current workspace (a schedule on Prod VMs approved without one then pauses and asks again). It is one
 line of up to 64 characters, and what looks like a password in it is stored as `[redacted]`. It is kept in the audit
 entry and the job (Activity shows it), the audit CSV's `change_id` column and the Compare and MultiExec exports.
@@ -669,7 +772,7 @@ Customer data stays on the laptop only as long as it is useful (BX-02, BX-05, SS
 
 - **Job outputs and command text**: every job keeps what its hosts printed (stdout and stderr, up to 64 KB each per
   host) and its command (a Compare run's whole script, a MultiExec line), so Activity and Compare can show them. Settings,
-  General, **Job outputs** says for how long: 30 days, **90 days** (the default), 1 year or forever. A purge runs at
+  Privacy and data, **Job outputs** says for how long: 30 days, **90 days** (the default), 1 year or forever. A purge runs at
   start and once a day: older jobs lose their outputs and their script or line text, and keep their rows, summaries,
   tiers, targets, results, exit codes and output hashes, so Activity still lists them and Compare still groups them
   (retrying such a run needs it typed again). **Purge now** applies the setting at once. A purge that removed something
@@ -685,7 +788,7 @@ Customer data stays on the laptop only as long as it is useful (BX-02, BX-05, SS
   purge, and compacts its file (`VACUUM`) after a purge that freed a lot of space, while no job runs (a job submitted
   meanwhile waits for it).
 - **Dashboard history** (MO-06, MO-07): 1-minute averages of the VMs, watched hosts and this PC, and the alert
-  list, kept 7 days by default (Settings, General, Dashboard history), pruned at start and daily, never exported.
+  list, kept 7 days by default (Settings, Dashboard, Dashboard history), pruned at start and daily, never exported.
 - **The audit log** is never purged: it is append-only and hash-chained. Verify and Export read it row by row, however
   long it is, and the export is written next to the file you chose, then renamed, so a failed export leaves no half
   file.
@@ -754,7 +857,7 @@ them on this PC, so no host ever receives them.
   (`bash`, `python3`, `perl`, `awk`, `xargs`, `sudo`, `env bash`, ...) can't be read-only commands at all.
 - **Windows unlock** (DPAPI) is off for new vaults. With it on, one click unlocks the vault while you are signed in to
   Windows, but any program running under your Windows account could open it too, even from a copy of Remotely's
-  database, without the vault password. Vaults set up before keep their setting; the Vault page and Settings, General
+  database, without the vault password. Vaults set up before keep their setting; the Vault page and Settings, Privacy and data
   say so plainly and turn it off in one click (no password needed: it deletes the Windows-protected copy of the key).
 - **The idle lock** counts from your own typing and clicking in Remotely and the actions you start, not from the
   dashboard's or the Containers page's background reads, so it really locks after 15 minutes away. When the vault locks,
@@ -896,7 +999,7 @@ Bulk execution lives in the Terminal page (it replaced the MVP's Bulk run page):
 - **How commands are rated** (BX-06, AP-01), for Compare and MultiExec alike: a command whose every part starts with
   a command on the read-only list, and that writes no file, is Low. Any other command is one confirm (Medium) on up to
   4 hosts, and the full approval (High: type the number of hosts, a reason, the countdown) on 5 or more; Settings,
-  Approval rules sets that number ("Bulk tier for commands on hosts", apart from the bulk threshold of VM and other
+  Approvals, Approval rules sets that number ("Bulk tier for commands on hosts", apart from the bulk threshold of VM and other
   actions). A command that matches a dangerous-command rule is High on any number of hosts. The rules are regular
   expressions, tested against the command as typed and against each of its commands as the shell reads them: quotes
   and backslashes removed (`\rm -rf /` and `"rm" -rf /` read as `rm -rf /`), `sudo`, `env` and `NAME=value` in front
@@ -918,7 +1021,7 @@ Bulk execution lives in the Terminal page (it replaced the MVP's Bulk run page):
   there. **Saved approval rules keep their own lists**: the new patterns and the 5-host step for "Run any other
   command" apply to new and default rules. Rules you saved before 0.4.1 keep their dangerous-command list and their
   tiers ("other" commands stay one confirm on any number of hosts) until you add the patterns and set "Run any other
-  command" to High in bulk yourself, or press Reset to defaults, in Settings, Approval rules. The Containers-page rating of prunes is built in, so it applies to
+  command" to High in bulk yourself, or press Reset to defaults, in Settings, Approvals, Approval rules. The Containers-page rating of prunes is built in, so it applies to
   saved rules too.
 - **Notifications** (QL-07): Settings, Terminal, chooses between commands longer than N seconds (5 to 3600) and any
   command that finishes while you're away (the tab isn't on screen or Remotely isn't the window in front), whatever its
@@ -940,39 +1043,167 @@ SS-08: files go up and down over SFTP on each terminal's own SSH connection, so 
   menu); a session's startup command waits for it. Each one is audited, and it can be turned off (see
   [What Remotely does by itself](#what-remotely-does-by-itself)): then the drawer starts in the home folder. Other shells
   (sh, fish, network gear) get nothing typed: the drawer starts in the home folder, and you open folders by
-  double-clicking, the breadcrumb, Up, Home, Back or a typed path. Sort by name, size or date; tick files to download
-  them.
+  double-clicking, the breadcrumb, Up, Home, Back or a typed path. Sort by name, size or date. Tick files and folders
+  for the selection bar: Download, Move to…, Copy to… and Delete, and in its **⋯** Download to…, Permissions… and
+  Owner…. **Open in Files** (the drawer's **⋯**) shows the same folder on the [Files page](#the-files-page).
 - **A folder that can't be opened** (QL-09), say one only another user may read: the drawer keeps its path in the path
   box and the breadcrumb, says why (`alice can't open the folder /home/bob/.app on the host (permission denied)`), and
   Up, Home, Back (to the last folder that opened), the breadcrumb, a typed path (relative paths go on from the folder
   shown) and Refresh all still work.
-- **Which user** (QL-09): the top of the drawer says who transfers run as, "Transfers as alice": always the SSH login
-  user, over SFTP, never with sudo. The prompt hook reports its shell's user next to the folder (in a private escape
-  sequence that is hidden like OSC 7). After `su`, `sudo -i` or `sudo su bob` the new shell has no hook, so its prompts
+- **Which user** (QL-09): the top of the drawer says who transfers run as, "Transfers as alice": the SSH login user,
+  over SFTP, unless you browse as root (below), when it says so instead. The prompt hook reports its shell's user next
+  to the folder (in a private escape sequence that is hidden like OSC 7). After `su`, `sudo -i` or `sudo su bob` the new shell has no hook, so its prompts
   come without a report: the drawer notices, says the shell may have switched (and to whom, when its prompt names a
   user, such as `bob@web01:~$`), that it shows the login user's view, and that transfers still run as the login user,
   so a permission error makes sense. `exit` back to the login shell clears it. Without the hook (sh, fish) the drawer
   goes by the prompt alone.
-- **Download**: to Downloads, or a folder you pick (Download to…). A file of the same name there is kept; the new one
-  gets a number. Right-click a file name in the terminal's output (`ls`, an error message) to download it; elsewhere
-  right-click pastes as before. "Open folder" in the transfers list shows a finished download in Explorer. Each download
+- **Download**: files or folders, to Downloads or a folder you pick (Download to…). When a file of the same name is
+  there, Remotely asks what to do (below). Right-click a file name in the terminal's output (`ls`, an error message)
+  to download it; elsewhere right-click pastes as before. "Open folder" in the transfers list shows a finished download in Explorer. Each download
   is in the audit log with the file's name, size, host path, where it was saved and its SHA-256, never its content.
   Names are made safe here: what Windows can't hold in a name and invisible Unicode format characters (such as U+202E,
   which makes `invoice[U+202E]fdp.exe` look like `invoiceexe.pdf`) become `_`, and a device name (`nul`, `com1.txt`)
   gets a `_` in front. Each download is marked as from the internet, with the `Zone.Identifier` stream browsers write
   (ZoneId=3, without the host's name), so SmartScreen and Office's Protected View treat it as one; on a FAT or exFAT
-  drive, which can't hold the mark, the transfers list says so.
-- **Upload**: drop files on a terminal, or use the upload button (toolbar or drawer). They go into the terminal's
-  folder (the drawer's upload goes into the folder it shows). Uploads are changes, so they go through the command bus:
-  Low, a Prod session raises it one tier, and a file that is there already is replaced only after you say so and
-  confirm (replacing is at least Medium; Settings won't take less). Files are written as the logged-in user and never
-  with sudo: a folder you can't write to fails with a message saying so. Each uploaded file is audited with its name,
-  size, destination and SHA-256. Folders aren't uploaded or downloaded (zip them, or pick their files).
-- **Transfers**: the list under the drawer shows each file's progress, speed and time left, with cancel and retry (a
-  retried upload asks again if it now replaces a file). A new file that fails or is cancelled part way is deleted from
-  the host; a file being replaced stays as it was (see [Safer operations on hosts](#safer-operations-on-hosts)).
-- With MultiExec on, uploads and downloads still go through one terminal: the current one. ZMODEM (`sz`/`rz`) is not
-  supported.
+  drive, which can't hold the mark, the transfers list says so. Nothing is ever downloaded into a Git working tree or
+  into Remotely's own data or logs folder.
+- **Upload**: drop files or folders on a terminal, or use the drawer's **Upload here…** (files) or **Upload a folder
+  here…** (its **⋯**). A drop goes into the folder the shell reported (its home folder without the hook), always as
+  the login user, never as root; the drawer's upload goes into the folder it shows. Uploads are changes, so they go
+  through the command bus: Low, a Prod session raises it one tier, and a file that is there already is replaced only
+  after you say so and confirm (replacing is at least Medium; Settings won't take less). A folder you can't write to
+  fails with a message saying so. Each uploaded file is audited with its name, size, destination and SHA-256.
+- **Folders** (SS-14, 0.8.0) go up and down whole, at most 10,000 files (files and folders, coming down) and 32
+  levels deep. Links, junctions and other
+  reparse points in a folder going up are left out, and so are, coming down, links to folders, devices and Git's data
+  (`.git`, which never comes down); the toast counts what was left out. A link to a file comes as the file it points
+  to.
+- **When files are there already** (both ways): **Replace them** (an upload then needs its approval), **Replace them
+  if newer** (by each side's own clock; a file whose time isn't known stays), **Keep both** (the default: the new one
+  is `name (1).ext`) or **Skip them**. Modification times are kept both ways.
+- **Changes to the host's files** (SS-14): the drawer's **⋯** makes a folder or an empty file; a row's **⋯** renames,
+  moves, copies, deletes, and sets permissions (octal, as chmod takes them) or the owner (user and group numbers).
+  Each is a command on the bus, one job with a step per path, each step audited with its path (`file_changed`):
+  making something new, or renaming or moving without replacing anything, is Low; replacing a file, copying (`cp -a`,
+  also rated by the shell rules), permissions and owners are Medium; deleting a file, a link or an empty folder is
+  Medium; deleting a folder with what is in it is High (`rm -rf --one-file-system`, never `/` or a top-level folder
+  such as `/etc`). Replacing and deleting never go below Medium, whatever Settings says. Permissions and owners are
+  never changed through a link, and a link swapped in before a delete is deleted as a link. Paths are checked as
+  typed, never resolved: no `.` or `..` part, no control or invisible format characters.
+- **Browse as root** (the drawer's **⋯**, also on the Files page): Remotely runs the host's own `sftp-server` under
+  sudo (found only in the distributions' fixed places, never on the PATH) and lists, transfers and changes as root,
+  one approval tier higher (before the Prod rule), with "as root" on the drawer, each dialog and each transfer. sudo
+  gets the password you choose from the vault, else the session's login password, else the password typed for this
+  terminal's login, or none under NOPASSWD; a vault password the host doesn't get yet asks for the vault password
+  first (see [The vault and where its passwords go](#the-vault-and-where-its-passwords-go)). A password sudo refuses is
+  parked until you press **Try again** (the park is shared with the Containers page). Root browsing ends on **Stop
+  browsing as root**, when the connection drops or reconnects, when the vault locks, when sudo refuses, and when the
+  terminal closes; its unfinished transfers are then cancelled and given 5 seconds to delete what they made. Starting,
+  stopping (with why) and refusals are audited (`files_root_started`, `files_root_stopped`, `files_root_refused`).
+- **Transfers**: the list under the drawer is a queue: 4 transfers at a time per terminal's connection, uploads and
+  downloads together, the rest "Waiting". Each row shows its progress, speed and time left, "replaces" or "as root"
+  when it does, and has **Pause** and **Resume**, cancel and retry (a retried upload asks again if it now replaces a
+  file). A paused upload goes on from where it stopped only when the host's file is still the one it was writing (its
+  size, time and the bytes already sent, read back and hashed), else it starts again; a paused download starts again.
+  A new file that fails or is cancelled part way is deleted from the host; a file being replaced stays as it was (see
+  [Safer operations on hosts](#safer-operations-on-hosts)).
+- With Type in all tabs (MultiExec) on, uploads and downloads still go through one terminal: the current one. ZMODEM
+  (`sz`/`rz`) is not supported.
+
+### Editing files on hosts
+
+SS-08 and SS-14 (0.8.0): a file's **⋯** in the Terminal's Files here has **Edit in nano** (or the host's editor:
+"Edit in the terminal" until Remotely knows which) and **Edit on this PC**. A double-click on a file does one of them:
+Settings, Terminal, **Double-clicking a file in Files here** (on the host, the default, or on this PC).
+
+- **Edit in the terminal** opens the file in a terminal editor on the host, in a tab of its own. The editors Remotely
+  knows are nano, micro, vim, vi, nvim, emacs, mcedit, joe and ne; it asks the host which it has once (`command -v`,
+  see [For SOC teams](#for-soc-teams)) and keeps the answer with the host's details. Without a choice it takes the
+  first of nano, micro, vim and vi the host has; the drawer's **⋯**, **Terminal editor**, picks one for the session
+  (a setting of the workspace, audited). The tab is a new connection to the host, like a split, whose channel runs the
+  editor on the path directly (the path passed as octal escapes through `/bin/sh`): nothing is typed into a shell.
+  It is Low and audited (Medium on Prod or as root). The tab never joins Type in all tabs or Compare hosts, has no
+  Files here, tunnels, prompt hook or startup command, and never reconnects: when the editor exits, close it.
+- **As root**, while browsing as root: `sudoedit`, with the editor as `SUDO_EDITOR`. Remotely gives it root browsing's
+  password once, hidden, and only if the session still goes where that password went; a second prompt closes the tab,
+  parks the password and ends root browsing. A link isn't opened as root.
+- **Edit on this PC** downloads the file (a regular file, not a link, up to 16 MB) into a folder of Remotely's data
+  that only your Windows user can open, marks it as from the internet, and opens it in your editor: the one set in
+  Settings, Tools and VMs, **Editor for files from hosts**, else `REMOTELY_LOCAL_EDITOR`, else VS Code, Notepad++ or
+  Notepad. Only an `.exe` on this PC is taken, never a program that runs what it is given (cmd, PowerShell, the script
+  hosts, mshta, Python...), and it is started on the copy itself, never through Windows' default action. A copy whose
+  name Explorer or VS Code would act on (`desktop.ini`, `.lnk`, `.url`, `.code-workspace`...) gets `.txt` added.
+- **Each save goes up** over the terminal's connection, replacing the file in one step as uploads do, once the copy
+  changed and settled. It goes up only while the read-only lock is off (else it waits), the connection still reaches
+  the same host, port, jump host and login, the session hasn't become Prod or protected since the approval (either
+  ends the editing), and the host's file is still the one last read or written (its SHA-256). Each save is audited
+  with its SHA-256. A save that fails is tried again after 10 seconds, doubling up to 5 minutes, or at once on a new
+  save or **Try again**.
+- **The host's copy changed** since: **Compare** (the host's copy saved beside yours as `name (on the host).ext`,
+  then VS Code's diff of the two, or both files opened in another editor), **Save beside it** (a new file,
+  `name (edited).ext`), **Overwrite** or **Keep editing**.
+- **The approval** is one for the whole editing session: Medium, as a replacement is (never less), one tier higher as
+  root and for Prod. The list **Edited on this PC**, above the transfers, shows every file being edited in the
+  workspace, its state, its saves and when it ends, with **Stop editing**.
+- **It ends** on **Stop editing** and after 4 hours (each sending its last save up first), and without uploading when
+  the job is cancelled, the workspace switches, Remotely closes, the terminal closes, root browsing ends, or (as root
+  only) the vault locks. Closing the editor doesn't end it. A save that didn't go up is never thrown away: Stop asks
+  whether to keep it, upload it again or discard it, and every other end keeps the copy, listed again after a restart
+  with **Open**, **Save as…** and **Discard**. Opening, each save, the end and a kept copy's fate are audited.
+
+### The Files page
+
+SS-14 and BX-10 (0.8.0): a two-pane file manager. **Files** is in the sidebar's Remote group, without a shortcut: it
+opens from the sidebar, Ctrl+K, links and **Open in Files** in the Terminal's Files here, which shows that terminal's
+tab at the drawer's folder. The page opens on **Many hosts**. **Open a host** adds a tab for an open SSH terminal, or
+opens a saved SSH session's terminal in the background on the Terminal page, where its host key and password
+questions show, and adds its tab once it connects. Each host tab rides on its terminal's own connection: no second
+login, and the same transfer queue and root browsing as Files here.
+
+- **Two panes**: This PC on the left, the host on the right, the transfers list below. This PC's pane only browses:
+  Back, Forward, Up, Home, Downloads, the drives, a typed folder (a full path), a filter and hidden files. It never
+  opens a network share or a device path, a link or junction (they are listed, not opened), or Remotely's own data
+  folder, and nothing on this PC changes but what a download writes. Drag picked files from one pane to the other to
+  upload or download them, or onto one of the host's folders to move them into it; files dropped from Explorer go
+  only onto the host's side.
+- **The host pane** has the same toolbar with **Bookmarks**, and its header says who the files are handled as ("as
+  alice", or "as root"). Its **⋯** makes a folder or an empty file, uploads files or a folder, finds files, compares
+  with this PC's folder and browses as root. A row's **⋯** opens, downloads (into This PC's folder, or **Download
+  to…**), previews, takes the SHA-256, renames, moves, copies, sets permissions or the owner, and deletes, as commands
+  with the tiers in [File transfer in the terminal](#file-transfer-in-the-terminal). A double-click opens a folder or
+  previews a file. Editing a file is in the Terminal's Files here (see
+  [Editing files on hosts](#editing-files-on-hosts)).
+- **Bookmarks**: up to 100 named folders per saved session, in its workspace (a quick connection has none). Changes
+  are audited (`file_bookmark_changed`) and refused by the read-only lock; bookmarks go to the trash and come back
+  with their session, and travel with it in the export to another laptop.
+- **Find files**: `find` under the folder shown, on that folder's file system only (`-xdev`), for a name or a pattern
+  such as `*.conf`, in any letter case unless you untick it. At most 2,000 results and 2 MB of output, and about a
+  minute (`timeout 55` on hosts that have it). BusyBox's `find` gives the paths only.
+- **Preview**: the first 256 KB of a file, as text only, never rendered. A file with a NUL byte is binary and isn't
+  shown. Control characters show as symbols (`␛`) and invisible format characters as their code (`⟨U+202E⟩`), with a
+  count, so a hidden character can't pass for something else.
+- **SHA-256 checksum**: the host's own `sha256sum`, or else the file read over SFTP and hashed on this PC (up to
+  2 GB), within 5 minutes either way. This PC's pane takes a file's SHA-256 too.
+- **Compare and sync** (**Compare with this PC's folder…**): both folders are walked (10,000 entries a side, 32 levels
+  deep; links, junctions and Git's data, `.git`, are left out and counted), and each name is only on this PC, only on
+  the host, the same, or different (newer by more than 2 seconds, or larger). **Compare contents (SHA-256)** hashes
+  the pairs of the same size, at most 1,000 files and 10 minutes. Then sync the ticked rows **To the host**: one
+  upload job, new files Low and replacements Medium, and, only when ticked, **Delete on the host what this PC's
+  folder doesn't have** (High; it runs after every file has landed, and never deletes a top-level folder). **To this
+  PC** downloads the ticked files, replacing those here; a sync never deletes anything on this PC.
+- **Many hosts** (BX-10): push files to many saved SSH sessions, or fetch one file from each. Hosts are picked by
+  session, VM (through its linked session), tag, saved filter or saved group, and each is logged in to on its own,
+  with its host key checked, as a Compare hosts (Compare output) run does.
+  - **Push** sends up to 100 files (**Choose files…**, or the files picked in This PC's pane) into one folder on
+    every host, replacing files of the same name only when ticked: Medium, High from 5 hosts. Each file's SHA-256 is
+    checked again on the host after it lands, and a mismatch fails that host.
+  - **Fetch** brings one file from each host into `<folder>\<session name>\<file>`, never into a Git working tree or
+    Remotely's data folder, each copy marked as from the internet and audited: Low.
+  - A Prod host raises either one tier. Results group the hosts by identical output, as in Compare hosts, with a diff
+    between groups.
+- **Reads** (listings, find, preview, checksums and comparing) have no tier and aren't audited; downloads are audited
+  reads. While presenting with the read-only lock on, browsing, find, previews, checksums, comparing and downloads
+  still work; uploads, changes to a host's files, syncs to a host, pushes, fetches and bookmark edits don't.
 
 ### Jump hosts and tunnels
 
@@ -1012,14 +1243,14 @@ and a jump host in quick connect.
 
 ### Containers
 
-CT-01 and CT-02 (0.4.0), Ctrl+3: Docker and Podman on SSH hosts, and Docker Desktop on this PC.
+CT-01 and CT-02 (0.4.0), Ctrl+6: Docker and Podman on SSH hosts, and Docker Desktop on this PC.
 
 - **Hosts**: mark a saved session as a container host with **Add a host…** (Docker, Podman or both), or press **Detect**
   in that dialog: Remotely logs in, looks for `docker` and `podman`, and says whether docker works for the login user,
   needs sudo with a password, or works with NOPASSWD sudo. For each engine choose how its CLI runs: as the login user
   (the `docker` group, or rootless Podman), with sudo and the session's login password, a vault password, or none.
   Marks are audited like session edits and move to another laptop with the export. Docker Desktop on this PC shows as
-  "This PC" when its `docker.exe` is found (the path in Settings, General, then `REMOTELY_DOCKER`, then Docker
+  "This PC" when its `docker.exe` is found (the path in Settings, Tools and VMs, then `REMOTELY_DOCKER`, then Docker
   Desktop's folder).
 - **Reads, never in the background**: a host is read when you open it, press Refresh or a job ends. The open host's
   stats are read every 10 s, and a followed log asks for new lines every 2 s, only while the page shows and the window
@@ -1077,7 +1308,7 @@ local storage, and offers none while presenting.
   highest CPU and its highest memory, load and fullest disk. The charts' range picker (Live, 1 h, 6 h, 24 h, 7 d) reads
   it in points of 1 minute (up to 6 hours), 5 minutes (a day) or 30 minutes (a week) and carries on with the live
   rounds; over a range, a chart widget's CPU also shows each point's highest reading. It is kept 7 days by default
-  (Settings, General, **Dashboard history**: 1, 3, 7, 14 or 30 days) and pruned at start and daily with the alert
+  (Settings, Dashboard, **Dashboard history**: 1, 3, 7, 14 or 30 days) and pruned at start and daily with the alert
   list's resolved alerts. It stays on this PC: no export carries it. A VM or host takes about 180 bytes a minute, so 50
   VMs and 20 watched hosts running around the clock for a week take about 125 MB, and ten VMs on working days with five
   watched hosts about 15 MB.
@@ -1110,7 +1341,7 @@ local storage, and offers none while presenting.
   so Enter takes it. Choosing a VM or session shows its actions as before; anything else opens where it lives. Search
   reads only what Remotely already has, once per opening of the palette: containers are the ones the Containers page
   read last (listing them logs in, and search never does), and it polls nothing.
-- **Map** (QL-21, Ctrl+0): this PC, the networks its VMs are on (Workstation's VMnets and VirtualBox's NAT, bridged,
+- **Map** (QL-21; the Dashboard's Map tab, Ctrl+0): this PC, the networks its VMs are on (Workstation's VMnets and VirtualBox's NAT, bridged,
   host-only, NAT and internal networks, from each VM's settings), the VMs, the sessions that reach them, the jump hosts
   on the way and the tunnels open on their terminals, in columns from left to right. Read only: click a node to open
   it; pointing at one lights up what it connects to. Sessions show when they reach a VM, go through or are a jump host,
@@ -1128,10 +1359,31 @@ local storage, and offers none while presenting.
 - **First-run wizard** (QL-23): on a PC with no vault and no session, Remotely offers to find Workstation and
   VirtualBox, create the vault (Windows unlock off unless you turn it on), add folders of VMs and import sessions.
   Each step is optional and saves exactly what Settings, the Vault page and the Sessions page would. **Skip for now**
-  remembers it on this PC; Settings, General, **Setup guide** opens it again.
+  remembers it on this PC; Settings, General, **Setup guide and tips**, **Open the setup guide** opens it again.
 - **Density and shortcuts** (QL-24): Settings, General, **Appearance** has Comfortable (the default) and Compact
   spacing, kept on this PC like the theme. Ctrl+/ (Ctrl+Shift+/ inside a terminal, where Ctrl+/ is the shell's) lists
-  every keyboard shortcut, with a filter.
+  every keyboard shortcut, with a filter. In a terminal, Ctrl+Shift+K opens the palette, since Ctrl+K is the shell's.
+- **Page shortcuts** (UX-08, 0.6.0) follow the sidebar's order:
+
+  | Keys   | Page                                                       |
+  | ------ | ---------------------------------------------------------- |
+  | Ctrl+1 | Virtual machines                                           |
+  | Ctrl+2 | Templates                                                  |
+  | Ctrl+3 | Schedules                                                  |
+  | Ctrl+4 | Sessions                                                   |
+  | Ctrl+5 | Terminal                                                   |
+  | Ctrl+6 | Containers                                                 |
+  | Ctrl+7 | Dashboard                                                  |
+  | Ctrl+8 | Activity                                                   |
+  | Ctrl+9 | Vault                                                      |
+  | Ctrl+, | Settings                                                   |
+  | Ctrl+0 | Dashboard › Map (the Map page until 0.6.0)                 |
+  | Ctrl+; | Templates › Disk images (the Image tools page until 0.6.0) |
+  | Ctrl+. | Schedules, as in 0.5.0                                     |
+
+  Files and Toolbox came after the digits ran out: they open from the sidebar, Ctrl+K and links (Files also from
+  the Terminal's Files here). Snapshots is the Virtual machines page's view, and Known hosts a Vault tab. Page
+  shortcuts work anywhere but inside a terminal, where those keys are the shell's.
 
 ### Host details
 
@@ -1189,7 +1441,7 @@ Windows hosts over SSH.
 ### Presentation mode
 
 FD-03, for screen shares on customer calls. **Present** in the top bar (or "Present" in the Ctrl+K palette, or Settings,
-General) masks host names, IP addresses, user names and your Windows user name in local paths everywhere on screen:
+Privacy and data) masks host names, IP addresses, user names and your Windows user name in local paths everywhere on screen:
 tab titles and the "via" line, the session tree, every table, dialogs (approval, host key, session editor, port
 forwards, quick connect, import and export previews), toasts, tooltips, the Files here drawer, the transfers list, the
 Tunnels panel, the command panel, error messages and the long-command Windows notifications. While it is on, the button
@@ -1443,7 +1695,7 @@ code. Treat the token like a password: one per machine, with an expiry, never in
 **Enter it in Remotely:**
 
 1. Unlock the vault (the lock in the sidebar).
-2. Open **Settings → General → Updates → GitHub update token**, paste the token and choose **Save**.
+2. Open **Settings → Updates → GitHub update token**, paste the token and choose **Save**.
 3. Remotely stores it in the vault and tests it at once: "The token works: it can read …, and the latest release is …".
    **Test** repeats that check at any time.
 4. Clear the clipboard (`Win+V` keeps a history: delete the entry there).
@@ -1566,60 +1818,67 @@ a dependency of the app. App-specific colours (risk tiers, environment labels) a
 
 ## Modules and requirements
 
-| Module             | Path                                                              | PRD requirements                                                                                                                                                  | State                                                                                                                                                                                                                                                          |
-| ------------------ | ----------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Command bus        | `crates/core/src/command_bus.rs`                                  | AP-01 (saves rules), AP-02, AP-03, AP-06, VM-02, VM-03, VM-04, BX-02, SS-07, SS-08, SS-10, FD-14                                                                  | Working: the only way to enqueue a job (MultiExec lines, uploads and tunnels too); checks snapshot names; audits rule changes; approvals expire after 15 minutes and are asked again when a target became Prod or protected                                    |
-| Containers         | `crates/core/src/containers/`, `adapters/containers/`             | CT-01, CT-02, AP-02, FD-07                                                                                                                                        | Working: marked hosts and Docker Desktop, reads on kept connections, both CLIs' JSON parsed, changes on the bus with tiers, impact preview, shells in containers                                                                                               |
-| Policy engine      | `crates/core/src/policy/`                                         | AP-01, AP-04, SS-06 (Prod raises the tier), SS-07, SS-08, SS-10, BX-06, VM-05, VM-07 (warnings add a confirm)                                                     | Working; every tier rule has a unit test; a MultiExec line it could not follow, replacing a file or a tunnel other computers can use is at least a confirm                                                                                                     |
-| Impact preview     | `crates/core/src/impact.rs`                                       | AP-02                                                                                                                                                             | Working: state, uptime (from `vmware.log`, or VirtualBox's state change time) and snapshot count per VM; logged-in users and dependent VMs later                                                                                                               |
-| Snapshot reads     | `crates/core/src/snapshots.rs`                                    | VM-04, VM-05                                                                                                                                                      | Working: tree order, 30-day flag, safety snapshot names                                                                                                                                                                                                        |
-| Audit export       | `crates/core/src/export.rs`                                       | AP-05                                                                                                                                                             | Working: CSV with hashes, secrets redacted, formula cells guarded                                                                                                                                                                                              |
-| Job runner         | `crates/core/src/jobs.rs`                                         | VM-03 (shutdown wait), VM-05, VM-06, AP-03 (countdown), AP-04, BX-02, BX-04, SS-08, SS-10, FD-14 (runs alone)                                                     | Working; sends a MultiExec line's held Enter to its terminals; carries out uploads through a terminal                                                                                                                                                          |
-| VMware adapter     | `crates/core/src/adapters/vmware.rs`                              | VM-01, VM-02, VM-03, VM-04, AP-02                                                                                                                                 | Library, folder scan, `.vmx` and `.vmsd` reading, `vmware.log` start time, `vmrun` list, power and snapshots; vmrest later                                                                                                                                     |
-| VirtualBox adapter | `crates/core/src/adapters/virtualbox.rs`, `hypervisor.rs`         | VM-18                                                                                                                                                             | Working: `VBoxManage` list, `showvminfo`, guest properties (one `enumerate` per VM), power and snapshots; snapshot times from the `.vbox`; each VM routed to its hypervisor by its key                                                                         |
-| Remote adapter     | `crates/core/src/adapters/remote.rs`, `remote/`                   | SS-03, SS-05, SS-07, SS-08, BX-02, BX-07, MO-02                                                                                                                   | Working: jump host chains, terminal shells, SFTP and port forwards (local, remote, SOCKS) on a terminal's connection, bulk exec with sudo, kept connections for guest metrics                                                                                  |
-| Host counters      | `crates/core/src/adapters/host_counters.rs`, `paging.rs`          | MO-01, MO-04, MO-15, VM-07                                                                                                                                        | Working: host RAM, CPUs, CPU times, free disk, paging files and commit charge, and each VM process's (`vmware-vmx.exe`, `VirtualBoxVM.exe`, `VBoxHeadless.exe`) CPU, working set and I/O                                                                       |
-| Host details       | `crates/core/src/host_details/`, `adapters/vm_hardware.rs`        | MO-13, MO-14                                                                                                                                                      | Working: SSH hosts' OS and specs (terminal, dashboard, Refresh; stored), admin reads on demand, VMs' virtual hardware from their files (stored)                                                                                                                |
-| Updater            | `crates/core/src/adapters/updater.rs`, `github.rs`                | FD-14                                                                                                                                                             | Works: this repository's public GitHub Releases, without a token or with the optional one from the vault; install is a Medium-tier job that runs alone                                                                                                         |
-| Inventory          | `crates/core/src/inventory.rs`                                    | VM-01, VM-02, VM-18, SS-06 (VM labels)                                                                                                                            | Every VM from the library, chosen folders and `vmrun list`, and VirtualBox's registered VMs; one refresh at a time, requests meanwhile share the next; filters; audited environment labels                                                                     |
-| VM settings        | `crates/core/src/vm_settings/`, `adapters/vmx_file.rs`            | VM-11, VM-12, VM-15, VM-16, VM-23, VM-24                                                                                                                          | Working: the Settings tab's full read of both hypervisors; .vmx edits after a backup (unknown keys kept), vdiskmanager and VBoxManage disk changes, devices on running VMs, bulk resize, delete, rename, add an existing VM, Open console (audited), ISO drops |
-| Host networks      | `crates/core/src/host_networks/`, `adapters/host_networks.rs`     | VM-11                                                                                                                                                             | Working: vmnets, VirtualBox host-only interfaces and NAT networks with the VMs on each; NAT port forwards added and removed on the bus (High); Workstation's refused without administrator rights                                                              |
-| VM insight         | `crates/core/src/vm_insight/`, `store/timeline.rs`                | VM-25                                                                                                                                                             | Working: a VM's logs (capped tails, following), its timeline from the audit log and the job journal                                                                                                                                                            |
-| Waste finder       | `crates/core/src/waste/`                                          | VM-16, VM-14                                                                                                                                                      | Working: idle VMs from the dashboard's history, suspended VMs, long snapshot chains, folders no VM uses                                                                                                                                                        |
-| Toolbox            | `crates/core/src/toolbox/`, `adapters/net_tools.rs`               | FD-09                                                                                                                                                             | Working: ping, trace route, DNS, port checks and the certificate viewer from this PC (ports and certificates through a session's jump host); Wake-on-LAN on the bus (Low); the subnet calculator in the UI                                                     |
-| Capacity check     | `crates/core/src/capacity.rs`                                     | VM-07, MO-04                                                                                                                                                      | Working: host RAM vs assigned RAM, free disk on VM drives; the dashboard's capacity panel                                                                                                                                                                      |
-| Metrics collector  | `crates/core/src/metrics/`                                        | MO-01, MO-02, MO-03, MO-04, MO-15                                                                                                                                 | Working: host-side source every 5 s, SSH guests every 5, 15, 30 or 60 s (one `grep` of /proc, `df` once a minute), 30 minutes of history in memory (allocated memory, swap, this PC's paging files), collector cost                                            |
-| Dashboard history  | `crates/core/src/metrics/history.rs`, `store/metrics.rs`          | MO-06                                                                                                                                                             | Working: 1-minute averages of VMs, watched hosts and this PC written once a minute; ranges of 1 h to 7 d in buckets; kept 7 days by default, pruned daily and audited; the UI's range picker                                                                   |
-| Alerts             | `crates/core/src/alerts/`, `store/alerts.rs`                      | MO-07                                                                                                                                                             | Working: rules (threshold and duration, unreachable, stopped outside the app) run each round; alert list with acknowledge; Windows notifications with a cooldown; built-in rules; audited edits                                                                |
-| Notifications      | `crates/core/src/notifications.rs`, `src/lib/notifications*.ts`   | QL-25                                                                                                                                                             | Working: the notification centre's history in memory, redacted, per workspace; read, unread and clear                                                                                                                                                          |
-| Dashboard layout   | `crates/core/src/dashboard.rs`, `src/components/Dashboard*.tsx`   | MO-16                                                                                                                                                             | Working: widgets on a four-column grid, saved per workspace and audited; drag, keyboard and size menu; services widget on the kept connection                                                                                                                  |
-| Schedules          | `crates/core/src/schedules/`, `command_bus/standing.rs`           | VM-14, VM-27                                                                                                                                                      | Working: snapshot (keep the last N), start, shut down, suspend, resume and idle auto-suspend; hourly, daily, weekly in local time across daylight saving; standing approvals at save; missed runs reported; chain warnings                                     |
-| Background logins  | `crates/core/src/login_guard.rs`                                  | MO-02, CT-01                                                                                                                                                      | Working: refused logins, sudo and changed keys park a host until a change or Retry; 10 logins per host an hour                                                                                                                                                 |
-| Vault              | `crates/core/src/vault/`                                          | SS-04, AP-06                                                                                                                                                      | Working: AES-256-GCM per item; Argon2id key wrapping, DPAPI opt-in; new data key per password change; idle lock from user activity; vault passwords go only where they already go                                                                              |
-| Session library    | `crates/core/src/sessions.rs`, `forwards.rs`                      | SS-01, SS-06, SS-07, QL-04                                                                                                                                        | Working: folders, tags, colours, search, vault credentials, jump host chains, saved port forwards, audited changes, the tree                                                                                                                                   |
-| Session import     | `crates/core/src/import/`                                         | SS-02, QL-10                                                                                                                                                      | Working: PuTTY (registry or a .reg export), MobaXterm, OpenSSH config and CSV, with a preview of duplicates and name conflicts; a format guide (from the parsers' own tables) and a sample file for each                                                       |
-| Export and import  | `crates/core/src/transfer/`                                       | FD-07                                                                                                                                                             | Working: one encrypted file per export; preview with per-item conflict choices; audited with counts and the file path                                                                                                                                          |
-| Spec catalogue     | `crates/core/src/catalog/`                                        | VM-19, VM-20, VM-21, FD-07                                                                                                                                        | Working: built-in and own sizes, OS profiles, images (checked and hashed, shares refused), launch templates with their problems and a plan per VM for deploy; audited                                                                                          |
-| Deploy             | `crates/core/src/deploy/`                                         | VM-10, VM-21, VM-22, AP-02                                                                                                                                        | Working: deploys from a template or Custom values (golden VM clone, cloud image with cloud-init, ISO, OVA/OVF) and bulk clones, one job step per VM with cleanup after a failure or cancel; preview with disk space; Medium, High from 5 VMs                   |
-| Stacks             | `crates/core/src/stacks/`                                         | VM-08, FD-07                                                                                                                                                      | Working: stacks of launch templates deployed as one job in boot order with readiness checks and delays; instances started, stopped and torn down (Critical) as one; hand-added VMs kept                                                                        |
-| Capacity planner   | `crates/core/src/capacity_plan.rs`                                | VM-26, VM-07                                                                                                                                                      | Working: RAM, CPU and disk after any deploy next to now (thin disks at full size), running VMs to suspend when RAM won't fit                                                                                                                                   |
-| Conversion         | `crates/core/src/convert/`                                        | VM-17, CV-01, CV-02, CV-03                                                                                                                                        | Working: Inspect, Convert and Verify on Image tools (hypervisors' tools first, qemu-img for qcow2 and VHDX when installed), imports as deploys, exports for ESXi, Hyper-V, Azure, KVM, Proxmox, OVA/OVF and raw with a README; Low jobs, Prod exports Medium   |
-| SSH key manager    | `crates/core/src/ssh_keys.rs`                                     | SS-09                                                                                                                                                             | Working: Ed25519 or RSA 4096 keys in the vault; public keys; attach to sessions; push to authorized_keys as a bus command                                                                                                                                      |
-| Terminal           | `crates/core/src/terminal/`                                       | SS-03, SS-07, SS-08, SS-10, SS-11, QL-02, QL-03, QL-06, QL-07                                                                                                     | Working: supervised panes through jump hosts (reconnects spread at random, fast then slow, woken by a resume or a network change), tunnels on the bus, quick connect, host name and IP, output saved or logged, vault passwords typed at prompts, MultiExec    |
-| MultiExec          | `crates/core/src/terminal/multiexec.rs`                           | SS-10, QL-07, QL-12                                                                                                                                               | Working: keys to the picked terminals, line buffer, Enter held and rated on the bus, password prompts and full-screen programs passed through, never logged                                                                                                    |
-| Recording          | `crates/core/src/terminal/record.rs`                              | QL-12                                                                                                                                                             | Working: each line's output per terminal until the prompt is back, escapes removed, secrets scrubbed, grouped and exported through Compare's code, kept in memory                                                                                              |
-| File transfer      | `crates/core/src/terminal/files.rs`, `folder.rs`, `shell_user.rs` | SS-08, QL-09                                                                                                                                                      | Working: the shell's folder (OSC 7, a hidden prompt hook for bash and zsh), listing, downloads (audited), uploads on the bus, transfers with cancel and retry                                                                                                  |
-| Compare output     | `crates/core/src/bulk.rs`                                         | BX-01, BX-03, BX-05, UX-16                                                                                                                                        | Working: hosts from picked tabs, tree sessions and the one picker (VMs, tags, filters, groups), results grouped by output, diff, CSV, JSON and HTML export                                                                                                     |
-| Command panel      | `crates/core/src/snippets/`                                       | BX-08, QL-13                                                                                                                                                      | Working: favourite commands in folders (audited), a built-in Linux library (Troubleshoot runbooks, 30 area groups, manual links), variables, marks from the policy engine                                                                                      |
-| Reachability       | `crates/core/src/reachability.rs`                                 | QL-04 (MO-08 lite), SS-07                                                                                                                                         | Working: TCP checks of the shown sessions, once per host and port, every 5 min; hosts with an open connection skipped, hosts down checked less often; the first jump host for sessions behind one                                                              |
-| VM links           | `crates/core/src/vm_links.rs`                                     | QL-01, BX-01                                                                                                                                                      | Working: sessions linked to VMs by guest IP (or a name resolving to it) or by hand; manual links kept; names looked up once at a time, never behind a jump host                                                                                                |
-| VM sessions        | `crates/core/src/vm_sessions.rs`                                  | QL-29                                                                                                                                                             | Working: an SSH session made from a VM (its name, guest address and labels, a deploy's user and key), one in the editor or several after a preview, linked by hand                                                                                             |
-| Network adapter    | `crates/core/src/adapters/network.rs`                             | QL-01, QL-03, QL-04                                                                                                                                               | Working: DNS lookups (forward and reverse, with a time limit) and the TCP probe                                                                                                                                                                                |
-| Store              | `crates/core/src/store/`, `crates/core/migrations/`               | AP-05, VM-01, VM-02, SS-01, SS-04, NFR Reliability                                                                                                                | Working: hash-chained audit log (text redacted, streamed), job journal (scripts and lines redacted), inventory, sessions, vault ciphertext, tags, saved filters; secure delete                                                                                 |
-| Retention          | `crates/core/src/retention.rs`, `save_guard.rs`                   | BX-02, BX-05, SS-10, SS-11, AP-05                                                                                                                                 | Working: job outputs and command text kept 30 days, 90 days (default), 1 year or forever; a purge at start and daily, Purge now, audited; compacting while no job runs; no save path writes into a Git working tree                                            |
-| Fake adapters      | `crates/core/src/fakes.rs`                                        | Development safety                                                                                                                                                | One fake per outside system; the test SSH server has SFTP on a temp folder and forwards (direct-tcpip, tcpip-forward) with internal names                                                                                                                      |
-| Presentation mode  | `crates/core/src/presentation.rs`, `src/lib/presentation*.ts`     | FD-03                                                                                                                                                             | Working: masking by field and pattern in the DOM and in terminal output (same width), stand-ins in memory, saved and audited, a read-only lock enforced by the policy engine                                                                                   |
-| Workspaces         | `crates/core/src/workspaces.rs`, `store/workspaces.rs`            | FD-02                                                                                                                                                             | Working: workspaces made, renamed, coloured, archived and switched (audited, read-only lock), VMs assigned to one workspace and refused from others, per-workspace audit chains, settings per workspace or for this PC                                         |
-| Change IDs         | `crates/core/src/command_bus/change_id.rs`                        | AP-08                                                                                                                                                             | Working: optional on High and Critical approvals, required for Prod by a workspace's rule, kept in the job, the audit log and the exports                                                                                                                      |
-| Tauri shell        | `src-tauri/src/`                                                  | All IPC                                                                                                                                                           | Working; QL-15: daily log file, crash reports, startup message boxes, one instance, a reload closes what the page had open (`diagnostics.rs`, `lib.rs`); SS-03 resume and network notifications (`wake.rs`)                                                    |
-| UI                 | `src/`                                                            | FD-01, FD-02, FD-03, FD-07, VM-01 to VM-06, AP-01 to AP-06, AP-08, SS-01 to SS-06, SS-08 to SS-11, BX-01 to BX-08, MO-01 to MO-04, MO-13 to MO-15, QL-01 to QL-11 | All pages, the approval dialog with countdown, MultiExec, Compare output and Files here in the Terminal page, the dashboard with live uPlot charts, the Ctrl+K command palette                                                                                 |
+| Module             | Path                                                                                                            | PRD requirements                                                                                                                                                  | State                                                                                                                                                                                                                                                                |
+| ------------------ | --------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Command bus        | `crates/core/src/command_bus.rs`                                                                                | AP-01 (saves rules), AP-02, AP-03, AP-06, VM-02, VM-03, VM-04, BX-02, SS-07, SS-08, SS-10, FD-14                                                                  | Working: the only way to enqueue a job (MultiExec lines, uploads and tunnels too); checks snapshot names; audits rule changes; approvals expire after 15 minutes and are asked again when a target became Prod or protected                                          |
+| Containers         | `crates/core/src/containers/`, `adapters/containers/`                                                           | CT-01, CT-02, AP-02, FD-07                                                                                                                                        | Working: marked hosts and Docker Desktop, reads on kept connections, both CLIs' JSON parsed, changes on the bus with tiers, impact preview, shells in containers                                                                                                     |
+| Policy engine      | `crates/core/src/policy/`                                                                                       | AP-01, AP-04, SS-06 (Prod raises the tier), SS-07, SS-08, SS-10, BX-06, VM-05, VM-07 (warnings add a confirm)                                                     | Working; every tier rule has a unit test; a MultiExec line it could not follow, replacing a file or a tunnel other computers can use is at least a confirm                                                                                                           |
+| Impact preview     | `crates/core/src/impact.rs`                                                                                     | AP-02                                                                                                                                                             | Working: state, uptime (from `vmware.log`, or VirtualBox's state change time) and snapshot count per VM; logged-in users and dependent VMs later                                                                                                                     |
+| Snapshot reads     | `crates/core/src/snapshots.rs`                                                                                  | VM-04, VM-05                                                                                                                                                      | Working: tree order, 30-day flag, safety snapshot names                                                                                                                                                                                                              |
+| Audit export       | `crates/core/src/export.rs`                                                                                     | AP-05                                                                                                                                                             | Working: CSV with hashes, secrets redacted, formula cells guarded                                                                                                                                                                                                    |
+| Job runner         | `crates/core/src/jobs.rs`                                                                                       | VM-03 (shutdown wait), VM-05, VM-06, AP-03 (countdown), AP-04, BX-02, BX-04, SS-08, SS-10, FD-14 (runs alone)                                                     | Working; sends a MultiExec line's held Enter to its terminals; carries out uploads through a terminal                                                                                                                                                                |
+| VMware adapter     | `crates/core/src/adapters/vmware.rs`                                                                            | VM-01, VM-02, VM-03, VM-04, AP-02                                                                                                                                 | Library, folder scan, `.vmx` and `.vmsd` reading, `vmware.log` start time, `vmrun` list, power and snapshots; vmrest later                                                                                                                                           |
+| VirtualBox adapter | `crates/core/src/adapters/virtualbox.rs`, `hypervisor.rs`                                                       | VM-18                                                                                                                                                             | Working: `VBoxManage` list, `showvminfo`, guest properties (one `enumerate` per VM), power and snapshots; snapshot times from the `.vbox`; each VM routed to its hypervisor by its key                                                                               |
+| Remote adapter     | `crates/core/src/adapters/remote.rs`, `remote/`                                                                 | SS-03, SS-05, SS-07, SS-08, BX-02, BX-07, MO-02                                                                                                                   | Working: jump host chains, terminal shells, SFTP and port forwards (local, remote, SOCKS) on a terminal's connection, bulk exec with sudo, kept connections for guest metrics                                                                                        |
+| Host counters      | `crates/core/src/adapters/host_counters.rs`, `paging.rs`                                                        | MO-01, MO-04, MO-15, VM-07                                                                                                                                        | Working: host RAM, CPUs, CPU times, free disk, paging files and commit charge, and each VM process's (`vmware-vmx.exe`, `VirtualBoxVM.exe`, `VBoxHeadless.exe`) CPU, working set and I/O                                                                             |
+| Host details       | `crates/core/src/host_details/`, `adapters/vm_hardware.rs`                                                      | MO-13, MO-14                                                                                                                                                      | Working: SSH hosts' OS and specs (terminal, dashboard, Refresh; stored), admin reads on demand, VMs' virtual hardware from their files (stored)                                                                                                                      |
+| Updater            | `crates/core/src/adapters/updater.rs`, `github.rs`                                                              | FD-14                                                                                                                                                             | Works: this repository's public GitHub Releases, without a token or with the optional one from the vault; install is a Medium-tier job that runs alone                                                                                                               |
+| Inventory          | `crates/core/src/inventory.rs`                                                                                  | VM-01, VM-02, VM-18, SS-06 (VM labels)                                                                                                                            | Every VM from the library, chosen folders and `vmrun list`, and VirtualBox's registered VMs; one refresh at a time, requests meanwhile share the next; filters; audited environment labels                                                                           |
+| VM settings        | `crates/core/src/vm_settings/`, `adapters/vmx_file.rs`                                                          | VM-11, VM-12, VM-15, VM-16, VM-23, VM-24                                                                                                                          | Working: the Settings tab's full read of both hypervisors; .vmx edits after a backup (unknown keys kept), vdiskmanager and VBoxManage disk changes, devices on running VMs, bulk resize, delete, rename, add an existing VM, Open console (audited), ISO drops       |
+| Host networks      | `crates/core/src/host_networks/`, `adapters/host_networks.rs`                                                   | VM-11                                                                                                                                                             | Working: vmnets, VirtualBox host-only interfaces and NAT networks with the VMs on each; NAT port forwards added and removed on the bus (High); Workstation's refused without administrator rights                                                                    |
+| VM insight         | `crates/core/src/vm_insight/`, `store/timeline.rs`                                                              | VM-25                                                                                                                                                             | Working: a VM's logs (capped tails, following), its timeline from the audit log and the job journal                                                                                                                                                                  |
+| Waste finder       | `crates/core/src/waste/`                                                                                        | VM-16, VM-14                                                                                                                                                      | Working: idle VMs from the dashboard's history, suspended VMs, long snapshot chains, folders no VM uses                                                                                                                                                              |
+| Toolbox            | `crates/core/src/toolbox/`, `adapters/net_tools.rs`                                                             | FD-09                                                                                                                                                             | Working: ping, trace route, DNS, port checks and the certificate viewer from this PC (ports and certificates through a session's jump host); Wake-on-LAN on the bus (Low); the subnet calculator in the UI                                                           |
+| Capacity check     | `crates/core/src/capacity.rs`                                                                                   | VM-07, MO-04                                                                                                                                                      | Working: host RAM vs assigned RAM, free disk on VM drives; the dashboard's capacity panel                                                                                                                                                                            |
+| Metrics collector  | `crates/core/src/metrics/`                                                                                      | MO-01, MO-02, MO-03, MO-04, MO-15                                                                                                                                 | Working: host-side source every 5 s, SSH guests every 5, 15, 30 or 60 s (one `grep` of /proc, `df` once a minute), 30 minutes of history in memory (allocated memory, swap, this PC's paging files), collector cost                                                  |
+| Dashboard history  | `crates/core/src/metrics/history.rs`, `store/metrics.rs`                                                        | MO-06                                                                                                                                                             | Working: 1-minute averages of VMs, watched hosts and this PC written once a minute; ranges of 1 h to 7 d in buckets; kept 7 days by default, pruned daily and audited; the UI's range picker                                                                         |
+| Alerts             | `crates/core/src/alerts/`, `store/alerts.rs`                                                                    | MO-07                                                                                                                                                             | Working: rules (threshold and duration, unreachable, stopped outside the app) run each round; alert list with acknowledge; Windows notifications with a cooldown; built-in rules; audited edits                                                                      |
+| Notifications      | `crates/core/src/notifications.rs`, `src/lib/notifications*.ts`                                                 | QL-25                                                                                                                                                             | Working: the notification centre's history in memory, redacted, per workspace; read, unread and clear                                                                                                                                                                |
+| Dashboard layout   | `crates/core/src/dashboard.rs`, `src/components/Dashboard*.tsx`                                                 | MO-16                                                                                                                                                             | Working: widgets on a four-column grid, saved per workspace and audited; drag, keyboard and size menu; services widget on the kept connection                                                                                                                        |
+| Schedules          | `crates/core/src/schedules/`, `command_bus/standing.rs`                                                         | VM-14, VM-27                                                                                                                                                      | Working: snapshot (keep the last N), start, shut down, suspend, resume and idle auto-suspend; hourly, daily, weekly in local time across daylight saving; standing approvals at save; missed runs reported; chain warnings                                           |
+| Background logins  | `crates/core/src/login_guard.rs`                                                                                | MO-02, CT-01                                                                                                                                                      | Working: refused logins, sudo and changed keys park a host until a change or Retry; 10 logins per host an hour                                                                                                                                                       |
+| Vault              | `crates/core/src/vault/`                                                                                        | SS-04, AP-06                                                                                                                                                      | Working: AES-256-GCM per item; Argon2id key wrapping, DPAPI opt-in; new data key per password change; idle lock from user activity; vault passwords go only where they already go                                                                                    |
+| Session library    | `crates/core/src/sessions.rs`, `forwards.rs`                                                                    | SS-01, SS-06, SS-07, QL-04                                                                                                                                        | Working: folders, tags, colours, search, vault credentials, jump host chains, saved port forwards, audited changes, the tree                                                                                                                                         |
+| Session import     | `crates/core/src/import/`                                                                                       | SS-02, QL-10                                                                                                                                                      | Working: PuTTY (registry or a .reg export), MobaXterm, OpenSSH config and CSV, with a preview of duplicates and name conflicts; a format guide (from the parsers' own tables) and a sample file for each                                                             |
+| Export and import  | `crates/core/src/transfer/`                                                                                     | FD-07                                                                                                                                                             | Working: one encrypted file per export; preview with per-item conflict choices; audited with counts and the file path                                                                                                                                                |
+| Spec catalogue     | `crates/core/src/catalog/`                                                                                      | VM-19, VM-20, VM-21, FD-07                                                                                                                                        | Working: built-in and own sizes, OS profiles, images (checked and hashed, shares refused), launch templates with their problems and a plan per VM for deploy; audited                                                                                                |
+| Deploy             | `crates/core/src/deploy/`                                                                                       | VM-10, VM-21, VM-22, AP-02                                                                                                                                        | Working: deploys from a template or Custom values (golden VM clone, cloud image with cloud-init, ISO, OVA/OVF) and bulk clones, one job step per VM with cleanup after a failure or cancel; preview with disk space; Medium, High from 5 VMs                         |
+| Stacks             | `crates/core/src/stacks/`                                                                                       | VM-08, FD-07                                                                                                                                                      | Working: stacks of launch templates deployed as one job in boot order with readiness checks and delays; instances started, stopped and torn down (Critical) as one; hand-added VMs kept                                                                              |
+| Install configs    | `crates/core/src/catalog/install/`, `catalog/install_configs.rs`                                                | VM-28, FD-07                                                                                                                                                      | Working: Ubuntu autoinstall, Kickstart, Debian preseed, cloud-init and Windows unattend files with read-only starters, placeholders, vault references, checks, a form and a masked preview; audited by SHA-256, never their text                                     |
+| Unattended deploys | `crates/core/src/deploy/install.rs`, `deploy/iso/`, `deploy/watch.rs`, `deploy/runner/install.rs`               | VM-29                                                                                                                                                             | Working: Ubuntu, Debian and Windows installs from an ISO copy and a seed CD per VM, watched on the serial port; Windows' one-time password replaced over WinRM over HTTPS                                                                                            |
+| Address pools      | `crates/core/src/address_pools.rs`                                                                              | VM-32                                                                                                                                                             | Working: IPv4 ranges per hypervisor network and workspace; addresses checked by ping and ARP before they are taken, freed when Remotely deletes the VM                                                                                                               |
+| Golden images      | `crates/core/src/golden/`, `deploy/runner/golden.rs`                                                            | VM-30                                                                                                                                                             | Working: an image built from an ISO and an install config, made generic (Linux) or sysprepped (Windows), versions with retention (Critical), rebuilds on a schedule                                                                                                  |
+| Capacity planner   | `crates/core/src/capacity_plan.rs`                                                                              | VM-26, VM-07                                                                                                                                                      | Working: RAM, CPU and disk after any deploy next to now (thin disks at full size), running VMs to suspend when RAM won't fit                                                                                                                                         |
+| Conversion         | `crates/core/src/convert/`                                                                                      | VM-17, CV-01, CV-02, CV-03                                                                                                                                        | Working: Inspect, Convert and Verify on the Disk images tab (hypervisors' tools first, qemu-img for qcow2 and VHDX when installed), imports as deploys, exports for ESXi, Hyper-V, Azure, KVM, Proxmox, OVA/OVF and raw with a README; Low jobs, Prod exports Medium |
+| SSH key manager    | `crates/core/src/ssh_keys.rs`                                                                                   | SS-09                                                                                                                                                             | Working: Ed25519 or RSA 4096 keys in the vault; public keys; attach to sessions; push to authorized_keys as a bus command                                                                                                                                            |
+| Terminal           | `crates/core/src/terminal/`                                                                                     | SS-03, SS-07, SS-08, SS-10, SS-11, QL-02, QL-03, QL-06, QL-07                                                                                                     | Working: supervised panes through jump hosts (reconnects spread at random, fast then slow, woken by a resume or a network change), tunnels on the bus, quick connect, host name and IP, output saved or logged, vault passwords typed at prompts, MultiExec          |
+| MultiExec          | `crates/core/src/terminal/multiexec.rs`                                                                         | SS-10, QL-07, QL-12                                                                                                                                               | Working: keys to the picked terminals, line buffer, Enter held and rated on the bus, password prompts and full-screen programs passed through, never logged                                                                                                          |
+| Recording          | `crates/core/src/terminal/record.rs`                                                                            | QL-12                                                                                                                                                             | Working: each line's output per terminal until the prompt is back, escapes removed, secrets scrubbed, grouped and exported through Compare's code, kept in memory                                                                                                    |
+| File transfer      | `crates/core/src/terminal/files.rs`, `folder.rs`, `shell_user.rs`                                               | SS-08, SS-14, QL-09                                                                                                                                               | Working: the shell's folder (OSC 7, a hidden prompt hook for bash and zsh), listing, downloads (audited), uploads on the bus, folders both ways, a queue of 4 per connection with pause, resume, cancel and retry                                                    |
+| File changes       | `crates/core/src/terminal/file_ops.rs`, `root_files.rs`, `adapters/remote/sftp_root.rs`                         | SS-14                                                                                                                                                             | Working: new, rename, move, copy, delete, permissions and owner on the bus with a step per path; root browsing through the host's sftp-server under sudo, one tier higher                                                                                            |
+| Files page         | `crates/core/src/local_files.rs`, `bookmarks.rs`, `terminal/file_reads.rs`, `terminal/sync.rs`, `bulk_files.rs` | SS-14, BX-10                                                                                                                                                      | Working: This PC's folders (read only), bookmarks, find, preview, checksums, compare and sync, push and fetch on many hosts with each copy's SHA-256                                                                                                                 |
+| Editing            | `crates/core/src/terminal/editor.rs`, `terminal/edit_local.rs`, `adapters/local_editor.rs`                      | SS-08, SS-14                                                                                                                                                      | Working: a terminal editor on the host (sudoedit as root); edit on this PC from a private folder, each save checked and uploaded, conflicts, kept copies                                                                                                             |
+| Compare output     | `crates/core/src/bulk.rs`                                                                                       | BX-01, BX-03, BX-05, UX-16                                                                                                                                        | Working: hosts from picked tabs, tree sessions and the one picker (VMs, tags, filters, groups), results grouped by output, diff, CSV, JSON and HTML export                                                                                                           |
+| Command panel      | `crates/core/src/snippets/`                                                                                     | BX-08, QL-13                                                                                                                                                      | Working: favourite commands in folders (audited), a built-in Linux library (Troubleshoot runbooks, 30 area groups, manual links), variables, marks from the policy engine                                                                                            |
+| Reachability       | `crates/core/src/reachability.rs`                                                                               | QL-04 (MO-08 lite), SS-07                                                                                                                                         | Working: TCP checks of the shown sessions, once per host and port, every 5 min; hosts with an open connection skipped, hosts down checked less often; the first jump host for sessions behind one                                                                    |
+| VM links           | `crates/core/src/vm_links.rs`                                                                                   | QL-01, BX-01                                                                                                                                                      | Working: sessions linked to VMs by guest IP (or a name resolving to it) or by hand; manual links kept; names looked up once at a time, never behind a jump host                                                                                                      |
+| VM sessions        | `crates/core/src/vm_sessions.rs`                                                                                | QL-29                                                                                                                                                             | Working: an SSH session made from a VM (its name, guest address and labels, a deploy's user and key), one in the editor or several after a preview, linked by hand                                                                                                   |
+| Network adapter    | `crates/core/src/adapters/network.rs`                                                                           | QL-01, QL-03, QL-04                                                                                                                                               | Working: DNS lookups (forward and reverse, with a time limit) and the TCP probe                                                                                                                                                                                      |
+| Store              | `crates/core/src/store/`, `crates/core/migrations/`                                                             | AP-05, VM-01, VM-02, SS-01, SS-04, NFR Reliability                                                                                                                | Working: hash-chained audit log (text redacted, streamed), job journal (scripts and lines redacted), inventory, sessions, vault ciphertext, tags, saved filters; secure delete                                                                                       |
+| Retention          | `crates/core/src/retention.rs`, `save_guard.rs`                                                                 | BX-02, BX-05, SS-10, SS-11, AP-05                                                                                                                                 | Working: job outputs and command text kept 30 days, 90 days (default), 1 year or forever; a purge at start and daily, Purge now, audited; compacting while no job runs; no save path writes into a Git working tree                                                  |
+| Fake adapters      | `crates/core/src/fakes.rs`                                                                                      | Development safety                                                                                                                                                | One fake per outside system; the test SSH server has SFTP on a temp folder and forwards (direct-tcpip, tcpip-forward) with internal names                                                                                                                            |
+| Presentation mode  | `crates/core/src/presentation.rs`, `src/lib/presentation*.ts`                                                   | FD-03                                                                                                                                                             | Working: masking by field and pattern in the DOM and in terminal output (same width), stand-ins in memory, saved and audited, a read-only lock enforced by the policy engine                                                                                         |
+| Workspaces         | `crates/core/src/workspaces.rs`, `store/workspaces.rs`                                                          | FD-02                                                                                                                                                             | Working: workspaces made, renamed, coloured, archived and switched (audited, read-only lock), VMs assigned to one workspace and refused from others, per-workspace audit chains, settings per workspace or for this PC                                               |
+| Change IDs         | `crates/core/src/command_bus/change_id.rs`                                                                      | AP-08                                                                                                                                                             | Working: optional on High and Critical approvals, required for Prod by a workspace's rule, kept in the job, the audit log and the exports                                                                                                                            |
+| Tauri shell        | `src-tauri/src/`                                                                                                | All IPC                                                                                                                                                           | Working; QL-15: daily log file, crash reports, startup message boxes, one instance, a reload closes what the page had open (`diagnostics.rs`, `lib.rs`); SS-03 resume and network notifications (`wake.rs`)                                                          |
+| UI                 | `src/`                                                                                                          | FD-01, FD-02, FD-03, FD-07, VM-01 to VM-06, AP-01 to AP-06, AP-08, SS-01 to SS-06, SS-08 to SS-11, BX-01 to BX-08, MO-01 to MO-04, MO-13 to MO-15, QL-01 to QL-11 | All pages, the approval dialog with countdown, MultiExec, Compare output and Files here in the Terminal page, the dashboard with live uPlot charts, the Ctrl+K command palette                                                                                       |
