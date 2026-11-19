@@ -97,7 +97,13 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
     group: "terminal",
     title: "Terminal",
     keywords:
-      "keep-alive reconnect copy on select paste font scrollback prompt hook reachability dots notifications long commands double-click file editor",
+      "keep-alive reconnect copy on select paste font scrollback prompt hook reachability dots notifications long commands",
+  },
+  {
+    id: "files",
+    group: "terminal",
+    title: "Files",
+    keywords: "double-click file editor edit nano vim preview files here host files page",
   },
   {
     id: "compare",

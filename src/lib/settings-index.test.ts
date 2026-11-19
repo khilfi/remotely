@@ -40,6 +40,8 @@ test("the search finds a setting by its name, a word it covers or its group", ()
   assert.deepEqual(ids("idle lock"), ["vault"]);
   assert.deepEqual(ids("DENS"), ["appearance"]);
   assert.ok(ids("prompt hook").includes("terminal"));
+  // UX-14: one double-click setting, under Files, for Files here and the Files page.
+  assert.deepEqual(ids("double-click"), ["files"]);
   assert.ok(ids("change").includes("change-ids"));
   // Every word must match.
   assert.deepEqual(ids("vmrun density"), []);

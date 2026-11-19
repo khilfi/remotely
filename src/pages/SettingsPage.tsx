@@ -42,6 +42,7 @@ import { NumberSetting, SaveStatus, useSaveStatus } from "@/components/SaveStatu
 import { ShowTipsAgainButton } from "@/components/Tip";
 import { TerminalRulesCard } from "@/components/TerminalRulesCard";
 import { TerminalSettingsCard } from "@/components/TerminalSettingsCard";
+import { FilesSettingsCard } from "@/components/FilesSettingsCard";
 import { ToolPathsCard } from "@/components/ToolPathsCard";
 import { UpdateTokenField } from "@/components/UpdateTokenField";
 import { WhyDisabled } from "@/components/WhyDisabled";
@@ -148,6 +149,8 @@ export function SettingsPage({ onChanged, vault, onVaultChanged, onOpenVault, fo
         return <PowerCard settings={settings} onSettings={setSettings} />;
       case "terminal":
         return <TerminalSettingsCard />;
+      case "files":
+        return <FilesSettingsCard />;
       case "compare":
         return <CompareCard settings={settings} onSettings={setSettings} />;
       case "terminal-rules":

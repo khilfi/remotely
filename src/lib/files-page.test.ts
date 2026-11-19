@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { DiffRow } from "./files-page-api.ts";
 import {
+  back,
   canGo,
   clickPick,
   DEFAULT_VIEW,
@@ -81,6 +82,24 @@ test("Back and Forward go through the places shown, a new one dropping what was 
   h = visit(back!.history, "/etc", same);
   assert.deepEqual(h.items, ["/srv", "/etc"]);
   assert.equal(go(h, 1), null);
+});
+
+test("QL-09: Back from a folder that wouldn't open goes to the last one that did", () => {
+  const same = (a: string, b: string) => a === b;
+  // Only folders that opened join the history: /home/alice, then its logs.
+  let h = visit(emptyHistory<string>(), "/home/alice", same);
+  // /root is refused: Back goes to /home/alice, though nothing was before it.
+  assert.deepEqual(back(h, { item: "/root", failed: true }, same), { history: h, item: "/home/alice" });
+  h = visit(h, "/home/alice/logs", same);
+  // From logs that opened, Back is the place before.
+  assert.equal(back(h, { item: "/home/alice/logs", failed: false }, same)?.item, "/home/alice");
+  // From a refused /root after logs: logs, not skipped.
+  assert.equal(back(h, { item: "/root", failed: true }, same)?.item, "/home/alice/logs");
+  // A folder that opened before and fails now (gone) goes to the place before it, not to itself.
+  assert.equal(back(h, { item: "/home/alice/logs", failed: true }, same)?.item, "/home/alice");
+  // Nothing shown yet, or nothing before.
+  assert.equal(back(emptyHistory<string>(), null, same), null);
+  assert.equal(back(visit(emptyHistory<string>(), "/", same), { item: "/", failed: false }, same), null);
 });
 
 test("this PC's breadcrumbs start at its drives", () => {

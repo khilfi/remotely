@@ -1,7 +1,9 @@
 // SS-14 (0.8.0 G3): the Files page's left pane, this PC. It only browses and is a transfer's source or destination:
 // nothing here changes a file of this PC. The core lists each folder and keeps the listing; this pane names files by
 // that listing and their names, never by a path it made up (a typed folder goes through the core's checks). Links and
-// junctions are listed but not opened, and Remotely's own data folder isn't opened at all.
+// junctions are listed but not opened, and Remotely's own data folder isn't opened at all. UX-15 (0.9.0 H1): a file or
+// folder's "⋯" has "Serve this over TFTP or HTTP…": the core keeps it as the file server's pick, by this listing and
+// its name, and the Toolbox's File server tab opens with it filled in (starting the server asks as it always does).
 
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import {
@@ -14,6 +16,7 @@ import {
   HardDriveIcon,
   HouseIcon,
   MonitorIcon,
+  RadioTowerIcon,
   UploadIcon,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -27,7 +30,10 @@ import { WhyDisabled } from "@/components/WhyDisabled";
 import { ChecksumDialog, type ChecksumShown } from "@/components/files/ChecksumDialog";
 import { FileTable } from "@/components/files/FileTable";
 import { PaneButton } from "@/components/files/PaneButton";
+import { toast } from "sonner";
 import { errorMessage } from "@/lib/api";
+import { fileServerApi } from "@/lib/file-server-api";
+import { requestLink } from "@/lib/links";
 import {
   canGo,
   DEFAULT_VIEW,
@@ -140,6 +146,17 @@ export function LocalPane({
     ev.preventDefault();
     const text = (typed ?? listing?.path ?? "").trim();
     if (text) place(text);
+  }
+
+  /** UX-15: the Toolbox's file server, serving this file or folder (by this listing and its name). */
+  async function serve(name: string, folder: boolean) {
+    if (!listing) return;
+    try {
+      const pick = await fileServerApi.pickListed(listing.id, name, folder ? "folder" : "file");
+      requestLink({ kind: "toolbox", tool: "fileServer", serve: { token: pick.token, path: pick.path, folder } });
+    } catch (err) {
+      toast.error(`Can't serve it: ${errorMessage(err)}`);
+    }
   }
 
   async function sum(entry: LocalEntry) {
@@ -319,6 +336,12 @@ export function LocalPane({
               >
                 <UploadIcon />
                 {hostFolder ? `Upload to ${hostFolder}` : "Upload"}
+              </DropdownMenuItem>
+            )}
+            {!drives && !e.link && e.kind !== "other" && (
+              <DropdownMenuItem onSelect={() => void serve(e.name, e.kind === "folder")}>
+                <RadioTowerIcon />
+                Serve this over TFTP or HTTP…
               </DropdownMenuItem>
             )}
             {e.kind === "file" && !e.link && (

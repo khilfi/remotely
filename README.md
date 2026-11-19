@@ -1045,7 +1045,11 @@ SS-08: files go up and down over SFTP on each terminal's own SSH connection, so 
   (sh, fish, network gear) get nothing typed: the drawer starts in the home folder, and you open folders by
   double-clicking, the breadcrumb, Up, Home, Back or a typed path. Sort by name, size or date. Tick files and folders
   for the selection bar: Download, Move to…, Copy to… and Delete, and in its **⋯** Download to…, Permissions… and
-  Owner…. **Open in Files** (the drawer's **⋯**) shows the same folder on the [Files page](#the-files-page).
+  Owner…. **Expand** (the drawer's **⋯**) shows the same folder on the [Files page](#the-files-page).
+- **One file pane** (UX-14, 0.9.0): the drawer is the Files page's host pane in a compact form, so a file has the
+  same **⋯** menu in both places (edit in the terminal or on this PC, preview, SHA-256 checksum, download, rename,
+  move, copy, permissions, owner, delete), with find, bookmarks, hidden files and **Browse as root**. Root browsing
+  started in one place shows in the other. The drawer keeps each terminal's folder and view while you switch tabs.
 - **A folder that can't be opened** (QL-09), say one only another user may read: the drawer keeps its path in the path
   box and the breadcrumb, says why (`alice can't open the folder /home/bob/.app on the host (permission denied)`), and
   Up, Home, Back (to the last folder that opened), the breadcrumb, a typed path (relative paths go on from the folder
@@ -1069,10 +1073,13 @@ SS-08: files go up and down over SFTP on each terminal's own SSH connection, so 
   into Remotely's own data or logs folder.
 - **Upload**: drop files or folders on a terminal, or use the drawer's **Upload here…** (files) or **Upload a folder
   here…** (its **⋯**). A drop goes into the folder the shell reported (its home folder without the hook), always as
-  the login user, never as root; the drawer's upload goes into the folder it shows. Uploads are changes, so they go
-  through the command bus: Low, a Prod session raises it one tier, and a file that is there already is replaced only
-  after you say so and confirm (replacing is at least Medium; Settings won't take less). A folder you can't write to
-  fails with a message saying so. Each uploaded file is audited with its name, size, destination and SHA-256.
+  the login user, never as root, whatever the drawer shows; the drawer's upload goes into the folder it shows. Files
+  dropped on the drawer (UX-14, 0.9.0) go into the folder it shows, or the folder row they fall on, as root (one
+  tier higher) while it browses as root; a drawer that can't take them (not connected, no folder open) says why.
+  Uploads are changes, so they go through the command bus: Low, a Prod session raises it one tier, and a file that is
+  there already is replaced only after you say so and confirm (replacing is at least Medium; Settings won't take
+  less). A folder you can't write to fails with a message saying so. Each uploaded file is audited with its name,
+  size, destination and SHA-256.
 - **Folders** (SS-14, 0.8.0) go up and down whole, at most 10,000 files (files and folders, coming down) and 32
   levels deep. Links, junctions and other
   reparse points in a folder going up are left out, and so are, coming down, links to folders, devices and Git's data
@@ -1112,9 +1119,12 @@ SS-08: files go up and down over SFTP on each terminal's own SSH connection, so 
 
 ### Editing files on hosts
 
-SS-08 and SS-14 (0.8.0): a file's **⋯** in the Terminal's Files here has **Edit in nano** (or the host's editor:
-"Edit in the terminal" until Remotely knows which) and **Edit on this PC**. A double-click on a file does one of them:
-Settings, Terminal, **Double-clicking a file in Files here** (on the host, the default, or on this PC).
+SS-08 and SS-14 (0.8.0): a file's **⋯** in the Terminal's Files here, and (UX-14, 0.9.0) on the Files page, has
+**Edit in nano** (or the host's editor: "Edit in the terminal" until Remotely knows which) and **Edit on this PC**.
+A double-click on a file does one of them in both places: Settings, Terminal, Files, **Double-clicking a file** (on
+the host, the default, or on this PC). When that can't be done (the host has no editor Remotely knows, a link, the
+read-only lock), a double-click previews the file instead. An editor tab opened from the Files page shows on the
+Terminal page.
 
 - **Edit in the terminal** opens the file in a terminal editor on the host, in a tab of its own. The editors Remotely
   knows are nano, micro, vim, vi, nvim, emacs, mcedit, joe and ne; it asks the host which it has once (`command -v`,
@@ -1154,8 +1164,9 @@ Settings, Terminal, **Double-clicking a file in Files here** (on the host, the d
 ### The Files page
 
 SS-14 and BX-10 (0.8.0): a two-pane file manager. **Files** is in the sidebar's Remote group, without a shortcut: it
-opens from the sidebar, Ctrl+K, links and **Open in Files** in the Terminal's Files here, which shows that terminal's
-tab at the drawer's folder. The page opens on **Many hosts**. **Open a host** adds a tab for an open SSH terminal, or
+opens from the sidebar, Ctrl+K, links and **Expand** in the Terminal's Files here, which shows that terminal's tab at
+the drawer's folder. The page opens on its first host tab, or (UX-15, 0.9.0) on **No host open** with **Open a
+host**; **Many hosts** is a tab beside them. **Open a host** adds a tab for an open SSH terminal, or
 opens a saved SSH session's terminal in the background on the Terminal page, where its host key and password
 questions show, and adds its tab once it connects. Each host tab rides on its terminal's own connection: no second
 login, and the same transfer queue and root browsing as Files here.
@@ -1165,14 +1176,15 @@ login, and the same transfer queue and root browsing as Files here.
   opens a network share or a device path, a link or junction (they are listed, not opened), or Remotely's own data
   folder, and nothing on this PC changes but what a download writes. Drag picked files from one pane to the other to
   upload or download them, or onto one of the host's folders to move them into it; files dropped from Explorer go
-  only onto the host's side.
+  only onto the host's side or Many hosts. A file or folder's **⋯** has **Serve this over TFTP or HTTP…** (UX-15),
+  which opens the Toolbox's file server with it filled in; starting the server asks for approval as it always does.
 - **The host pane** has the same toolbar with **Bookmarks**, and its header says who the files are handled as ("as
   alice", or "as root"). Its **⋯** makes a folder or an empty file, uploads files or a folder, finds files, compares
-  with this PC's folder and browses as root. A row's **⋯** opens, downloads (into This PC's folder, or **Download
-  to…**), previews, takes the SHA-256, renames, moves, copies, sets permissions or the owner, and deletes, as commands
-  with the tiers in [File transfer in the terminal](#file-transfer-in-the-terminal). A double-click opens a folder or
-  previews a file. Editing a file is in the Terminal's Files here (see
-  [Editing files on hosts](#editing-files-on-hosts)).
+  with this PC's folder and browses as root. A row's **⋯** is Files here's (UX-14): it opens, edits (in the terminal
+  or on this PC), previews, takes the SHA-256, downloads (into This PC's folder, or Downloads while it shows the
+  drives, or **Download to…**), renames, moves, copies, sets permissions or the owner, and deletes, as commands with
+  the tiers in [File transfer in the terminal](#file-transfer-in-the-terminal). A double-click opens a folder, and
+  on a file does what [Editing files on hosts](#editing-files-on-hosts) says.
 - **Bookmarks**: up to 100 named folders per saved session, in its workspace (a quick connection has none). Changes
   are audited (`file_bookmark_changed`) and refused by the read-only lock; bookmarks go to the trash and come back
   with their session, and travel with it in the export to another laptop.
@@ -1194,11 +1206,14 @@ login, and the same transfer queue and root browsing as Files here.
 - **Many hosts** (BX-10): push files to many saved SSH sessions, or fetch one file from each. Hosts are picked by
   session, VM (through its linked session), tag, saved filter or saved group, and each is logged in to on its own,
   with its host key checked, as a Compare hosts (Compare output) run does.
-  - **Push** sends up to 100 files (**Choose files…**, or the files picked in This PC's pane) into one folder on
-    every host, replacing files of the same name only when ticked: Medium, High from 5 hosts. Each file's SHA-256 is
-    checked again on the host after it lands, and a mismatch fails that host.
+  - **Push** sends up to 100 files (**Choose files…**, the files picked in This PC's pane, or (UX-15) files dropped
+    on this tab from Explorer) into one folder on every host, replacing files of the same name only when ticked:
+    Medium, High from 5 hosts. Each file's SHA-256 is checked again on the host after it lands, and a mismatch fails
+    that host.
   - **Fetch** brings one file from each host into `<folder>\<session name>\<file>`, never into a Git working tree or
-    Remotely's data folder, each copy marked as from the internet and audited: Low.
+    Remotely's data folder, each copy marked as from the internet and audited: Low. **Collect a support bundle
+    instead…** (UX-15) opens the support bundle dialog on the same hosts, and its **Fetch one file from each…** comes
+    back here.
   - A Prod host raises either one tier. Results group the hosts by identical output, as in Compare hosts, with a diff
     between groups.
 - **Reads** (listings, find, preview, checksums and comparing) have no tier and aren't audited; downloads are audited

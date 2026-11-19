@@ -697,9 +697,10 @@ export const HELP = {
   filesEditing: {
     title: "Editing files",
     body: [
-      "Edit in the terminal opens a tab on the host running its editor on the file: the session's choice, else the first of nano, micro, vim and vi it has. As root it runs sudoedit. Edit on this PC opens a copy, in a folder only you can open, in the editor set in Settings, Tools.",
+      "Edit in the terminal opens a tab on the host running its editor (the session's choice, else the first of nano, micro, vim and vi; sudoedit as root). Edit on this PC opens a private copy in the editor set in Settings, Tools. A double-click does what Settings › Terminal › Files says, or previews the file when it can't.",
       "Each save goes up once the host's copy is checked to be the one opened; if it changed, you choose. One approval covers the session; each save is audited. Stop editing ends it, or 4 hours, or the terminal closing. A save that didn't go up is never deleted: the copy stays listed until you save it elsewhere or discard it.",
     ],
+    link: { label: "Double-click setting", to: setting("files") },
   },
   filesChanges: {
     title: "Changing files",

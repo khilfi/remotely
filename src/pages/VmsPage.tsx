@@ -137,6 +137,7 @@ import { useToolsImages } from "@/hooks/use-tools-images";
 import { CloneDialog } from "@/components/CloneDialog";
 import { PageHeader } from "@/components/PageHeader";
 import { RefreshButton } from "@/components/RefreshButton";
+import { dropTarget, readDropSpot } from "@/lib/drop-target";
 import { plural } from "@/lib/format";
 import { hypervisorName, vmLocation } from "@/lib/hypervisors";
 import { refreshDue } from "@/lib/job-events";
@@ -804,8 +805,9 @@ export function VmsPage({
         return;
       }
       if (!dropped.staged) return;
-      const at = document.elementFromPoint(dropped.x, dropped.y)?.closest<HTMLElement>("[data-vm-drop]");
-      const vmxPath = at?.dataset.vmDrop;
+      // UX-14 (H1): lib/drop-target.ts chooses: a VM's row or details.
+      const target = dropTarget(readDropSpot(dropped.x, dropped.y), { vms: true });
+      const vmxPath = target.kind === "vm" ? target.vm : null;
       if (!vmxPath) {
         void api.filesUnstage(dropped.staged.id).catch(() => undefined);
         toast.info("Drop an ISO image on a VM to attach it to its CD/DVD drive.");

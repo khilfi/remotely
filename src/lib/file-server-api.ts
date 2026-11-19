@@ -131,6 +131,9 @@ export const fileServerApi = {
   status: () => invoke<ServerStatus | null>("file_server_status"),
   /** Opens a file or folder dialog; the core keeps the choice. null: the dialog was closed. */
   pick: (purpose: PickFor) => invoke<PickedPath | null>("file_server_pick", { purpose }),
+  /** UX-15: a file or folder of the Files page's This PC pane, by its listing and name; the core keeps it the same way. */
+  pickListed: (listing: string, name: string, purpose: "file" | "folder") =>
+    invoke<PickedPath>("file_server_pick_listed", { listing, name, purpose }),
   start: (request: FileServerRequest) => invoke<SubmitOutcome>("file_server_start", { request }),
   stop: (jobId: string) => invoke<boolean>("file_server_stop", { jobId }),
   onEvent: (handler: (event: FileServerEvent) => void) =>

@@ -908,6 +908,7 @@ fn commands() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         file_server::file_server_options,
         file_server::file_server_status,
         file_server::file_server_pick,
+        file_server::file_server_pick_listed,
         file_server::file_server_start,
         file_server::file_server_stop,
     ]

@@ -7,8 +7,13 @@
 // folder move into it (pointer events: the window's drop handler, which catches Explorer's files in Rust, turns HTML
 // drag and drop off on Windows). Files from Explorer dropped on the host pane upload there (`files://dropped`, staged in
 // the core; no path comes from the window). Every change goes through the approval rules; reads don't.
+//
+// UX-14, UX-15 (0.9.0 H1): the host pane is the Terminal drawer's too (files/HostPane.tsx), so a file has the same row
+// menu, double-click and editing in both places; its edits in the terminal open their tab on the Terminal page. The page
+// opens on its first host tab, or on "No host open" with "Open a host"; Many hosts is a tab, no longer the default, and
+// files dropped on it from Explorer fill its push. Which target takes a drop is lib/drop-target.ts's.
 
-import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { FolderTreeIcon, PlusIcon, ServerIcon, UsersIcon, XIcon } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
@@ -21,6 +26,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { EditingSessionsList } from "@/components/EditingSessionsList";
 import { EmptyState } from "@/components/EmptyState";
 import { PageHeader } from "@/components/PageHeader";
 import { usePresentation } from "@/components/Presentation";
@@ -29,23 +35,27 @@ import { TransfersList } from "@/components/TransfersList";
 import { UploadConflictDialog } from "@/components/UploadConflictDialog";
 import { HostPane, type HostTab } from "@/components/files/HostPane";
 import { LocalPane } from "@/components/files/LocalPane";
-import { ManyHostsView } from "@/components/files/ManyHostsView";
+import { ManyHostsView, type Mode as ManyMode } from "@/components/files/ManyHostsView";
 import {
   api,
   errorMessage,
   type DownloadStart,
   type Existing,
+  type FileDoubleClick,
   type SessionRecord,
   type StagedFiles,
   type SubmitOutcome,
+  type TargetPicks,
   type TransferInfo,
   type UploadStart,
 } from "@/lib/api";
 import { uploadReason } from "@/lib/disabled-reasons";
+import { dropTarget, readDropSpot, type DropPlaces } from "@/lib/drop-target";
 import { dropAction, type DragItems } from "@/lib/files-page";
 import { filesPageApi, type LocalListing } from "@/lib/files-page-api";
 import { plural } from "@/lib/format";
-import { filePanes, openPanes, paneOf, subscribePanes } from "@/lib/open-panes";
+import { requestLink } from "@/lib/links";
+import { filePanes, openPanes, paneOf, requestEditorTab, subscribePanes, type OpenPane } from "@/lib/open-panes";
 import { readOnlyLocked } from "@/lib/presentation-state";
 import { kindOf } from "@/lib/session-kinds";
 import { transferStore } from "@/lib/transfers-store";
@@ -53,6 +63,9 @@ import { transferStore } from "@/lib/transfers-store";
 export interface FilesRequest {
   terminalId?: string;
   path?: string;
+  /** UX-15: Many hosts, pushing or fetching, on these picks (the support bundle dialog's Fetch). */
+  many?: ManyMode;
+  picks?: TargetPicks;
   n: number;
 }
 
@@ -67,6 +80,8 @@ interface Props {
 }
 
 const MANY = "many";
+/** No tab shown: "No host open". */
+const NONE = "none";
 
 /** An upload or download waiting for the answer about files already there. */
 type Conflict =
@@ -92,6 +107,51 @@ type Conflict =
       name: string;
     };
 
+/** "Open a host": a terminal open now, or a saved session (its terminal opens behind, on the Terminal page). */
+function OpenHostMenu({
+  align,
+  openable,
+  sessions,
+  onOpenTerminal,
+  onOpenSession,
+}: {
+  align: "center" | "end";
+  openable: OpenPane[];
+  sessions: SessionRecord[];
+  onOpenTerminal: (terminalId: string) => void;
+  onOpenSession: (session: SessionRecord) => void;
+}) {
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button>
+          <PlusIcon data-icon="inline-start" />
+          Open a host
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align={align} className="max-h-96 min-w-64 overflow-y-auto">
+        <DropdownMenuLabel>Open terminals</DropdownMenuLabel>
+        {openable.length === 0 && <p className="px-2 py-1 text-xs text-muted-foreground">None not shown here.</p>}
+        {openable.map((p) => (
+          <DropdownMenuItem key={p.key} onSelect={() => p.terminalId && onOpenTerminal(p.terminalId)}>
+            <ServerIcon />
+            {p.title}
+          </DropdownMenuItem>
+        ))}
+        <DropdownMenuSeparator />
+        <DropdownMenuLabel>Saved sessions</DropdownMenuLabel>
+        {sessions.length === 0 && <p className="px-2 py-1 text-xs text-muted-foreground">No SSH sessions saved.</p>}
+        {sessions.map((s) => (
+          <DropdownMenuItem key={s.id} onSelect={() => onOpenSession(s)}>
+            <FolderTreeIcon />
+            {s.name}
+          </DropdownMenuItem>
+        ))}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
 /** Downloads finished, so the local pane lists its folder again when the count grows. */
 function downloadsDone(all: TransferInfo[]) {
   return all.filter((t) => t.direction === "download" && t.state === "done").length;
@@ -101,13 +161,23 @@ export function FilesPage({ active, request, onSubmitted, onOpenTerminal, onShow
   const presentation = usePresentation();
   const panes = useSyncExternalStore(subscribePanes, openPanes);
   const [allTabs, setTabs] = useState<HostTab[]>([]);
-  const [activeTab, setActiveTab] = useState<string>(MANY);
+  // UX-15 (H1): the page opens on its first host tab, or on "No host open"; Many hosts is a tab like the others.
+  const [activeTab, setActiveTab] = useState<string>(NONE);
+  /** SS-14 (G4), UX-14: what a double-click on a file does (Settings), as in the Terminal's drawer. */
+  const [doubleClick, setDoubleClick] = useState<FileDoubleClick>("terminalEditor");
+  /** UX-15: files dropped on Many hosts, for its push (the counter tells one drop from the next). */
+  const [manyDrop, setManyDrop] = useState<{ staged: StagedFiles; n: number } | null>(null);
+  /** UX-15: Many hosts asked for from elsewhere, with its mode and picks. */
+  const [manyRequest, setManyRequest] = useState<{ mode: ManyMode; picks?: TargetPicks; n: number } | null>(null);
+  const forgetManyRequest = useCallback(() => setManyRequest(null), []);
   // A tab whose terminal closed goes once another tab shows (the one shown says so first).
   const tabs = allTabs.filter((t) => paneOf(t.terminalId) || t.key === activeTab);
   const [sessions, setSessions] = useState<SessionRecord[]>([]);
   const [local, setLocal] = useState<LocalListing | null>(null);
   const [localPicked, setLocalPicked] = useState<string[]>([]);
-  const [folders, setFolders] = useState<Record<string, { folder: string | null; asRoot: boolean }>>({});
+  const [folders, setFolders] = useState<
+    Record<string, { folder: string | null; asRoot: boolean; why: string | null }>
+  >({});
   const [conflict, setConflict] = useState<Conflict | null>(null);
   const [drag, setDrag] = useState<{ items: DragItems; x: number; y: number } | null>(null);
   /** Saved sessions opened from here, waiting for their terminal to open. */
@@ -115,16 +185,22 @@ export function FilesPage({ active, request, onSubmitted, onOpenTerminal, onShow
   const downloads = useSyncExternalStore(transferStore.subscribe, () => downloadsDone(transferStore.getSnapshot().all));
 
   const current = tabs.find((t) => t.key === activeTab) ?? null;
+  /** UX-15: "No host open" shows: no host tab shown, and not Many hosts. */
+  const noHost = !current && activeTab !== MANY;
   const currentPane = paneOf(current?.terminalId);
   const currentFolder = current ? folders[current.key] : undefined;
   const connected = currentPane?.getSnapshot().status.state === "connected";
 
-  // The saved SSH sessions to open from here.
+  // The saved SSH sessions to open from here, and what a double-click does (Settings may have changed it).
   useEffect(() => {
     if (!active) return;
     api.sessions().then(
       (list) => setSessions(list.filter((s) => kindOf(s).protocol === "ssh")),
       () => setSessions([]),
+    );
+    api.terminalSettings().then(
+      (s) => setDoubleClick(s.fileDoubleClick ?? "terminalEditor"),
+      () => undefined,
     );
   }, [active]);
 
@@ -155,16 +231,26 @@ export function FilesPage({ active, request, onSubmitted, onOpenTerminal, onShow
     [addTab],
   );
 
-  // "Open in Files" from the Terminal's drawer, or a link.
+  // The Terminal drawer's Expand, or a link.
   const [handled, setHandled] = useState(0);
   if (request && request.n !== handled) {
     setHandled(request.n);
     if (request.terminalId) addTab(request.terminalId, request.path);
+    else if (request.many) {
+      setActiveTab(MANY);
+      setManyRequest({ mode: request.many, picks: request.picks, n: request.n });
+    }
   }
 
+  /** The next tab shown is the first host tab left, or "No host open". */
   function closeTab(key: string) {
     setTabs((prev) => prev.filter((t) => t.key !== key));
-    if (activeTab === key) setActiveTab(MANY);
+    if (activeTab === key) setActiveTab(tabs.find((t) => t.key !== key && paneOf(t.terminalId))?.key ?? NONE);
+  }
+
+  /** SS-14 (G4): "Edit in the terminal" opens its tab on the Terminal page, which shows it. */
+  function openEditorTab(jobId: string, title: string) {
+    if (requestEditorTab(jobId, title)) requestLink({ kind: "page", page: "terminal" });
   }
 
   function openSession(session: SessionRecord) {
@@ -181,9 +267,11 @@ export function FilesPage({ active, request, onSubmitted, onOpenTerminal, onShow
   }
 
   const onFolder = useCallback(
-    (key: string, folder: string | null, asRoot: boolean) => {
+    (key: string, folder: string | null, asRoot: boolean, why: string | null) => {
       setFolders((prev) =>
-        prev[key]?.folder === folder && prev[key]?.asRoot === asRoot ? prev : { ...prev, [key]: { folder, asRoot } },
+        prev[key]?.folder === folder && prev[key]?.asRoot === asRoot && prev[key]?.why === why
+          ? prev
+          : { ...prev, [key]: { folder, asRoot, why } },
       );
     },
     [setFolders],
@@ -262,7 +350,9 @@ export function FilesPage({ active, request, onSubmitted, onOpenTerminal, onShow
     );
   }
 
-  async function download(terminalId: string, paths: string[], to: "here" | "downloads" | "choose", asRoot: boolean) {
+  /** "default": into the folder This PC's side shows, or Downloads when it shows none (the drives). */
+  async function download(terminalId: string, paths: string[], asked: "default" | "here" | "choose", asRoot: boolean) {
+    const to = asked === "default" ? (local?.path ? "here" : "downloads") : asked;
     try {
       if (to === "here") {
         if (!local?.path) {
@@ -428,13 +518,39 @@ export function FilesPage({ active, request, onSubmitted, onOpenTerminal, onShow
         return;
       }
       if (!dropped.staged) return;
-      const target = targetAt(dropped.x, dropped.y);
-      if (!target || target.pane !== "host") {
-        void api.filesUnstage(dropped.staged.id).catch(() => undefined);
-        toast.info("Drop files on the host's side to upload them; nothing on this PC is changed here.");
+      // UX-14, UX-15 (H1): lib/drop-target.ts chooses: a host tab's folder (or the folder row it fell on), or
+      // Many hosts, whose push the files fill.
+      const places: DropPlaces = {
+        hosts: tabs.map((t) => ({
+          key: t.key,
+          terminalId: t.terminalId,
+          folder: folders[t.key]?.folder ?? null,
+          asRoot: folders[t.key]?.asRoot ?? false,
+          why: folders[t.key]?.why ?? null,
+        })),
+        many: activeTab === MANY,
+      };
+      const target = dropTarget(readDropSpot(dropped.x, dropped.y), places);
+      if (target.kind === "many") {
+        const staged = dropped.staged;
+        setManyDrop((prev) => ({ staged, n: (prev?.n ?? 0) + 1 }));
         return;
       }
-      void uploadStaged(target.terminalId, dropped.staged, target.intoFolder ?? target.folder, target.asRoot);
+      if (target.kind === "refused") {
+        void api.filesUnstage(dropped.staged.id).catch(() => undefined);
+        toast.info(`Not uploaded: ${target.why}`);
+        return;
+      }
+      if (target.kind !== "host") {
+        void api.filesUnstage(dropped.staged.id).catch(() => undefined);
+        toast.info(
+          activeTab === MANY
+            ? "Drop files on Many hosts' side to push them; nothing on this PC is changed here."
+            : "Drop files on the host's side to upload them; nothing on this PC is changed here.",
+        );
+        return;
+      }
+      void uploadStaged(target.terminalId, dropped.staged, target.folder, target.asRoot);
     };
   });
   useEffect(() => {
@@ -444,51 +560,29 @@ export function FilesPage({ active, request, onSubmitted, onOpenTerminal, onShow
 
   // ---- Page --------------------------------------------------------------------------------------------------
 
-  const openable = useMemo(
-    () => filePanes(panes).filter((p) => !tabs.some((t) => t.terminalId === p.terminalId)),
-    [panes, tabs],
-  );
+  const openable = filePanes(panes).filter((p) => !tabs.some((t) => t.terminalId === p.terminalId));
   const readOnly = readOnlyLocked(presentation);
   const localUploadReason = !current
     ? "Open a host tab first: files upload into its folder"
     : (uploadReason({ open: true, connected, readOnly }) ??
       (currentFolder?.folder ? null : "The host's folder couldn't be opened"));
 
-  const openMenu = (
-    <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <Button>
-          <PlusIcon data-icon="inline-start" />
-          Open a host
-        </Button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="end" className="max-h-96 min-w-64 overflow-y-auto">
-        <DropdownMenuLabel>Open terminals</DropdownMenuLabel>
-        {openable.length === 0 && <p className="px-2 py-1 text-xs text-muted-foreground">None not shown here.</p>}
-        {openable.map((p) => (
-          <DropdownMenuItem key={p.key} onSelect={() => p.terminalId && addTab(p.terminalId)}>
-            <ServerIcon />
-            {p.title}
-          </DropdownMenuItem>
-        ))}
-        <DropdownMenuSeparator />
-        <DropdownMenuLabel>Saved sessions</DropdownMenuLabel>
-        {sessions.length === 0 && <p className="px-2 py-1 text-xs text-muted-foreground">No SSH sessions saved.</p>}
-        {sessions.map((s) => (
-          <DropdownMenuItem key={s.id} onSelect={() => openSession(s)}>
-            <FolderTreeIcon />
-            {s.name}
-          </DropdownMenuItem>
-        ))}
-      </DropdownMenuContent>
-    </DropdownMenu>
+  const openMenu = (align: "center" | "end") => (
+    <OpenHostMenu
+      align={align}
+      openable={openable}
+      sessions={sessions}
+      onOpenTerminal={addTab}
+      onOpenSession={(s) => openSession(s)}
+    />
   );
 
   return (
     <Tabs value={activeTab} onValueChange={setActiveTab} className="flex h-full min-h-0 flex-col gap-3">
       <PageHeader
         page="files"
-        primary={openMenu}
+        // "No host open" has the one "Open a host" while it shows.
+        primary={noHost ? undefined : openMenu("end")}
         tabs={
           <TabsList className="flex-wrap">
             {tabs.map((t) => (
@@ -548,9 +642,11 @@ export function FilesPage({ active, request, onSubmitted, onOpenTerminal, onShow
               <HostPane
                 tab={t}
                 local={local}
+                doubleClick={doubleClick}
                 onDownload={(paths, to, asRoot) => void download(t.terminalId, paths, to, asRoot)}
                 onUpload={(folder, asRoot, pick) => void pickAndUpload(t.terminalId, folder, asRoot, pick)}
                 onSubmitted={(outcome, onJob) => onSubmitted(outcome, onJob)}
+                onEditorJob={openEditorTab}
                 onDownloads={(start) => queued(start)}
                 onFolder={onFolder}
                 onDragStart={startDrag}
@@ -565,21 +661,26 @@ export function FilesPage({ active, request, onSubmitted, onOpenTerminal, onShow
               active={active && activeTab === MANY}
               local={local}
               localPicked={localPicked}
+              dropped={manyDrop}
+              request={manyRequest}
+              onRequestTaken={forgetManyRequest}
               onSubmitted={(outcome, onJob) => onSubmitted(outcome, onJob)}
               onOpenSessions={onOpenSessions}
             />
           )}
-          {tabs.length === 0 && activeTab !== MANY && (
+          {noHost && (
             <EmptyState
               icon={ServerIcon}
               title="No host open"
               description="Open a host: a terminal open now, or a saved session."
               help="page.files"
+              action={openMenu("center")}
             />
           )}
         </div>
       </div>
-      <div className="flex max-h-[30%] min-h-0 shrink-0 flex-col overflow-hidden">
+      <div className="flex max-h-[30%] min-h-0 shrink-0 flex-col gap-2 overflow-hidden">
+        <EditingSessionsList />
         <TransfersList onRetry={(t) => void retry(t)} />
       </div>
       {conflict && (

@@ -3,9 +3,9 @@
 // a kind here and a case there (deploy, schedules, stacks). Links the core keeps for the notification centre come back
 // as plain JSON, so `isAppLink` checks them before they are opened. Tested in links.test.ts.
 
-import type { ContainerHost, EngineKind } from "./api.ts";
+import type { ContainerHost, EngineKind, TargetPicks } from "./api.ts";
 import type { CheckSpec } from "./checks-api.ts";
-import { isToolboxTool, type ToolboxTool, type ToolTarget } from "./toolbox.ts";
+import { isToolboxTool, type ServePick, type ToolboxTool, type ToolTarget } from "./toolbox.ts";
 import type { VmView } from "./vm-snapshots.ts";
 
 /** The tabs of the Templates page (VM-19 to VM-21). */
@@ -20,8 +20,13 @@ export type AppLink =
   | { kind: "session"; sessionId: string }
   /** An open terminal's tab (SS-07: with its tunnels panel). */
   | { kind: "terminal"; terminalId: string; tunnels?: boolean }
-  /** SS-14 (0.8.0 G3): the Files page, on an open terminal's host at a folder (the Terminal's "Files here"). */
-  | { kind: "files"; terminalId?: string; path?: string }
+  /**
+   * SS-14 (0.8.0 G3): the Files page, on an open terminal's host at a folder (the Terminal drawer's Expand). UX-15
+   * (0.9.0 H1): or its Many hosts tab, pushing or fetching, with hosts picked (the support bundle dialog's Fetch).
+   */
+  | { kind: "files"; terminalId?: string; path?: string; many?: "push" | "fetch"; picks?: TargetPicks }
+  /** FD-04, UX-15: the support bundle dialog, on these sessions (Many hosts' "Collect a support bundle instead"). */
+  | { kind: "bundle"; sessionIds?: string[] }
   /** A job's results in Activity. */
   | { kind: "job"; jobId: string }
   /** CT-01: a container's details on the Containers page. */
@@ -49,8 +54,11 @@ export type AppLink =
   | { kind: "hostNetworks" }
   /** FD-06: the note of a session, VM or folder, in its sheet. */
   | { kind: "note"; noteKind: "session" | "vm" | "folder"; key: string; title?: string }
-  /** FD-09: a tool of the Toolbox, with a session, VM or host filled in. */
-  | { kind: "toolbox"; tool: ToolboxTool; target?: ToolTarget }
+  /**
+   * FD-09: a tool of the Toolbox, with a session, VM or host filled in. UX-15 (0.9.0 H1): or the file server with what
+   * it serves (a pick the core keeps, from the Files page's This PC pane).
+   */
+  | { kind: "toolbox"; tool: ToolboxTool; target?: ToolTarget; serve?: ServePick }
   /**
    * MO-08: the Dashboard's Checks tab: a check's history, or a new check on a session, VM or host (UX-19: `spec`, what
    * a Toolbox result's "Keep checking this…" filled in; `untrusted`, what its certificate read found that the check
@@ -81,6 +89,7 @@ const KINDS: Record<AppLinkKind, readonly string[]> = {
   note: ["noteKind", "key"],
   toolbox: ["tool"],
   files: [],
+  bundle: [],
   checks: [],
   group: [],
 };
@@ -167,7 +176,9 @@ export function linkLabel(link: AppLink): string {
     case "checks":
       return link.add ? "Add a check" : link.checkId ? "Show the check" : "Show the checks";
     case "files":
-      return "Open in Files";
+      return link.many ? "Open Many hosts" : "Open in Files";
+    case "bundle":
+      return "Collect a support bundle";
     case "group":
       return link.groupId ? "Open the group" : "Manage groups";
   }

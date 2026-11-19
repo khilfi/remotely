@@ -3,7 +3,8 @@
 // command on the bus (Medium serving, High with uploads), refused by the read-only lock; the server stops at its time
 // limit, on Stop, when another workspace opens, the vault locks, the window reloads or Remotely closes. While it runs
 // (and after it stopped) the tab lists the transfers (repeats summed) and the refused requests by client, the last
-// changed first. Paths never go back to the core: a dialog's choice is a token the core handed out.
+// changed first. Paths never go back to the core: a dialog's choice is a token the core handed out. UX-15 (0.9.0 H1): so is
+// a file or folder sent here from the Files page's This PC pane ("Serve this over TFTP or HTTP…"), which fills in Serve.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { CopyIcon, FileIcon, FolderIcon, PlayIcon, SquareIcon } from "lucide-react";
@@ -37,15 +38,19 @@ import {
   type FileServerForm,
 } from "@/lib/file-server";
 import { fileServerApi, type PickFor, type ServeAddress, type ServerStatus } from "@/lib/file-server-api";
+import type { ServePick } from "@/lib/toolbox";
 import { cn } from "@/lib/utils";
 import { Field, RunError } from "./TargetField";
 
 export function FileServerTool({
   shown,
+  serve = null,
   onSubmitted,
 }: {
   /** The tab shows: the addresses and the status are read then. */
   shown: boolean;
+  /** UX-15: what to serve, sent from the Files page (a pick the core keeps); `n` counts the asks. */
+  serve?: { pick: ServePick; n: number } | null;
   onSubmitted: (outcome: SubmitOutcome) => void;
 }) {
   const [addresses, setAddresses] = useState<ServeAddress[] | null>(null);
@@ -54,6 +59,16 @@ export function FileServerTool({
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const readOnly = useReadOnlyReason();
+  // UX-15: a file or folder sent from the Files page fills in Serve once the form is there, once per ask.
+  const [served, setServed] = useState(0);
+  if (serve && form && serve.n !== served) {
+    setServed(serve.n);
+    setForm({
+      ...form,
+      root: { path: serve.pick.path, choice: { kind: "picked", token: serve.pick.token } },
+      folder: serve.pick.folder,
+    });
+  }
 
   const refresh = useCallback(() => {
     fileServerApi.status().then(setStatus, (err) => setError(errorMessage(err)));

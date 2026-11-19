@@ -1221,7 +1221,8 @@ src-tauri/            Tauri 2 shell (VM-30 0.8.0 G7: golden.rs the build dialog'
                       `reports://progress`); FD-09 toolbox.rs (each tool's run
                       under an id the UI chose, `toolbox://progress` events,
                       toolbox_cancel, the certificate file dialog, Wake up's adapters and MACs), file_server.rs (the File
-                      server tab's options, file and folder dialogs, start, Stop and status, `fileserver://event`);
+                      server tab's options, file and folder dialogs, start, Stop and status, `fileserver://event`; UX-15
+                      file_server_pick_listed: a file or folder of the Files page's This PC pane by its listing and name);
                       MO-08 checks.rs (the runner, `checks://event`, the Checks tab's commands); 0.7.0 F5 comfort.rs
                       (FD-06 notes, render, a note's web link through ShellExecute after the window's confirm, http(s)
                       only; QL-26 stars and recents; QL-27 the trash, its Undo, and its daily purge started in lib.rs;
@@ -1236,12 +1237,15 @@ src/                  React + TypeScript UI
                       filters and a Groups tab; `compact`), MultiExec
                       bar (UX-16: its Pick tabs menu in both states, with the saved groups), WhyDisabled for QL-08,
                       PasteConfirmDialog for QL-05,
-                      FilesDrawer and TransfersList for SS-08 (SS-14: each row's "⋯" and the selection bar rename, move,
-                      copy, delete, set permissions or the owner; the header's "⋯" makes folders and files, uploads a
-                      folder and browses as root; transfers pause and resume; no permissions or owner on a link; G4: a
-                      file's "⋯" edits it in the terminal or on this PC, a double-click as Settings › Terminal says, the
-                      header's "⋯" picks the session's terminal editor; EditingSessionsList: files edited on this PC,
-                      their state, the conflict's answers and Stop editing),
+                      FilesDrawer and TransfersList for SS-08 (UX-14, 0.9.0 H1: the drawer is files/HostPane in compact
+                      mode on the current terminal, a pane per terminal that keeps its folder, Back and Forward and view
+                      across tab switches (hidden files shown, as before), with EditingSessionsList and TransfersList
+                      below; its folder and why it can't take uploads go to the page for drops, DRAWER_KEY; transfers
+                      pause and resume;
+                      EditingSessionsList: files edited on this PC, their state, the conflict's answers and Stop
+                      editing), FilesSettingsCard (UX-14: Settings › Terminal › Files, "Double-clicking a file" for both
+                      places; it and TerminalSettingsCard save through saveTerminalSettings, onto the core's settings as
+                      they are, so neither card puts back the other's change),
                       FileChangeDialog (SS-14: a name, a folder, a mode or an owner before a change), SudoPasswordDialog
                       (SS-14: sudo's password from the vault when the session saves none), UploadConflictDialog (SS-08,
                       SS-14: replace, replace
@@ -1356,18 +1360,28 @@ src/                  React + TypeScript UI
                       More › Organise; lib/vm-sessions.ts); SS-14, BX-10 (0.8.0 G3)
                       files/: FileTable (both panes' table: folders first, sort, click with Ctrl and Shift, a row menu, a
                       pointer drag followed by window listeners, host folder rows `data-files-folder` drop targets),
-                      LocalPane (this PC by listing), HostPane (a host tab on an open terminal's connection: G2's changes,
-                      root browsing, bookmarks, find, preview, checksums, compare), FindSheet, PreviewDialog,
-                      ChecksumDialog, CompareSheet, NameDialog, PaneButton, ManyHostsView (BulkTargetPicker, push or
-                      fetch, BulkResultsView); FilesPage puts them together (tabs per host, "Open a host" from open
-                      terminals or saved sessions, opened behind on the Terminal page; drops between panes and from
-                      Explorer's `files://dropped`; the conflict dialog; the transfers list)
+                      LocalPane (this PC by listing; UX-15 a row's "Serve this over TFTP or HTTP…", a `toolbox` link
+                      with the file server's pick), HostPane (UX-14, 0.9.0 H1: one host pane for the Files page's host
+                      tab and, `compact`, the Terminal's drawer, on an open terminal's connection: one row menu (edit in
+                      the terminal or on this PC, preview, checksum, download, G2's changes), lib/editing.ts's
+                      double-click, the terminal-editor choice, root browsing read from `files_root_status` through
+                      lib/root-browsing.ts, bookmarks, find, preview, checksums, compare (full mode only), QL-09's folder
+                      that won't open and switched shell user; compact: follows the shell's folder (OSC 7), "Transfers
+                      as alice", Type in all tabs' note, Expand to the Files page at the same folder), FindSheet,
+                      PreviewDialog, ChecksumDialog, CompareSheet, NameDialog, PaneButton, ManyHostsView
+                      (BulkTargetPicker, push or fetch, BulkResultsView; UX-15 `data-files-drop="many"`: an Explorer
+                      drop fills the push; fetch's "Collect a support bundle instead…" and the bundle dialog's "Fetch one
+                      file from each…" lead to each other); FilesPage puts them together (UX-15: it opens on its first
+                      host tab, or "No host open" with "Open a host" from open terminals or saved sessions, opened behind
+                      on the Terminal page; Many hosts a tab; drops between panes and from Explorer's
+                      `files://dropped`; the conflict dialog; the editing list and the transfers list; edits in the
+                      terminal open their tab on the Terminal page through open-panes.ts)
   pages/              one file per page (bulk execution is in TerminalPage: Type in all tabs (MultiExec) and Compare
                       hosts; QL-14 VmsPage
                       is VMs and snapshots, with the selection's bulk snapshot actions and the details panel;
                       UX-08 the sidebar's order and shortcuts are lib/navigation.ts's: Machines (VMs Ctrl+1, Templates
                       Ctrl+2, Schedules Ctrl+3), Remote (Sessions Ctrl+4, Terminal Ctrl+5, SS-14's FilesPage (no digit:
-                      Ctrl+K, `files` links, the Terminal drawer's "Open in Files"), Containers Ctrl+6, and
+                      Ctrl+K, `files` links, the Terminal drawer's Expand), Containers Ctrl+6, and
                       FD-09's ToolboxPage, which has no digit and opens from Ctrl+K, rows and `toolbox` links),
                       Overview (Dashboard Ctrl+7, Activity Ctrl+8), then Vault Ctrl+9 and Settings Ctrl+,;
                       TemplatesPage: VM-19 to VM-21 sizes, images and launch
@@ -1421,7 +1435,8 @@ src/                  React + TypeScript UI
                       QL-07 notify choice and the one notification per MultiExec line), transfers.ts,
                       transfers-store.ts (SS-08, P6 every transfer outside React state), file-ops.ts (SS-14 the
                       drawer's checks of names, folders, modes and owners; mode text; the existing-file choices),
-                      editing.ts and editing-api.ts (0.8.0 G4: what a double-click does, the editing list's words and
+                      editing.ts and editing-api.ts (0.8.0 G4, UX-14: doubleClickAction, what a double-click does in
+                      both places, a preview when it can't edit; the editing list's words and
                       events; types and IPC wrappers; an editor tab is the PaneOpener `editor` by its job),
                       job-events.ts (P6, VM-01
                       which job events and setting changes render or refresh what), chart-gaps.ts (MO-02 a guest
@@ -1429,8 +1444,16 @@ src/                  React + TypeScript UI
                       screen, at most 12, released 2 s after a pane hides, DOM after failures; FD-03 the masked copy's
                       1,000 lines written in pieces), tunnels.ts (SS-07 chains and forwards),
                       files-page.ts and files-page-api.ts (SS-14, BX-10 0.8.0 G3: each pane's view, clickPick, Back and
-                      Forward, this PC's breadcrumbs, dropAction (a local folder is never a drop target), a comparison's
-                      rows in words and a sync's default picks; the IPC wrappers), open-panes.ts (the Terminal page's
+                      Forward (QL-09 back: from a folder that wouldn't open, the last one that did), this PC's breadcrumbs, dropAction (a local folder is never a drop target), a comparison's
+                      rows in words and a sync's default picks; the IPC wrappers), drop-target.ts (UX-14, 0.9.0 H1:
+                      dropTarget, the one choice of which target takes an Explorer drop, for the Terminal, Files and VMs
+                      pages' `files://dropped` listeners, from readDropSpot's markers: a terminal pane into its shell
+                      folder or home, never as root, whatever the drawer does (the owner's constraint, pinned by its
+                      test); a host pane or its folder row, or refused with the reason it gives (not connected, no
+                      folder, the read-only lock); Many hosts; a VM's ISO; terminalPageDrop, the Terminal page's whole
+                      choice: which pane uploads, into what folder, as root or not, tested), root-browsing.ts (UX-14: which
+                      terminals browse as root, the core's answer shared by the drawer and the Files page),
+                      open-panes.ts (UX-14: also the Files page's editor tabs, requestEditorTab; the Terminal page's
                       panes published for the Files page's host tabs),
                       navigation.ts (UX-08 the page registry: ids, sidebar names (the headers' titles), groups and
                       shortcuts in sidebar order; MOVED_PAGES: the old Snapshots, Image tools, Map and Known hosts ids
@@ -2848,7 +2871,8 @@ seen on a real VM yet (the PR lists the checks).
   serves moving /proc counters, so watching it on the dashboard shows live guest metrics, and SFTP from a temp folder
   (SS-08) with a bash login, so the "Files here" drawer follows `cd` (QL-09: `cd /home/bob/.app`, a folder alice
   can't open over SFTP, and `su bob` to switch user; SS-14: the drawer's "Browse as root" starts its sftp-server under
-  the toy sudo, which takes the same password, so /etc and /root open and change as root). SS-07: the servers reach
+  the toy sudo, which takes the same password, so /etc and /root open and change as root; UX-14: fake nano and vi
+  for Edit in the terminal, sudoedit with the same password). SS-07: the servers reach
   each other as
   `dev-host-01.test`, `dev-host-02.test`... (names this PC can't resolve, so they need a jump host) and a web page as
   `web.test:80`, for trying chains and tunnels. CT-01: each has `docker` and `podman` with a small shop of containers
