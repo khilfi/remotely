@@ -472,6 +472,8 @@ export function TerminalPage({
   const [treePicks, setTreePicks] = useState<string[]>([]);
   /** UX-16: Compare hosts' other picks (VMs, tags, saved filters, saved groups), kept while the panel is closed. */
   const [comparePicks, setComparePicks] = useState<TargetPicks>({});
+  /** BX-01: the typing tabs "Run a command on these…" left out (they stay picked for typing), or null. */
+  const [compareLeftOut, setCompareLeftOut] = useState<string[] | null>(null);
   const [folders, setFolders] = useState<SessionFolder[]>([]);
   /** Bumped when a pane's state changes, so what depends on terminal ids and statuses is recomputed. */
   const [paneTick, setPaneTick] = useState(0);
@@ -526,6 +528,11 @@ export function TerminalPage({
   const loadGroups = useCallback(() => {
     api.multiExecGroups().then(setGroups, () => undefined);
   }, []);
+  /** UX-16: changes when a group is added, renamed, changed or deleted, so Compare hosts resolves its picks again. */
+  const groupsKey = useMemo(
+    () => JSON.stringify(groups.map((g) => [g.id, g.name, g.members.map((m) => m.sessionId)])),
+    [groups],
+  );
 
   const loadSessions = useCallback(() => {
     api.sessions().then(setSessions, (err) => toast.error(errorMessage(err)));
@@ -1125,10 +1132,12 @@ export function TerminalPage({
     // The tabs picked already, or every tab.
     if (selection.keys.length < 2) setSelection({ keys: tabs.map((t) => t.key), anchor: activeTab });
     setMxNote(null);
+    setCompareLeftOut(null);
     typingOn();
   }
 
   function stopMultiExec() {
+    setCompareLeftOut(null);
     setMultiExec(false);
     setMxNote(null);
     setMxApproval(null);
@@ -1263,14 +1272,16 @@ export function TerminalPage({
     });
   }
   /**
-   * The tabs Compare runs on: MultiExec's, or the picked ones, or the current one while nothing else is picked (so a
-   * run on a tag or "Run a command on these…" reaches exactly its picks).
+   * The tabs Compare runs on, as the tab row marks them: MultiExec's (unless "Run a command on these…" left them out),
+   * or two or more picked ones, or the current one while nothing else is picked (so a run on a tag reaches exactly its
+   * picks).
    */
   const compareTabPick = compareTabKeys({
     typing: multiExec,
     picked: selection.keys,
     current: current?.key ?? null,
     otherPicks: anyPicks(pickerPicks),
+    leftOut: compareLeftOut,
   });
   const compareTabs = tabs.filter((t) => compareTabPick.keys.includes(t.key));
   const comparePanes = compareTabs.map((t) => findPane(t.layout, t.activePane)).filter((p): p is PaneSession => !!p);
@@ -1282,8 +1293,13 @@ export function TerminalPage({
   if (compareWith && compareWith.n !== compareWithHandled) {
     setCompareWithHandled(compareWith.n);
     changeComparePicks(compareWith.picks);
-    // Ctrl+clicked tabs would join the run; Type in all tabs' tabs stay picked (the summary names them).
-    if (!multiExec) setSelection((s) => ({ keys: [], anchor: s.anchor }));
+    // Exactly those picks: Ctrl+clicked tabs are let go; Type in all tabs' tabs stay picked for typing but are left out
+    // of the run until the picked tabs change (the summary says so).
+    if (multiExec) setCompareLeftOut([...selection.keys]);
+    else {
+      setCompareLeftOut(null);
+      setSelection((s) => ({ keys: [], anchor: s.anchor }));
+    }
     setCompareView("run");
     setSide("compare");
   }
@@ -1799,7 +1815,8 @@ export function TerminalPage({
         multiExecOn={multiExec}
         picks={{ ...pickerPicks, terminalIds: compareTerminals }}
         onPicksChange={changeComparePicks}
-        tabs={{ count: compareTabs.length, current: compareTabPick.current }}
+        tabs={{ count: compareTabs.length, current: compareTabPick.current, leftOut: compareTabPick.leftOut }}
+        groupsKey={groupsKey}
         unsavedTabs={unsavedTabs}
         savedSessions={sessions.length}
         onSubmit={onSubmitted}
@@ -2184,7 +2201,11 @@ export function TerminalPage({
           sessions={sessions}
           start={groupsDialog}
           onChanged={loadGroups}
-          onClose={() => setGroupsDialog(null)}
+          onClose={() => {
+            setGroupsDialog(null);
+            // UX-16: read again on close too, so Compare hosts' group picks resolve to the groups as they are now.
+            loadGroups();
+          }}
         />
       )}
       {conflict?.kind === "upload" && (

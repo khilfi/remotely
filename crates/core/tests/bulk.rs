@@ -1180,6 +1180,119 @@ async fn a_deleted_group_picks_nothing_and_says_so() {
     );
 }
 
+/// UX-16: a WinRM group under a job that goes over SSH only (the key push, the Files page's push) reaches no host and
+/// says why, as a WinRM session picked any other way does; under Compare hosts (`winrm`) it reaches its sessions.
+#[tokio::test]
+async fn a_winrm_group_under_an_ssh_only_job_is_left_out_with_its_note() {
+    use remotely_core::sessions::kinds::{WinrmCertificate, WinrmOptions, WinrmSignIn, WinrmTransport};
+    let core = lab_core(FakeRemote::default()).await;
+    let ctx = &core.ctx();
+    let win = core
+        .sessions
+        .create(
+            ctx,
+            SessionInput {
+                host: "win01.example.com".into(),
+                port: 5986,
+                kind: remotely_core::sessions::SessionKind::Winrm(WinrmOptions {
+                    transport: WinrmTransport::Https,
+                    sign_in: WinrmSignIn::Basic,
+                    certificate: WinrmCertificate::Windows,
+                }),
+                ..session_input("win01", 5986, SessionAuth::Password { password_id: None })
+            },
+        )
+        .await
+        .unwrap();
+    let group = core
+        .groups
+        .create(
+            ctx,
+            remotely_core::multiexec_groups::GroupInput {
+                name: "windows".into(),
+                session_ids: vec![win.id],
+            },
+        )
+        .await
+        .unwrap();
+    let ssh_only = TargetPicks {
+        group_ids: vec![group.id],
+        ..Default::default()
+    };
+    let resolved = core.bulk.resolve(ctx, &ssh_only).await.unwrap();
+    assert!(resolved.hosts.is_empty());
+    assert_eq!(
+        resolved.notes,
+        ["'win01' is a WinRM session, so it was left out: this works over SSH only."]
+    );
+    let compare = core
+        .bulk
+        .resolve(
+            ctx,
+            &TargetPicks {
+                winrm: true,
+                ..ssh_only
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(compare.hosts.len(), 1);
+    assert_eq!(compare.hosts[0].via, ["group 'windows'"]);
+}
+
+/// UX-16: a member moved to the trash leaves its groups (QL-27), so a picked group reaches the others; once every
+/// member is gone, the pick says the group has no sessions left.
+#[tokio::test]
+async fn a_trashed_member_leaves_the_group_and_an_empty_group_says_so() {
+    let core = lab_core(FakeRemote::default()).await;
+    let ctx = &core.ctx();
+    let mut ids = Vec::new();
+    for name in ["app01", "app02"] {
+        let s = core
+            .sessions
+            .create(
+                ctx,
+                SessionInput {
+                    host: format!("{name}.example.com"),
+                    ..session_input(name, 22, SessionAuth::Agent)
+                },
+            )
+            .await
+            .unwrap();
+        ids.push(s.id);
+    }
+    let group = core
+        .groups
+        .create(
+            ctx,
+            remotely_core::multiexec_groups::GroupInput {
+                name: "apps".into(),
+                session_ids: ids.clone(),
+            },
+        )
+        .await
+        .unwrap();
+    let picks = TargetPicks {
+        group_ids: vec![group.id],
+        ..Default::default()
+    };
+
+    core.sessions.delete(ctx, ids[0]).await.unwrap();
+    assert!(
+        core.trash.list(ctx).await.unwrap().iter().any(|i| i.name == "app01"),
+        "in the trash"
+    );
+    let resolved = core.bulk.resolve(ctx, &picks).await.unwrap();
+    let names: Vec<&str> = resolved.hosts.iter().map(|h| h.name.as_str()).collect();
+    assert_eq!(names, ["app02"], "the trashed member isn't reached");
+    assert!(resolved.notes.is_empty(), "{:?}", resolved.notes);
+
+    core.sessions.delete(ctx, ids[1]).await.unwrap();
+    let resolved = core.bulk.resolve(ctx, &picks).await.unwrap();
+    assert!(resolved.hosts.is_empty());
+    assert_eq!(resolved.notes, ["Group 'apps' has no sessions left."]);
+}
+
 #[tokio::test]
 async fn compare_runs_on_the_sessions_of_picked_tabs_and_says_which_tabs_it_cannot_reach() {
     let core = ssh_core().await;

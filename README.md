@@ -882,13 +882,17 @@ Bulk execution lives in the Terminal page (it replaced the MVP's Bulk run page):
 - **Picking the hosts** (UX-16, 0.9.0): Compare hosts uses the same picker as every other bulk job, as one line such as
   "12 hosts: 6 picked tabs, folder 'Web', tag 'db'" with **Change…**. It starts with the picked tabs and the sessions
   Ctrl+clicked in the session tree (Ctrl+click a folder for all of it, handy for 50 hosts); Change… adds saved
-  sessions, VMs, tags, saved VM filters and saved groups, and its Sessions tab and the tree are one list. With nothing
-  picked, the current tab is the host; once anything else is picked, only the picks run. A VM is reached through a
-  session linked to it by you or confirmed, never through a link made only by the address its guest reports; the
-  picker names the VMs with no such link. Each host is rated and a protected one skipped as if picked one by one.
+  sessions, VMs, tags, saved VM filters and saved groups, and its Sessions tab and the tree are one list. Tabs count
+  as the tab row marks them: Type in all tabs' tabs, or two or more Ctrl+clicked ones. With nothing picked, the
+  current tab is the host; once anything else is picked, only the picks run. A VM is reached through a session linked
+  to it by you or confirmed, never through a link made only by the address its guest reports; the picker names the
+  VMs with no such link, and a group of sessions the job doesn't take (a WinRM group for a key push) can't be picked.
+  A group changed in Manage groups is read again before the run. Each host is rated and a protected one skipped as if
+  picked one by one.
 - **Run a command on these…** (BX-01, 0.9.0): on the Sessions page's selection bar (SSH and WinRM sessions) and in the
-  VMs page's **More › Organise**, it opens the Terminal page's Compare hosts with those picks, in place of any
-  Ctrl+clicked tabs (while Type in all tabs is on, its tabs stay picked and the summary names them).
+  VMs page's **More › Organise**, it opens the Terminal page's Compare hosts with exactly those picks: Ctrl+clicked
+  tabs are let go, and while Type in all tabs is on its tabs stay picked for typing but are left out of the run (the
+  summary says so) until the picked tabs change.
 - **How commands are rated** (BX-06, AP-01), for Compare and MultiExec alike: a command whose every part starts with
   a command on the read-only list, and that writes no file, is Low. Any other command is one confirm (Medium) on up to
   4 hosts, and the full approval (High: type the number of hosts, a reason, the countdown) on 5 or more; Settings,

@@ -44,7 +44,15 @@ import {
   type TargetPicks,
   type VmRecord,
 } from "@/lib/api";
-import { anyPicks, picksParts, picksSummary, togglePick, type PickKind, type TabsPart } from "@/lib/bulk-picks";
+import {
+  anyPicks,
+  leftOutText,
+  picksParts,
+  picksSummary,
+  togglePick,
+  type PickKind,
+  type TabsPart,
+} from "@/lib/bulk-picks";
 import { plural } from "@/lib/format";
 import { memberNames } from "@/lib/multiexec-groups";
 import { kindOf } from "@/lib/session-kinds";
@@ -72,6 +80,8 @@ interface Props {
   compact?: { tabs: TabsPart };
   /** The page shows the core's notes itself (Compare hosts' alert). */
   hideNotes?: boolean;
+  /** Changes when the lists should be read again (Compare hosts: a group changed in Manage groups). */
+  refresh?: string;
 }
 
 function matches(needle: string, ...fields: (string | null | undefined)[]) {
@@ -96,6 +106,7 @@ export function BulkTargetPicker({
   purpose = "run",
   compact,
   hideNotes = false,
+  refresh = "",
 }: Props) {
   const exporting = purpose === "export";
   const [allSessions, setSessions] = useState<SessionRecord[]>([]);
@@ -152,7 +163,7 @@ export function BulkTargetPicker({
     return () => {
       stale = true;
     };
-  }, [active, reload, isCompact]);
+  }, [active, reload, isCompact, refresh]);
 
   // Which session each VM is reached through: the first linked one by name, as the core picks it. A4, H11: only a
   // link the user chose or confirmed; an automatic one waits for a confirm.
@@ -189,6 +200,15 @@ export function BulkTargetPicker({
   const shownTags = tags.filter((t) => matches(text, t.name));
   const shownFilters = filters.filter((f) => matches(text, f.name));
   const shownGroups = groups.filter((g) => matches(text, g.name, ...g.members.map((m) => m.name)));
+  // A group whose sessions this job doesn't take (a WinRM group under the key push or the Files push, SSH only) would
+  // reach no host: it shows, but can't be picked, and says why.
+  const reachable = useMemo(() => new Set(sessions.map((s) => s.id)), [sessions]);
+  const groupReason = (g: MultiExecGroup) =>
+    g.members.length > 0 && !g.members.some((m) => reachable.has(m.sessionId))
+      ? withWinrm
+        ? "None of its sessions is an SSH or WinRM session"
+        : "Its sessions are WinRM sessions: this works over SSH only"
+      : null;
   const picked = (kind: PickKind) => (picks[kind] ?? []).length;
   const anyPicked = anyPicks(picks);
   const hosts = resolved?.hosts ?? [];
@@ -222,10 +242,14 @@ export function BulkTargetPicker({
     </>
   );
 
+  const leftOut = compact?.tabs.leftOut ?? 0;
   const summary = compact && (
     <div className="flex min-w-0 flex-wrap items-center gap-2 text-sm">
-      <span className="min-w-0 flex-1 font-medium break-words" title={hosts.map((h) => h.name).join(", ")}>
-        {picksSummary(hostCount, picksParts(picks, compact.tabs, { sessions, folders, vms, filters, groups }))}
+      <span className="grid min-w-0 flex-1 gap-0.5">
+        <span className="font-medium break-words" title={hosts.map((h) => h.name).join(", ")}>
+          {picksSummary(hostCount, picksParts(picks, compact.tabs, { sessions, folders, vms, filters, groups }))}
+        </span>
+        {leftOut > 0 && <span className="text-xs text-muted-foreground">{leftOutText(leftOut)}</span>}
       </span>
       {badges}
       <Button
@@ -403,22 +427,30 @@ export function BulkTargetPicker({
                     : "No group matches."
                 }
               >
-                {shownGroups.map((g) => (
-                  <PickRow
-                    key={g.id}
-                    id={`pick-group-${g.id}`}
-                    checked={has("groupIds", g.id)}
-                    onChange={(on) => set("groupIds", g.id, on)}
-                    title={g.name}
-                    detail={
-                      g.members.length === 0 ? (
-                        <span className="text-tier-medium">No sessions left: edit it in Manage groups</span>
-                      ) : (
-                        `${plural(g.members.length, "session")}: ${memberNames(g.members)}`
-                      )
-                    }
-                  />
-                ))}
+                {shownGroups.map((g) => {
+                  const reason = groupReason(g);
+                  const checked = has("groupIds", g.id);
+                  return (
+                    <PickRow
+                      key={g.id}
+                      id={`pick-group-${g.id}`}
+                      checked={checked}
+                      // A picked one can still be taken out.
+                      disabled={reason !== null && !checked}
+                      onChange={(on) => set("groupIds", g.id, on)}
+                      title={g.name}
+                      detail={
+                        g.members.length === 0 ? (
+                          <span className="text-tier-medium">No sessions left: edit it in Manage groups</span>
+                        ) : reason ? (
+                          <span className="text-tier-medium">{reason}</span>
+                        ) : (
+                          `${plural(g.members.length, "session")}: ${memberNames(g.members)}`
+                        )
+                      }
+                    />
+                  );
+                })}
               </PickList>
             </TabsContent>
           </Tabs>
@@ -539,6 +571,7 @@ function PickRow({
   detail,
   mono,
   extra,
+  disabled = false,
 }: {
   id: string;
   checked: boolean;
@@ -547,10 +580,12 @@ function PickRow({
   detail?: React.ReactNode;
   mono?: boolean;
   extra?: React.ReactNode;
+  /** QL-08: can't be picked; `detail` says why. */
+  disabled?: boolean;
 }) {
   return (
     <li className="flex items-center gap-3 px-3 py-2">
-      <Checkbox id={id} checked={checked} onCheckedChange={(v) => onChange(v === true)} />
+      <Checkbox id={id} checked={checked} disabled={disabled} onCheckedChange={(v) => onChange(v === true)} />
       <Label htmlFor={id} className="grid min-w-0 flex-1 gap-0.5 font-normal">
         <span className="truncate text-sm font-medium">{title}</span>
         {detail && (

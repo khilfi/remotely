@@ -5,6 +5,7 @@ import type { SessionFolder } from "./api.ts";
 import {
   anyPicks,
   compareTabKeys,
+  leftOutText,
   pickCount,
   picksParts,
   picksSummary,
@@ -89,28 +90,68 @@ test("the current tab is 'this tab'; many VMs are counted; deleted picks still s
   ]);
 });
 
-test("Compare runs on the typing tabs, the Ctrl+clicked ones, or the current tab only when nothing else is picked", () => {
+test("Compare runs on the tabs the tab row marks picked, or the current tab only when nothing else is picked", () => {
   assert.deepEqual(compareTabKeys({ typing: true, picked: ["a", "b"], current: "c", otherPicks: true }), {
     keys: ["a", "b"],
     current: false,
+    leftOut: 0,
   });
-  assert.deepEqual(compareTabKeys({ typing: false, picked: ["b"], current: "c", otherPicks: true }), {
-    keys: ["b"],
+  assert.deepEqual(compareTabKeys({ typing: false, picked: ["a", "b"], current: "c", otherPicks: true }), {
+    keys: ["a", "b"],
     current: false,
+    leftOut: 0,
+  });
+  // One Ctrl+clicked tab (A picked, then C unpicked; or one of two picked tabs closed) isn't marked picked, so it
+  // isn't one here either: the current tab is, as before 0.9.0.
+  assert.deepEqual(compareTabKeys({ typing: false, picked: ["a"], current: "c", otherPicks: false }), {
+    keys: ["c"],
+    current: true,
+    leftOut: 0,
+  });
+  assert.deepEqual(compareTabKeys({ typing: false, picked: ["a"], current: "c", otherPicks: true }), {
+    keys: [],
+    current: false,
+    leftOut: 0,
   });
   assert.deepEqual(compareTabKeys({ typing: false, picked: [], current: "c", otherPicks: false }), {
     keys: ["c"],
     current: true,
+    leftOut: 0,
   });
   assert.deepEqual(
     compareTabKeys({ typing: false, picked: [], current: "c", otherPicks: true }),
-    { keys: [], current: false },
-    "Run a command on these… runs on exactly those picks",
+    { keys: [], current: false, leftOut: 0 },
+    "a run on a tag reaches exactly its picks",
   );
   assert.deepEqual(compareTabKeys({ typing: false, picked: [], current: null, otherPicks: false }), {
     keys: [],
     current: false,
+    leftOut: 0,
   });
+});
+
+test("BX-01: Run a command on these… leaves the typing tabs out until the picked tabs change", () => {
+  const typing = ["a", "b", "c", "d", "e", "f"];
+  assert.deepEqual(
+    compareTabKeys({ typing: true, picked: typing, current: "a", otherPicks: true, leftOut: [...typing].reverse() }),
+    { keys: [], current: false, leftOut: 6 },
+    "the same tabs, in any order: left out",
+  );
+  assert.deepEqual(
+    compareTabKeys({ typing: true, picked: [...typing, "g"], current: "a", otherPicks: true, leftOut: typing }),
+    { keys: [...typing, "g"], current: false, leftOut: 0 },
+    "a tab Ctrl+clicked since: the typing tabs count again",
+  );
+  assert.equal(leftOutText(6), "The 6 tabs you're typing in are left out.");
+  assert.equal(leftOutText(1), "The tab you're typing in is left out.");
+});
+
+test("the summary counts only sessions the job takes (a folder's RDP session isn't one)", () => {
+  // The tree's Ctrl+click on Web picks its RDP session too; it runs nowhere, so Web is still the whole folder.
+  assert.deepEqual(picksParts({ sessionIds: ["w1", "w2", "rdp"] }, { count: 0, current: false }, names), [
+    "folder 'Web'",
+  ]);
+  assert.deepEqual(picksParts({ sessionIds: ["rdp"] }, { count: 0, current: false }, names), []);
 });
 
 test("picks are toggled once each and counted with the tabs", () => {

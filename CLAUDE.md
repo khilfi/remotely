@@ -1382,8 +1382,10 @@ src/                  React + TypeScript UI
                       window from the Terminal or Sessions page; the presenting notice), multiexec.ts,
                       multiexec-groups.ts (QL-19 which
                       tabs a group picks or opens, saving picked tabs, editor checks), bulk-picks.ts (UX-16, BX-01 the
-                      picker's summary line with whole folders, which tabs Compare hosts runs on (compareTabKeys: the
-                      current tab only while nothing else is picked), a selection's picks), scrollback-search.ts (QL-18
+                      picker's summary line with whole folders and only sessions the job takes, which tabs Compare hosts
+                      runs on (compareTabKeys, as the tab row marks them: typing tabs, or two or more picked; the current
+                      tab only while nothing else is picked; BX-01's `leftOut`: the typing tabs "Run a command on
+                      these…" left out until the picked tabs change), a selection's picks), scrollback-search.ts (QL-18
                       logical lines, matching, caps, grouping by tab), scrollback-xterm.ts (QL-18 reading a pane's
                       buffer, showing a match with a decoration), highlight-rules.ts (QL-17 scope, compile, match a
                       logical line to cells, colours per theme, time budget), terminal-highlights.ts (QL-17 xterm

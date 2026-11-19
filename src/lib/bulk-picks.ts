@@ -35,6 +35,8 @@ export interface TabsPart {
   count: number;
   /** The one tab is the current tab, used because nothing was picked. */
   current: boolean;
+  /** BX-01: Type in all tabs' tabs, left out since "Run a command on these…" opened Compare hosts. */
+  leftOut?: number;
 }
 
 /** What the summary names things by. */
@@ -49,12 +51,14 @@ export interface SummaryNames {
 
 /**
  * Picked sessions as whole folders where every session under a folder is picked (the tree's Ctrl+click on a folder
- * picks them so), outermost first, then the rest by name or count.
+ * picks them so), outermost first, then the rest by name or count. Only sessions the job takes count (`names.sessions`):
+ * a folder's RDP session the tree picked along with its SSH ones runs nowhere, so it isn't counted.
  */
 function sessionParts(ids: readonly string[], names: SummaryNames): string[] {
-  if (ids.length === 0) return [];
-  const picked = new Set(ids);
-  const left = new Set(ids);
+  const runs = new Set(names.sessions.map((s) => s.id));
+  const picked = new Set(ids.filter((id) => runs.has(id)));
+  if (picked.size === 0) return [];
+  const left = new Set(picked);
   const parts: string[] = [];
   for (const { folder } of flattenFolders([...names.folders])) {
     const under = subtree([...names.folders], folder.id);
@@ -127,21 +131,40 @@ export function picksSummary(hosts: number, parts: readonly string[]): string {
   return `${plural(hosts, "host")}: ${shown}`;
 }
 
+/** BX-01: the summary's second line while the typing tabs are left out. */
+export function leftOutText(count: number): string {
+  return count === 1 ? "The tab you're typing in is left out." : `The ${count} tabs you're typing in are left out.`;
+}
+
+function sameKeys(a: readonly string[], b: readonly string[]) {
+  return a.length === b.length && a.every((k) => b.includes(k));
+}
+
 /**
- * The tabs Compare hosts runs on: Type in all tabs' picked tabs while it is on, else the Ctrl+clicked ones, else the
- * current tab, but only while nothing else is picked (so "Run a command on these…" runs on exactly those picks).
+ * The tabs Compare hosts runs on, as the tab row marks them picked:
+ * - Type in all tabs' tabs while it is on, unless "Run a command on these…" left them out (`leftOut`, the typing
+ *   tabs then; it lapses once the picked tabs change);
+ * - else two or more Ctrl+clicked tabs (`isMulti`: one Ctrl+clicked tab is shown as no pick, so it isn't one);
+ * - else the current tab, but only while nothing else is picked (so a run on a tag reaches exactly its picks).
  */
 export function compareTabKeys(input: {
   typing: boolean;
-  /** The picked tabs, left to right. */
+  /** The selection's tabs, left to right. */
   picked: readonly string[];
   current: string | null;
   /** Something is picked in the tree or the picker. */
   otherPicks: boolean;
-}): { keys: string[]; current: boolean } {
-  if (input.typing || input.picked.length > 0) return { keys: [...input.picked], current: false };
-  if (input.current && !input.otherPicks) return { keys: [input.current], current: true };
-  return { keys: [], current: false };
+  /** The typing tabs "Run a command on these…" left out, or null. */
+  leftOut?: readonly string[] | null;
+}): { keys: string[]; current: boolean; leftOut: number } {
+  if (input.typing) {
+    if (input.leftOut && sameKeys(input.leftOut, input.picked))
+      return { keys: [], current: false, leftOut: input.picked.length };
+    return { keys: [...input.picked], current: false, leftOut: 0 };
+  }
+  if (input.picked.length > 1) return { keys: [...input.picked], current: false, leftOut: 0 };
+  if (input.current && !input.otherPicks) return { keys: [input.current], current: true, leftOut: 0 };
+  return { keys: [], current: false, leftOut: 0 };
 }
 
 /** BX-01: what "Run a command on these…" opens Compare hosts with: the Sessions page's or the VMs page's selection. */

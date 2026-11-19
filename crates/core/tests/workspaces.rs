@@ -461,9 +461,24 @@ async fn another_workspaces_group_is_refused_as_a_pick() {
         there.notes,
         ["A picked group isn't saved in this workspace (deleted meanwhile?)."]
     );
-    // The other pickers' reads take the same picks: Ansible's and the Files page's push go through the same resolve.
+    // The other pickers take the same picks through the same resolve: Ansible's read, and the Files page's push, which
+    // finds no host to push to and refuses before anything is submitted.
     let ansible = core.reports.ansible_targets(&b, &picks).await.unwrap();
     assert!(ansible.hosts.is_empty());
+    let folder = common::temp_folder("h2-group-push");
+    let file = folder.join("app.conf");
+    std::fs::write(&file, "listen 8080\n").unwrap();
+    let err = core
+        .bulk_files
+        .push(&picks, vec![file], "/home/alice", false, false)
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("None of what is picked reaches a host"),
+        "{err}"
+    );
+    assert_eq!(core.jobs.open_user_jobs(b.workspace_id), 0, "nothing submitted");
+    std::fs::remove_dir_all(&folder).ok();
 }
 
 #[tokio::test]

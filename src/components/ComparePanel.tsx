@@ -85,6 +85,8 @@ interface Props {
   onPicksChange: (picks: TargetPicks) => void;
   /** The tabs in `picks.terminalIds`, for the summary: picked ones, or the current tab. */
   tabs: TabsPart;
+  /** UX-16: changes when a saved group changes (Manage groups), so its picks are resolved again before a run. */
+  groupsKey?: string;
   /** How many of the picked tabs are quick connections that were not saved. */
   unsavedTabs: number;
   /** Saved sessions on this computer. */
@@ -114,6 +116,7 @@ export function ComparePanel({
   picks,
   onPicksChange,
   tabs,
+  groupsKey = "",
   unsavedTabs,
   savedSessions,
   onSubmit,
@@ -217,7 +220,8 @@ export function ComparePanel({
     return () => {
       stale = true;
     };
-  }, [picksKey, active, resolveAgain]);
+    // groupsKey: a picked group edited in Manage groups runs on its members as they are now.
+  }, [picksKey, active, resolveAgain, groupsKey]);
 
   // BX-06: the tier and any dangerous-command rule, shown while typing.
   useEffect(() => {
@@ -327,6 +331,7 @@ export function ComparePanel({
                   onOpenSessions={() => requestLink({ kind: "page", page: "sessions" })}
                   winrm
                   compact={{ tabs }}
+                  refresh={groupsKey}
                   hideNotes
                 />
                 {resolved && resolved.notes.length > 0 && (
