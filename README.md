@@ -963,23 +963,39 @@ Bulk execution lives in the Terminal page (it replaced the MVP's Bulk run page):
   32 MB per session, and 64 KB per terminal per line (the middle of a longer output is cut, as in Compare); the view
   says when a cap was hit. Export a line, or all of them, as CSV, JSON or HTML with groups and diffs; the audit log
   says what was exported and where, never the output.
-- **Saved MultiExec groups** (QL-19, 0.5.0): the Groups button next to the MultiExec switch keeps named sets of saved
-  sessions, such as "all web servers". **Open group** opens a tab for each session, reusing tabs that are already
-  open, and turns MultiExec on for exactly those tabs. **Select group** picks the group's open tabs and says which
-  members aren't open. You can also save the picked tabs as a group (quick connections are left out), and rename,
-  reorder or delete groups under **Manage groups**. Every line you type still goes through the approval rules. Group
-  changes are audited, blocked by the read-only lock while presenting, and carried in the encrypted export to another
-  laptop.
+- **Saved MultiExec groups** (QL-19, 0.5.0; UX-16, 0.9.0): named sets of saved sessions, such as "all web servers",
+  in the **Pick tabs** menu of the bar under the tabs (shown while Type in all tabs is on or several tabs are picked),
+  and in Ctrl+K: type the group's name for **Open group: web servers**, or "Manage groups". **Open group** opens
+  a tab for each session, reusing tabs that are already open, and turns MultiExec on for exactly those tabs. **Select
+  group** picks the group's open tabs and says which members aren't open. **Save picked tabs as a group…** saves the
+  picked tabs (quick connections are left out), and **Manage groups…** renames, reorders or deletes them. Every line
+  you type still goes through the approval rules. A group is also a pick in every bulk job's host picker (Compare
+  hosts, support bundles, key pushes, the Files page's push and fetch, the Ansible inventory): its sessions in the
+  shown workspace, read when the job resolves its hosts, not audited. Group changes are audited, blocked by the
+  read-only lock while presenting, and carried in the encrypted export to another laptop.
 - **Search all terminals** (QL-18, 0.5.0): Ctrl+Shift+G, the search-all button or the palette searches the scrollback
   of every open terminal at once, as plain text or a regular expression, with or without case. Results are grouped by
   tab; click one to jump to its tab, scroll to the line and highlight the match. Results are from when you searched:
   press Enter or Search again for newer output. At most 200 matches per terminal and 2,000 in all are shown. While
   presenting, the masked text on screen is what gets searched.
-- **Compare output** (BX-03): runs one command once on the hosts of the picked tabs and of sessions Ctrl+clicked in the
-  session tree (Ctrl+click a folder for all of it, handy for 50 hosts), over separate exec channels with the usual
+- **Compare output** (BX-03): runs one command once on each picked host, over separate exec channels with the usual
   approval tiers, sudo from the vault, a time limit and the parallel limit from Settings. The results are grouped by
   output ("48 hosts same, 2 differ"), with a diff between groups, retry of the failed hosts and CSV, JSON or HTML
   export. Quick connections that were not saved as sessions can't be compared.
+- **Picking the hosts** (UX-16, 0.9.0): Compare hosts uses the same picker as every other bulk job, as one line such as
+  "12 hosts: 6 picked tabs, folder 'Web', tag 'db'" with **Change…**. It starts with the picked tabs and the sessions
+  Ctrl+clicked in the session tree (Ctrl+click a folder for all of it, handy for 50 hosts); Change… adds saved
+  sessions, VMs, tags, saved VM filters and saved groups, and its Sessions tab and the tree are one list. Tabs count
+  as the tab row marks them: Type in all tabs' tabs, or two or more Ctrl+clicked ones. With nothing picked, the
+  current tab is the host; once anything else is picked, only the picks run. A VM is reached through a session linked
+  to it by you or confirmed, never through a link made only by the address its guest reports; the picker names the
+  VMs with no such link, and a group of sessions the job doesn't take (a WinRM group for a key push) can't be picked.
+  A group changed in Manage groups is read again before the run. Each host is rated and a protected one skipped as if
+  picked one by one.
+- **Run a command on these…** (BX-01, 0.9.0): on the Sessions page's selection bar (SSH and WinRM sessions) and in the
+  VMs page's **More › Organise**, it opens the Terminal page's Compare hosts with exactly those picks: Ctrl+clicked
+  tabs are let go, and while Type in all tabs is on its tabs stay picked for typing but are left out of the run (the
+  summary says so) until the picked tabs change.
 - **How commands are rated** (BX-06, AP-01), for Compare and MultiExec alike: a command whose every part starts with
   a command on the read-only list, and that writes no file, is Low. Any other command is one confirm (Medium) on up to
   4 hosts, and the full approval (High: type the number of hosts, a reason, the countdown) on 5 or more; Settings,
@@ -1176,8 +1192,8 @@ login, and the same transfer queue and root browsing as Files here.
   folder doesn't have** (High; it runs after every file has landed, and never deletes a top-level folder). **To this
   PC** downloads the ticked files, replacing those here; a sync never deletes anything on this PC.
 - **Many hosts** (BX-10): push files to many saved SSH sessions, or fetch one file from each. Hosts are picked by
-  session, VM (through its linked session), tag or saved filter, and each is logged in to on its own, with its host
-  key checked, as a Compare hosts (Compare output) run does.
+  session, VM (through its linked session), tag, saved filter or saved group, and each is logged in to on its own,
+  with its host key checked, as a Compare hosts (Compare output) run does.
   - **Push** sends up to 100 files (**Choose files…**, or the files picked in This PC's pane) into one folder on
     every host, replacing files of the same name only when ticked: Medium, High from 5 hosts. Each file's SHA-256 is
     checked again on the host after it lands, and a mismatch fails that host.
@@ -1852,7 +1868,7 @@ a dependency of the app. App-specific colours (risk tiers, environment labels) a
 | File changes       | `crates/core/src/terminal/file_ops.rs`, `root_files.rs`, `adapters/remote/sftp_root.rs`                         | SS-14                                                                                                                                                             | Working: new, rename, move, copy, delete, permissions and owner on the bus with a step per path; root browsing through the host's sftp-server under sudo, one tier higher                                                                                            |
 | Files page         | `crates/core/src/local_files.rs`, `bookmarks.rs`, `terminal/file_reads.rs`, `terminal/sync.rs`, `bulk_files.rs` | SS-14, BX-10                                                                                                                                                      | Working: This PC's folders (read only), bookmarks, find, preview, checksums, compare and sync, push and fetch on many hosts with each copy's SHA-256                                                                                                                 |
 | Editing            | `crates/core/src/terminal/editor.rs`, `terminal/edit_local.rs`, `adapters/local_editor.rs`                      | SS-08, SS-14                                                                                                                                                      | Working: a terminal editor on the host (sudoedit as root); edit on this PC from a private folder, each save checked and uploaded, conflicts, kept copies                                                                                                             |
-| Compare output     | `crates/core/src/bulk.rs`                                                                                       | BX-01, BX-03, BX-05                                                                                                                                               | Working: hosts from picked tabs and tree sessions, results grouped by output, diff, CSV, JSON and HTML export                                                                                                                                                        |
+| Compare output     | `crates/core/src/bulk.rs`                                                                                       | BX-01, BX-03, BX-05, UX-16                                                                                                                                        | Working: hosts from picked tabs, tree sessions and the one picker (VMs, tags, filters, groups), results grouped by output, diff, CSV, JSON and HTML export                                                                                                           |
 | Command panel      | `crates/core/src/snippets/`                                                                                     | BX-08, QL-13                                                                                                                                                      | Working: favourite commands in folders (audited), a built-in Linux library (Troubleshoot runbooks, 30 area groups, manual links), variables, marks from the policy engine                                                                                            |
 | Reachability       | `crates/core/src/reachability.rs`                                                                               | QL-04 (MO-08 lite), SS-07                                                                                                                                         | Working: TCP checks of the shown sessions, once per host and port, every 5 min; hosts with an open connection skipped, hosts down checked less often; the first jump host for sessions behind one                                                                    |
 | VM links           | `crates/core/src/vm_links.rs`                                                                                   | QL-01, BX-01                                                                                                                                                      | Working: sessions linked to VMs by guest IP (or a name resolving to it) or by hand; manual links kept; names looked up once at a time, never behind a jump host                                                                                                      |

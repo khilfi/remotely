@@ -18,7 +18,10 @@
 // and can show them side by side. The core holds each line's Enter and rates it; above Low the approval dialog opens
 // here, with the line and the terminals. The command panel's paste and Shift+click go through it too. Compare output
 // (BX-03) runs one command on the picked tabs' hosts and on sessions Ctrl+clicked in the tree, as a one-shot job, and
-// shows the grouped results in a panel under the terminals. QL-08: disabled buttons say why.
+// shows the grouped results in a panel under the terminals. UX-16 (0.9.0 H2): its hosts are BulkTargetPicker's picks,
+// filled with those, so Change… adds sessions, VMs, tags, saved filters and saved groups; the current tab counts only
+// while nothing else is picked; BX-01's "Run a command on these…" (Sessions and VMs pages) opens it on their
+// selection. QL-08: disabled buttons say why.
 //
 // P7: file transfer (SS-08) over each terminal's own SSH connection (SFTP, no second login). The "Files here" drawer
 // follows the current terminal's folder (bash and zsh report it through an invisible prompt hook; other shells start
@@ -30,12 +33,13 @@
 //
 // 0.5.0: QL-18 searches every open terminal's scrollback from a panel under the terminals (Ctrl+Shift+G), results
 // grouped by tab, a click showing the match in its pane. QL-19's saved groups open or select a saved group of sessions
-// for MultiExec, save the picked tabs as one, and manage them.
+// for MultiExec, save the picked tabs as one, and manage them: UX-16, from the slim bar's "Pick tabs" and the palette's
+// "Open group: <name>".
 //
 // 0.6.0 (UX-02, UX-03, UX-04, UX-12): the toolbar sits in the page header with a few controls: Split, Type in all tabs,
 // the switch of the one right-hand panel (Files here, Compare hosts, Commands: one view at a time, and the only way into
-// each), and "⋯" for everything else, each in one place (search, Type a vault password, Tunnels, Output, Saved groups,
-// notify, Reconnect, Close pane). The tabs have their own full-width row with + at its end; one slim bar under them
+// each), and "⋯" for everything else, each in one place (search, Type a vault password, Tunnels, Output, notify,
+// Reconnect, Close pane). The tabs have their own full-width row with + at its end; one slim bar under them
 // serves Type in all tabs and the picked tabs (with their Output menu); the session tree folds while terminals are
 // open. Shortcuts are in the shortcut sheet (Ctrl+/), not in a footer. A tab's environment is the one that applies (a
 // Prod VM the session reaches makes it Prod), and its tooltip says where it comes from.
@@ -105,7 +109,7 @@ import { HostDetailsSheet } from "@/components/HostDetailsSheet";
 import { HostKeyDialog } from "@/components/HostKeyDialog";
 import { MultiExecBar, type MultiExecNote } from "@/components/MultiExecBar";
 import { MultiExecGroupsDialog, type GroupsDialogStart } from "@/components/MultiExecGroupsDialog";
-import { MultiExecGroupsSubmenu } from "@/components/MultiExecGroupsMenu";
+import { MultiExecGroupsItems } from "@/components/MultiExecGroupsMenu";
 import { NewTerminalDialog } from "@/components/NewTerminalDialog";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { PasteConfirmDialog } from "@/components/PasteConfirmDialog";
@@ -135,6 +139,7 @@ import {
   type StagedFiles,
   type FileDoubleClick,
   type SubmitOutcome,
+  type TargetPicks,
   type TerminalAlert,
   type TerminalRule,
   type TransferInfo,
@@ -142,6 +147,7 @@ import {
   type VaultInfo,
   type VmRecord,
 } from "@/lib/api";
+import { anyPicks, compareTabKeys } from "@/lib/bulk-picks";
 import { rulesForPane } from "@/lib/highlight-rules";
 import { alertNotification, recordAlert } from "@/lib/terminal-alerts";
 import { fromCommandFinished, fromTerminalAlert } from "@/lib/notifications";
@@ -271,6 +277,10 @@ interface Props {
   newRequest: number;
   /** BX-03: opens Compare output when it changes (the command palette). */
   compareRequest: number;
+  /** UX-16, BX-01: opens Compare hosts on exactly these picks (the Sessions and VMs pages' "Run a command on these…"). */
+  compareWith?: { picks: TargetPicks; n: number } | null;
+  /** UX-16: the palette's "Open group: <name>" (the group's id), or its Manage groups (null). */
+  groupRequest?: { groupId: string | null; n: number } | null;
   /** SS-10: turns MultiExec on when it changes (the command palette). */
   multiExecRequest: number;
   /** QL-18: opens Search all terminals when it changes (the command palette). */
@@ -403,6 +413,8 @@ export function TerminalPage({
   openRequest,
   newRequest,
   compareRequest,
+  compareWith = null,
+  groupRequest = null,
   multiExecRequest,
   searchRequest = 0,
   focusRequest = null,
@@ -456,7 +468,12 @@ export function TerminalPage({
   const [thresholds] = useThresholds();
   /** QL-12: the panel's one-shot run, or the lines MultiExec recorded. */
   const [compareView, setCompareView] = useState<CompareView>("run");
+  /** Sessions Ctrl+clicked in the tree; UX-16: also Compare hosts' picker's sessions (one list, shown in both). */
   const [treePicks, setTreePicks] = useState<string[]>([]);
+  /** UX-16: Compare hosts' other picks (VMs, tags, saved filters, saved groups), kept while the panel is closed. */
+  const [comparePicks, setComparePicks] = useState<TargetPicks>({});
+  /** BX-01: the typing tabs "Run a command on these…" left out (they stay picked for typing), or null. */
+  const [compareLeftOut, setCompareLeftOut] = useState<string[] | null>(null);
   const [folders, setFolders] = useState<SessionFolder[]>([]);
   /** Bumped when a pane's state changes, so what depends on terminal ids and statuses is recomputed. */
   const [paneTick, setPaneTick] = useState(0);
@@ -511,6 +528,11 @@ export function TerminalPage({
   const loadGroups = useCallback(() => {
     api.multiExecGroups().then(setGroups, () => undefined);
   }, []);
+  /** UX-16: changes when a group is added, renamed, changed or deleted, so Compare hosts resolves its picks again. */
+  const groupsKey = useMemo(
+    () => JSON.stringify(groups.map((g) => [g.id, g.name, g.members.map((m) => m.sessionId)])),
+    [groups],
+  );
 
   const loadSessions = useCallback(() => {
     api.sessions().then(setSessions, (err) => toast.error(errorMessage(err)));
@@ -1110,10 +1132,12 @@ export function TerminalPage({
     // The tabs picked already, or every tab.
     if (selection.keys.length < 2) setSelection({ keys: tabs.map((t) => t.key), anchor: activeTab });
     setMxNote(null);
+    setCompareLeftOut(null);
     typingOn();
   }
 
   function stopMultiExec() {
+    setCompareLeftOut(null);
     setMultiExec(false);
     setMxNote(null);
     setMxApproval(null);
@@ -1236,17 +1260,88 @@ export function TerminalPage({
     if (treePicks.length === 0 && ids.length > 0) setSide("compare");
     setTreePicks(ids);
   }
-  /** The tabs Compare runs on: MultiExec's, or the picked ones, or the current one. */
-  const compareTabs = multiExec
-    ? pickedTabs
-    : isMulti(selection)
-      ? tabs.filter((t) => selection.keys.includes(t.key))
-      : current
-        ? [current]
-        : [];
+  /** UX-16: the picker's picks; its sessions are the tree's. */
+  const pickerPicks: TargetPicks = { ...comparePicks, sessionIds: treePicks };
+  function changeComparePicks(next: TargetPicks) {
+    setTreePicks(next.sessionIds ?? []);
+    setComparePicks({
+      vmPaths: next.vmPaths ?? [],
+      tags: next.tags ?? [],
+      filterIds: next.filterIds ?? [],
+      groupIds: next.groupIds ?? [],
+    });
+  }
+  /**
+   * The tabs Compare runs on, as the tab row marks them: MultiExec's (unless "Run a command on these…" left them out),
+   * or two or more picked ones, or the current one while nothing else is picked (so a run on a tag reaches exactly its
+   * picks).
+   */
+  const compareTabPick = compareTabKeys({
+    typing: multiExec,
+    picked: selection.keys,
+    current: current?.key ?? null,
+    otherPicks: anyPicks(pickerPicks),
+    leftOut: compareLeftOut,
+  });
+  const compareTabs = tabs.filter((t) => compareTabPick.keys.includes(t.key));
   const comparePanes = compareTabs.map((t) => findPane(t.layout, t.activePane)).filter((p): p is PaneSession => !!p);
   const compareTerminals = comparePanes.map((p) => p.terminalId).filter((id): id is string => id !== null);
   const unsavedTabs = comparePanes.filter((p) => !p.sessionId).length;
+
+  // BX-01: the Sessions or VMs page's "Run a command on these…": Compare hosts on exactly those picks.
+  const [compareWithHandled, setCompareWithHandled] = useState(compareWith?.n ?? 0);
+  if (compareWith && compareWith.n !== compareWithHandled) {
+    setCompareWithHandled(compareWith.n);
+    changeComparePicks(compareWith.picks);
+    // Exactly those picks: Ctrl+clicked tabs are let go; Type in all tabs' tabs stay picked for typing but are left out
+    // of the run until the picked tabs change (the summary says so).
+    if (multiExec) setCompareLeftOut([...selection.keys]);
+    else {
+      setCompareLeftOut(null);
+      setSelection((s) => ({ keys: [], anchor: s.anchor }));
+    }
+    setCompareView("run");
+    setSide("compare");
+  }
+
+  // UX-16: the palette's "Open group: <name>" (read again, then opened as Pick tabs' Open group does), or Manage groups.
+  const [groupHandled, setGroupHandled] = useState(groupRequest?.n ?? 0);
+  const [pendingGroup, setPendingGroup] = useState<string | null>(null);
+  if (groupRequest && groupRequest.n !== groupHandled) {
+    setGroupHandled(groupRequest.n);
+    if (groupRequest.groupId === null) setGroupsDialog({ kind: "manage" });
+    else setPendingGroup(groupRequest.groupId);
+  }
+  const groupOpener = useRef({ openGroup, groupsBlocked });
+  useEffect(() => {
+    groupOpener.current = { openGroup, groupsBlocked };
+  });
+  useEffect(() => {
+    if (pendingGroup === null) return;
+    let stale = false;
+    api.multiExecGroups().then(
+      (list) => {
+        if (stale) return;
+        setPendingGroup(null);
+        setGroups(list);
+        const { openGroup: open, groupsBlocked: blocked } = groupOpener.current;
+        const group = list.find((g) => g.id === pendingGroup);
+        if (blocked) toast.info(blocked);
+        else if (!group) toast.error("That group isn't saved in this workspace any more");
+        else if (group.members.length === 0)
+          toast.info(`The sessions of '${group.name}' were deleted: edit it in Manage groups`);
+        else open(group);
+      },
+      (err: unknown) => {
+        if (stale) return;
+        setPendingGroup(null);
+        toast.error(errorMessage(err));
+      },
+    );
+    return () => {
+      stale = true;
+    };
+  }, [pendingGroup]);
 
   // ---- QL-18 search all terminals ---------------------------------------------------------------------
 
@@ -1718,11 +1813,12 @@ export function TerminalPage({
         view={compareView}
         onViewChange={setCompareView}
         multiExecOn={multiExec}
-        terminalIds={compareTerminals}
-        sessionIds={treePicks}
+        picks={{ ...pickerPicks, terminalIds: compareTerminals }}
+        onPicksChange={changeComparePicks}
+        tabs={{ count: compareTabs.length, current: compareTabPick.current, leftOut: compareTabPick.leftOut }}
+        groupsKey={groupsKey}
         unsavedTabs={unsavedTabs}
         savedSessions={sessions.length}
-        onClearTree={() => setTreePicks([])}
         onSubmit={onSubmitted}
         onOpenVault={onOpenVault}
       />
@@ -1851,21 +1947,8 @@ export function TerminalPage({
                 Close this pane
               </DropdownMenuItem>
             )}
-            <DropdownMenuSeparator />
           </>
         )}
-        <MultiExecGroupsSubmenu
-          groups={groups}
-          tabs={groupTabList}
-          multiExecBlocked={groupsBlocked}
-          saveReason={saveReason}
-          saveCount={toSave.sessionIds.length}
-          onOpenGroup={openGroup}
-          onSelectGroup={selectGroup}
-          onSave={saveAsGroup}
-          onManage={() => setGroupsDialog({ kind: "manage" })}
-          onShow={loadGroups}
-        />
       </DropdownMenuContent>
     </DropdownMenu>
   );
@@ -1921,7 +2004,16 @@ export function TerminalPage({
         })}
       </div>
       <Separator orientation="vertical" className="mx-1 data-[orientation=vertical]:h-5" />
-      {moreMenu}
+      {current && currentPane ? (
+        moreMenu
+      ) : (
+        // UX-16: saved groups moved to the typing bar's Pick tabs (and the palette), so "⋯" is the current tab's.
+        <WhyDisabled reason="More actions on Terminal: open a terminal first">
+          <Button type="button" variant="outline" size="icon" aria-label="More actions on Terminal" disabled>
+            <MoreHorizontalIcon />
+          </Button>
+        </WhyDisabled>
+      )}
     </div>
   );
 
@@ -1986,6 +2078,20 @@ export function TerminalPage({
       onTile={setTile}
       onPick={(keys) => setSelection({ keys, anchor: activeTab })}
       onClose={multiExec ? stopMultiExec : () => setSelection({ keys: [], anchor: activeTab })}
+      groups={
+        <MultiExecGroupsItems
+          groups={groups}
+          tabs={groupTabList}
+          multiExecBlocked={groupsBlocked}
+          saveReason={saveReason}
+          saveCount={toSave.sessionIds.length}
+          onOpenGroup={openGroup}
+          onSelectGroup={selectGroup}
+          onSave={saveAsGroup}
+          onManage={() => setGroupsDialog({ kind: "manage" })}
+        />
+      }
+      onPickMenu={loadGroups}
       output={
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
@@ -2095,7 +2201,11 @@ export function TerminalPage({
           sessions={sessions}
           start={groupsDialog}
           onChanged={loadGroups}
-          onClose={() => setGroupsDialog(null)}
+          onClose={() => {
+            setGroupsDialog(null);
+            // UX-16: read again on close too, so Compare hosts' group picks resolve to the groups as they are now.
+            loadGroups();
+          }}
         />
       )}
       {conflict?.kind === "upload" && (

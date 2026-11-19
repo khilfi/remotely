@@ -152,6 +152,7 @@ import {
   type ApprovalRequest,
   type Command,
   type SubmitOutcome,
+  type TargetPicks,
   type UpdateCheck,
   type VaultInfo,
   type VmSessionDraft,
@@ -366,6 +367,13 @@ export default function App() {
   // BX-03, SS-10: Compare output and MultiExec, opened from the palette.
   const [terminalCompare, setTerminalCompare] = useState(0);
   const [terminalMultiExec, setTerminalMultiExec] = useState(0);
+  // BX-01, UX-16: "Run a command on these…" (Sessions, VMs) opens Compare hosts on those picks; a saved group opens.
+  const [terminalCompareWith, setTerminalCompareWith] = useState<{ picks: TargetPicks; n: number } | null>(null);
+  const [terminalGroup, setTerminalGroup] = useState<{ groupId: string | null; n: number } | null>(null);
+  const runCommandOn = useCallback((picks: TargetPicks) => {
+    setTerminalCompareWith((prev) => ({ picks, n: (prev?.n ?? 0) + 1 }));
+    setPage("terminal");
+  }, []);
   // QL-18: Search all terminals, opened from the palette.
   const [terminalSearch, setTerminalSearch] = useState(0);
   // SS-10: MultiExec lines are jobs too; their terminals show what happened, so they get no toasts.
@@ -809,6 +817,10 @@ export default function App() {
           setFilesRequest((prev) => ({ terminalId: link.terminalId, path: link.path, n: (prev?.n ?? 0) + 1 }));
           setPage("files");
           break;
+        case "group":
+          setTerminalGroup((prev) => ({ groupId: link.groupId ?? null, n: (prev?.n ?? 0) + 1 }));
+          setPage("terminal");
+          break;
       }
     },
     [go, openVms, openSchedules, openVmsPanel],
@@ -1022,6 +1034,15 @@ export default function App() {
         setTerminalCompare((n) => n + 1);
         setPage("terminal");
       },
+    },
+    {
+      // UX-16: Open group, Select group and saving picked tabs are in the typing bar's Pick tabs; Ctrl+K finds
+      // "Open group: <name>" by the group's name.
+      id: "manage-groups",
+      label: "Manage groups: saved sets of sessions to type in or run on…",
+      icon: LayersIcon,
+      keywords: "multiexec group saved sessions type in all tabs open select",
+      run: () => openLink({ kind: "group" }),
     },
     {
       // FD-04.
@@ -1338,6 +1359,7 @@ export default function App() {
                   refreshKey={vmJobs + vmSettings + inventoryVersion}
                   onSchedules={openSchedules}
                   onCreateSessions={createVmSessions}
+                  onRunCommand={runCommandOn}
                   sessionsKey={vmSessionsMade}
                 />
               </ErrorBoundary>
@@ -1421,6 +1443,7 @@ export default function App() {
                   onSupportBundle={openSupportBundle}
                   onExportAnsible={openAnsible}
                   onExportInventory={openInventory}
+                  onRunCommand={runCommandOn}
                   active={page === "sessions"}
                   focus={sessionsFocus}
                   sessionsKey={vmSessionsMade}
@@ -1435,6 +1458,8 @@ export default function App() {
                   openRequest={terminalOpen}
                   newRequest={terminalNew}
                   compareRequest={terminalCompare}
+                  compareWith={terminalCompareWith}
+                  groupRequest={terminalGroup}
                   multiExecRequest={terminalMultiExec}
                   searchRequest={terminalSearch}
                   focusRequest={terminalFocus}

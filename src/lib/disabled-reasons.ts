@@ -16,7 +16,7 @@ export function sudoWindowsReason(windowsHosts: number): string | null {
 export function compareRunReason(input: {
   /** Saved sessions on this computer. */
   savedSessions: number;
-  /** Tabs and tree sessions picked. */
+  /** Tabs, tree sessions and UX-16 picker picks (sessions, VMs, tags, filters, groups). */
   picked: number;
   /** The hosts the picks reach (saved sessions), with their protection. */
   hosts: { protected: boolean }[];
@@ -32,13 +32,13 @@ export function compareRunReason(input: {
 }): string | null {
   if (input.readOnly) return READ_ONLY_REASON;
   if (input.savedSessions === 0) return "No saved sessions on this computer: add or import sessions first";
-  if (input.picked === 0) return "Pick tabs, or sessions in the tree, to run on";
+  if (input.picked === 0) return "Pick hosts: Ctrl+click tabs or sessions in the tree, or use Change…";
   if (input.hosts.length === 0) {
     return input.unsavedTabs > 0
       ? "The picked tabs are quick connections: save them as sessions first"
       : "None of the picks is a saved session it can run on";
   }
-  if (input.hosts.every((h) => h.protected)) return "Every picked tab is Protected";
+  if (input.hosts.every((h) => h.protected)) return "Every picked host is Protected";
   if (!input.script.trim()) return "Type a command first";
   if (!input.timeoutOk) return "The time limit must be a whole number of seconds, 1 to 86400 (or empty)";
   if (input.stopAfterOk === false) return "Stop after must be a whole number of failures, 1 to 1000 (or empty)";
