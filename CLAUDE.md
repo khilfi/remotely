@@ -1240,10 +1240,17 @@ src/                  React + TypeScript UI
                       filters and a Groups tab; `compact`), MultiExec
                       bar (UX-16: its Pick tabs menu in both states, with the saved groups), WhyDisabled for QL-08,
                       PasteConfirmDialog for QL-05, DropPushMenu for QL-30 (0.9.0 H6: DropChoiceMenu at a drop's point
-                      while typing in more than one tab, "Upload to <tab>'s folder" focused for Enter, "Push to the N
-                      picked hosts…" off with its reason, Esc or a click away unstaging; DropPushDialog, the folder
-                      filled in with the tab's, replace or not, the hosts the core resolves, then `files_push` from
-                      the drop's staged id; showPushNotice, the job's toast replaced by one leading to its results),
+                      while typing in more than one tab, "Upload to <tab>'s folder" focused for Enter only while
+                      document.hasFocus() (else "Click a choice": an Enter Explorer gets opens its selected files),
+                      "Push to the N picked hosts…" off with its reason (the read-only lock too); kept open when the
+                      window loses the focus (Radix would close it), closed by a choice, Esc or a click in the window,
+                      the page then unstaging and saying "Nothing uploaded"; a later drop refused while it or the
+                      dialog is open; DropPushDialog, the folder filled in with the tab's, replace or not, the hosts
+                      the core resolves, then `files_push` from the drop's staged id, the focus back on the terminal
+                      (after the approval too, which leaves it nowhere);
+                      showPushNotice, the job's toast replaced by one leading to its results, cancelled said as such;
+                      the window focuses itself when the menu opens, core:window:allow-set-focus, logged at debug when
+                      it doesn't get it),
                       FilesDrawer and TransfersList for SS-08 (UX-14, 0.9.0 H1: the drawer is files/HostPane in compact
                       mode on the current terminal, a pane per terminal that keeps its folder, Back and Forward and view
                       across tab switches (hidden files shown, as before), with EditingSessionsList and TransfersList
@@ -1460,12 +1467,15 @@ src/                  React + TypeScript UI
                       folder, the read-only lock); Many hosts; a VM's ISO; terminalPageDrop, the Terminal page's whole
                       choice: which pane uploads, into what folder, as root or not, tested; QL-30 (0.9.0 H6)
                       DropPlaces.typing (dropTyping: Type in all tabs on, the picked tabs and their panes): with more
-                      than one tab picked a pane's drop is `choose`, its `upload` exactly the drop without typing (the
-                      default, Enter) beside dropPush (the picked SSH terminals of saved sessions as
-                      TargetPicks.terminal_ids, one host per session, quick connections and other tabs counted as left
-                      out, `why` when none can take it; pushReason: dropped folders), pushLabel, pushLeftOut and
-                      pushNotice (the push's notice from its hosts' statuses), tested in drop-target-typing.test.ts
-                      beside H1's unchanged test), root-browsing.ts (UX-14: which
+                      than one tab picked and a host besides the dropped pane's own session (DropPane.sessionId,
+                      DropPush.others), a pane's drop is `choose`, its `upload` exactly the drop without typing (the
+                      default) beside dropPush (the picked SSH terminals of saved sessions as
+                      TargetPicks.terminal_ids, one host per session, quick connections and other terminals counted
+                      as left out, `why` when none can take it); pushReason (the read-only lock's reason first, then
+                      no host, dropped folders, past MAX_PUSH_FILES 100, the core's cap), pushLabel, pushLeftOut and
+                      pushNotice (the push's notice from its hosts' statuses and the job's end: cancelled or
+                      interrupted said as such), tested in drop-target-typing.test.ts beside H1's unchanged test),
+                      root-browsing.ts (UX-14: which
                       terminals browse as root, the core's answer shared by the drawer and the Files page),
                       open-panes.ts (UX-14: also the Files page's editor tabs, requestEditorTab; the Terminal page's
                       panes published for the Files page's host tabs),

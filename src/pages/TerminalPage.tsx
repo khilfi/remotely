@@ -536,7 +536,10 @@ export function TerminalPage({
   /** QL-30: a drop while typing in all tabs asks at its point: the upload (the default) or a push to the picked hosts. */
   const [dropAsk, setDropAsk] = useState<(DropAsk & { upload: TerminalPageUpload<PaneSession> }) | null>(null);
   /** QL-30: the push's folder, filled in with the tab's own. */
-  const [pushAsk, setPushAsk] = useState<{ ask: DropAsk; folder: string } | null>(null);
+  const [pushAsk, setPushAsk] = useState<{
+    ask: DropAsk & { upload: TerminalPageUpload<PaneSession> };
+    folder: string;
+  } | null>(null);
   /** QL-19: saved MultiExec groups, and the dialog that manages them. */
   const [groups, setGroups] = useState<MultiExecGroup[]>([]);
   const [groupsDialog, setGroupsDialog] = useState<GroupsDialogStart | null>(null);
@@ -1653,10 +1656,18 @@ export function TerminalPage({
       }
       // VM-23: the page on screen owns a drop (an ISO dropped on the Virtual machines page is that page's).
       if (!dropped.staged || !active) return;
+      // QL-30 (H6): while an earlier drop's menu or push dialog is open, the page under it takes no pointer, so
+      // nothing could be found under this drop: it is refused, saying why, and the earlier one keeps its choice.
+      if (dropAsk || pushAsk) {
+        void api.filesUnstage(dropped.staged.id).catch(() => undefined);
+        toast.info("Not uploaded: the files dropped before still wait for a choice");
+        return;
+      }
       // UX-14 (H1): lib/drop-target.ts terminalPageDrop chooses (tested there). A pane takes its drop into its shell
       // folder, never as root; the drawer into the folder it shows (as root when it browses so).
       const drop = dropPlanRef.current(readDropSpot(dropped.x, dropped.y));
-      // QL-30 (H6): typing in more than one tab, the drop asks; Enter takes `drop.upload`, the upload below.
+      // QL-30 (H6): typing in more than one tab, with another host to push to, the drop asks; its default is
+      // `drop.upload`, the upload below.
       if (drop.kind === "choose") {
         askDrop(dropped.x, dropped.y, dropped.staged, drop);
         return;
@@ -1671,14 +1682,13 @@ export function TerminalPage({
     };
   });
 
-  /** QL-30 (H6): the choice at the drop point; a drop while one is open replaces it (its files unstaged). */
+  /** QL-30 (H6): the choice at the drop point (a later drop is refused while it is open). */
   function askDrop(
     x: number,
     y: number,
     staged: StagedFiles,
     drop: Extract<TerminalPageDrop<PaneSession>, { kind: "choose" }>,
   ) {
-    if (dropAsk) void api.filesUnstage(dropAsk.staged.id).catch(() => undefined);
     const pane = drop.upload.pane;
     const session = pane.sessionId ? sessionById.get(pane.sessionId) : undefined;
     setDropAsk({
@@ -1691,10 +1701,12 @@ export function TerminalPage({
       push: drop.push,
       upload: drop.upload,
     });
-    // Explorer keeps the focus after a drop: the window takes it, so Enter answers the menu.
+    // Explorer keeps the focus after a drop: the window asks for it. Windows may refuse; the menu then invites no Enter
+    // (DropChoiceMenu follows document.hasFocus()), since an Enter that reaches Explorer opens the selected files.
+    const failed = (why: unknown) => console.debug("the window didn't take the focus after a drop", why);
     void getCurrentWindow()
       .setFocus()
-      .catch(() => undefined);
+      .then(() => window.setTimeout(() => !document.hasFocus() && failed("Windows kept it elsewhere"), 300), failed);
   }
 
   /** Enter, or the first item: exactly the upload the drop makes without typing. */
@@ -1704,11 +1716,13 @@ export function TerminalPage({
     if (ask) void uploadStaged(ask.upload.pane, ask.staged, ask.upload.folder, ask.upload.asRoot);
   }
 
-  /** Esc or a click away: nothing is uploaded. */
+  /** Esc or a click in Remotely away from the menu: nothing is uploaded, and the page says so. */
   function dismissDrop() {
     const ask = dropAsk;
     setDropAsk(null);
-    if (ask) void api.filesUnstage(ask.staged.id).catch(() => undefined);
+    if (!ask) return;
+    void api.filesUnstage(ask.staged.id).catch(() => undefined);
+    toast.info(`Nothing uploaded: ${droppedWhat(ask.staged)} dropped on ${ask.tabName}`);
   }
 
   /** The push's folder starts as the tab's own: its shell's, or its home folder. */
@@ -1730,11 +1744,22 @@ export function TerminalPage({
     if (error) toast.error(`Not pushed: ${error}`);
   }
 
+  /** QL-30: the focus back on `pane` once no dialog is open (for at most 3 s; a dialog still open keeps it). */
+  function focusAfterDialogs(pane: PaneSession) {
+    let tries = 0;
+    const tick = () => {
+      if (document.querySelector('[role="dialog"], [role="alertdialog"]') && tries++ < 30) {
+        window.setTimeout(tick, 100);
+      } else pane.focus();
+    };
+    window.setTimeout(tick, 100);
+  }
+
   /** QL-30: the pushes started here, followed to a notice that leads to the job (Activity's results). */
   const pushJobs = useRef(new Map<string, { what: string; folder: string }>());
   /** Jobs that ended lately: an approved push's id can come back after its job has ended. */
-  const endedJobs = useRef(new Set<string>());
-  function pushEnded(jobId: string, push: { what: string; folder: string }) {
+  const endedJobs = useRef(new Map<string, string>());
+  function pushEnded(jobId: string, push: { what: string; folder: string }, status: string) {
     // After the app's own "Job …" toast for this job, which this one replaces (same id).
     void api.jobTargets(jobId).then(
       (targets) =>
@@ -1744,17 +1769,22 @@ export function TerminalPage({
             push.what,
             push.folder,
             targets.map((t) => t.status),
+            status,
           ),
         ),
-      () => showPushNotice(jobId, pushNotice(push.what, push.folder, [])),
+      () => showPushNotice(jobId, pushNotice(push.what, push.folder, [], status)),
     );
   }
   function pushed(started: BulkFilesStart, folder: string) {
     const ask = pushAsk;
     setPushAsk(null);
     const push = { what: ask ? droppedWhat(ask.ask.staged) : "the files", folder };
+    const pane = ask?.ask.upload.pane;
     onSubmitted(started.outcome, (jobId) => {
-      if (endedJobs.current.has(jobId)) pushEnded(jobId, push);
+      // Approved (or queued): the terminal gets the focus back once the approval has gone, which leaves it nowhere.
+      if (pane) focusAfterDialogs(pane);
+      const ended = endedJobs.current.get(jobId);
+      if (ended) pushEnded(jobId, push, ended);
       else pushJobs.current.set(jobId, push);
     });
   }
@@ -1762,13 +1792,13 @@ export function TerminalPage({
     const unlisten = api.onJobEvent((event) => {
       if (event.event !== "finished") return;
       const ended = endedJobs.current;
-      ended.add(event.jobId);
-      const oldest = ended.values().next().value;
+      ended.set(event.jobId, event.status);
+      const oldest = ended.keys().next().value;
       if (ended.size > 50 && oldest !== undefined) ended.delete(oldest);
       const push = pushJobs.current.get(event.jobId);
       if (!push) return;
       pushJobs.current.delete(event.jobId);
-      pushEnded(event.jobId, push);
+      pushEnded(event.jobId, push, event.status);
     });
     return () => void unlisten.then((stop) => stop());
   }, []);
@@ -2456,6 +2486,7 @@ export function TerminalPage({
           folder={pushAsk.folder}
           onPushed={pushed}
           onClose={closePush}
+          onRefocus={() => pushAsk.ask.upload.pane.focus()}
         />
       )}
       {breakAsk && (

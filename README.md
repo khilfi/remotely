@@ -1080,17 +1080,23 @@ SS-08: files go up and down over SFTP on each terminal's own SSH connection, so 
   there already is replaced only after you say so and confirm (replacing is at least Medium; Settings won't take
   less). A folder you can't write to fails with a message saying so. Each uploaded file is audited with its name,
   size, destination and SHA-256.
-- **A drop while typing in all tabs** (QL-30, 0.9.0): with Type in all tabs on and more than one tab picked, files
-  dropped on a terminal open a small menu where they fell. **Upload to web01's folder** (the tab's name) is the
-  default (Enter): the same upload as above, into that terminal's folder, never as root. **Push to the N picked
-  hosts…** sends the same files into one folder on every picked tab's host instead: the folder starts as that tab's,
-  and you can change it and choose whether files of the same name are replaced. It is one push, like Files › Many hosts': Medium, High from 5
-  hosts, a Prod host one tier higher, protected hosts skipped, and its approval names every host. Two tabs of one
-  saved session are one host. A quick connection has no saved session, so it is left out (the menu says how many);
-  with no saved SSH session picked, the push is off and says why. A push sends files, so it is off for a dropped
-  folder. Esc or a click away uploads nothing. When the push ends, a notice says how many hosts got the files, with
-  **Show results** for the job's results in Activity. Without Type in all tabs, or with one tab picked, a drop uploads
-  as it always has.
+- **A drop while typing in all tabs** (QL-30, 0.9.0): with Type in all tabs on, more than one tab picked and another
+  host among them, files dropped on a terminal open a small menu where they fell. **Upload to web01's folder** (the
+  tab's name) is the default: the same upload as above, into that terminal's folder, never as root. Enter takes it,
+  and the menu says "Enter uploads", only while Remotely has the keyboard. If Windows left the focus with Explorer
+  after the drop, the menu says "Click a choice" instead: an Enter there would go to Explorer, which opens the files
+  still selected. **Push to the N picked hosts…** sends the same files into one folder on every picked tab's host
+  instead: the folder starts as that tab's, and you can change it and choose whether files of the same name are
+  replaced. It is one push, like Files › Many hosts': Medium, High from 5 hosts, a Prod host one tier higher,
+  protected hosts skipped, and its approval names every host. Two tabs of one saved session are one host. A quick
+  connection has no saved session, so it is left out (the menu says how many). The push is off, and says why, under
+  the read-only lock, for a dropped folder (a push sends files) and past 100 files. The menu stays open while you
+  switch windows; Esc or a click elsewhere in Remotely closes it, uploads nothing and says so ("Nothing uploaded:
+  'app.conf' dropped on web01"). While it is open, another drop is refused until you choose. When the push ends, a
+  notice says how many hosts got the files (or that it was cancelled), with **Show results** for the job's results in
+  Activity. Without Type in all tabs, with one tab picked, or when the only host picked is the one the files fell on
+  (its other picks being quick connections, Telnet or serial tabs), a drop uploads as it always has, without the
+  menu.
 - **Folders** (SS-14, 0.8.0) go up and down whole, at most 10,000 files (files and folders, coming down) and 32
   levels deep. Links, junctions and other
   reparse points in a folder going up are left out, and so are, coming down, links to folders, devices and Git's data

@@ -8,6 +8,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+  MAX_PUSH_FILES,
   dropPush,
   dropTarget,
   dropTyping,
@@ -21,9 +22,9 @@ import {
   type DropTyping,
 } from "./drop-target.ts";
 
-/** Stand-ins for the Terminal page's panes: a key, a core id and the shell's folder in their snapshot. */
-function pane(key: string, terminalId: string | null, folder: string | null) {
-  return { key, terminalId, getSnapshot: () => ({ folder: folder === null ? null : { path: folder } }) };
+/** Stand-ins for the Terminal page's panes: a key, a core id, the shell's folder, and its saved session if any. */
+function pane(key: string, terminalId: string | null, folder: string | null, sessionId: string | null = null) {
+  return { key, terminalId, sessionId, getSnapshot: () => ({ folder: folder === null ? null : { path: folder } }) };
 }
 
 const a = pane("pane-a", "t-a", "/srv/www");
@@ -114,6 +115,7 @@ test("the push goes to the picked SSH terminals of saved sessions, one host per 
   assert.deepEqual(push, {
     terminalIds: ["t-a", "t-a2", "t-b"],
     hosts: 2,
+    others: 2,
     quick: 1,
     other: 2,
     why: null,
@@ -121,33 +123,71 @@ test("the push goes to the picked SSH terminals of saved sessions, one host per 
   const asked = terminalPageDrop({ paneKey: "pane-a" }, everyPane, null, typing);
   assert.deepEqual(asked.kind === "choose" && asked.push, push);
   assert.equal(pushLabel(push), "Push to the 2 picked hosts…");
+  // What each part counts: quick connections, and other terminals (panes), never "tabs".
   assert.equal(
     pushLeftOut(push),
-    "1 quick connection left out: it isn't a saved session; 2 tabs left out: they aren't connected SSH terminals",
+    "1 quick connection left out: it isn't a saved session; 2 other terminals left out: they aren't SSH, or haven't connected",
   );
   // A terminal picked twice (the core's list holds each once).
   assert.deepEqual(dropPush({ tabs: 2, panes: [typing.panes[0], typing.panes[0]] }).terminalIds, ["t-a"]);
+  // Dropped on web01: web02 is the one other host.
+  assert.equal(dropPush(typing, "s-web01").others, 1);
 });
 
-test("with no saved SSH session picked the push says why, and the upload is still the default", () => {
-  const quick: DropTyping = {
+test("a drop asks only when the push would reach a host besides the dropped tab's own", () => {
+  const web01 = pane("pane-w1", "t-a", "/srv/www", "s-web01");
+  const web01b = pane("pane-w1b", "t-a2", "/srv/www", "s-web01");
+  const quickPane = pane("pane-q", "t-q", "/tmp");
+  const panes = [web01, web01b, quickPane];
+  const plain = (key: string) => terminalPageDrop({ paneKey: key }, panes, null);
+
+  // Only quick connections picked: nothing to push to, so no question; the upload as today.
+  const quickOnly: DropTyping = {
     tabs: 2,
     panes: [
-      { terminalId: "t-q1", sessionId: null, ssh: true },
+      { terminalId: "t-q", sessionId: null, ssh: true },
       { terminalId: "t-q2", sessionId: null, ssh: true },
     ],
   };
-  const push = dropPush(quick);
-  assert.equal(push.why, "Quick connections can't take a push: save them as sessions first");
-  assert.deepEqual([push.terminalIds, push.hosts, push.quick], [[], 0, 2]);
-  assert.equal(pushLeftOut(push), "2 quick connections left out: they aren't saved sessions");
-  assert.equal(pushLabel(push), "Push to the picked hosts…");
-  const asked = terminalPageDrop({ paneKey: "pane-a" }, everyPane, null, quick);
-  assert.deepEqual(asked.kind === "choose" && asked.upload, terminalPageDrop({ paneKey: "pane-a" }, everyPane, null));
+  assert.deepEqual(terminalPageDrop({ paneKey: "pane-q" }, panes, null, quickOnly), plain("pane-q"));
+  assert.equal(dropPush(quickOnly).why, "Quick connections can't take a push: save them as sessions first");
+  assert.equal(pushLeftOut(dropPush(quickOnly)), "2 quick connections left out: they aren't saved sessions");
+  assert.equal(pushLabel(dropPush(quickOnly)), "Push to the picked hosts…");
 
-  const powershell: DropTyping = { tabs: 2, panes: [typing.panes[4]] };
-  assert.equal(dropPush(powershell).why, "None of the picked tabs is a connected SSH session");
-  assert.equal(pushLeftOut(dropPush(powershell)), "1 tab left out: it isn't a connected SSH terminal");
+  // web01 split in two and a Telnet tab: two tabs picked, but the one host is the dropped tab's.
+  const telnet: DropTyping = {
+    tabs: 2,
+    panes: [
+      { terminalId: "t-a", sessionId: "s-web01", ssh: true },
+      { terminalId: "t-a2", sessionId: "s-web01", ssh: true },
+      { terminalId: "t-tel", sessionId: "s-router", ssh: false },
+    ],
+  };
+  assert.deepEqual(terminalPageDrop({ paneKey: "pane-w1" }, panes, null, telnet), plain("pane-w1"));
+  assert.deepEqual(terminalPageDrop({ paneKey: "pane-w1b" }, panes, null, telnet), plain("pane-w1b"));
+  // A PowerShell tab alone takes no push either.
+  assert.equal(
+    dropPush({ tabs: 2, panes: [typing.panes[4]] }).why,
+    "None of the picked tabs is a connected SSH session",
+  );
+  assert.equal(
+    pushLeftOut(dropPush({ tabs: 2, panes: [typing.panes[4]] })),
+    "1 other terminal left out: it isn't SSH, or hasn't connected",
+  );
+
+  // web01 and a quick connection: dropped on the quick one, web01 is another host, so it asks.
+  const mixed: DropTyping = {
+    tabs: 2,
+    panes: [
+      { terminalId: "t-a", sessionId: "s-web01", ssh: true },
+      { terminalId: "t-q", sessionId: null, ssh: true },
+    ],
+  };
+  const onQuick = terminalPageDrop({ paneKey: "pane-q" }, panes, null, mixed);
+  assert.equal(onQuick.kind, "choose");
+  assert.deepEqual(onQuick.kind === "choose" && [onQuick.upload, onQuick.push.others], [plain("pane-q"), 1]);
+  // Dropped on web01 instead: the push would only reach web01, so no question.
+  assert.deepEqual(terminalPageDrop({ paneKey: "pane-w1" }, panes, null, mixed), plain("pane-w1"));
 });
 
 test("one host and nothing left out", () => {
@@ -162,6 +202,22 @@ test("a push sends files: dropped folders keep it from being chosen, never the u
   assert.equal(pushReason(push, { files: [{}, { folder: true }] }), "A push sends files: drop files, not folders");
   const none = dropPush({ tabs: 2, panes: [] });
   assert.equal(pushReason(none, { files: [{ folder: true }] }), none.why, "the first reason wins");
+});
+
+test("the read-only lock keeps the push from being chosen, before its dialog takes the drop", () => {
+  const push = dropPush(typing);
+  const locked = "Read-only while presenting: turn the read-only lock off first (Presenting menu)";
+  assert.equal(pushReason(push, { files: [{}] }, locked), locked);
+  assert.equal(pushReason(push, { files: [{ folder: true }] }, locked), locked, "the lock is said first");
+  assert.equal(pushReason(push, { files: [{}] }, null), null);
+});
+
+test("a push takes at most the core's 100 files", () => {
+  const push = dropPush(typing);
+  const files = (n: number) => ({ files: Array.from({ length: n }, () => ({})) });
+  assert.equal(MAX_PUSH_FILES, 100);
+  assert.equal(pushReason(push, files(100)), null);
+  assert.equal(pushReason(push, files(101)), "A push sends at most 100 files; 101 were dropped");
 });
 
 test("the push's notice says how many hosts got the files, and names the folder", () => {
@@ -182,6 +238,21 @@ test("the push's notice says how many hosts got the files, and names the folder"
   });
   assert.equal(pushNotice("'a'", "/srv", ["succeeded"]).title, "Pushed 'a' to 1 host");
   assert.equal(pushNotice("'a'", "/srv", []).title, "The push of 'a' finished", "its hosts couldn't be read");
+});
+
+test("a cancelled or interrupted push says so, not that it failed", () => {
+  assert.deepEqual(pushNotice("'a'", "/srv", ["cancelled", "cancelled"], "cancelled"), {
+    title: "The push of 'a' was cancelled",
+    description: "Into /srv",
+    ok: false,
+  });
+  assert.deepEqual(pushNotice("'a'", "/srv", ["succeeded", "cancelled", "skipped"], "cancelled"), {
+    title: "The push of 'a' was cancelled",
+    description: "Into /srv; 1 host skipped (protected); 1 of 2 hosts got it before",
+    ok: false,
+  });
+  assert.equal(pushNotice("'a'", "/srv", ["unknown"], "interrupted").title, "The push of 'a' was interrupted");
+  assert.equal(pushNotice("'a'", "/srv", ["failed"], "failed").title, "The push of 'a' failed on 1 host");
 });
 
 test("the page's panes become the typing the drop reads", () => {
