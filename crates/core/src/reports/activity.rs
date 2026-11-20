@@ -379,6 +379,7 @@ mod tests {
             bodies_removed: false,
             command_redacted: false,
             change_id: Some("CHG-1".into()),
+            command_type: "vmPower".into(),
         }
     }
 

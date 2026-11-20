@@ -102,7 +102,7 @@ import { CommandPanel } from "@/components/CommandPanel";
 import { EmptyState } from "@/components/EmptyState";
 import { PageHeader } from "@/components/PageHeader";
 import { Tip } from "@/components/Tip";
-import { ComparePanel, type CompareView } from "@/components/ComparePanel";
+import { ComparePanel } from "@/components/ComparePanel";
 import { DRAWER_KEY, FilesDrawer } from "@/components/FilesDrawer";
 import { onEditorTabRequest, publishPanes } from "@/lib/open-panes";
 import { HostDetailsSheet } from "@/components/HostDetailsSheet";
@@ -474,8 +474,6 @@ export function TerminalPage({
   /** MO-13, MO-14: a session's host details, from the session tree. */
   const [hostDetails, setHostDetails] = useState<{ id: string; name: string } | null>(null);
   const [thresholds] = useThresholds();
-  /** QL-12: the panel's one-shot run, or the lines MultiExec recorded. */
-  const [compareView, setCompareView] = useState<CompareView>("run");
   /** Sessions Ctrl+clicked in the tree; UX-16: also Compare hosts' picker's sessions (one list, shown in both). */
   const [treePicks, setTreePicks] = useState<string[]>([]);
   /** UX-16: Compare hosts' other picks (VMs, tags, saved filters, saved groups), kept while the panel is closed. */
@@ -1130,10 +1128,12 @@ export function TerminalPage({
   // Leaving the page for good (the app closing) turns it off.
   useEffect(() => () => void api.multiExecStop().catch(() => undefined), []);
 
-  /** Turns MultiExec on; Compare hosts then opens on the lines it records (one way into Compare hosts, UX-03). */
+  /**
+   * Turns MultiExec on; Compare hosts' one results list then shows the newest line it records (one way into Compare
+   * hosts, UX-03; UX-17: the panel shows the newest again when typing turns on).
+   */
   function typingOn() {
     setMultiExec(true);
-    setCompareView("multiExec");
   }
 
   function startMultiExec() {
@@ -1308,7 +1308,6 @@ export function TerminalPage({
       setCompareLeftOut(null);
       setSelection((s) => ({ keys: [], anchor: s.anchor }));
     }
-    setCompareView("run");
     setSide("compare");
   }
 
@@ -1846,8 +1845,6 @@ export function TerminalPage({
       <ComparePanel
         active={active}
         vault={vault}
-        view={compareView}
-        onViewChange={setCompareView}
         multiExecOn={multiExec}
         picks={{ ...pickerPicks, terminalIds: compareTerminals }}
         onPicksChange={changeComparePicks}

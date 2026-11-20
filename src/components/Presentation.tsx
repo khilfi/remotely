@@ -312,7 +312,12 @@ export const READ_ONLY_PAGES: Record<string, { blocked: string; still?: string }
     blocked: "Adding, replacing, renaming and deleting secrets, the vault password, SSH keys and trusted host keys",
     still: "Locking and unlocking the vault, and trusting a new host's key when you connect, still work.",
   },
-  activity: { blocked: "Retrying and starting jobs", still: "Reading and exporting the audit log still work." },
+  // UX-18 (0.9.0 H3): what Activity offers, bulk jobs' grouped results included.
+  activity: {
+    blocked: "Retries of a job's failed hosts and the go-ahead for the rest of a run after its first host",
+    still:
+      "Reading jobs, their grouped results and diffs, cancelling a job, and exporting results, reports and the audit log still work.",
+  },
   settings: {
     blocked: "Changes to settings and the approval rules",
     still: "Presentation mode itself can still be changed here.",

@@ -917,7 +917,8 @@ crates/core/          remotely-core: all app logic
                       chosen or confirmed link, else ResolvedTargets::vms_unconfirmed; BX-13 TargetPicks.winrm: WinRM
                       sessions and PowerShell tabs are hosts for Compare hosts and support bundles, never the SS-09 key
                       push; BulkHost.script_kind), BX-03 grouped results and diff,
-                      BX-05 exports: the Terminal page's Compare output (running is RemoteExec on the bus); QL-12
+                      BX-05 exports: the Terminal page's Compare output (running is RemoteExec on the bus; UX-17, 0.9.0
+                      H3: `recent` lists its runs and BX-10's pushes and fetches, whoever started them); QL-12
                       recorded MultiExec lines group (group_with_output), diff and export (export_recorded, audited
                       multiexec_exported) through the same code; Reach: runs keep SSH sessions, F6's Ansible export
                       SSH and WinRM (resolve_reaching)
@@ -1054,7 +1055,9 @@ crates/core/          remotely-core: all app logic
     store/            install_configs.rs (VM-28 rows, migration 0035; install_configs_upgrade_tests.rs a database at
                       0033 with trash rows of every kind, opened by 0035's trash rebuild); jobs.rs: the journal stores
                       Command::for_journal (scripts and lines redacted), command_type
-                      (migration 0017) for the lists, which pick a page of ids on an index first (AP-03, BX-03);
+                      (migration 0017) for the lists, which pick a page of ids on an index first (AP-03, BX-03; UX-17,
+                      0.9.0 H3: recent_bulk_jobs merges the remoteExec and bulkFiles pages; UX-18 JobSummary.command_type,
+                      so Activity knows a bulk job);
                       purge_job_bodies and redact_old_commands; audit.rs redacts every entry's text before hashing it,
                       and verifies and exports with row streams; multiexec_groups.rs (QL-19, migration 0021);
                       terminal_rules.rs (QL-17 rules and built-in overrides, migration 0021); timeline.rs (VM-25 the
@@ -1233,8 +1236,12 @@ src-tauri/            Tauri 2 shell (VM-30 0.8.0 G7: golden.rs the build dialog'
                       window only for the shown workspace
 src/                  React + TypeScript UI
   components/ui/      shadcn/ui components (generated)
-  components/         app components (approval dialog, badges, Compare panel with its one-shot and MultiExec views
-                      (RecordedLinesView, QL-12; BulkResultsView's GroupCard and OutputDiffDialog serve both; UX-16 its
+  components/         app components (approval dialog, badges, Compare panel (UX-17, 0.9.0 H3: no view switch; one
+                      results list under Run, newest first, of its runs, BX-10's pushes and fetches and the lines typed
+                      in all tabs, badged "Run on 12 hosts" or "Typed in 6 tabs", lib/results-list.ts; the one picked or
+                      the newest opens beside it: BulkResultsView for a run, with retry and the canary, RecordedLinesView's
+                      RecordedLineResults for a typed line (QL-12, useRecordings), whose Retry says why it has none and
+                      which goes when typing stops; BulkResultsView's GroupCard and OutputDiffDialog serve both; UX-16 its
                       hosts from BulkTargetPicker's compact mode: one summary line, lib/bulk-picks.ts, with Change…),
                       BulkTargetPicker (BX-01, UX-16 the one host picker of every bulk job: sessions, VMs, tags, saved
                       filters and a Groups tab; `compact`), MultiExec
@@ -1396,7 +1403,11 @@ src/                  React + TypeScript UI
                       KnownHostsPage (UX-08: the Vault page's Known hosts tab); App keeps the Dashboard's and Vault's
                       tab so links open either; SchedulesPage (VM-14, VM-27; Ctrl+. still opens it), also from the
                       palette and a VM's Schedules tab open it). R10: App's `openLink` opens every AppLink (lib/links.ts), and pages
-                      take a request to show one item (Sessions `focus`, Activity `focusJob`, Settings `focus` by
+                      take a request to show one item (Sessions `focus`, Activity `focusJob` (UX-18, 0.9.0 H3: a bulk
+                      job, lib/results-list.ts activityView, opens BulkResultsView in its sheet, a support bundle in its
+                      bundle mode with Show folder, every other job the per-target sheet; a retry goes through App's
+                      `submitted` and its approval, then its job opens; job notifications, a failed job's toast (Show) and the
+                      status bar's jobs item lead there), Settings `focus` by
                       settings-index.ts, Containers `request`, Terminal `focusRequest` and `snippetRequest`,
                       Templates `request.id`). P6: App memoises every page and passes
                       stable callbacks, and renders
@@ -1466,7 +1477,12 @@ src/                  React + TypeScript UI
                       tips.ts (UX-09 dismissed tips in local storage), requirement-ids.test.ts (UX-06 no requirement
                       ID in any UI string), links.ts's requestLink (a link opened without an onOpenLink prop),
                       activity.ts (UX-02, UX-06 Activity: jobs with their audit entries and approvals folded, plain
-                      event names, filters), palette.ts (UX-07 Ctrl+K's order; bulk actions only when searched for),
+                      event names, filters), results-list.ts (UX-17, UX-18, 0.9.0 H3: Compare hosts' one list's items, a
+                      union of kinds (`run`, `typed`; QL-31, H7, adds a kept line) merged newest first, badges, status
+                      words, the shown item (a run just queued opens before it is listed), why a typed line has no
+                      retry; retryBlockedReason: a finished job's retry off only where the core's retry_failed refuses
+                      it (the lock, a purged remote exec run, a redacted command); activityView: which jobs Activity
+                      opens in BulkResultsView), palette.ts (UX-07 Ctrl+K's order; bulk actions only when searched for),
                       update-notice.ts (FD-14 the one update notice), catalog.ts (VM-19
                       to VM-21 texts, the size form), deploy.ts (VM-21, VM-10 the dialogs' reasons, counts and
                       packages, a job's steps from its events and targets), vm-insight-api.ts and vm-insight.ts (R4
@@ -1516,7 +1532,8 @@ src/                  React + TypeScript UI
                       read last, for search), topology.ts and topology-layout.ts (QL-21 graph, networkKey for R4's
                       host networks: vm-insight.ts topologyHostNetworks keys them alike and links them to the VM
                       page's Networks sheet, AppLink `hostNetworks`; layered layout), open-tunnels.ts (every pane's
-                      tunnels, from their events), status-bar.ts (QL-22 texts, the vault countdown store, OpenJobs),
+                      tunnels, from their events), status-bar.ts (QL-22 texts, the vault countdown store, OpenJobs; UX-18
+                      jobsLink: the one open job's results in Activity, else Activity),
                       notifications.ts and notifications-store.ts (QL-25 entries per source, JobNotes, grouping),
                       navigation-api.ts,
                       density.ts (QL-24 `--spacing` and `--radius` through `data-density`), shortcuts.ts (QL-24 every

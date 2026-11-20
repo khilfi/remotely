@@ -1,22 +1,15 @@
-// QL-12: the Compare panel's MultiExec view. Every line MultiExec sends is recorded in each of its terminals, from
-// Enter until that terminal's prompt comes back (crates/core/src/terminal/record.rs), so it can be compared at any
-// time without typing it again: the list of lines (newest first, with time, terminals and tier) and, for the line
-// picked (or the newest), the same grouped view as a one-shot run: identical outputs grouped A, B..., the diff
-// between groups, the ignore-trailing-whitespace switch, each terminal's state as it fills in, and CSV, JSON or HTML
-// export of this line or all of them. Recordings live in memory until MultiExec is turned off. FD-03: everything here
-// is plain DOM text, so presentation mode masks it like the rest of the page.
+// QL-12: the lines typed in all tabs, for Compare hosts. Every line MultiExec sends is recorded in each of its
+// terminals, from Enter until that terminal's prompt comes back (crates/core/src/terminal/record.rs), so it can be
+// compared at any time without typing it again. UX-17 (0.9.0 H3): the lines are items of Compare hosts' one results
+// list beside its runs (ComparePanel, lib/results-list.ts); useRecordings reads them, and RecordedLineResults shows
+// the line picked with the same grouped card as a run: identical outputs grouped A, B..., the diff between groups,
+// the ignore-trailing-whitespace switch, each terminal's state as it fills in, and CSV, JSON or HTML export of this
+// line or all of them. A typed line has no retry or canary (it says why) and goes when Type in all tabs is turned
+// off. FD-03: everything here is plain DOM text, so presentation mode masks it like the rest of the page.
 
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
-import {
-  ChevronRightIcon,
-  DownloadIcon,
-  GitCompareArrowsIcon,
-  LoaderCircleIcon,
-  RadioTowerIcon,
-  ScissorsIcon,
-} from "lucide-react";
-import { Alert, AlertDescription } from "@/components/ui/alert";
+import { ChevronRightIcon, DownloadIcon, GitCompareArrowsIcon, LoaderCircleIcon, RotateCcwIcon } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
@@ -28,7 +21,6 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from "@/components/ui/empty";
 import { Label } from "@/components/ui/label";
 import { Progress } from "@/components/ui/progress";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -51,14 +43,9 @@ import {
 } from "@/lib/api";
 import { diffReason } from "@/lib/disabled-reasons";
 import { plural } from "@/lib/format";
-import { capsNote, captureText, lineStatus, shortDuration, shownLine, type CaptureTone } from "@/lib/recordings";
+import { captureText, shortDuration, type CaptureTone } from "@/lib/recordings";
+import { TYPED_KEPT, TYPED_NO_RETRY } from "@/lib/results-list";
 import { cn } from "@/lib/utils";
-
-interface Props {
-  active: boolean;
-  /** MultiExec is on: lines typed now are recorded. */
-  multiExecOn: boolean;
-}
 
 /** Reloads at most this often while terminals finish. */
 const RELOAD_MS = 150;
@@ -83,9 +70,12 @@ function time(ts: string) {
   return new Date(ts).toLocaleTimeString();
 }
 
-export function RecordedLinesView({ active, multiExecOn }: Props) {
+/**
+ * The session's recorded lines (newest first), read while the panel shows and again, at most every RELOAD_MS, as
+ * lines are recorded or finish; `version` moves with each read so a line's results follow it.
+ */
+export function useRecordings(active: boolean, multiExecOn: boolean) {
   const [recordings, setRecordings] = useState<Recordings | null>(null);
-  const [picked, setPicked] = useState<string | null>(null);
   const [version, setVersion] = useState(0);
   const [error, setError] = useState<string | null>(null);
 
@@ -124,90 +114,7 @@ export function RecordedLinesView({ active, multiExecOn }: Props) {
     };
   }, [active, version, multiExecOn]);
 
-  const lines = recordings?.lines ?? [];
-  const shown = shownLine(lines, picked);
-  const caps = recordings ? capsNote(recordings.dropped, recordings.limits) : null;
-
-  async function exportAll(format: ExportFormat) {
-    await exportLines(null, format, false);
-  }
-
-  if (error && !recordings) {
-    return (
-      <p className="text-sm text-destructive" role="alert">
-        {error}
-      </p>
-    );
-  }
-  if (!recordings) return <Skeleton className="h-48" />;
-
-  if (lines.length === 0) {
-    return (
-      <Empty className="border">
-        <EmptyHeader>
-          <EmptyMedia variant="icon">
-            <RadioTowerIcon />
-          </EmptyMedia>
-          <EmptyTitle>{multiExecOn ? "No line recorded yet" : "Type in all tabs is off"}</EmptyTitle>
-          <EmptyDescription>
-            {multiExecOn
-              ? "Type a command in one of the picked terminals. Each terminal's output is recorded until its prompt comes back, and shows here grouped by output."
-              : "Turn on Type in all tabs and type in a terminal: every line goes to the picked terminals and is recorded here, so you can compare the outputs without typing the command again."}
-          </EmptyDescription>
-        </EmptyHeader>
-      </Empty>
-    );
-  }
-
-  return (
-    <div className="grid grid-cols-1 gap-4 @5xl:grid-cols-[minmax(0,26rem)_minmax(0,1fr)]">
-      <div className="grid min-w-0 grid-cols-1 content-start gap-3">
-        <div className="flex min-w-0 flex-wrap items-center gap-2">
-          <h3 className="flex items-center gap-1 text-sm font-medium">
-            {plural(lines.length, "recorded line")}
-            <HelpTip topic="recordedLines" />
-          </h3>
-          {picked && (
-            <Button size="xs" variant="ghost" onClick={() => setPicked(null)}>
-              Show the newest
-            </Button>
-          )}
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <Button size="xs" variant="outline" className="ml-auto">
-                <DownloadIcon data-icon="inline-start" />
-                Export all
-              </Button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="end">
-              <DropdownMenuLabel>Save every recorded line as</DropdownMenuLabel>
-              {EXPORTS.map((e) => (
-                <DropdownMenuItem key={e.format} onSelect={() => void exportAll(e.format)}>
-                  {e.label}
-                </DropdownMenuItem>
-              ))}
-            </DropdownMenuContent>
-          </DropdownMenu>
-        </div>
-        <ul className="grid max-h-[28rem] min-w-0 grid-cols-1 gap-1 overflow-y-auto rounded-md border p-1" role="list">
-          {lines.map((l) => (
-            <li key={l.id} className="min-w-0">
-              <LineItem line={l} selected={l.id === shown?.id} onPick={() => setPicked(l.id)} />
-            </li>
-          ))}
-        </ul>
-        {caps && (
-          <Alert>
-            <ScissorsIcon />
-            <AlertDescription className="text-xs">{caps}</AlertDescription>
-          </Alert>
-        )}
-      </div>
-      <div className="min-w-0">
-        {shown && <RecordedLineResults key={shown.id} line={shown} version={version} active={active} />}
-      </div>
-    </div>
-  );
+  return { recordings, version, error };
 }
 
 async function exportLines(lineId: string | null, format: ExportFormat, ignoreTrailingWhitespace: boolean) {
@@ -224,35 +131,17 @@ async function exportLines(lineId: string | null, format: ExportFormat, ignoreTr
   }
 }
 
-function LineItem({ line, selected, onPick }: { line: RecordedLine; selected: boolean; onPick: () => void }) {
-  const running = line.finished < line.terminals;
-  return (
-    <button
-      type="button"
-      onClick={onPick}
-      aria-current={selected || undefined}
-      className={cn(
-        "grid w-full min-w-0 gap-1 rounded-md px-2 py-1.5 text-left text-sm hover:bg-accent",
-        selected && "bg-accent",
-      )}
-    >
-      <span className="flex min-w-0 items-center gap-2">
-        {running && <LoaderCircleIcon className="size-3.5 shrink-0 animate-spin" aria-label="Running" />}
-        <code className="min-w-0 flex-1 truncate font-mono text-xs" title={line.line}>
-          {line.line}
-        </code>
-        {line.tier && <TierBadge tier={line.tier} />}
-      </span>
-      <span className="flex min-w-0 flex-wrap items-center gap-x-2 text-xs text-muted-foreground">
-        <span>{time(line.recordedAt)}</span>
-        <span>{plural(line.terminals, "terminal")}</span>
-        <span className="min-w-0 truncate">{lineStatus(line)}</span>
-      </span>
-    </button>
-  );
-}
-
-function RecordedLineResults({ line, version, active }: { line: RecordedLine; version: number; active: boolean }) {
+/** One typed line's results, grouped like a run's. */
+export function RecordedLineResults({
+  line,
+  version,
+  active,
+}: {
+  line: RecordedLine;
+  /** Moves with each read of the recordings. */
+  version: number;
+  active: boolean;
+}) {
   const [results, setResults] = useState<RecordedResults | null>(null);
   const [ignoreWs, setIgnoreWs] = useState(false);
   const [tick, setTick] = useState(0);
@@ -303,12 +192,14 @@ function RecordedLineResults({ line, version, active }: { line: RecordedLine; ve
     <div className="grid min-w-0 gap-4">
       <div className="grid min-w-0 gap-2">
         <div className="flex min-w-0 flex-wrap items-center gap-2">
+          <Badge variant="outline">Typed in {plural(results.line.terminals, "tab")}</Badge>
           {results.line.tier && <TierBadge tier={results.line.tier} />}
           {results.line.waitingApproval && <Badge variant="outline">waiting for approval</Badge>}
           <span className="text-xs text-muted-foreground">
             Recorded {time(results.line.recordedAt)}
             {results.line.durationMs !== null && ` · took ${shortDuration(results.line.durationMs)}`}
           </span>
+          <HelpTip topic="recordedLines" />
         </div>
         <pre className="max-h-24 overflow-auto rounded-md border bg-muted/40 px-3 py-2 font-mono text-xs break-words whitespace-pre-wrap">
           {results.line.line}
@@ -317,6 +208,13 @@ function RecordedLineResults({ line, version, active }: { line: RecordedLine; ve
           {results.line.waitingApproval ? "Waiting for approval: Enter is held in every terminal" : results.headline}
         </p>
         <div className="flex flex-wrap items-center gap-2">
+          {/* UX-17: only runs retry; a typed line says why it has none. */}
+          <WhyDisabled reason={TYPED_NO_RETRY}>
+            <Button variant="outline" size="sm" disabled>
+              <RotateCcwIcon data-icon="inline-start" />
+              Retry
+            </Button>
+          </WhyDisabled>
           <WhyDisabled reason={diffReason(groups.length)}>
             <Button
               variant="outline"
@@ -343,7 +241,7 @@ function RecordedLineResults({ line, version, active }: { line: RecordedLine; ve
                 </DropdownMenuItem>
               ))}
               <DropdownMenuSeparator />
-              <DropdownMenuLabel>Save every recorded line as</DropdownMenuLabel>
+              <DropdownMenuLabel>Save every typed line as</DropdownMenuLabel>
               {EXPORTS.map((e) => (
                 <DropdownMenuItem key={`all-${e.format}`} onSelect={() => void exportLines(null, e.format, ignoreWs)}>
                   {e.label}
@@ -352,6 +250,7 @@ function RecordedLineResults({ line, version, active }: { line: RecordedLine; ve
             </DropdownMenuContent>
           </DropdownMenu>
         </div>
+        <p className="text-xs text-muted-foreground">{TYPED_KEPT}</p>
       </div>
 
       <div className="grid gap-2">

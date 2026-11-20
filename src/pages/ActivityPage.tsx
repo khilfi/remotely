@@ -9,6 +9,13 @@
 // BX-02: a job older than the retention period (Settings, General) keeps its results but no longer its outputs or
 // command text, which its results say.
 //
+// UX-18 (0.9.0 H3): a bulk job (a remote command on hosts, a push or fetch to many hosts, an SSH key push) opens in
+// the grouped results view Compare hosts uses (BulkResultsView): its groups, the diff, retry of the failed hosts and
+// the export; a support bundle in that view's bundle mode with Show folder (lib/results-list.ts activityView). Every
+// other job keeps its per-target sheet. A retry is the same command resubmitted on the bus, rated again and asked for
+// through the app's approval dialog; its job then opens here. Job notifications and the status bar's jobs item lead
+// to a job's results here (`focusJob`).
+//
 // P6, AP-03: job events come in bursts (a MultiExec line on 50 terminals sends about 100), so they reach the lists
 // through one path. App bumps `version` only when a job is queued or ends; while this page shows, a job's progress
 // (its countdown, its start, each target's result) asks too. Asks within a second of the first are one reload, a
@@ -23,6 +30,7 @@ import {
   DownloadIcon,
   EraserIcon,
   FilterXIcon,
+  FolderOpenIcon,
   ListChecksIcon,
   PackageCheckIcon,
   ScrollTextIcon,
@@ -41,11 +49,20 @@ import { Sheet, SheetContent, SheetDescription, SheetHeader, SheetTitle } from "
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { StatusBadge, TierBadge } from "@/components/Badges";
+import { BulkResultsView } from "@/components/BulkResultsView";
 import { EmptyState } from "@/components/EmptyState";
 import { HelpTip } from "@/components/HelpTip";
 import { PageHeader } from "@/components/PageHeader";
 import { Term } from "@/components/Term";
-import { api, errorMessage, type AuditEntry, type ChainCheck, type JobSummary, type JobTarget } from "@/lib/api";
+import {
+  api,
+  errorMessage,
+  type AuditEntry,
+  type ChainCheck,
+  type JobSummary,
+  type JobTarget,
+  type SubmitOutcome,
+} from "@/lib/api";
 import {
   ACTIVITY_KINDS,
   DATE_RANGES,
@@ -67,6 +84,7 @@ import {
 } from "@/lib/activity";
 import { formatWhen, plural } from "@/lib/format";
 import { progressesJob, PROGRESS_READ_MS } from "@/lib/job-events";
+import { activityView } from "@/lib/results-list";
 import { cn } from "@/lib/utils";
 
 type View = "timeline" | "audit";
@@ -113,6 +131,7 @@ export function ActivityPage({
   active,
   focusJob = null,
   onHandover,
+  onSubmitted,
 }: {
   version: number;
   active: boolean;
@@ -120,6 +139,8 @@ export function ActivityPage({
   focusJob?: { jobId: string; n: number } | null;
   /** FD-08: the handover pack's dialog, on the dates the filter shows. */
   onHandover: (range: DateRange) => void;
+  /** UX-18: a retry was submitted; the app asks for its approval, and `onJob` gets its job once queued. */
+  onSubmitted: (outcome: SubmitOutcome, onJob?: (jobId: string) => void) => void;
 }) {
   const [jobs, setJobs] = useState<JobSummary[]>([]);
   const [audit, setAudit] = useState<AuditEntry[]>([]);
@@ -134,6 +155,9 @@ export function ActivityPage({
   const [now, setNow] = useState(() => Date.now());
   // The job whose results are open; read from `jobs`, so its status stays current.
   const [openedId, setOpenedId] = useState<string | null>(null);
+  // UX-18: a retry just queued from a bulk job's results: its id and its parent's kind, so its grouped view opens
+  // before the list has it (its summary and times show once the list does).
+  const [retried, setRetried] = useState<{ id: string; commandType: string } | null>(null);
   const [focusHandled, setFocusHandled] = useState(focusJob?.n ?? 0);
   if (focusJob && focusJob.n !== focusHandled) {
     setFocusHandled(focusJob.n);
@@ -141,6 +165,15 @@ export function ActivityPage({
     setView("timeline");
   }
   const opened = jobs.find((j) => j.id === openedId);
+  const pendingRetry = !opened && retried && retried.id === openedId ? retried : null;
+  const openRetry = useCallback(
+    (outcome: SubmitOutcome, commandType: string) =>
+      onSubmitted(outcome, (jobId) => {
+        setRetried({ id: jobId, commandType });
+        setOpenedId(jobId);
+      }),
+    [onSubmitted],
+  );
   const [exporting, setExporting] = useState(false);
   const counting = jobs.some((j) => j.status === "countdown");
 
@@ -475,7 +508,18 @@ export function ActivityPage({
         </div>
       )}
 
-      {opened && <JobResults job={opened} version={asked + reloads} onClose={() => setOpenedId(null)} />}
+      {/* One place for the bulk sheet, so a just-queued retry's sheet stays open as the list catches up. */}
+      {opened && !activityView(opened.commandType) ? (
+        <JobResults job={opened} version={asked + reloads} onClose={() => setOpenedId(null)} />
+      ) : opened || pendingRetry ? (
+        <BulkJobResults
+          jobId={opened?.id ?? pendingRetry?.id ?? ""}
+          commandType={opened?.commandType ?? pendingRetry?.commandType ?? ""}
+          job={opened}
+          onRetry={openRetry}
+          onClose={() => setOpenedId(null)}
+        />
+      ) : null}
     </Tabs>
   );
 }
@@ -634,6 +678,76 @@ function GroupRows({
         </TableRow>
       )}
     </>
+  );
+}
+
+/** FD-04: a bundle's zip is saved once it ends like this. */
+const BUNDLE_SAVED = new Set(["succeeded", "partially_failed"]);
+
+/**
+ * UX-18: a bulk job's results grouped by output, as Compare hosts shows them: progress, groups, the diff, retry of the
+ * failed hosts and export; a support bundle in its bundle mode, with Show folder once its zip is saved. `job` is the
+ * list's row; a retry just queued has none yet, so its summary and times show once the list has it.
+ */
+function BulkJobResults({
+  jobId,
+  commandType,
+  job,
+  onRetry,
+  onClose,
+}: {
+  jobId: string;
+  commandType: string;
+  job?: JobSummary;
+  onRetry: (outcome: SubmitOutcome, commandType: string) => void;
+  onClose: () => void;
+}) {
+  const bundle = activityView(commandType) === "bundle";
+
+  async function showFolder() {
+    try {
+      await api.bundleShowFolder(jobId);
+    } catch (err) {
+      toast.error(errorMessage(err));
+    }
+  }
+
+  return (
+    <Sheet open onOpenChange={(open) => !open && onClose()}>
+      <SheetContent className="gap-0 data-[side=right]:w-full data-[side=right]:sm:max-w-3xl">
+        <SheetHeader>
+          <SheetTitle>{job?.summary ?? "Retry of the failed hosts"}</SheetTitle>
+          <SheetDescription>
+            {job ? (
+              <>
+                Created {formatWhen(job.createdAt)}
+                {job.finishedAt && ` · finished ${formatWhen(job.finishedAt)}`}
+                {/* AP-08: the ticket or change number its approval was given with. */}
+                {job.changeId && ` · change ID ${job.changeId}`}
+              </>
+            ) : (
+              "Queued just now"
+            )}
+          </SheetDescription>
+        </SheetHeader>
+        <div className="overflow-auto px-4 pb-4">
+          <BulkResultsView
+            key={jobId}
+            jobId={jobId}
+            bundle={bundle}
+            onRetry={(outcome) => onRetry(outcome, commandType)}
+            extraActions={
+              bundle && job && BUNDLE_SAVED.has(job.status) ? (
+                <Button variant="outline" size="sm" onClick={() => void showFolder()}>
+                  <FolderOpenIcon data-icon="inline-start" />
+                  Show folder
+                </Button>
+              ) : null
+            }
+          />
+        </div>
+      </SheetContent>
+    </Sheet>
   );
 }
 

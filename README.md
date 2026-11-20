@@ -953,10 +953,12 @@ Bulk execution lives in the Terminal page (it replaced the MVP's Bulk run page):
   vim's `:!command`, is not rated). Protected sessions are left out.
 - **MultiExec recording** (QL-12): every line MultiExec sends is recorded in each of its terminals, from Enter until
   that terminal's prompt comes back (or its output stops for the quiet spell set in Settings, or 10 minutes pass), so
-  you can compare it at any time without typing it again: open Compare from the MultiExec bar, or pick the MultiExec
-  view in the Compare panel. It lists the recorded lines, newest first, with their time, terminals and tier; a line
-  shows grouped like a Compare run (identical outputs together, A, B..., the diff between groups, ignore trailing
-  whitespace), and a line still running fills in as each prompt comes back. Escape sequences are removed and redrawn
+  you can compare it at any time without typing it again: open Compare hosts from the MultiExec bar. Since 0.9.0
+  (UX-17) its one results list has each recorded line, badged "Typed in 6 tabs", among the one-shot runs, newest
+  first, with its time and tier; turning Type in all tabs on shows the newest line as it is recorded. A line shows
+  grouped like a Compare run (identical outputs together, A, B..., the diff between groups, ignore trailing
+  whitespace), and a line still running fills in as each prompt comes back. A typed line can't be retried (its Retry
+  says why: pressing Enter again later could run it after something else) and has no canary. Escape sequences are removed and redrawn
   lines (progress bars) read as they ended; secrets are scrubbed like saved output (the login's and vault passwords
   typed into the terminal). Password prompts and keys sent to full-screen programs are never recorded. Recordings are
   kept in memory only, until MultiExec is turned off (or every terminal of a line has closed), at most 200 lines and
@@ -982,6 +984,20 @@ Bulk execution lives in the Terminal page (it replaced the MVP's Bulk run page):
   approval tiers, sudo from the vault, a time limit and the parallel limit from Settings. The results are grouped by
   output ("48 hosts same, 2 differ"), with a diff between groups, retry of the failed hosts and CSV, JSON or HTML
   export. Quick connections that were not saved as sessions can't be compared.
+- **One results list** (UX-17, 0.9.0): under Run, newest first, Compare hosts lists its runs, the pushes and fetches
+  to many hosts (from the Files page's Many hosts or a drop, whoever started them) and the lines typed in all tabs,
+  each badged with what it was: "Run on 12 hosts", "Pushed to 5 hosts", "Fetched from 3 hosts", "Typed in 6 tabs".
+  The one you pick, or the newest, opens beside the list in the same grouped view. Retry of the failed hosts is for
+  runs, pushes and fetches, and the canary ("Run on one host first", then "Run on the rest") for runs only; a typed
+  line has neither and goes when Type in all tabs is turned off. The One-shot run and Type in all tabs views of 0.8 are
+  gone.
+- **Bulk jobs in Activity** (UX-18, 0.9.0): Activity opens a command run on many hosts, a push or fetch to many hosts
+  and an SSH key push in that grouped view too, with the diff, retry of the failed hosts and export, and a support
+  bundle in its own mode with Show folder; other jobs keep their per-target sheet. A job's notification, a failed
+  job's toast (Show) and the status bar's jobs item lead there. **Retry** sends the same command for the failed hosts
+  through the approval rules again, rated for those hosts as a new run on them would be (a retry of 2 hosts out of 5
+  may need less approval than the run did), and its job opens in its place. While presenting with the read-only lock on, the retry and the
+  canary's go-ahead are off and say why.
 - **Picking the hosts** (UX-16, 0.9.0): Compare hosts uses the same picker as every other bulk job, as one line such as
   "12 hosts: 6 picked tabs, folder 'Web', tag 'db'" with **Change…**. It starts with the picked tabs and the sessions
   Ctrl+clicked in the session tree (Ctrl+click a folder for all of it, handy for 50 hosts); Change… adds saved
@@ -1385,7 +1401,8 @@ local storage, and offers none while presenting.
   again** reads every one. Presentation mode masks the map like every other page.
 - **Status bar** (QL-22): along the bottom, the vault's lock countdown, the jobs running, the tunnels open, the open
   alerts and the update state; each opens what it is about (the alerts open the dashboard's Alerts widget, or the
-  alert rules when the dashboard has no Alerts widget). It reads nothing on its own: the countdown starts again each
+  alert rules when the dashboard has no Alerts widget; the jobs open the one running job's results in Activity, or
+  Activity while several run). It reads nothing on its own: the countdown starts again each
   time you type or click.
 - **Notification centre** (QL-25): the bell at the right of the status bar lists what notified since Remotely started:
   metric alerts (fired and resolved), terminal alert rules, long commands that finished, jobs that finished or failed,
