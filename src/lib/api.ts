@@ -982,6 +982,12 @@ export interface JobSummary {
   commandRedacted: boolean;
   /** AP-08: the ticket or change number its approval was given with. */
   changeId: string | null;
+  /**
+   * UX-18 (0.9.0 H3): the command's type as the journal names it (`remoteExec`, `bulkFiles`, `supportBundle`,
+   * `pushSshKey`...), so Activity opens a bulk job in the grouped results view. Empty for a job journaled before
+   * types were named.
+   */
+  commandType: string;
 }
 
 /** One target of a job and how it went. */

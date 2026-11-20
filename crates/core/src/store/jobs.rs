@@ -136,6 +136,10 @@ pub struct JobSummary {
     pub command_redacted: bool,
     /// AP-08: the ticket or change number its approval was given with.
     pub change_id: Option<String>,
+    /// UX-18 (0.9.0 H3): the command's type as the journal names it (`remoteExec`, `bulkFiles`, `supportBundle`,
+    /// `pushSshKey`...; [`Command::type_name`]), so Activity opens a bulk job in the grouped results view. Empty for a
+    /// job journaled before migration 0017 named types.
+    pub command_type: String,
 }
 
 impl JobSummary {
@@ -252,7 +256,7 @@ macro_rules! target_columns {
 macro_rules! job_columns {
     () => {
         "j.id, j.summary, j.action, j.tier, j.status, j.created_at, j.started_at, j.finished_at, j.countdown_until,
-         j.retry_of, j.bodies_removed_at, j.command_redacted, j.change_id"
+         j.retry_of, j.bodies_removed_at, j.command_redacted, j.change_id, j.command_type"
     };
 }
 
@@ -304,6 +308,7 @@ fn row_to_summary(r: &sqlx::sqlite::SqliteRow) -> Result<JobSummary> {
         bodies_removed: removed.is_some(),
         command_redacted: redacted == Some(1),
         change_id: r.try_get("change_id")?,
+        command_type: r.try_get("command_type")?,
     })
 }
 
@@ -485,6 +490,18 @@ impl Store {
     /// rated like them but typed into terminals, so they are left out.
     pub async fn recent_exec_jobs(&self, ctx: &Context, limit: u32) -> Result<Vec<JobSummary>> {
         self.recent_jobs_of(ctx, Some("remoteExec"), limit).await
+    }
+
+    /// UX-17 (0.9.0 H3): the newest one-shot jobs on hosts that group by output, newest first, for Compare hosts' one
+    /// results list: its runs and BX-10's pushes and fetches, whoever started them (Compare hosts, the Files page's
+    /// Many hosts, a drop). Each type's page comes from its own index, then the two are merged.
+    pub async fn recent_bulk_jobs(&self, ctx: &Context, limit: u32) -> Result<Vec<JobSummary>> {
+        let mut jobs = self.recent_jobs_of(ctx, Some("remoteExec"), limit).await?;
+        jobs.extend(self.recent_jobs_of(ctx, Some("bulkFiles"), limit).await?);
+        // RFC 3339 times written by one clock in one format sort as text; the id keeps ties in one order.
+        jobs.sort_by(|a, b| b.created_at.cmp(&a.created_at).then_with(|| b.id.cmp(&a.id)));
+        jobs.truncate(limit as usize);
+        Ok(jobs)
     }
 
     /// When the job ended, how; `None` for a job that is not in the journal.

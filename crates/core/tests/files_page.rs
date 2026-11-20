@@ -871,6 +871,35 @@ async fn pushing_to_many_hosts_checks_each_copy_and_is_high_from_five() {
         .unwrap();
     assert_eq!(results.groups.len(), 2, "{:?}", results.groups);
     assert_eq!(results.groups[0].hosts.len(), 3);
+    let five_host_push = job;
+
+    // UX-17, UX-18 (0.9.0 H3): pushes are in Compare hosts' one results list, newest first, with their command type
+    // for Activity's grouped view, whoever started them.
+    let runs = core.bulk.recent(&core.ctx(), 20).await.unwrap();
+    assert_eq!(runs.len(), 2, "{runs:?}");
+    assert_eq!(runs[0].id, five_host_push.to_string());
+    assert!(runs
+        .iter()
+        .all(|r| r.command_type == "bulkFiles" && r.action == "filePush"));
+    // Retrying the two that failed (from Activity or the list) resubmits the same push on the bus, rated again for
+    // its own two hosts: Medium, under the bulk threshold, and still asked for.
+    let (retry, status, tier, asked) = run(&core, core.bus.retry_failed(&core.ctx(), job, false).await.unwrap()).await;
+    assert_eq!(tier, Tier::Medium);
+    assert_eq!(
+        asked.unwrap().action,
+        ActionKind::FilePush,
+        "a retry is never let through unasked"
+    );
+    assert_eq!(
+        status,
+        JobStatus::Failed,
+        "the two still have the file and the push doesn't replace"
+    );
+    let retried = core.store.job_targets(&core.ctx(), retry).await.unwrap();
+    assert_eq!(retried.len(), 2, "only the failed hosts: {retried:?}");
+    let runs = core.bulk.recent(&core.ctx(), 20).await.unwrap();
+    assert_eq!(runs[0].id, retry.to_string());
+    assert_eq!(runs[0].retry_of.as_deref(), Some(five_host_push.to_string().as_str()));
     // With replacing, every host gets the same bytes again.
     let started = core
         .bulk_files

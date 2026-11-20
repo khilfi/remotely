@@ -1565,9 +1565,10 @@ impl BulkRuns {
         })
     }
 
-    /// BX-02: the newest bulk runs, newest first.
+    /// BX-02: the newest bulk runs, newest first. UX-17 (0.9.0 H3): BX-10's pushes and fetches too, which group and
+    /// retry like a run, so Compare hosts' one results list shows every one-shot job on hosts, whoever started it.
     pub async fn recent(&self, ctx: &Context, limit: u32) -> Result<Vec<JobSummary>> {
-        self.store.recent_exec_jobs(ctx, limit).await
+        self.store.recent_bulk_jobs(ctx, limit).await
     }
 
     async fn job(&self, ctx: &Context, job_id: Uuid) -> Result<(JobSummary, Command)> {

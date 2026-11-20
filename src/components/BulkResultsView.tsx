@@ -2,7 +2,9 @@
 // 2 differ"), output groups (largest first, each with one host's output standing for all), every host
 // with its status, exit code and duration, and the actions: cancel, retry the failed hosts, compare two
 // groups and export. Grouping happens in the core; this view reloads it as hosts finish. QL-12: the group cards and
-// the output dialog serve the Compare panel's MultiExec view too (terminals instead of hosts).
+// the output dialog serve the Compare panel's typed lines too (terminals instead of hosts). UX-18 (0.9.0 H3): Activity
+// opens bulk jobs here as well (a push or fetch, a key push, a support bundle's mode); a retry is the same command
+// resubmitted on the bus, rated again, and says why it is off under the read-only lock.
 
 import { useEffect, useState, type ReactNode } from "react";
 import { toast } from "sonner";
@@ -45,6 +47,7 @@ import {
   type SubmitOutcome,
 } from "@/lib/api";
 import { HelpTip } from "@/components/HelpTip";
+import { useReadOnlyReason } from "@/components/Presentation";
 import { formatWhen, plural } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import { diffReason } from "@/lib/disabled-reasons";
@@ -104,6 +107,8 @@ export function BulkResultsView({ jobId, onRetry, bundle = false, extraActions }
   // H9: the canary host finished; the rest wait for the go-ahead until `until`.
   const [canary, setCanary] = useState<{ name: string; rest: number; until: string } | null>(null);
   const [confirmUnknown, setConfirmUnknown] = useState(false);
+  // FD-03: a retry is a new job, which the read-only lock refuses.
+  const readOnly = useReadOnlyReason();
   const shown = results?.job.id === jobId ? results : null;
   const open = shown ? OPEN.has(shown.job.status) : true;
 
@@ -206,11 +211,13 @@ export function BulkResultsView({ jobId, onRetry, bundle = false, extraActions }
   // H9: the event may have come before this view opened; the results say whether the rest still wait.
   const waiting = canary ?? shown.canary;
   // BX-02, BX-04: the journal no longer holds the script as it ran (the core refuses the retry too).
-  const retryBlocked = job.bodiesRemoved
-    ? "Its script was removed after the retention period. Run it again from Compare."
-    : job.commandRedacted
-      ? "Its script had something that looked like a secret, which the journal doesn't keep. Run it again from Compare."
-      : null;
+  const retryBlocked = readOnly
+    ? readOnly
+    : job.bodiesRemoved
+      ? "Its script was removed after the retention period. Run it again from Compare hosts."
+      : job.commandRedacted
+        ? "Its script had something that looked like a secret, which the journal doesn't keep. Run it again from Compare hosts."
+        : null;
 
   return (
     <div className="grid gap-4">
@@ -298,10 +305,12 @@ export function BulkResultsView({ jobId, onRetry, bundle = false, extraActions }
             {` The others wait ${timeLeft(waiting.until, now)} more, then the run stops.`}
           </AlertDescription>
           <AlertAction className="flex gap-2">
-            <Button size="sm" onClick={() => void goOn()} disabled={busy}>
-              <PlayIcon data-icon="inline-start" />
-              Run on the rest
-            </Button>
+            <WhyDisabled reason={readOnly}>
+              <Button size="sm" onClick={() => void goOn()} disabled={busy || readOnly !== null}>
+                <PlayIcon data-icon="inline-start" />
+                Run on the rest
+              </Button>
+            </WhyDisabled>
             <Button size="sm" variant="outline" onClick={() => void cancel()} disabled={busy}>
               Stop here
             </Button>

@@ -32,6 +32,7 @@ import { openTunnels, subscribeTunnels } from "@/lib/open-tunnels";
 import {
   alertsText,
   checksText,
+  jobsLink,
   jobsText,
   OpenJobs,
   reportVault,
@@ -128,13 +129,7 @@ export function StatusBar({ vault, updateCheck, updateProblem, onOpenLink, onOpe
         onClick={() => onOpenLink({ kind: "vault" })}
         mono={vault?.status === "unlocked" && left !== null}
       />
-      {jobsStatus && (
-        <Item
-          icon={ListChecksIcon}
-          status={jobsStatus}
-          onClick={() => onOpenLink({ kind: "page", page: "activity" })}
-        />
-      )}
+      {jobsStatus && <Item icon={ListChecksIcon} status={jobsStatus} onClick={() => onOpenLink(jobsLink(jobs.only))} />}
       {tunnelsStatus && (
         <Popover>
           <PopoverTrigger asChild>
@@ -261,7 +256,7 @@ function useOpenJobs() {
       void unlisten.then((stop) => stop());
     };
   }, [tracker]);
-  return { count: tracker.count, summaries: tracker.summaries };
+  return { count: tracker.count, summaries: tracker.summaries, only: tracker.only };
 }
 
 /** MO-08: the shown workspace's down and failing checks: read once, then from each check event (which carries them). */
