@@ -770,6 +770,8 @@ export type JobEvent =
       name: string;
       status: TargetStatus;
       message: string | null;
+      /** Why it failed or what its cancel kept, as a stable code (`JobTarget.errorCode`); absent when none. */
+      errorCode?: string | null;
       /** BX-02: a remote command's exit code. */
       exitCode: number | null;
       durationMs: number;

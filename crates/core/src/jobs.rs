@@ -264,6 +264,10 @@ pub enum JobEvent {
         name: String,
         status: TargetStatus,
         message: Option<String>,
+        /// The error's [`CoreError::code`], as journaled (VM-29: `install_failed` and `install_cancelled` keep their
+        /// VM, `deploy_failed` says what it removed), so the window goes by it, never by the message's words.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        error_code: Option<&'static str>,
         /// BX-02: a remote command's exit code.
         exit_code: Option<i64>,
         duration_ms: u64,
@@ -1686,6 +1690,7 @@ impl JobRunner {
             name: target.name.clone(),
             status: done.status,
             message: done.error,
+            error_code: done.error_code,
             exit_code: done.exit_code,
             duration_ms,
             safety_snapshot,

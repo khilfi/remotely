@@ -89,7 +89,8 @@ crates/core/          remotely-core: all app logic
     settings.rs       QL-15 settings this version can't read are set aside (`<key>.unreadable`), audited, and get
                       their defaults at start, instead of stopping the app; FD-02 MACHINE_KEYS, this PC's settings,
                       which the store keeps in the home workspace whichever is shown, and WORKSPACE_KEYS
-    policy/           tiers and steps; FD-03 read_only_refusal: the read-only lock refuses every command and edit;
+    policy/           tiers and steps; FD-03 read_only_refusal: the read-only lock refuses every command and edit
+                      (read_only_host_refusal for what runs on a host without a command: starting root browsing);
                       AP-01 RUNS_ANYTHING: shells, interpreters and command runners can't be read-only entries
                       SS-07 a loopback SOCKS tunnel is at least Medium while other users are signed in to this PC
                       (set_other_users, from HostCounters::other_users_signed_in: WTSEnumerateSessionsW);
@@ -455,7 +456,8 @@ crates/core/          remotely-core: all app logic
     untrusted.rs      A3, A8, A9 hostile input: path_refusal (shares `\\x` `//x`, `\\?\` `\\.\` `\??\`, DOS device
                       names; by text alone, never the file system), read_capped (a file whole up to a cap, or
                       TooLarge; MAX_VM_CONFIG_BYTES 4 MB), is_format_char (Unicode 16.0's Cf table), is_device_name
-    metrics/          MO-01 to MO-04: mod.rs (collector, in-memory history, dashboard rows; MO-15 allocated memory, swap
+    metrics/          MO-01 to MO-04: mod.rs (collector, in-memory history, dashboard rows; MO-02 set_watched audited
+                      setting_changed and refused by the read-only lock like a setting; MO-15 allocated memory, swap
                       and this PC's RAM and paging files per round; RoundObserver: after each round, history.rs and
                       alerts; collect_once_at for tests' own clock), history.rs (MO-06 Rollup: 1-minute averages with
                       min and max, written once a minute in one transaction; bucket: ranges of 1 h to 7 d;
@@ -741,7 +743,8 @@ crates/core/          remotely-core: all app logic
                       is deleted as a link; permissions and owners refuse a link), and FileTransfers::change
                       (FileChange from the drawer: what is there decides replace and recursive; RemotePathTaken unless
                       replace was asked; a link refused for permissions and owners); root_files.rs SS-14 root browsing
-                      (Terminals::browse_as_root, stop_root, root_browsing): the server probed, BX-07's sudo password
+                      (Terminals::browse_as_root, stop_root, root_browsing): refused by the read-only lock before
+                      anything reaches the host (stopping never is), the server probed, BX-07's sudo password
                       (chosen, the session's login password, or the typed login), rule 7 (SecretBindings::may_go,
                       confirm, allow), a refused password parked per session and password (login_guard
                       ParkScope::Sudo { secret } with sudo_key, shared with Containers' SudoWatch; a quick connection

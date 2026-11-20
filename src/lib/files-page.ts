@@ -151,19 +151,30 @@ export type DragItems =
   | { from: "local"; listing: string; names: string[] }
   | { from: "host"; terminalId: string; folder: string; paths: string[]; asRoot: boolean };
 
-/** Where a drop does something, and what (`null`: nothing happens there). */
+/** Where a drop does something, and what (`null`: nothing happens there; `hint`: nothing happens, and it says why). */
 export type DropAction =
-  { kind: "upload"; folder: string } | { kind: "download" } | { kind: "move"; into: string } | null;
+  | { kind: "upload"; folder: string }
+  | { kind: "download" }
+  | { kind: "move"; into: string }
+  | { kind: "hint"; text: string }
+  | null;
+
+/** UX-15: rows of this PC dragged onto Many hosts: the push takes the files picked on this PC's side already. */
+export const MANY_HOSTS_DROP_HINT =
+  "Nothing to drop here: a push sends the files picked on this PC's side. Pick the hosts and a folder, then push.";
 
 /** What dropping `items` on `target` does: local files on the host pane upload, host files on the local pane download,
  * host files on a folder of the same host move into it. A local folder is never a drop target: nothing on this PC is
- * changed but by a download into the pane's folder. */
+ * changed but by a download into the pane's folder. UX-15: local rows let go on Many hosts do nothing, but say why
+ * (its push already takes the picked files), so a drop there is never silent. */
 export function dropAction(
   items: DragItems,
   target:
     | { pane: "local"; listing: string | null }
-    | { pane: "host"; terminalId: string; folder: string; intoFolder?: string },
+    | { pane: "host"; terminalId: string; folder: string; intoFolder?: string }
+    | { pane: "many" },
 ): DropAction {
+  if (target.pane === "many") return items.from === "local" ? { kind: "hint", text: MANY_HOSTS_DROP_HINT } : null;
   if (items.from === "local") {
     if (target.pane !== "host") return null;
     return { kind: "upload", folder: target.intoFolder ?? target.folder };

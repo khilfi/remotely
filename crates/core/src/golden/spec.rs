@@ -109,7 +109,7 @@ impl BuildOs {
                 "the seed (the answer file) is taken out of the VM first",
                 "the build's WinRM over HTTPS listener and its certificate are deleted, so each clone makes its own at its first sign-in",
                 "Setup's copies of the answer file, PowerShell's history and the event logs are cleared",
-                "sysprep /generalize /oobe /shutdown",
+                "sysprep /generalize /oobe /quit /quiet with a generic answer file for the clones, then Windows is shut down once sysprep returned 0",
             ],
             BuildOs::Ubuntu | BuildOs::Debian => vec![
                 "the seed (the answer file) is taken out of the VM first, then the first boot's own work is waited for",
@@ -870,5 +870,10 @@ mod tests {
         assert_eq!(BuildOs::of(InstallKind::CloudInit), None);
         assert!(BuildOs::Windows.generic_steps().iter().any(|s| s.contains("sysprep")));
         assert!(BuildOs::Debian.generic_steps().iter().any(|s| s.contains("machine-id")));
+        // The approval says what the task runs (N8, generic.rs's tests): sysprep returns, then the task shuts Windows
+        // down.
+        let windows = BuildOs::Windows.generic_steps().join("; ");
+        assert!(windows.contains("/oobe /quit /quiet"), "{windows}");
+        assert!(!windows.contains("/shutdown"), "{windows}");
     }
 }

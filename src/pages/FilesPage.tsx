@@ -428,12 +428,13 @@ export function FilesPage({ active, request, onSubmitted, onOpenTerminal, onShow
 
   // ---- Drag and drop -------------------------------------------------------------------------------------------
 
-  /** What is under a point: the host pane's tab (and the folder row there), or the local pane. */
+  /** What is under a point: the host pane's tab (and the folder row there), the local pane, or Many hosts. */
   function targetAt(x: number, y: number) {
     const under = document.elementFromPoint(x, y);
     const pane = under?.closest<HTMLElement>("[data-files-drop]");
     if (!pane) return null;
     if (pane.dataset.filesDrop === "local") return { pane: "local" as const, listing: local?.path ? local.id : null };
+    if (pane.dataset.filesDrop === "many") return { pane: "many" as const };
     const tab = tabs.find((t) => t.key === pane.dataset.filesTab);
     const folder = tab ? folders[tab.key] : undefined;
     if (!tab || !folder?.folder) return null;
@@ -456,7 +457,9 @@ export function FilesPage({ active, request, onSubmitted, onOpenTerminal, onShow
       if (!target) return;
       const action = dropAction(items, target);
       if (!action) return;
-      if (action.kind === "upload" && items.from === "local" && target.pane === "host") {
+      if (action.kind === "hint") {
+        toast.info(action.text);
+      } else if (action.kind === "upload" && items.from === "local" && target.pane === "host") {
         void uploadLocal(target.terminalId, items.listing, items.names, action.folder, target.asRoot);
       } else if (action.kind === "download" && items.from === "host") {
         void download(items.terminalId, items.paths, "here", items.asRoot);

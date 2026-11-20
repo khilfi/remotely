@@ -1218,7 +1218,8 @@ login, and the same transfer queue and root browsing as Files here.
     between groups.
 - **Reads** (listings, find, preview, checksums and comparing) have no tier and aren't audited; downloads are audited
   reads. While presenting with the read-only lock on, browsing, find, previews, checksums, comparing and downloads
-  still work; uploads, changes to a host's files, syncs to a host, pushes, fetches and bookmark edits don't.
+  still work; uploads, changes to a host's files, syncs to a host, pushes, fetches, bookmark edits and starting to
+  browse as root (it runs sudo on the host; stopping still works) don't.
 
 ### Jump hosts and tunnels
 
@@ -1353,8 +1354,9 @@ local storage, and offers none while presenting.
   stopped, even after it was changed into another kind. **Add a check** opens the health check editor on the
   dashboard's Checks tab, filled in with the row; a check probes from this PC every minute unless you choose otherwise,
   and a session behind a jump host is checked through it, which keeps a login to the jump host open between runs (for
-  checks every 10 minutes or more often). While the read-only lock is on, **Add a check** says so and is off. Watching
-  is audited as before, with no approval; a new check is audited when you add it. "Add a check" is no longer in the
+  checks every 10 minutes or more often). While the read-only lock is on, **Add a check**, **Watch its metrics** and
+  **Stop watching** say so and are off (watching is a setting). Watching is audited as before, with no approval; a new
+  check is audited when you add it. "Add a check" is no longer in the
   Toolbox menu.
 - **Layout** (MO-16): **Customize** adds, removes, moves and resizes the widgets (the overview grid, host capacity,
   this PC's memory, the alerts, a watched host's services, and charts of a VM, a watched host or this PC) on a grid of
@@ -1512,9 +1514,9 @@ log.
   screen). For those, **Hide terminal output** in the Presenting menu blurs the terminals; typing still works.
 - **Read-only lock** (optional, in the Presenting menu, the palette or Settings; kept for next time): while presenting
   with it on, the core refuses every command on the bus, whatever its tier (VM power and snapshots, protection, remote
-  commands including read-only ones, MultiExec lines, uploads, tunnels, SSH key pushes, updates), and every edit of the
-  app's data (sessions, folders, labels, tags, saved filters, VM links, imports, the vault and SSH keys, favourites, port
-  forwards, settings, approval rules, how long job outputs are kept and Purge now, replacing or removing trusted host
+  commands including read-only ones, MultiExec lines, uploads, tunnels, SSH key pushes, updates) and starting to browse
+  a host as root, and every edit of the app's data (sessions, folders, labels, tags, saved filters, VM links, imports,
+  the vault and SSH keys, favourites, port forwards, settings (watching a host's metrics among them), approval rules, how long job outputs are kept and Purge now, replacing or removing trusted host
   keys, turning MultiExec on). The daily purge of old job outputs still runs. An approval asked
   before the lock came on waits until it is off. Still allowed, because they change nothing outside this PC or are part
   of connecting: reading everything, connecting, typing into one terminal (it is your own shell), trusting a new host's

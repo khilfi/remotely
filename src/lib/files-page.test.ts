@@ -15,6 +15,7 @@ import {
   filterTest,
   go,
   localCrumbs,
+  MANY_HOSTS_DROP_HINT,
   rowWords,
   syncSummary,
   syncTakes,
@@ -133,6 +134,15 @@ test("a drop uploads, downloads or moves, and never changes a folder of this PC"
   assert.equal(dropAction(host, { pane: "host", terminalId: "t1", folder: "/srv", intoFolder: "/srv/a/b" }), null);
   assert.equal(dropAction(host, { pane: "host", terminalId: "t2", folder: "/srv", intoFolder: "/x" }), null);
   assert.equal(dropAction(host, { pane: "host", terminalId: "t1", folder: "/srv" }), null);
+});
+
+test("rows of this PC let go on Many hosts do nothing but say so, since its push takes the picked files", () => {
+  // UX-15, the owner's hand check of #115: the drop was silent.
+  const local: DragItems = { from: "local", listing: "l1", names: ["app.conf"] };
+  assert.deepEqual(dropAction(local, { pane: "many" }), { kind: "hint", text: MANY_HOSTS_DROP_HINT });
+  assert.match(MANY_HOSTS_DROP_HINT, /picked on this PC's side/);
+  const host: DragItems = { from: "host", terminalId: "t1", folder: "/srv", paths: ["/srv/a"], asRoot: false };
+  assert.equal(dropAction(host, { pane: "many" }), null, "a host's rows don't push");
 });
 
 const row = (path: string, state: DiffRow["state"], extra: Partial<DiffRow> = {}): DiffRow => ({
