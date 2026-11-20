@@ -297,18 +297,12 @@ async fn stars_and_recents_are_kept_per_workspace_and_not_audited() {
         .set(&ctx, StarKind::Session, &web.id.to_string(), true)
         .await
         .unwrap();
-    core.stars
-        .set(&ctx, StarKind::Command, "library:disk.usage", true)
-        .await
-        .unwrap();
     let stars = core.stars.set(&ctx, StarKind::Vm, &vmx("it-web"), true).await.unwrap();
-    assert_eq!(stars.len(), 3);
-    let stars = core
-        .stars
-        .set(&ctx, StarKind::Command, "library:disk.usage", false)
-        .await
-        .unwrap();
     assert_eq!(stars.len(), 2);
+    let stars = core.stars.set(&ctx, StarKind::Vm, &vmx("it-web"), false).await.unwrap();
+    assert_eq!(stars.len(), 1);
+    // UX-20: commands have no stars; their kind isn't one.
+    assert!(serde_json::from_str::<StarKind>(r#""command""#).is_err());
     for n in 0..(MAX_RECENTS + 5) {
         core.stars
             .opened(&ctx, RecentKind::Page, &format!("page-{n}"))

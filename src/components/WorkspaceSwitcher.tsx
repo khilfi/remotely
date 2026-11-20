@@ -1,7 +1,8 @@
 // FD-02: the top bar's workspace switcher. One workspace per customer engagement: the menu lists the active ones, makes
 // a new one, edits the shown one's name and colour, and manages them all (archive, restore). Switching asks first,
 // says what closes (terminals, MultiExec, waiting approvals) and is refused while jobs started in this workspace run;
-// once the core has switched, the window loads again, so nothing the old workspace showed stays in memory.
+// once the core has switched, the window loads again, so nothing the old workspace showed stays in memory. UX-22
+// (0.9.0): the palette's "Switch workspace…" opens this menu (`openRequest`); the menu stays the switch's one home.
 //
 // Workspace names may be customer names: every element that shows one is `data-mask="workspace"`, so presentation
 // mode (FD-03) shows `workspace-1` instead, and the masker learns them for any other text.
@@ -76,13 +77,24 @@ export async function switchWorkspace(id: string) {
 interface Props {
   /** Opens Activity (the switch's refusal offers it while jobs run). */
   onOpenActivity: () => void;
+  /** UX-22 (0.9.0): the palette's Switch workspace…: the menu opens each time this goes up. */
+  openRequest?: number;
 }
 
-export function WorkspaceSwitcher({ onOpenActivity }: Props) {
+export function WorkspaceSwitcher({ onOpenActivity, openRequest = 0 }: Props) {
   const [all, setAll] = useState<Workspace[]>([]);
   const [editing, setEditing] = useState<Workspace | "new" | null>(null);
   const [managing, setManaging] = useState(false);
   const [switching, setSwitching] = useState<Workspace | null>(null);
+  const [menuOpen, setMenuOpen] = useState(false);
+  // The list is read again each time the menu opens, from the top bar or the palette.
+  const [reads, setReads] = useState(0);
+  const [handled, setHandled] = useState(openRequest);
+  if (openRequest !== handled) {
+    setHandled(openRequest);
+    setMenuOpen(true);
+    setReads((n) => n + 1);
+  }
   const readOnly = useReadOnlyReason();
 
   const load = useCallback(async () => {
@@ -104,14 +116,20 @@ export function WorkspaceSwitcher({ onOpenActivity }: Props) {
     return () => {
       live = false;
     };
-  }, []);
+  }, [reads]);
 
   const shown = all.find((w) => w.current);
   const list = switchable(all);
 
   return (
     <>
-      <DropdownMenu onOpenChange={(open) => open && void load()}>
+      <DropdownMenu
+        open={menuOpen}
+        onOpenChange={(open) => {
+          setMenuOpen(open);
+          if (open) setReads((n) => n + 1);
+        }}
+      >
         <DropdownMenuTrigger asChild>
           <Button variant="ghost" size="sm" className="max-w-56 gap-2 px-2" aria-label="Workspace: switch or manage">
             {shown && <WorkspaceDot color={shown.color} />}

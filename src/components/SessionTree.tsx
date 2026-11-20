@@ -1,7 +1,8 @@
 // QL-26: starred sessions first: a Starred group at the top, and first in every group.
 // QL-04: the session tree on the left of the Terminal page. The same library as the Sessions page,
 // grouped by folder, tag or environment label (the core builds the tree), with a search box and the
-// recently opened sessions on top. Double-click (or Enter) opens a session in a new tab.
+// recently opened sessions on top (UX-22, 0.9.0: QL-26's recents, the sessions among them). Double-click (or Enter)
+// opens a session in a new tab.
 //
 // Reachability dots (MO-08 lite): the core checks the port of each session the tree shows, in the
 // background; collapsed groups are not checked, which keeps large libraries light. A setting turns it off.
@@ -51,8 +52,8 @@ import { RefreshButton } from "@/components/RefreshButton";
 import { RowMenu } from "@/components/RowMenu";
 import { Tip } from "@/components/Tip";
 import { appliedEnvironment, environmentText, type EnvironmentOfVm } from "@/lib/session-environment";
-import { isStarred, starredFirst } from "@/lib/stars";
-import { toggleStar, useStars } from "@/lib/stars-store";
+import { isStarred, recentSessions, starredFirst } from "@/lib/stars";
+import { toggleStar, useRecents, useStars } from "@/lib/stars-store";
 import { requestLink } from "@/lib/links";
 import { noteLink } from "@/lib/notes";
 import { jumpChain, routeText, viaText, type JumpLink } from "@/lib/tunnels";
@@ -78,6 +79,8 @@ const GROUPING_KEY = "remotely.terminal.treeGrouping";
 const OPEN_KEY = "remotely.terminal.treeOpen";
 /** Larger libraries start with their groups closed. */
 const OPEN_BY_DEFAULT_UP_TO = 40;
+/** UX-22: the Recent group's sessions at most. */
+const RECENT_IN_TREE = 8;
 
 const GROUPINGS: { value: TreeGrouping; label: string }[] = [
   { value: "folder", label: "Folder" },
@@ -136,9 +139,13 @@ export function SessionTree({
   const [grouping, setGrouping] = useState<TreeGrouping>(() => readJson(GROUPING_KEY, "folder"));
   const [text, setText] = useState("");
   const [tree, setTree] = useState<Tree | null>(null);
-  const [recent, setRecent] = useState<SessionRecord[]>([]);
-  /** SS-07: every session, for the names of jump hosts the search left out. */
-  const [links, setLinks] = useState<Map<string, JumpLink>>(new Map());
+  /** SS-07: every session, for the names of jump hosts the search left out; UX-22: and the recent ones. */
+  const [all, setAll] = useState<Map<string, SessionRecord>>(new Map());
+  const links: Map<string, JumpLink> = all;
+  // UX-22 (0.9.0): Recent is QL-26's one list (the sessions among the items opened last), as Ctrl+K's and the New
+  // terminal dialog's; a terminal opening notes its session there.
+  const recents = useRecents();
+  const recent = useMemo(() => recentSessions(recents, all, RECENT_IN_TREE), [recents, all]);
   const [open, setOpen] = useState<Record<string, boolean>>(() => readJson(OPEN_KEY, {}));
   const [reach, setReach] = useState<{ enabled: boolean; states: Map<string, Reachability> }>({
     enabled: false,
@@ -152,11 +159,10 @@ export function SessionTree({
     if (!active) return;
     const timer = window.setTimeout(
       () => {
-        Promise.all([api.sessionTree(grouping, { text }), api.recentSessions(8), api.sessions()]).then(
-          ([t, r, all]) => {
+        Promise.all([api.sessionTree(grouping, { text }), api.sessions()]).then(
+          ([t, sessions]) => {
             setTree(t);
-            setRecent(r);
-            setLinks(new Map(all.map((s) => [s.id, s])));
+            setAll(new Map(sessions.map((s) => [s.id, s])));
           },
           (err) => toast.error(errorMessage(err)),
         );

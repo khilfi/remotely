@@ -140,8 +140,8 @@ function ToolsCard({ tools, onOpenSettings }: { tools: ToolsReport | null; onOpe
         <Alert>
           <AlertDescription className="grid gap-2">
             <span className="flex items-center gap-1">
-              {/* UX-04: the first sentence here; the rest is the "?" (help.ts qemuImg). */}
-              {note.includes(". ") ? note.slice(0, note.indexOf(". ") + 1) : note}
+              {/* UX-22: one sentence here; the rest is the one "?" (help.ts qemuImg), as in Export and Import. */}
+              {note}
               <HelpTip topic="qemuImg" />
             </span>
             <span className="flex flex-wrap gap-2">

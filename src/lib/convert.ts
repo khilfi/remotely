@@ -171,11 +171,14 @@ export function qemuOnly(options: ConvertOptions | null): OutputKind[] {
   return options?.outputs.filter((o) => o.needsQemuImg).map((o) => o.kind) ?? [];
 }
 
-/** Which conversions need qemu-img, in words, when it isn't installed; null when it is. */
+/**
+ * Which conversions need qemu-img, in one sentence, when it isn't installed; null when it is. UX-22 (0.9.0): Disk
+ * images, the Export and the Import dialogs show this beside the one help key (help.ts `qemuImg`) that says the rest.
+ */
 export function qemuNote(tools: ToolsReport | null): string | null {
   if (!tools || tools.paths.qemuImg) return null;
   const formats = tools.qemuImgFormats.map((f) => FORMAT_LABEL[f]).join(" and ");
-  return `qemu-img isn't installed: converting to or from ${formats} needs it. Remotely never ships it (it is GPL-licensed); install QEMU for Windows from its own download page, and Remotely finds it.`;
+  return `qemu-img isn't installed: converting to or from ${formats} needs it.`;
 }
 
 /** A key for an export target (React keys, the picked one). */

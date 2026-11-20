@@ -14,7 +14,10 @@
 // collects from the SSH ones), QL-26 a star on each row, FD-06 a session's and a folder's note in their menus, and
 // QL-27 a delete's toast offers Undo (the item is in the trash). 0.9.0 BX-01, UX-16: the selection bar's "Run a
 // command on these…" opens the Terminal page's Compare hosts with the SSH and WinRM sessions picked. UX-19 (0.9.0): a
-// row's Monitor ▸ watches its metrics or adds a health check, beside its Toolbox ▸.
+// row's Monitor ▸ watches its metrics or adds a health check, beside its Toolbox ▸. UX-21, UX-22 (0.9.0): the "⋯" keeps
+// what concerns sessions (Import from another app, Move to another laptop ▸ Export and Import, the Ansible inventory,
+// the support bundle; the inventory to Excel is Activity's Reports ▸), each with the one label the palette has;
+// starred sessions come first, and Host details shows only for a kind whose host is read, as in the tree.
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
@@ -22,7 +25,6 @@ import { jumpChain, routeText } from "@/lib/tunnels";
 import {
   FileCodeIcon,
   FileLockIcon,
-  FileSpreadsheetIcon,
   FolderIcon,
   FolderOpenIcon,
   FolderPlusIcon,
@@ -106,7 +108,10 @@ import { reveal } from "@/lib/reveal";
 import { appliedEnvironment, environmentText, sourceText, vmsById } from "@/lib/session-environment";
 import { cn } from "@/lib/utils";
 import { openSessionWindow } from "@/lib/console-open";
-import { kindAddress, kindLabel, kindOf, opensWindow } from "@/lib/session-kinds";
+import { kindAddress, kindLabel, kindOf, opensWindow, readsGuest } from "@/lib/session-kinds";
+import { SESSION_EXPORT_LABELS } from "@/lib/reports";
+import { isStarred, starredFirst } from "@/lib/stars";
+import { useStars } from "@/lib/stars-store";
 import { usePresentation } from "@/components/Presentation";
 
 interface Props {
@@ -119,8 +124,6 @@ interface Props {
   onSupportBundle: (sessionIds: string[]) => void;
   /** BX-12: the Ansible inventory dialog, with these sessions picked (none: every SSH session). */
   onExportAnsible: (sessionIds: string[]) => void;
-  /** FD-05: the inventory to Excel. */
-  onExportInventory: () => void;
   /** BX-01, UX-16: "Run a command on these…": Compare hosts on the Terminal page with these picks. */
   onRunCommand?: (picks: TargetPicks) => void;
   /** True while the page is shown, so the lists are read again when the user comes back. */
@@ -168,7 +171,6 @@ export function SessionsPage({
   onConnect,
   onSupportBundle,
   onExportAnsible,
-  onExportInventory,
   onRunCommand,
   active,
   focus = null,
@@ -265,6 +267,9 @@ export function SessionsPage({
   }, [active, version]);
 
   const vmById = useMemo(() => vmsById(vms), [vms]);
+  // UX-22 (0.9.0): starred sessions first, as the tree and Ctrl+K show them; each part in the core's order.
+  const stars = useStars();
+  const listed = useMemo(() => starredFirst(shown, (s) => isStarred(stars, "session", s.id)), [shown, stars]);
   const secretLabel = useMemo(() => new Map(secrets.map((s) => [s.id, s.label])), [secrets]);
   const sessionName = useMemo(() => new Map(all.map((s) => [s.id, s.name])), [all]);
   const rows = flattenFolders(folders);
@@ -362,52 +367,53 @@ export function SessionsPage({
         }
         toolsClassName="w-72"
         tools={
+          // UX-21: what concerns sessions only; the reports (the inventory included) are Activity's Reports ▸.
           <>
             <DropdownMenuItem onSelect={() => setDialog({ kind: "import" })}>
               <ImportIcon />
               <span className="grid">
-                Import from another app…
+                {SESSION_EXPORT_LABELS.importApp}
                 <span className="text-xs text-muted-foreground">PuTTY, MobaXterm, OpenSSH or CSV</span>
               </span>
             </DropdownMenuItem>
-            <DropdownMenuItem onSelect={() => setDialog({ kind: "importExport" })}>
-              <LaptopIcon />
-              <span className="grid">
-                Import from another laptop…
-                <span className="text-xs text-muted-foreground">A file exported from Remotely</span>
-              </span>
-            </DropdownMenuItem>
-            <DropdownMenuSeparator />
-            <DropdownMenuItem disabled={all.length === 0} onSelect={() => setDialog({ kind: "export" })}>
-              <FileLockIcon />
-              <span>
-                Export to another laptop…
-                <ReasonLine reason={all.length === 0 ? "No sessions to export yet" : null} />
-              </span>
-            </DropdownMenuItem>
-            <DropdownMenuSeparator />
-            <DropdownMenuItem disabled={all.length === 0} onSelect={() => onSupportBundle([])}>
-              <PackageIcon />
-              <span className="grid">
-                Collect a support bundle…
-                <span className="text-xs text-muted-foreground">Logs and settings from hosts, in one zip</span>
-                <ReasonLine reason={all.length === 0 ? "No sessions to collect from yet" : null} />
-              </span>
-            </DropdownMenuItem>
+            <DropdownMenuSub>
+              <DropdownMenuSubTrigger>
+                <LaptopIcon />
+                {SESSION_EXPORT_LABELS.moveLaptop}
+              </DropdownMenuSubTrigger>
+              <DropdownMenuSubContent className="w-64">
+                <DropdownMenuItem disabled={all.length === 0} onSelect={() => setDialog({ kind: "export" })}>
+                  <FileLockIcon />
+                  <span className="grid">
+                    Export…
+                    <span className="text-xs text-muted-foreground">One encrypted file for the other laptop</span>
+                    <ReasonLine reason={all.length === 0 ? "No sessions to export yet" : null} />
+                  </span>
+                </DropdownMenuItem>
+                <DropdownMenuItem onSelect={() => setDialog({ kind: "importExport" })}>
+                  <ImportIcon />
+                  <span className="grid">
+                    Import…
+                    <span className="text-xs text-muted-foreground">A file exported from Remotely</span>
+                  </span>
+                </DropdownMenuItem>
+              </DropdownMenuSubContent>
+            </DropdownMenuSub>
             <DropdownMenuSeparator />
             <DropdownMenuItem disabled={all.length === 0} onSelect={() => onExportAnsible([])}>
               <FileCodeIcon />
               <span className="grid">
-                Export an Ansible inventory…
+                {SESSION_EXPORT_LABELS.ansible}
                 <span className="text-xs text-muted-foreground">Hosts and groups for playbooks, no secrets</span>
                 <ReasonLine reason={all.length === 0 ? "No sessions to export yet" : null} />
               </span>
             </DropdownMenuItem>
-            <DropdownMenuItem onSelect={onExportInventory}>
-              <FileSpreadsheetIcon />
+            <DropdownMenuItem disabled={all.length === 0} onSelect={() => onSupportBundle([])}>
+              <PackageIcon />
               <span className="grid">
-                Export the inventory to Excel…
-                <span className="text-xs text-muted-foreground">VMs, hosts, networks and checks</span>
+                {SESSION_EXPORT_LABELS.bundle}
+                <span className="text-xs text-muted-foreground">Logs and settings from hosts, in one zip</span>
+                <ReasonLine reason={all.length === 0 ? "No sessions to collect from yet" : null} />
               </span>
             </DropdownMenuItem>
           </>
@@ -444,7 +450,7 @@ export function SessionsPage({
                 onClick={() => onSupportBundle(selectedHosts.map((s) => s.id))}
               >
                 <PackageIcon data-icon="inline-start" />
-                Make a support bundle…
+                {SESSION_EXPORT_LABELS.bundle}
               </Button>
             </WhyDisabled>
             <WhyDisabled
@@ -457,7 +463,7 @@ export function SessionsPage({
                 onClick={() => onExportAnsible(selectedHosts.map((s) => s.id))}
               >
                 <FileCodeIcon data-icon="inline-start" />
-                Export Ansible inventory…
+                {SESSION_EXPORT_LABELS.ansible}
               </Button>
             </WhyDisabled>
           </SelectionBar>
@@ -632,7 +638,7 @@ export function SessionsPage({
                   </Button>
                   <Button variant="outline" onClick={() => setDialog({ kind: "import" })}>
                     <ImportIcon data-icon="inline-start" />
-                    Import from another app…
+                    {SESSION_EXPORT_LABELS.importApp}
                   </Button>
                 </>
               }
@@ -680,7 +686,7 @@ export function SessionsPage({
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {shown.map((s) => {
+                  {listed.map((s) => {
                     // UX-12: the environment that applies, and where it comes from.
                     const applied = appliedEnvironment(s, vmById);
                     const vm = s.vmId ? vmById.get(s.vmId) : undefined;
@@ -795,9 +801,12 @@ export function SessionsPage({
                               <DropdownMenuItem onSelect={() => setDialog({ kind: "editSession", session: s })}>
                                 Edit…
                               </DropdownMenuItem>
-                              <DropdownMenuItem onSelect={() => setHostDetails({ id: s.id, name: s.name })}>
-                                Host details…
-                              </DropdownMenuItem>
+                              {/* UX-22: only a kind whose host is read (SSH, WinRM), as the tree's row menu. */}
+                              {readsGuest(kindOf(s)) && (
+                                <DropdownMenuItem onSelect={() => setHostDetails({ id: s.id, name: s.name })}>
+                                  Host details…
+                                </DropdownMenuItem>
+                              )}
                               <DropdownMenuItem onSelect={() => requestLink(noteLink("session", s.id, s.name))}>
                                 Note…
                               </DropdownMenuItem>

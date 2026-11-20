@@ -34,15 +34,15 @@ use crate::terminal::editor::HOST_EDITORS_KEY;
 use crate::terminal::{TerminalSettings, TERMINAL_SETTINGS_KEY};
 use crate::toolbox::file_server::{FileServerSpec, LAST_KEY as FILE_SERVER_LAST_KEY};
 use crate::updates::{UPDATE_TOKEN_EXPIRES_KEY, UPDATE_TOKEN_KEY};
-use crate::vault::SecretId;
+use crate::vault::{SecretId, IDLE_LOCK_KEY};
 use crate::vm_settings::ADDED_VMS_KEY;
 use crate::workspaces::CURRENT_WORKSPACE_KEY;
 
 /// FD-02: this PC's settings, the same in every workspace: where the tools are (SS-12: the VNC viewer too) and which
 /// VMs the PC has, how many jobs it runs at once, update checks, how long the journal and the dashboard's history are
 /// kept, the terminal and presentation settings, the approval rules (one safety policy for the one user), the
-/// snapshot chain warnings, and which workspace was shown last.
-pub const MACHINE_KEYS: [&str; 23] = [
+/// snapshot chain warnings, the vault's idle lock, and which workspace was shown last.
+pub const MACHINE_KEYS: [&str; 24] = [
     store::POLICY_RULES_KEY,
     store::VMRUN_PATH_KEY,
     store::OVFTOOL_PATH_KEY,
@@ -66,6 +66,8 @@ pub const MACHINE_KEYS: [&str; 23] = [
     TERMINAL_SETTINGS_KEY,
     PRESENTATION_KEY,
     CHAIN_LIMITS_KEY,
+    // SS-04 (0.9.0): how long the vault stays unlocked without activity.
+    IDLE_LOCK_KEY,
     CURRENT_WORKSPACE_KEY,
 ];
 
@@ -189,6 +191,7 @@ pub async fn repair(store: &Store, ctx: &Context) -> Result<Vec<&'static str>> {
         &mut reset,
     )
     .await?;
+    check::<u64>(store, ctx, IDLE_LOCK_KEY, "when the vault locks itself", &mut reset).await?;
     reset.extend(repair_workspace(store, ctx).await?);
     Ok(reset)
 }

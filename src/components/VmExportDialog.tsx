@@ -18,6 +18,7 @@ import {
 } from "@/components/ui/dialog";
 import { Label } from "@/components/ui/label";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
+import { HelpTip } from "@/components/HelpTip";
 import { useReadOnlyReason } from "@/components/Presentation";
 import { ReasonLine, WhyDisabled } from "@/components/WhyDisabled";
 import { errorMessage, type SubmitOutcome } from "@/lib/api";
@@ -149,7 +150,11 @@ export function VmExportDialog({ vmKey, onSubmitted, onClose }: Props) {
             <Alert>
               <AlertTitle>Some targets need qemu-img</AlertTitle>
               <AlertDescription className="grid gap-2">
-                <span>{note}</span>
+                {/* UX-22: the one help key says why it isn't shipped and how Remotely finds it. */}
+                <span className="flex items-center gap-1">
+                  {note}
+                  <HelpTip topic="qemuImg" />
+                </span>
                 <Button
                   variant="outline"
                   size="sm"

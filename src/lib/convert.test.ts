@@ -92,7 +92,7 @@ test("without qemu-img the page says which formats need it", () => {
     qemuImgFormats: ["qcow2", "vhdx"] as ("qcow2" | "vhdx")[],
     downloadPage: "https://www.qemu.org/download/#windows",
   };
-  assert.match(qemuNote(tools) ?? "", /qcow2 and VHDX needs it/);
+  assert.equal(qemuNote(tools), "qemu-img isn't installed: converting to or from qcow2 and VHDX needs it.");
   assert.equal(qemuNote({ ...tools, paths: { ...tools.paths, qemuImg: "q" } }), null);
 });
 

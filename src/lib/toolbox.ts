@@ -13,7 +13,9 @@ import type {
   TraceHop,
 } from "./toolbox-api.ts";
 
-export type ToolboxTool = "ping" | "trace" | "dns" | "ports" | "certificate" | "subnet" | "wake" | "fileServer";
+/** UX-22 (0.9.0): "disks" is Disk images (Inspect, Convert, Verify), the Templates page's tab until 0.9.0. */
+export type ToolboxTool =
+  "ping" | "trace" | "dns" | "ports" | "certificate" | "subnet" | "wake" | "fileServer" | "disks";
 
 /** The tabs, in order. */
 export const TOOLBOX_TOOLS: readonly { id: ToolboxTool; label: string }[] = [
@@ -25,6 +27,7 @@ export const TOOLBOX_TOOLS: readonly { id: ToolboxTool; label: string }[] = [
   { id: "subnet", label: "Subnet calculator" },
   { id: "wake", label: "Wake up" },
   { id: "fileServer", label: "File server" },
+  { id: "disks", label: "Disk images" },
 ];
 
 export function isToolboxTool(value: unknown): value is ToolboxTool {

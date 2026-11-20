@@ -7,7 +7,50 @@ use crate::domain::{now_rfc3339, Context};
 use crate::error::Result;
 use crate::stars::{Recent, RecentKind, Star, StarKind, MAX_RECENTS};
 
+/// UX-20 (0.9.0): the kind 0.8.x kept command stars under (`favourite:<id>`, `library:<id>`). Nothing makes one now;
+/// [`crate::snippets::Snippets::move_command_stars`] moves those left into the favourites once and deletes them.
+const COMMAND_STAR_KIND: &str = "command";
+
 impl Store {
+    /// UX-20: the workspace's command stars left from 0.8.x, by key, oldest first.
+    pub(crate) async fn command_stars(&self, ctx: &Context) -> Result<Vec<String>> {
+        Ok(sqlx::query_scalar(
+            "SELECT item_key FROM stars WHERE workspace_id = ? AND kind = ? ORDER BY created_at, rowid",
+        )
+        .bind(ctx.workspace_id.to_string())
+        .bind(COMMAND_STAR_KIND)
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
+    /// UX-20: deletes one command star, once it is in the favourites.
+    pub(crate) async fn delete_command_star(&self, ctx: &Context, key: &str) -> Result<()> {
+        sqlx::query("DELETE FROM stars WHERE workspace_id = ? AND kind = ? AND item_key = ?")
+            .bind(ctx.workspace_id.to_string())
+            .bind(COMMAND_STAR_KIND)
+            .bind(key)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    /// UX-20 (tests): a command star as 0.8.x wrote one.
+    #[cfg(test)]
+    pub(crate) async fn insert_command_star(&self, ctx: &Context, key: &str) -> Result<()> {
+        sqlx::query(
+            "INSERT INTO stars (workspace_id, user_id, kind, item_key, created_at) VALUES (?, ?, ?, ?, ?)
+             ON CONFLICT(workspace_id, kind, item_key) DO NOTHING",
+        )
+        .bind(ctx.workspace_id.to_string())
+        .bind(ctx.user_id.to_string())
+        .bind(COMMAND_STAR_KIND)
+        .bind(key)
+        .bind(now_rfc3339())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     /// The workspace's stars, oldest first.
     pub(crate) async fn list_stars(&self, ctx: &Context) -> Result<Vec<Star>> {
         let rows =

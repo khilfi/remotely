@@ -31,6 +31,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { DeployProgressView, useDeployProgress } from "@/components/DeployDialog";
 import { DeployPreviewView } from "@/components/DeployPreviewView";
 import { CapacityPlanView } from "@/components/CapacityPlanView";
+import { HelpTip } from "@/components/HelpTip";
 import { useReadOnlyReason } from "@/components/Presentation";
 import { RowMenu } from "@/components/RowMenu";
 import { WhyDisabled } from "@/components/WhyDisabled";
@@ -644,7 +645,11 @@ export function VmImportDialog({ initialPath, onSubmitted, onClose }: Props) {
               <Alert>
                 <AlertTitle>This needs qemu-img</AlertTitle>
                 <AlertDescription className="grid gap-2">
-                  <span>{note}</span>
+                  {/* UX-22: the one help key says why it isn't shipped and how Remotely finds it. */}
+                  <span className="flex items-center gap-1">
+                    {note}
+                    <HelpTip topic="qemuImg" />
+                  </span>
                   <Button
                     variant="outline"
                     size="sm"

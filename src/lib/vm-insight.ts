@@ -1,7 +1,8 @@
 // R4 as pure functions (tested in vm-insight.test.ts): VM-25 following a log and searching it, grouping the timeline;
 // VM-11 the port forward form, its checks (the core's, in crates/core/src/host_networks/ops.rs, checked again there)
-// and the command it becomes, and the host networks as the topology map and search show them; VM-16, VM-14 the waste
-// finder's reasons and sums. QL-08: every reason says why an action is off; `null` means it is available.
+// and the command it becomes, and the host networks as the topology map and search show them; VM-16, VM-14 (UX-22: its
+// defaults from the Schedules page's chain limits) the waste finder's reasons and sums. QL-08: every reason says why
+// an action is off; `null` means it is available.
 
 import type { Command, PowerState, TargetRef } from "./api.ts";
 import type { HostNetwork } from "./topology.ts";
@@ -21,6 +22,7 @@ import type {
   WasteReport,
   WasteVm,
 } from "./vm-insight-api.ts";
+import type { ChainLimits } from "./schedules-api.ts";
 
 // ---- VM-25: the Log tab ----
 
@@ -427,6 +429,24 @@ export const WASTE_DEFAULTS: WasteOptions = { idleDays: 3, chainDepth: 5, chainG
 export const IDLE_DAY_CHOICES = [1, 3, 7, 14];
 export const CHAIN_DEPTH_CHOICES = [3, 5, 10];
 export const CHAIN_GB_CHOICES = [10, 20, 50, 100];
+
+/**
+ * UX-22 (0.9.0): one set of chain limits. The finder starts from the Schedules page's (`schedule_chain_limits`): a
+ * chain deeper than its depth (so from one more) or larger than its size; idle days stay the finder's own.
+ */
+export function wasteDefaults(limits: Pick<ChainLimits, "maxDepth" | "maxSizeGb"> | null): WasteOptions {
+  if (!limits) return WASTE_DEFAULTS;
+  return {
+    idleDays: WASTE_DEFAULTS.idleDays,
+    chainDepth: Math.min(100, Math.max(2, limits.maxDepth + 1)),
+    chainGb: Math.min(10_000, Math.max(1, limits.maxSizeGb)),
+  };
+}
+
+/** The choices with `value` among them, in order (a default from the limits that isn't one of the usual). */
+export function choicesWith(choices: readonly number[], value: number): number[] {
+  return [...new Set([...choices, value])].sort((a, b) => a - b);
+}
 
 /** QL-08: why a waste row's VM can't be suspended. */
 export function suspendReason(vm: WasteVm, readOnly: string | null): string | null {

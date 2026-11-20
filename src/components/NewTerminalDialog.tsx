@@ -1,6 +1,7 @@
 // QL-02 "New terminal": a quick connection typed in a form (host, port, user, how to log in: a vault item
 // or a typed password, or the SSH agent), optionally saved as a session in a folder with a label. Beside
-// it, the recently opened sessions and the history of quick connections that were not saved.
+// it, the recently opened sessions (UX-22, 0.9.0: QL-26's recents) and the history of quick connections that were not
+// saved.
 //
 // A typed password goes to the core with the request and is cleared from the form at once: it never
 // stays in the UI state, and the core uses it for that terminal's logins only, never saving it.
@@ -38,6 +39,8 @@ import {
 } from "@/lib/api";
 import { flattenFolders, folderPath } from "@/lib/folders";
 import { formatWhen } from "@/lib/format";
+import { recentSessions } from "@/lib/stars";
+import { useRecents } from "@/lib/stars-store";
 import { sessionAddress } from "@/lib/terminal-session";
 
 /** Radix Select can't hold an empty value. */
@@ -96,16 +99,19 @@ export function NewTerminalDialog({ open, onOpenChange, onConnect, onOpenSession
   const [error, setError] = useState<string | null>(null);
   const [secrets, setSecrets] = useState<SecretMeta[]>([]);
   const [folders, setFolders] = useState<SessionFolder[]>([]);
-  const [recent, setRecent] = useState<SessionRecord[]>([]);
+  const [sessions, setSessions] = useState<Map<string, SessionRecord>>(new Map());
   const [history, setHistory] = useState<QuickConnectEntry[]>([]);
+  // UX-22 (0.9.0): Recent sessions are QL-26's one list, as the tree's and Ctrl+K's.
+  const recents = useRecents();
+  const recent = useMemo(() => recentSessions(recents, sessions), [recents, sessions]);
 
   useEffect(() => {
     if (!open) return;
-    Promise.all([api.secrets(), api.sessionFolders(), api.recentSessions(20), api.quickConnectHistory()]).then(
-      ([s, f, r, h]) => {
+    Promise.all([api.secrets(), api.sessionFolders(), api.sessions(), api.quickConnectHistory()]).then(
+      ([s, f, all, h]) => {
         setSecrets(s);
         setFolders(f);
-        setRecent(r);
+        setSessions(new Map(all.map((x) => [x.id, x])));
         setHistory(h);
       },
       (err) => setError(errorMessage(err)),

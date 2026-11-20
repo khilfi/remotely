@@ -32,6 +32,7 @@ import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useStat
 import { toast } from "sonner";
 import {
   CalendarClockIcon,
+  ChevronsUpDownIcon,
   CameraIcon,
   FilePlusIcon,
   DownloadIcon,
@@ -137,12 +138,14 @@ import { ShortcutSheet } from "@/components/ShortcutSheet";
 import { StatusBar } from "@/components/StatusBar";
 import { useDensity } from "@/lib/density";
 import { firstRunDismissed, onFirstRunRequest, requestFirstRun, shouldOfferFirstRun } from "@/lib/first-run";
-import { onLinkRequest, type AppLink } from "@/lib/links";
+import { onLinkRequest, requestLink, type AppLink } from "@/lib/links";
+import { settingsSection } from "@/lib/settings-index";
 import { fromSkipped, fromUpdate } from "@/lib/notifications";
 import { notify } from "@/lib/notifications-store";
 import { opensShortcutSheet, pageShortcuts } from "@/lib/shortcuts";
 import { reportVault } from "@/lib/status-bar";
-import { daysFromActivity } from "@/lib/reports";
+import { exportAuditLog } from "@/lib/audit-export";
+import { daysFromActivity, reportPaletteLabel, SESSION_EXPORT_LABELS } from "@/lib/reports";
 import type { DateRange } from "@/lib/activity";
 import {
   api,
@@ -214,6 +217,7 @@ const TOOLBOX_KEYWORDS: Record<ToolboxTool, string> = {
   subnet: "subnet cidr calculator mask netmask broadcast ipv4 ipv6 split",
   wake: "wake on lan wol magic packet power on mac",
   fileServer: "file server tftp http share serve firmware config upload transfer",
+  disks: "disk images image tools inspect convert verify vmdk vdi vhd vhdx qcow2 raw qemu-img checksum sha256",
 };
 
 /** Each page's sidebar icon; the pages themselves, in order, are lib/navigation.ts's PAGES. */
@@ -306,6 +310,7 @@ export default function App() {
   // UX-08: the tabs of the pages that took in another (the Map, Known hosts).
   const [dashboardTab, setDashboardTab] = useState<DashboardTab>("metrics");
   const [vaultTab, setVaultTab] = useState<VaultTab>("secrets");
+  const [vaultFocus, setVaultFocus] = useState<{ card: "unlocking"; n: number } | null>(null);
   // VM-19 to VM-21: a tab of the Templates page, or a new item there, asked for from the palette.
   const [templatesRequest, setTemplatesRequest] = useState<{
     tab: TemplatesTab;
@@ -379,6 +384,8 @@ export default function App() {
   }, []);
   // QL-18: Search all terminals, opened from the palette.
   const [terminalSearch, setTerminalSearch] = useState(0);
+  // UX-22: the palette's Switch workspace… opens the top bar's switcher.
+  const [workspaceMenu, setWorkspaceMenu] = useState(0);
   // SS-10: MultiExec lines are jobs too; their terminals show what happened, so they get no toasts.
   const quietJobs = useRef(new Set<string>());
   // SS-04: the vault's status for the sidebar, the pages and the approval dialog (AP-06).
@@ -463,6 +470,9 @@ export default function App() {
       }
       if (target.page === "templates" && tab)
         setTemplatesRequest((prev) => ({ tab: tab as TemplatesTab, n: (prev?.n ?? 0) + 1 }));
+      // UX-22: Disk images (MOVED_PAGES.images, Ctrl+;) is a Toolbox tab.
+      if (target.page === "toolbox" && tab)
+        setToolboxRequest((prev) => ({ tool: tab as ToolboxTool, n: (prev?.n ?? 0) + 1 }));
       if (target.page === "dashboard" && tab) setDashboardTab(tab as DashboardTab);
       if (target.page === "vault" && tab) setVaultTab(tab as VaultTab);
       setPage(target.page);
@@ -774,10 +784,17 @@ export default function App() {
           setTemplatesRequest((prev) => ({ tab: link.tab, id: link.id, n: (prev?.n ?? 0) + 1 }));
           setPage("templates");
           break;
-        case "setting":
+        case "setting": {
+          // UX-22: a section whose home is elsewhere (the Vault page's Unlocking card) opens there.
+          const section = settingsSection(link.section);
+          if (section?.elsewhere) {
+            requestLink(section.elsewhere);
+            break;
+          }
           setSettingsFocus((prev) => ({ section: link.section, n: (prev?.n ?? 0) + 1 }));
           setPage("settings");
           break;
+        }
         case "snippet":
           setSnippetRequest((prev) => ({ command: link.command, n: (prev?.n ?? 0) + 1 }));
           setPage("terminal");
@@ -809,6 +826,8 @@ export default function App() {
           }
           break;
         case "vault":
+          // UX-22: the Unlocking card, lit.
+          if (link.card === "unlocking") setVaultFocus((prev) => ({ card: "unlocking", n: (prev?.n ?? 0) + 1 }));
           go({ page: "vault", tab: "secrets" });
           break;
         case "map":
@@ -962,13 +981,6 @@ export default function App() {
       run: () => openImport(),
     },
     {
-      id: "image-tools",
-      label: "Disk images: inspect, convert or verify a disk file",
-      icon: HardDriveIcon,
-      keywords: "image tools convert vmdk vdi vhd vhdx qcow2 raw qemu-img checksum sha256 disk",
-      run: () => go(navTarget("images")),
-    },
-    {
       id: "new-template",
       label: "New launch template…",
       icon: LayersIcon,
@@ -1018,6 +1030,36 @@ export default function App() {
         setTemplatesRequest((prev) => ({ tab: "stacks", create: true, n: (prev?.n ?? 0) + 1 }));
         setPage("templates");
       },
+    },
+    {
+      // UX-22 (0.9.0): VM-28's New install config, the Templates page's header button, here too.
+      id: "new-install-config",
+      label: "New install config…",
+      icon: FileCodeIcon,
+      keywords: "install config autoinstall kickstart preseed cloud-init unattend unattended answer file create",
+      run: () => {
+        setTemplatesRequest((prev) => ({ tab: "installConfigs", create: true, n: (prev?.n ?? 0) + 1 }));
+        setPage("templates");
+      },
+    },
+    {
+      // UX-22: VM-32's New address pool.
+      id: "new-address-pool",
+      label: "New address pool…",
+      icon: NetworkIcon,
+      keywords: "address pool static ip range gateway dns deploy network create",
+      run: () => {
+        setTemplatesRequest((prev) => ({ tab: "addressPools", create: true, n: (prev?.n ?? 0) + 1 }));
+        setPage("templates");
+      },
+    },
+    {
+      // UX-22: FD-02's switcher in the top bar, opened.
+      id: "switch-workspace",
+      label: "Switch workspace…",
+      icon: ChevronsUpDownIcon,
+      keywords: "workspace customer engagement switch change open manage new",
+      run: () => setWorkspaceMenu((n) => n + 1),
     },
     {
       // VM-14, VM-27.
@@ -1078,26 +1120,19 @@ export default function App() {
       keywords: "multiexec group saved sessions type in all tabs open select",
       run: () => openLink({ kind: "group" }),
     },
+    // UX-21 (0.9.0): each with the label it has on its page's menu; the reports under Activity's Reports ▸.
     {
       // FD-04.
       id: "support-bundle",
-      label: "Collect a support bundle from hosts…",
+      label: SESSION_EXPORT_LABELS.bundle,
       icon: PackageIcon,
       keywords: "logs diagnostics zip collect journal dmesg syslog files sosreport many hosts",
       run: () => openSupportBundle([]),
     },
     {
-      // FD-05.
-      id: "export-inventory",
-      label: "Export the inventory to Excel…",
-      icon: FileSpreadsheetIcon,
-      keywords: "xlsx spreadsheet workbook report vms hosts packages networks checks csv",
-      run: openInventory,
-    },
-    {
       // BX-12.
       id: "export-ansible",
-      label: "Export an Ansible inventory…",
+      label: SESSION_EXPORT_LABELS.ansible,
       icon: FileCodeIcon,
       keywords: "ansible inventory yaml ini playbook hosts groups proxyjump",
       run: () => openAnsible([]),
@@ -1105,10 +1140,26 @@ export default function App() {
     {
       // FD-08.
       id: "handover-pack",
-      label: "Make a handover pack…",
+      label: reportPaletteLabel("handover"),
       icon: PackageCheckIcon,
       keywords: "handover report customer end of engagement pdf print summary what was done zip",
       run: () => openHandover("30d"),
+    },
+    {
+      // FD-05.
+      id: "export-inventory",
+      label: reportPaletteLabel("inventory"),
+      icon: FileSpreadsheetIcon,
+      keywords: "export excel xlsx spreadsheet workbook report vms hosts packages networks checks csv",
+      run: openInventory,
+    },
+    {
+      // AP-05.
+      id: "audit",
+      label: reportPaletteLabel("audit"),
+      icon: HistoryIcon,
+      keywords: "export audit log csv download report",
+      run: () => void exportAuditLog(),
     },
     {
       id: "multiexec",
@@ -1241,20 +1292,6 @@ export default function App() {
         }
       },
     },
-    {
-      id: "audit",
-      label: "Export the audit log…",
-      icon: HistoryIcon,
-      keywords: "csv download",
-      run: async () => {
-        try {
-          const report = await api.exportAudit();
-          if (report) toast.success(`Exported the audit log (${report.entries} entries)`);
-        } catch (err) {
-          toast.error(errorMessage(err));
-        }
-      },
-    },
   ];
 
   // UX-01: the pages share one scroll area, so a page opens at its top, its header in view, not where the last one was.
@@ -1342,7 +1379,7 @@ export default function App() {
             <SidebarTrigger className="-ml-1" />
             <Separator orientation="vertical" className="mr-1 data-[orientation=vertical]:h-4" />
             {/* FD-02: one workspace per engagement, switched here. */}
-            <WorkspaceSwitcher onOpenActivity={openActivity} />
+            <WorkspaceSwitcher onOpenActivity={openActivity} openRequest={workspaceMenu} />
             <Button
               variant="outline"
               size="sm"
@@ -1405,8 +1442,6 @@ export default function App() {
                   request={templatesRequest}
                   onDeploy={openDeploy}
                   onSubmitted={submitted}
-                  onImport={openImport}
-                  onOpenSettings={show.settings}
                   refreshKey={vmJobs + inventoryVersion}
                 />
               </ErrorBoundary>
@@ -1453,7 +1488,13 @@ export default function App() {
             </section>
             <section hidden={page !== "toolbox"}>
               <ErrorBoundary name="Toolbox">
-                <Toolbox active={page === "toolbox"} request={toolboxRequest} onSubmitted={submitted} />
+                <Toolbox
+                  active={page === "toolbox"}
+                  request={toolboxRequest}
+                  onSubmitted={submitted}
+                  onImport={openImport}
+                  onOpenSettings={show.settings}
+                />
               </ErrorBoundary>
             </section>
             <section hidden={page !== "files"} className="h-full">
@@ -1477,7 +1518,6 @@ export default function App() {
                   onConnect={openTerminal}
                   onSupportBundle={openSupportBundle}
                   onExportAnsible={openAnsible}
-                  onExportInventory={openInventory}
                   onRunCommand={runCommandOn}
                   active={page === "sessions"}
                   focus={sessionsFocus}
@@ -1516,6 +1556,7 @@ export default function App() {
                   onTabChange={setVaultTab}
                   onSubmitted={submitted}
                   onOpenSessions={show.sessions}
+                  focus={vaultFocus}
                 />
               </ErrorBoundary>
             </section>
@@ -1526,6 +1567,7 @@ export default function App() {
                   active={page === "activity"}
                   focusJob={jobFocus}
                   onHandover={openHandover}
+                  onInventory={openInventory}
                 />
               </ErrorBoundary>
             </section>

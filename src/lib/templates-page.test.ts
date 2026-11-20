@@ -5,10 +5,10 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { newStackReason, newTemplateReason, openingTab, TEMPLATE_TABS } from "./templates-page.ts";
 
-test("the tabs follow a first deploy's steps, Disk images last", () => {
+test("the tabs follow a first deploy's steps (UX-22: Disk images is a Toolbox tab now)", () => {
   assert.deepEqual(
     TEMPLATE_TABS.map((t) => t.label),
-    ["Images", "Sizes", "Install configs", "Address pools", "Launch templates", "Stacks", "Disk images"],
+    ["Images", "Sizes", "Install configs", "Address pools", "Launch templates", "Stacks"],
   );
 });
 

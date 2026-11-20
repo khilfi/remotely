@@ -3898,6 +3898,8 @@ pub struct FakeVault {
     password: String,
     items: Mutex<HashMap<SecretId, (crate::domain::WorkspaceId, SecretMeta, SecretString)>>,
     status: watch::Sender<VaultStatus>,
+    /// SS-04: the idle lock set ([`Vault::set_idle_timeout`]); it never locks.
+    idle_secs: std::sync::atomic::AtomicU64,
 }
 
 impl FakeVault {
@@ -3906,6 +3908,7 @@ impl FakeVault {
             password: password.to_owned(),
             items: Mutex::default(),
             status: watch::channel(VaultStatus::Unlocked).0,
+            idle_secs: std::sync::atomic::AtomicU64::new(crate::vault::IDLE_TIMEOUT.as_secs()),
         }
     }
 }
@@ -3913,13 +3916,19 @@ impl FakeVault {
 #[async_trait]
 impl Vault for FakeVault {
     fn info(&self) -> VaultInfo {
+        let idle = self.idle_secs.load(std::sync::atomic::Ordering::SeqCst);
         VaultInfo {
             status: VaultStatus::Unlocked,
             windows_login: false,
             windows_login_available: false,
-            idle_lock_minutes: 15,
-            locks_in_secs: Some(15 * 60),
+            idle_lock_minutes: idle.div_ceil(60),
+            locks_in_secs: Some(idle),
         }
+    }
+
+    fn set_idle_timeout(&self, timeout: std::time::Duration) {
+        self.idle_secs
+            .store(timeout.as_secs(), std::sync::atomic::Ordering::SeqCst);
     }
 
     fn watch(&self) -> watch::Receiver<VaultStatus> {

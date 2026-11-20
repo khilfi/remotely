@@ -5,7 +5,8 @@
 //
 // Each row's action is the usual one through the bus and its approvals: Suspend, Delete VM (R3, Critical), the VM's
 // Snapshots tab to delete some, and Open folder (Explorer, at a folder the core names). The report itself changes
-// nothing, is not audited, and the read-only lock doesn't stop it. QL-08: disabled actions say why.
+// nothing, is not audited, and the read-only lock doesn't stop it. QL-08: disabled actions say why. UX-22 (0.9.0): its chain
+// options start from the Schedules page's chain limits (past them, as its warnings), one set of limits for both.
 
 import { useEffect, useState, type ReactNode } from "react";
 import {
@@ -34,11 +35,14 @@ import { formatWhen, plural } from "@/lib/format";
 import { formatBytes } from "@/lib/retention";
 import type { VmView } from "@/lib/vm-snapshots";
 import { insightApi, type WasteOptions, type WasteReport, type WasteVm } from "@/lib/vm-insight-api";
+import { schedulesApi } from "@/lib/schedules-api";
 import {
   CHAIN_DEPTH_CHOICES,
   CHAIN_GB_CHOICES,
   IDLE_DAY_CHOICES,
   WASTE_DEFAULTS,
+  choicesWith,
+  wasteDefaults,
   deleteVmReason,
   orphanKindLabel,
   suspendReason,
@@ -70,15 +74,35 @@ export function WasteFinderSheet({ open, onClose, ...rest }: Props) {
 
 function WasteBody({ readOnly, onSubmitted, onOpenVm }: Omit<Props, "open" | "onClose">) {
   const [options, setOptions] = useState<WasteOptions>(WASTE_DEFAULTS);
-  // The options apply when Find is pressed; `n` counts the runs.
-  const [asked, setAsked] = useState<{ n: number; options: WasteOptions }>({ n: 0, options: WASTE_DEFAULTS });
+  // The options apply when Find is pressed; `n` counts the runs. UX-22: the first run waits for the Schedules page's
+  // chain limits, its defaults (one set of limits; the built-in ones when they can't be read).
+  const [asked, setAsked] = useState<{ n: number; options: WasteOptions } | null>(null);
   const [result, setResult] = useState<{ for: number; report?: WasteReport; error?: string } | null>(null);
   const [busy, setBusy] = useState(false);
-  const loading = result?.for !== asked.n;
+  const loading = asked === null || result?.for !== asked.n;
   const report = result?.report ?? null;
   const error = result?.error ?? null;
 
   useEffect(() => {
+    let stale = false;
+    schedulesApi
+      .chainLimits()
+      .then(
+        (limits) => wasteDefaults(limits),
+        () => wasteDefaults(null),
+      )
+      .then((defaults) => {
+        if (stale) return;
+        setOptions(defaults);
+        setAsked({ n: 0, options: defaults });
+      });
+    return () => {
+      stale = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (asked === null) return;
     let stale = false;
     insightApi.wasteReport(asked.options).then(
       (found) => !stale && setResult({ for: asked.n, report: found }),
@@ -135,7 +159,7 @@ function WasteBody({ readOnly, onSubmitted, onOpenVm }: Omit<Props, "open" | "on
           id="waste-depth"
           label="Chains from"
           value={options.chainDepth}
-          choices={CHAIN_DEPTH_CHOICES}
+          choices={choicesWith(CHAIN_DEPTH_CHOICES, options.chainDepth)}
           text={(n) => `${n} deep`}
           onChange={(chainDepth) => setOptions((o) => ({ ...o, chainDepth }))}
         />
@@ -143,11 +167,11 @@ function WasteBody({ readOnly, onSubmitted, onOpenVm }: Omit<Props, "open" | "on
           id="waste-gb"
           label="or"
           value={options.chainGb}
-          choices={CHAIN_GB_CHOICES}
+          choices={choicesWith(CHAIN_GB_CHOICES, options.chainGb)}
           text={(n) => `${n} GB`}
           onChange={(chainGb) => setOptions((o) => ({ ...o, chainGb }))}
         />
-        <Button variant="outline" disabled={loading} onClick={() => setAsked((a) => ({ n: a.n + 1, options }))}>
+        <Button variant="outline" disabled={loading} onClick={() => setAsked((a) => ({ n: (a?.n ?? 0) + 1, options }))}>
           <RefreshCwIcon data-icon="inline-start" className={loading ? "animate-spin" : undefined} />
           Find waste
         </Button>

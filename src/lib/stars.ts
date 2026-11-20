@@ -1,6 +1,8 @@
-// QL-26 stars and recents in the window, as pure functions (tested in stars.test.ts). A star marks a session, a VM or a
-// command so it comes first in the session tree, the VMs list and Ctrl+K; the window calls them "starred" (BX-08's
-// saved commands are its "favourites"). Recents are the 20 sessions, VMs and pages opened last, newest first.
+// QL-26 stars and recents in the window, as pure functions (tested in stars.test.ts). A star marks a session or a VM so
+// it comes first in the session tree, the Sessions page, the VMs list and Ctrl+K; the window calls them "starred".
+// UX-20 (0.9.0): commands have no stars: BX-08's favourites keep them (a library row's "Add to favourites"). Recents are
+// the 20 sessions, VMs and pages opened last, newest first; UX-22: the session tree's Recent group and the New
+// terminal dialog read the sessions among them.
 
 import type { Recent, RecentKind, Star, StarKind } from "./comfort-api.ts";
 import type { SearchItem } from "./search.ts";
@@ -9,12 +11,11 @@ import type { SearchItem } from "./search.ts";
 export interface StarSets {
   session: Set<string>;
   vm: Set<string>;
-  command: Set<string>;
 }
 
 export function starSets(stars: readonly Star[]): StarSets {
-  const sets: StarSets = { session: new Set(), vm: new Set(), command: new Set() };
-  for (const s of stars) sets[s.kind].add(starKey(s.kind, s.key));
+  const sets: StarSets = { session: new Set(), vm: new Set() };
+  for (const s of stars) sets[s.kind]?.add(starKey(s.kind, s.key));
   return sets;
 }
 
@@ -25,11 +26,6 @@ export function starKey(kind: StarKind, key: string): string {
 
 export function isStarred(sets: StarSets, kind: StarKind, key: string): boolean {
   return sets[kind].has(starKey(kind, key));
-}
-
-/** A saved command's key (`favourite:<id>`), and a built-in one's (`library:<id>`), as search ids use them. */
-export function commandStarKey(source: "favourite" | "library", id: string): string {
-  return `${source}:${id}`;
 }
 
 /** Starred items first, each part in the order given. */
@@ -45,6 +41,17 @@ export function recentOf(recents: readonly Recent[], kinds: readonly RecentKind[
   return recents.filter((r) => kinds.includes(r.kind)).slice(0, limit);
 }
 
+/**
+ * UX-22: the sessions opened last (QL-26's recents), newest first, at most `limit`, as the records `byId` has: one
+ * deleted since is left out.
+ */
+export function recentSessions<T>(recents: readonly Recent[], byId: ReadonlyMap<string, T>, limit = 20): T[] {
+  return recentOf(recents, ["session"])
+    .map((r) => byId.get(r.key))
+    .filter((s): s is T => s !== undefined)
+    .slice(0, limit);
+}
+
 /** What the star button says. */
 export function starLabel(starred: boolean, name: string): string {
   return starred ? `Unstar ${name}` : `Star ${name}`;
@@ -54,16 +61,14 @@ export function starLabel(starred: boolean, name: string): string {
  * better one (search.ts caps an item's boost). */
 export const STAR_BOOST = 4;
 
-/** Search items with a boost for the starred ones (`vm:<key>`, `session:<id>`, `favourite:<id>`, `library:<id>`). */
+/** Search items with a boost for the starred ones (`vm:<key>`, `session:<id>`). */
 export function boostStarred(items: readonly SearchItem[], sets: StarSets): SearchItem[] {
   return items.map((item) => {
     const colon = item.id.indexOf(":");
     const prefix = item.id.slice(0, colon);
     const rest = item.id.slice(colon + 1);
     const starred =
-      (prefix === "vm" && isStarred(sets, "vm", rest)) ||
-      (prefix === "session" && isStarred(sets, "session", rest)) ||
-      ((prefix === "favourite" || prefix === "library") && isStarred(sets, "command", item.id));
+      (prefix === "vm" && isStarred(sets, "vm", rest)) || (prefix === "session" && isStarred(sets, "session", rest));
     return starred ? { ...item, boost: (item.boost ?? 0) + STAR_BOOST } : item;
   });
 }

@@ -69,7 +69,8 @@ export function vaultText(info: VaultInfo | null, secsLeft: number | null): Stat
         return { label: "Vault unlocked", title: "The vault is unlocked. Open the Vault page.", tone: "good" };
       return {
         label: `Vault locks in ${formatCountdown(secsLeft)}`,
-        title: `Locks after ${minutes} minutes without typing or clicking in Remotely. Open the Vault page.`,
+        // SS-04 (0.9.0): this PC's setting, 1 to 60 minutes.
+        title: `Locks after ${minutes === 1 ? "1 minute" : `${minutes} minutes`} without typing or clicking in Remotely. Open the Vault page.`,
         tone: secsLeft <= LOCK_WARNING_SECS ? "warning" : "good",
       };
     }

@@ -4,9 +4,10 @@
 // with everything a deploy needs, each saying why it can't deploy when it can't). VM-21: Deploy on a template's row
 // opens the Deploy dialog on it.
 //
-// UX-07 (0.6.0): the tabs follow a first deploy's steps (Images, Sizes, Launch templates, Stacks, then Disk images),
-// the page opens on the first step that isn't done, each tab's one primary action is in the header, and every empty
-// tab offers the action that fills it.
+// UX-07 (0.6.0): the tabs follow a first deploy's steps (Images, Sizes, Install configs, Address pools, Launch
+// templates, Stacks; lib/templates-page.ts TEMPLATE_TABS), the page opens on the first step that isn't done, each tab's
+// one primary action is in the header, and every empty tab offers the action that fills it. UX-22 (0.9.0): Disk images
+// left for a Toolbox tab (Ctrl+; and its old id follow it).
 //
 // Edits are the app's own data: audited in the core with no approval tier, and refused by the read-only lock (FD-03).
 // P6: the page reads nothing while it is hidden.
@@ -26,7 +27,6 @@ import {
   ExternalLinkIcon,
   FileBoxIcon,
   FileCodeIcon,
-  FileCogIcon,
   HammerIcon,
   HardDriveIcon,
   HistoryIcon,
@@ -63,7 +63,6 @@ import { SizeDialog } from "@/components/SizeDialog";
 import { StacksTab } from "@/components/StacksTab";
 import { TemplateDialog } from "@/components/TemplateDialog";
 import { ReasonLine, WhyDisabled } from "@/components/WhyDisabled";
-import { ImageToolsPage } from "@/pages/ImageToolsPage";
 import {
   api,
   errorMessage,
@@ -105,7 +104,6 @@ const TAB_ICON: Record<TemplatesTab, typeof DiscIcon> = {
   addressPools: NetworkIcon,
   templates: LayersIcon,
   stacks: BoxesIcon,
-  disks: FileCogIcon,
 };
 
 interface Props {
@@ -118,10 +116,6 @@ interface Props {
   onDeploy: (templateId: string) => void;
   /** VM-08: the approval dialog for a stack's deploy, an instance's power or a teardown. */
   onSubmitted?: (outcome: SubmitOutcome) => void;
-  /** CV-01: the Import dialog (Disk images' Import as a VM), on a file when one is given. */
-  onImport: (path?: string) => void;
-  /** Disk images: Settings, for qemu-img's path. */
-  onOpenSettings: () => void;
   /** VM-08: changes when a VM job finished, so the instances' states are read again. */
   refreshKey?: number;
 }
@@ -138,7 +132,7 @@ type Dialog =
   | { kind: "buildSettings"; image: Image }
   | { kind: "versions"; image: Image };
 
-export function TemplatesPage({ active, request, onDeploy, onSubmitted, onImport, onOpenSettings, refreshKey }: Props) {
+export function TemplatesPage({ active, request, onDeploy, onSubmitted, refreshKey }: Props) {
   const readOnly = useReadOnlyReason();
   // The tab the user or a link picked; until then, the first step that isn't done (UX-07).
   const [picked, setPicked] = useState<TemplatesTab | null>(null);
@@ -300,7 +294,6 @@ export function TemplatesPage({ active, request, onDeploy, onSubmitted, onImport
         </Button>
       </WhyDisabled>
     ) : null,
-    disks: null,
   };
 
   return (
@@ -760,15 +753,6 @@ export function TemplatesPage({ active, request, onDeploy, onSubmitted, onImport
             onNewTemplate={images.length === 0 ? addImage : newTemplate}
             newTemplateLabel={images.length === 0 ? "Add an image" : "New launch template"}
             onCount={setStackCount}
-          />
-        </TabsContent>
-
-        <TabsContent value="disks" className="flex min-w-0 flex-col gap-3">
-          <ImageToolsPage
-            active={active && tab === "disks"}
-            onSubmitted={submittedHere}
-            onImport={onImport}
-            onOpenSettings={onOpenSettings}
           />
         </TabsContent>
       </Tabs>

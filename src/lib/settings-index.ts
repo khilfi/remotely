@@ -3,7 +3,10 @@
 // a side list; a search shows every section that matches, under its group. Each section has an element id
 // (`settingsCardId`), on its card or, for the rows of a shared card (the tools table, the change ID rule), on its row;
 // a link to it opens its group, scrolls to it and lights it. A package that adds a setting adds a line here. Tested in
-// settings-index.test.ts and search.test.ts.
+// settings-index.test.ts and search.test.ts. UX-22 (0.9.0): a section may live elsewhere (the Vault page's Unlocking
+// card): the search points there.
+
+import type { AppLink } from "./links.ts";
 
 export type SettingsGroup =
   "general" | "tools" | "terminal" | "approvals" | "privacy" | "dashboard" | "updates" | "about";
@@ -28,6 +31,11 @@ export interface SettingsSection {
   title: string;
   /** Other words it is found by. */
   keywords: string;
+  /**
+   * UX-22 (0.9.0): a setting whose home is elsewhere (the Vault page's Unlocking card): the search finds it and points
+   * there, and the palette opens it there; its group doesn't show it.
+   */
+  elsewhere?: AppLink;
 }
 
 export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
@@ -131,12 +139,27 @@ export const SETTINGS_SECTIONS: readonly SettingsSection[] = [
     keywords: "ticket change number chg prod required approval workspace",
   },
   {
+    // UX-22: one line here; the top bar's Present is its home.
     id: "presentation",
     group: "privacy",
     title: "Presentation mode",
     keywords: "present mask screen share read-only lock hide terminal output",
   },
-  { id: "vault", group: "privacy", title: "Vault", keywords: "windows login dpapi unlock idle lock minutes" },
+  {
+    // SS-04 (0.9.0): this PC's idle lock.
+    id: "vault-lock",
+    group: "privacy",
+    title: "Lock the vault after",
+    keywords: "vault idle lock minutes timeout inactivity automatic auto",
+  },
+  {
+    // UX-22: the Vault page's Unlocking card (the Windows login, the vault password).
+    id: "vault",
+    group: "privacy",
+    title: "Vault unlocking",
+    keywords: "vault windows login dpapi unlock password change",
+    elsewhere: { kind: "vault", card: "unlocking" },
+  },
   {
     id: "retention",
     group: "privacy",
@@ -185,9 +208,14 @@ export function groupTitle(group: SettingsGroup): string {
   return SETTINGS_GROUPS.find((g) => g.id === group)?.title ?? group;
 }
 
-/** The sections of a group, in order. */
+/** The sections of a group, in order (UX-22: one whose home is elsewhere only in a search). */
 export function groupSections(group: SettingsGroup): SettingsSection[] {
-  return SETTINGS_SECTIONS.filter((s) => s.group === group);
+  return SETTINGS_SECTIONS.filter((s) => s.group === group && !s.elsewhere);
+}
+
+/** UX-22: where a link to a section leads: the section, or its home elsewhere. */
+export function sectionLink(section: SettingsSection): AppLink {
+  return section.elsewhere ?? { kind: "setting", section: section.id };
 }
 
 /**

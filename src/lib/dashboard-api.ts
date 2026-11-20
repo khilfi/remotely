@@ -149,7 +149,6 @@ export type WidgetKind =
       key?: string | null;
       name?: string | null;
       metric: ChartMetric;
-      range: ChartRange;
     };
 
 export type Widget = { id: string; w: number; h: number } & WidgetKind;

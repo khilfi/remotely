@@ -1,8 +1,8 @@
 //! QL-26 stars and recents, per workspace.
 //!
-//! * A star marks a session, a VM or a command (a saved one, `favourite:<id>`, or a built-in one, `library:<id>`), so
-//!   it comes first in the session tree, the VMs list and Ctrl+K. The window calls them "starred" (BX-08's saved
-//!   commands are already its "favourites").
+//! * A star marks a session or a VM, so it comes first in the session tree, the Sessions page, the VMs list and Ctrl+K.
+//!   The window calls them "starred". UX-20 (0.9.0): commands have no stars; BX-08's favourites are their one way to be
+//!   kept, and the command stars 0.8.x made move into them once ([`crate::snippets::Snippets::move_command_stars`]).
 //! * Recents: the [`MAX_RECENTS`] sessions, VMs and pages opened last, newest first, for Ctrl+K's and the Terminal
 //!   page's "Recent". A terminal opening notes its session here by itself (`Store::record_session_opened`).
 //! * Like the notification centre (QL-25), neither is audited and the read-only lock leaves them alone: they change
@@ -27,7 +27,6 @@ const MAX_KEY: usize = 1024;
 pub enum StarKind {
     Session,
     Vm,
-    Command,
 }
 
 impl StarKind {
@@ -35,15 +34,14 @@ impl StarKind {
         match self {
             StarKind::Session => "session",
             StarKind::Vm => "vm",
-            StarKind::Command => "command",
         }
     }
 
+    /// UX-20: a command star left from 0.8.x is none of these, so it is never listed.
     pub fn parse(s: &str) -> Option<Self> {
         match s {
             "session" => Some(StarKind::Session),
             "vm" => Some(StarKind::Vm),
-            "command" => Some(StarKind::Command),
             _ => None,
         }
     }
