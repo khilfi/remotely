@@ -199,8 +199,8 @@ Golden image builds (0.8.0, VM-30, `docs/plan-0.8.md` "Approval tiers"). A build
 
 | Action | Tier |
 | --- | --- |
-| Build a version of a golden image, or rebuild one by hand | Medium |
-| A build that keeps only the newest versions: older versions' VMs and their files are deleted (never one a linked clone uses), each one a target of the approval | Critical, as deleting VMs |
+| Build or rebuild (by hand) a version of a golden image that keeps every version | Medium |
+| Any build of an image set to keep only its newest versions, even one with nothing to delete yet: older versions' VMs past the count and their files are deleted (never one a linked clone uses), each one a target of the approval | Critical, as deleting VMs |
 | A scheduled rebuild (VM-27) | Under the schedule's standing approval, at the build's tier; a build that differs from the approved one (its new VM's name aside), or rules that rate it otherwise, pause the schedule and ask again |
 | Change an image's build settings | No tier; audited, refused by the read-only lock; a schedule that rebuilds the image asks again before its next run |
 

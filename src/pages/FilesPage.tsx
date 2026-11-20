@@ -167,6 +167,8 @@ export function FilesPage({ active, request, onSubmitted, onOpenTerminal, onShow
   const [doubleClick, setDoubleClick] = useState<FileDoubleClick>("terminalEditor");
   /** UX-15: files dropped on Many hosts, for its push (the counter tells one drop from the next). */
   const [manyDrop, setManyDrop] = useState<{ staged: StagedFiles; n: number } | null>(null);
+  /** UX-15: rows of This PC dragged onto Many hosts, which fill its push (counted the same way). */
+  const [manyLocalDrop, setManyLocalDrop] = useState<{ names: string[]; n: number } | null>(null);
   /** UX-15: Many hosts asked for from elsewhere, with its mode and picks. */
   const [manyRequest, setManyRequest] = useState<{ mode: ManyMode; picks?: TargetPicks; n: number } | null>(null);
   const forgetManyRequest = useCallback(() => setManyRequest(null), []);
@@ -457,8 +459,9 @@ export function FilesPage({ active, request, onSubmitted, onOpenTerminal, onShow
       if (!target) return;
       const action = dropAction(items, target);
       if (!action) return;
-      if (action.kind === "hint") {
-        toast.info(action.text);
+      if (action.kind === "push" && items.from === "local") {
+        // UX-15: the dragged rows (the picked ones) fill the push, in place of files chosen or dropped before.
+        setManyLocalDrop((prev) => ({ names: items.names, n: (prev?.n ?? 0) + 1 }));
       } else if (action.kind === "upload" && items.from === "local" && target.pane === "host") {
         void uploadLocal(target.terminalId, items.listing, items.names, action.folder, target.asRoot);
       } else if (action.kind === "download" && items.from === "host") {
@@ -665,6 +668,7 @@ export function FilesPage({ active, request, onSubmitted, onOpenTerminal, onShow
               local={local}
               localPicked={localPicked}
               dropped={manyDrop}
+              localDrop={manyLocalDrop}
               request={manyRequest}
               onRequestTaken={forgetManyRequest}
               onSubmitted={(outcome, onJob) => onSubmitted(outcome, onJob)}

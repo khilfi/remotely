@@ -5,7 +5,8 @@
 // show like Compare hosts': hosts that got or hold the same bytes grouped, and two groups diffed.
 //
 // UX-15 (0.9.0 H1): files dropped on this tab from Explorer fill the push's list (`data-files-drop="many"`,
-// lib/drop-target.ts). Fetch leads to the support bundle (many files and commands from each host, in one zip), and the
+// lib/drop-target.ts), and so do picked rows of the This PC pane dragged here (lib/files-page.ts manyHostsDrop: the
+// push then sends those files in place of the ones chosen before, and the tab shows Push). Fetch leads to the support bundle (many files and commands from each host, in one zip), and the
 // bundle dialog back here, each with the hosts picked.
 
 import { useEffect, useRef, useState } from "react";
@@ -31,6 +32,7 @@ import {
 } from "@/lib/api";
 import { READ_ONLY_REASON } from "@/lib/disabled-reasons";
 import { plural } from "@/lib/format";
+import { manyHostsDrop, pushableFiles } from "@/lib/files-page";
 import { filesPageApi, type FetchTo, type LocalListing, type PushFrom } from "@/lib/files-page-api";
 import { requestLink } from "@/lib/links";
 import { readOnlyLocked } from "@/lib/presentation-state";
@@ -42,6 +44,8 @@ interface Props {
   localPicked: string[];
   /** UX-15: files dropped on this tab from Explorer, for the push; `n` counts the drops. */
   dropped?: { staged: StagedFiles; n: number } | null;
+  /** UX-15: rows of the local pane dragged onto this tab (the picked ones), which fill the push; counted the same way. */
+  localDrop?: { names: string[]; n: number } | null;
   /** UX-15: opened from the support bundle dialog: fetch, on these picks. */
   request?: { mode: Mode; picks?: TargetPicks; n: number } | null;
   /** The request was taken: the page forgets it, so coming back to this tab later starts afresh. */
@@ -57,6 +61,7 @@ export function ManyHostsView({
   local,
   localPicked,
   dropped = null,
+  localDrop = null,
   request = null,
   onRequestTaken,
   onSubmitted,
@@ -97,9 +102,7 @@ export function ManyHostsView({
   }, [picks]);
 
   const hosts = resolved?.hosts.length ?? 0;
-  const localFiles = local?.path
-    ? localPicked.filter((n) => local.entries.some((e) => e.name === n && e.kind === "file" && !e.link))
-    : [];
+  const localFiles = local?.path ? pushableFiles(localPicked, local.entries) : [];
   const pushFrom: PushFrom | null = staged
     ? { kind: "staged", id: staged.id }
     : local && localFiles.length > 0
@@ -143,17 +146,38 @@ export function ManyHostsView({
     }
   }
 
-  // UX-15: files from Explorer dropped on this tab fill the push's list.
-  const takeRef = useRef(take);
+  /** UX-15: rows of this PC dragged here fill the push: it sends the picked files, not what was chosen before. */
+  function takeLocal(names: string[]) {
+    const drop = manyHostsDrop(names, local?.path ? local.entries : [], staged ? staged.files.length : null);
+    if (drop.files.length === 0) {
+      toast.info(drop.text);
+      return;
+    }
+    if (drop.unstage && staged) {
+      void api.filesUnstage(staged.id).catch(() => undefined);
+      setStaged(null);
+    }
+    setMode("push");
+    toast.success(drop.text);
+  }
+
+  // UX-15: files from Explorer, or rows of this PC, dropped on this tab fill the push's list.
+  const takeRef = useRef({ take, takeLocal });
   useEffect(() => {
-    takeRef.current = take;
+    takeRef.current = { take, takeLocal };
   });
   const seenDrop = useRef(dropped?.n ?? 0);
   useEffect(() => {
     if (!dropped || dropped.n === seenDrop.current) return;
     seenDrop.current = dropped.n;
-    takeRef.current(dropped.staged, "drop");
+    takeRef.current.take(dropped.staged, "drop");
   }, [dropped]);
+  const seenLocalDrop = useRef(localDrop?.n ?? 0);
+  useEffect(() => {
+    if (!localDrop || localDrop.n === seenLocalDrop.current) return;
+    seenLocalDrop.current = localDrop.n;
+    takeRef.current.takeLocal(localDrop.names);
+  }, [localDrop]);
 
   async function go(to?: FetchTo) {
     setBusy(true);
