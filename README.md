@@ -917,8 +917,9 @@ approval rules make of it (read-only, changes, dangerous), so you see before you
   (`{{service}}`, `{{host:db01.test}}`) asked when you paste. Adding, editing and reordering are audited by name and
   folder, never the command text. A library command's star (**Add to favourites**) saves it as it is into a **Starred**
   folder, and shows filled once a favourite holds that command; its **⋯** menu's **Copy to favourites…** lets you edit it
-  first. Since 0.9.0 commands have no stars of their own: the ones 0.8 kept moved into the favourites once per workspace
-  at the first start, as audited adds (starred library commands into Starred, a starred favourite first in its folder).
+  first. Since 0.9.0 commands have no stars of their own: at the first start, once per workspace, the library commands
+  0.8 kept starred were added to Starred (audited as adds), and a starred favourite stayed in its own folder and moved to
+  the top of it (audited as a reorder).
 - **Library**: a large built-in set of Linux commands for day-to-day admin and troubleshooting (RHEL/Rocky/Alma 8–9,
   Ubuntu 22.04/24.04, Debian 12; apt and dnf, ufw and firewalld both given where they differ). None opens a pager or
   hangs. It has two sections, searchable together with collapsible groups:
