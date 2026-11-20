@@ -1,4 +1,5 @@
-// CV-03: Image tools (UX-08: the Templates page's Disk images tab since 0.6.0), which make no VM. Inspect (format, virtual size, size on disk, parent), Convert between VMDK
+// CV-03: Image tools, the Toolbox's Disk images tab (UX-22, 0.9.0; the Templates page's from 0.6.0 to 0.8.x), which
+// make no VM. Inspect (format, virtual size, size on disk, parent), Convert between VMDK
 // (growable, preallocated, stream-optimized, ESXi's layout), VDI, VHD, VHDX, qcow2 and raw, thin or thick, and Verify
 // (sizes, SHA-256 of every file, and qemu-img's comparison when it is installed). The hypervisors' own tools convert
 // first; qemu-img only what they can't (qcow2, VHDX), and only when the owner installed it: the page says which

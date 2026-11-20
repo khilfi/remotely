@@ -284,9 +284,13 @@ export function PresentationLine() {
           Presentation mode
           <HelpTip topic="presentationMode" />
         </CardTitle>
+        {/* The Presenting menu is a modal dropdown, which a help popover inside it would close: its "?"s live here. */}
         <CardDescription className="flex flex-wrap items-center gap-x-1">
           {view.presenting ? "On now." : "For screen shares."} The top bar&apos;s Present masks host names, IP addresses
-          and user names, with the read-only lock in its menu.
+          and user names; its menu has the read-only lock
+          <HelpTip topic="readOnlyLock" />
+          and hides terminal output
+          <HelpTip topic="hideTerminals" />
           <Button variant="link" className="h-auto p-0" onClick={pointAtPresentButton}>
             Show it
           </Button>

@@ -542,8 +542,10 @@ crates/core/          remotely-core: all app logic
                       `data-note-link="N"` with no address (RenderedNote.links), code blocks `data-note-code="N"`
                       (codeBlocks, for Send to terminal), looks_secret from export::redact_secrets
     stars.rs          QL-26 (migration 0033): Stars (Core.stars): stars on sessions and VMs (by key), and the
-                      MAX_RECENTS (20) sessions, VMs and pages opened last (a terminal's session notes itself in
-                      Store::record_session_opened; UX-22: the one recent list, for Ctrl+K, the tree and New terminal);
+                      MAX_RECENTS (20) sessions, 20 VMs and 20 pages opened last, each kind trimmed on its own (a
+                      terminal's session notes itself in Store::record_session_opened; UX-22: the one recent list, Ctrl+K
+                      showing the newest 20 of all, the tree's Recent and New terminal the sessions, which pages and
+                      VMs never push out);
                       per workspace, not audited, not locked, kept by key so a restored session keeps its star. UX-20
                       (0.9.0): commands have no stars (StarKind has none); 0.8.x's (`favourite:<id>`, `library:<id>`)
                       are read only by store/stars.rs command_stars for snippets' one-time move

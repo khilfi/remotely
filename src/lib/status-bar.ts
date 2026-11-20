@@ -19,6 +19,11 @@ export interface StatusText {
 /** Under this many seconds the countdown turns amber. */
 export const LOCK_WARNING_SECS = 60;
 
+/** SS-04 (0.9.0): the amber part of a countdown for an idle lock of `minutes`: the last minute, or a quarter of it. */
+export function lockWarningSecs(minutes: number): number {
+  return Math.min(LOCK_WARNING_SECS, Math.max(1, (minutes * 60) / 4));
+}
+
 /** `14:05`, `0:42`; an hour or more as `1:02:03`. */
 export function formatCountdown(secs: number): string {
   const s = Math.max(0, Math.floor(secs));
@@ -71,7 +76,7 @@ export function vaultText(info: VaultInfo | null, secsLeft: number | null): Stat
         label: `Vault locks in ${formatCountdown(secsLeft)}`,
         // SS-04 (0.9.0): this PC's setting, 1 to 60 minutes.
         title: `Locks after ${minutes === 1 ? "1 minute" : `${minutes} minutes`} without typing or clicking in Remotely. Open the Vault page.`,
-        tone: secsLeft <= LOCK_WARNING_SECS ? "warning" : "good",
+        tone: secsLeft <= lockWarningSecs(minutes) ? "warning" : "good",
       };
     }
     case "locked":

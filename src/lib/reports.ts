@@ -15,7 +15,10 @@ export const REPORT_LABELS = {
   audit: "Audit log (CSV)…",
 } as const;
 
-/** UX-21: the Sessions page's "⋯" and selection bar and the palette name these the same way. */
+/**
+ * UX-21: the Sessions page's "⋯" names these so; the Ansible inventory and the support bundle are also on its selection
+ * bar and in the palette, under the same labels.
+ */
 export const SESSION_EXPORT_LABELS = {
   importApp: "Import from another app…",
   moveLaptop: "Move to another laptop",

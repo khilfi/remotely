@@ -8,9 +8,9 @@
 // to the shell), Ctrl+1 to Ctrl+9 open the pages in sidebar order and Ctrl+, opens Settings.
 //
 // UX-08 (0.6.0): the sidebar groups the pages (Machines, Remote, Overview, then Vault and Settings), as the page
-// registry in lib/navigation.ts lists them; each page shows its own title in a PageHeader. Image tools is the Templates
-// page's Disk images tab, the Map a Dashboard tab and Known hosts a Vault tab: their old ids, links and free shortcuts
-// still open them there (`go`). The sidebar's status rows show only when something needs attention (no hypervisor
+// registry in lib/navigation.ts lists them; each page shows its own title in a PageHeader. Image tools is the Toolbox's
+// Disk images tab (UX-22, 0.9.0: the Templates page's from 0.6.0 to 0.8.x), the Map a Dashboard tab and Known hosts a
+// Vault tab: their old ids, links and free shortcuts still open them there (`go`). The sidebar's status rows show only when something needs attention (no hypervisor
 // found, no vault yet); the status bar keeps the vault's state.
 //
 // QL-14: snapshots are part of the Virtual machines page; the old Snapshots id opens the snapshot view there.
@@ -161,7 +161,7 @@ import {
   type VaultInfo,
   type VmSessionDraft,
 } from "@/lib/api";
-import { shouldPingActivity } from "@/lib/reauth";
+import { ACTIVITY_PING_MS, activityPingMs, shouldPingActivity } from "@/lib/reauth";
 import { useTheme } from "@/lib/theme";
 import { checkMessage, isNotice, recheckDelayMs, UPDATE_CHECK_INTERVAL_MS } from "@/lib/updates";
 import { cn } from "@/lib/utils";
@@ -519,12 +519,17 @@ export default function App() {
   }, [go]);
 
   // SS-04: the vault's idle lock counts from the user's own input, never from background reads, so typing and
-  // clicking anywhere in the window (terminals included) tell the core, at most every 20 seconds.
+  // clicking anywhere in the window (terminals included) tell the core, at most every 20 seconds (0.9.0: a quarter of
+  // a shorter idle lock, never under 5 seconds, so a 1-minute lock never comes early).
+  const pingEvery = useRef(ACTIVITY_PING_MS);
+  useEffect(() => {
+    pingEvery.current = activityPingMs(vault?.idleLockMinutes);
+  }, [vault?.idleLockMinutes]);
   useEffect(() => {
     let last: number | null = null;
     function onInput() {
       const now = Date.now();
-      if (!shouldPingActivity(last, now)) return;
+      if (!shouldPingActivity(last, now, pingEvery.current)) return;
       last = now;
       // QL-22: the answer moves the status bar's lock countdown on.
       void api.vaultActivity().then(

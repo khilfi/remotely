@@ -145,6 +145,8 @@ interface VmAction {
 }
 
 const ON: PowerState[] = ["running", "paused"];
+/** QL-26, UX-22: the recents Ctrl+K lists, the newest of every kind together. */
+const RECENT_IN_PALETTE = 20;
 
 /** No session watched yet (the read hasn't come back). */
 const NONE_WATCHED: ReadonlySet<string> = new Set();
@@ -257,18 +259,21 @@ export function CommandPalette({
     const vmByKey = new Map(vms.map((v) => [v.vmxPath.toLowerCase(), v]));
     const sessionById = new Map(sessions.map((s) => [s.id, s]));
     const pageById = new Map(pages.map((p) => [p.id, p]));
-    return recents.flatMap((r): { key: string; label: string; kind: "vm" | "session" | "page"; id: string }[] => {
-      if (r.kind === "vm") {
-        const v = vmByKey.get(r.key.toLowerCase());
-        return v ? [{ key: `vm:${v.vmxPath}`, label: v.displayName, kind: "vm", id: v.vmxPath }] : [];
-      }
-      if (r.kind === "session") {
-        const s = sessionById.get(r.key);
-        return s ? [{ key: `session:${s.id}`, label: s.name, kind: "session", id: s.id }] : [];
-      }
-      const p = pageById.get(r.key);
-      return p ? [{ key: `page:${p.id}`, label: p.label, kind: "page", id: p.id }] : [];
-    });
+    // UX-22: the core keeps 20 of each kind; Ctrl+K shows the newest 20 of them all.
+    return recents
+      .flatMap((r): { key: string; label: string; kind: "vm" | "session" | "page"; id: string }[] => {
+        if (r.kind === "vm") {
+          const v = vmByKey.get(r.key.toLowerCase());
+          return v ? [{ key: `vm:${v.vmxPath}`, label: v.displayName, kind: "vm", id: v.vmxPath }] : [];
+        }
+        if (r.kind === "session") {
+          const s = sessionById.get(r.key);
+          return s ? [{ key: `session:${s.id}`, label: s.name, kind: "session", id: s.id }] : [];
+        }
+        const p = pageById.get(r.key);
+        return p ? [{ key: `page:${p.id}`, label: p.label, kind: "page", id: p.id }] : [];
+      })
+      .slice(0, RECENT_IN_PALETTE);
   }, [recents, vms, sessions, pages]);
   const vm = view.kind === "vm" ? vms.find((v) => v.vmxPath === view.vmxPath) : undefined;
   const session = view.kind === "session" ? sessions.find((s) => s.id === view.id) : undefined;

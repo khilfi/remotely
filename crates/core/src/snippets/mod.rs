@@ -500,22 +500,23 @@ impl Snippets {
             description,
         };
         let id = Uuid::new_v4();
-        self.store.insert_favourite(ctx, id, &fields(&clean)).await?;
-        self.audit(
-            ctx,
-            &format!("Added the favourite command '{}'", clean.name),
-            &format!("in {}, {how}", place(&clean.folder)),
-        )
-        .await?;
+        // The add and its audit entry commit together, so a stop half-way never leaves an add unaudited.
+        let action = format!("Added the favourite command '{}'", clean.name);
+        let detail = format!("in {}, {how}", place(&clean.folder));
+        self.store
+            .insert_favourite_audited(ctx, id, &fields(&clean), favourite_entry(&action, &detail))
+            .await?;
         Ok((id, true))
     }
 
     /// UX-20: moves this workspace's command stars left from 0.8.x into the favourites. A starred library command is
     /// saved into [`STARRED_FOLDER`] by its text and name (audited as an add; nothing when a favourite holds that
     /// command already); a folder's starred favourites come first in it, as the panel showed them (audited as a
-    /// reorder); then each star is deleted. Stars on sessions and VMs stay. Safe to run again: with no command star
-    /// left it does nothing, and a run stopped half-way finds the favourites it added. The read-only lock refuses it,
-    /// which leaves the stars for a later start.
+    /// reorder); then each star is deleted. Stars on sessions and VMs stay. Each add and each reorder commits with its
+    /// audit entry. Safe to run again, to the same result: with no command star left it does nothing; a run stopped
+    /// before the starred favourites' stars went (all at once, after the reorders) finds their folders in order already;
+    /// one stopped among the library commands finds the favourites it added. The read-only lock refuses it, which
+    /// leaves the stars for a later start.
     pub async fn move_command_stars(&self, ctx: &Context) -> Result<StarsMoved> {
         let keys = self.store.command_stars(ctx).await?;
         let mut moved = StarsMoved::default();
@@ -544,17 +545,21 @@ impl Snippets {
             let (first, rest): (Vec<Uuid>, Vec<Uuid>) = now.iter().copied().partition(|id| starred.contains(id));
             let wanted: Vec<Uuid> = first.into_iter().chain(rest).collect();
             if wanted != now {
-                self.store.order_favourites(ctx, &wanted).await?;
-                self.audit(
-                    ctx,
-                    "Reordered the favourite commands",
-                    &format!("{} in {}: the starred ones first", wanted.len(), place(folder)),
-                )
-                .await?;
+                let detail = format!("{} in {}: the starred ones first", wanted.len(), place(folder));
+                self.store
+                    .order_favourites_audited(
+                        ctx,
+                        &wanted,
+                        favourite_entry("Reordered the favourite commands", &detail),
+                    )
+                    .await?;
                 moved.reordered += 1;
             }
         }
-        for key in &keys {
+        // Every starred favourite's star goes at once, once all their folders are in order: a run stopped before this
+        // finds the same stars and the same order (nothing to do again), one stopped after finds none.
+        moved.deleted += usize::try_from(self.store.delete_favourite_command_stars(ctx).await?).unwrap_or(0);
+        for key in keys.iter().filter(|k| !k.starts_with("favourite:")) {
             if let Some(entry) = key
                 .strip_prefix("library:")
                 .and_then(|id| LIBRARY.iter().find(|b| b.id == id))
@@ -675,6 +680,20 @@ impl Snippets {
             )
             .await
             .map(drop)
+    }
+}
+
+/// A favourite's audit entry (`favourite_changed`), for a change written with it in one transaction.
+fn favourite_entry<'a>(action: &'a str, detail: &'a str) -> NewAuditEntry<'a> {
+    NewAuditEntry {
+        event: "favourite_changed",
+        action,
+        tier: None,
+        job_id: None,
+        targets: &[],
+        approval: None,
+        result: None,
+        detail: Some(detail),
     }
 }
 
@@ -936,6 +955,66 @@ mod tests {
         let moved = snippets.move_command_stars(&home).await.unwrap();
         assert_eq!((moved.added, moved.already, moved.deleted), (0, 1, 1));
         assert_eq!(snippets.favourites(&home).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_move_stopped_after_its_reorders_reorders_and_audits_nothing_twice() {
+        let (store, snippets, home, _) = setup().await;
+        let x = snippets.add(&home, mine(Some("Web"), "x", "echo x")).await.unwrap();
+        let y = snippets.add(&home, mine(Some("Web"), "y", "echo y")).await.unwrap();
+        let z = snippets.add(&home, mine(Some("Web"), "z", "echo z")).await.unwrap();
+        for id in [z.id, x.id] {
+            store
+                .insert_command_star(&home, &format!("favourite:{id}"))
+                .await
+                .unwrap();
+        }
+        // As the first run left it: the folder in order (and audited with it), the stars not deleted yet.
+        store
+            .order_favourites_audited(
+                &home,
+                &[x.id, z.id, y.id],
+                favourite_entry(
+                    "Reordered the favourite commands",
+                    "3 in the folder 'Web': the starred ones first",
+                ),
+            )
+            .await
+            .unwrap();
+        let before = audit(&store, &home).await.len();
+        let moved = snippets.move_command_stars(&home).await.unwrap();
+        assert_eq!((moved.reordered, moved.deleted), (0, 2));
+        assert_eq!(audit(&store, &home).await.len(), before, "nothing audited twice");
+        let web: Vec<Uuid> = snippets
+            .favourites(&home)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|f| f.id)
+            .collect();
+        assert_eq!(web, vec![x.id, z.id, y.id]);
+        assert!(store.command_stars(&home).await.unwrap().is_empty());
+        assert!(store.verify_audit_chain(&home).await.unwrap().ok);
+    }
+
+    #[tokio::test]
+    async fn an_add_and_its_audit_entry_commit_together() {
+        let (store, snippets, home, _) = setup().await;
+        let before = audit(&store, &home).await.len();
+        let added = snippets
+            .add_from_library(&home, built_in("disk.free").id)
+            .await
+            .unwrap();
+        let entries = audit(&store, &home).await;
+        assert_eq!(entries.len(), before + 1);
+        assert_eq!(
+            entries[0].action,
+            format!("Added the favourite command '{}'", added.favourite.name)
+        );
+        assert!(
+            store.verify_audit_chain(&home).await.unwrap().ok,
+            "the chain links across the transaction"
+        );
     }
 
     #[test]

@@ -11,6 +11,9 @@ use crate::stars::{Recent, RecentKind, Star, StarKind, MAX_RECENTS};
 /// [`crate::snippets::Snippets::move_command_stars`] moves those left into the favourites once and deletes them.
 const COMMAND_STAR_KIND: &str = "command";
 
+/// The kinds of recent items ([`RecentKind`]): sessions, VMs and pages, each kept to [`MAX_RECENTS`].
+const RECENT_KINDS: usize = 3;
+
 impl Store {
     /// UX-20: the workspace's command stars left from 0.8.x, by key, oldest first.
     pub(crate) async fn command_stars(&self, ctx: &Context) -> Result<Vec<String>> {
@@ -21,6 +24,17 @@ impl Store {
         .bind(COMMAND_STAR_KIND)
         .fetch_all(&self.pool)
         .await?)
+    }
+
+    /// UX-20: deletes every starred favourite's star (`favourite:<id>`) at once, after their folders were put in order.
+    /// Returns how many went.
+    pub(crate) async fn delete_favourite_command_stars(&self, ctx: &Context) -> Result<u64> {
+        let done = sqlx::query("DELETE FROM stars WHERE workspace_id = ? AND kind = ? AND item_key LIKE 'favourite:%'")
+            .bind(ctx.workspace_id.to_string())
+            .bind(COMMAND_STAR_KIND)
+            .execute(&self.pool)
+            .await?;
+        Ok(done.rows_affected())
     }
 
     /// UX-20: deletes one command star, once it is in the favourites.
@@ -105,14 +119,14 @@ impl Store {
         Ok(done.rows_affected() > 0)
     }
 
-    /// The workspace's recently opened items, newest first.
+    /// The workspace's recently opened items, newest first: at most [`MAX_RECENTS`] of each kind.
     pub(crate) async fn list_recents(&self, ctx: &Context) -> Result<Vec<Recent>> {
         let rows = sqlx::query(
             "SELECT kind, item_key, opened_at FROM recent_items WHERE workspace_id = ?
              ORDER BY opened_at DESC, rowid DESC LIMIT ?",
         )
         .bind(ctx.workspace_id.to_string())
-        .bind(i64::try_from(MAX_RECENTS).unwrap_or(20))
+        .bind(i64::try_from(MAX_RECENTS * RECENT_KINDS).unwrap_or(60))
         .fetch_all(&self.pool)
         .await?;
         let mut out = Vec::with_capacity(rows.len());
@@ -130,7 +144,8 @@ impl Store {
         Ok(out)
     }
 
-    /// Notes that `key` was opened now, and keeps the [`MAX_RECENTS`] newest.
+    /// Notes that `key` was opened now, and keeps the [`MAX_RECENTS`] newest of its kind (UX-22: pages and VMs never
+    /// push sessions out of the session tree's and the New terminal dialog's Recent).
     pub(crate) async fn note_recent(&self, ctx: &Context, kind: RecentKind, key: &str) -> Result<()> {
         let mut tx = self.pool.begin().await?;
         sqlx::query(
@@ -146,11 +161,14 @@ impl Store {
         .execute(&mut *tx)
         .await?;
         sqlx::query(
-            "DELETE FROM recent_items WHERE workspace_id = ? AND rowid NOT IN
-                 (SELECT rowid FROM recent_items WHERE workspace_id = ? ORDER BY opened_at DESC, rowid DESC LIMIT ?)",
+            "DELETE FROM recent_items WHERE workspace_id = ? AND kind = ? AND rowid NOT IN
+                 (SELECT rowid FROM recent_items WHERE workspace_id = ? AND kind = ?
+                  ORDER BY opened_at DESC, rowid DESC LIMIT ?)",
         )
         .bind(ctx.workspace_id.to_string())
+        .bind(kind.as_str())
         .bind(ctx.workspace_id.to_string())
+        .bind(kind.as_str())
         .bind(i64::try_from(MAX_RECENTS).unwrap_or(20))
         .execute(&mut *tx)
         .await?;

@@ -310,9 +310,11 @@ async fn stars_and_recents_are_kept_per_workspace_and_not_audited() {
             .unwrap();
     }
     let recents = core.stars.opened(&ctx, RecentKind::Vm, &vmx("it-web")).await.unwrap();
-    assert_eq!(recents.len(), MAX_RECENTS);
+    // UX-22: at most MAX_RECENTS of each kind: the newest pages, and the VM beside them.
+    assert_eq!(recents.len(), MAX_RECENTS + 1);
     assert_eq!(recents[0].kind, RecentKind::Vm);
     assert_eq!(recents[1].key, format!("page-{}", MAX_RECENTS + 4));
+    assert!(!recents.iter().any(|r| r.key == "page-4"), "the oldest pages went");
     // Opening one again moves it to the top, once.
     let recents = core.stars.opened(&ctx, RecentKind::Page, "page-24").await.unwrap();
     assert_eq!(recents[0].key, "page-24");
@@ -320,6 +322,53 @@ async fn stars_and_recents_are_kept_per_workspace_and_not_audited() {
     // Only the session's creation was audited.
     assert_eq!(audit(&core).await.len(), before + 1);
     assert!(core.stars.set(&ctx, StarKind::Session, " \n", true).await.is_err());
+}
+
+#[tokio::test]
+async fn pages_and_vms_opened_since_never_push_the_recent_sessions_out() {
+    // UX-22: the session tree's Recent group and the New terminal dialog read the sessions among the recents.
+    let core = core().await;
+    let ctx = core.ctx();
+    let mut sessions = Vec::new();
+    for n in 0..5 {
+        let s = core
+            .sessions
+            .create(&ctx, session(&format!("web0{n}"), &format!("web0{n}.example.com")))
+            .await
+            .unwrap();
+        core.stars
+            .opened(&ctx, RecentKind::Session, &s.id.to_string())
+            .await
+            .unwrap();
+        sessions.push(s.id.to_string());
+    }
+    for n in 0..MAX_RECENTS {
+        core.stars
+            .opened(&ctx, RecentKind::Page, &format!("page-{n}"))
+            .await
+            .unwrap();
+        core.stars
+            .opened(&ctx, RecentKind::Vm, &vmx(&format!("it-{n}")))
+            .await
+            .unwrap();
+    }
+    let recents = core.stars.recents(&ctx).await.unwrap();
+    let mut kept: Vec<String> = recents
+        .iter()
+        .filter(|r| r.kind == RecentKind::Session)
+        .map(|r| r.key.clone())
+        .collect();
+    kept.reverse();
+    assert_eq!(kept, sessions, "all five, newest first in the list");
+    assert_eq!(recents.len(), 5 + 2 * MAX_RECENTS);
+    // One page past the cap drops the oldest page, never a session.
+    core.stars.opened(&ctx, RecentKind::Page, "one-more").await.unwrap();
+    let recents = core.stars.recents(&ctx).await.unwrap();
+    assert_eq!(
+        recents.iter().filter(|r| r.kind == RecentKind::Page).count(),
+        MAX_RECENTS
+    );
+    assert_eq!(recents.iter().filter(|r| r.kind == RecentKind::Session).count(), 5);
 }
 
 // ---- QL-27 the trash ------------------------------------------------------------------------------------------------

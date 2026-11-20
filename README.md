@@ -40,7 +40,7 @@ AES-256-GCM), imported with a preview that lets you skip, replace or keep
 both of each conflicting item (startup commands and port forwards come along only when ticked, see
 [What Remotely does by itself](#what-remotely-does-by-itself)). The Sessions page's **⋯** keeps what concerns sessions:
 **Import from another app…**, **Move to another laptop ▸** (**Export…**, **Import…**), **Export an Ansible inventory…**
-and **Collect a support bundle…**, each with the label it has in Ctrl+K and on the selection bar. The Sessions page
+and **Collect a support bundle…**; the last two have the same label in Ctrl+K and on the selection bar. The Sessions page
 lists starred sessions first, as the tree does. The SSH key manager on the Vault page generates Ed25519 or RSA 4096 keys straight into
 the vault, copies their public keys, lets sessions log in with them and pushes a public key to many hosts'
 `authorized_keys` through the approval flow. The Containers page (0.4.0) lists and controls Docker and Podman
