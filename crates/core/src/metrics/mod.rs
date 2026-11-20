@@ -36,6 +36,7 @@ use crate::capacity::{CapacityChecker, HostCapacity};
 use crate::domain::{now_rfc3339, Context, Environment, PowerState, TargetRef, WorkspaceId};
 use crate::error::Result;
 use crate::locks;
+use crate::presentation::Change;
 use crate::store::{NewAuditEntry, Store};
 use crate::workspaces::Current;
 
@@ -1034,8 +1035,10 @@ impl Metrics {
     }
 
     /// MO-02: starts or stops guest metrics for a session. Watching means the app logs in to the
-    /// host every round, so the change is audited like other settings. Reads only: no approval.
+    /// host every round, so the change is audited like other settings, and (FD-03) refused by the read-only lock like
+    /// them, as MO-13's background reads are. Reads only: no approval.
     pub async fn set_watched(&self, ctx: &Context, session_id: Uuid, watch: bool) -> Result<Vec<Uuid>> {
+        self.store.read_only().check(Change::Settings)?;
         let session = self
             .store
             .get_session(ctx, session_id)

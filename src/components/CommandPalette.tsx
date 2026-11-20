@@ -366,8 +366,9 @@ export function CommandPalette({
 
   /**
    * UX-19: Monitor, as on the rows (MonitorMenu.tsx): watch its metrics or stop (MO-02, a VM through a linked session;
-   * disabled with the reason when it can't be watched) and a health check on it (MO-08; disabled with the reason under
-   * the read-only lock), each with what it costs. `checkVia`: the jump host a session's check goes through.
+   * disabled with the reason when it can't be watched or under the read-only lock) and a health check on it (MO-08;
+   * disabled with the reason under the read-only lock), each with what it costs. `checkVia`: the jump host a
+   * session's check goes through.
    */
   function monitorGroup(check: ToolTarget, checkVia: string | null, source: WatchSource) {
     const state = watchedHosts.watched === null ? null : watchState(source, watched);
@@ -376,7 +377,7 @@ export function CommandPalette({
       <CommandGroup heading="Monitor">
         <CommandItem
           value={watching ? "monitor stop watching guest metrics" : "monitor watch its metrics guest dashboard"}
-          disabled={state === null || !state.can}
+          disabled={state === null || !state.can || readOnly !== null}
           onSelect={() => {
             if (!state?.can) return;
             close();
@@ -386,7 +387,11 @@ export function CommandPalette({
           {watching ? <EyeOffIcon /> : <EyeIcon />}
           <span className="shrink-0">{watching ? "Stop watching" : "Watch its metrics"}</span>
           <span className="min-w-0 truncate text-xs text-muted-foreground">
-            {state === null ? "Reading…" : state.can ? watchCostText(state, watchedHosts.intervalSecs) : state.reason}
+            {state === null
+              ? "Reading…"
+              : state.can
+                ? (readOnly ?? watchCostText(state, watchedHosts.intervalSecs))
+                : state.reason}
           </span>
         </CommandItem>
         <CommandItem

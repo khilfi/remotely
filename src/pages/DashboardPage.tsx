@@ -320,7 +320,8 @@ function ThresholdsEditor({ value, onChange }: { value: Thresholds; onChange: (t
 
 /**
  * UX-03: the one place to watch a host, or stop watching it (the palette aside): a session per line, ticked while
- * watched. A session linked to a running VM names the VM, so a VM's guest is found by the VM's name too.
+ * watched. A session linked to a running VM names the VM, so a VM's guest is found by the VM's name too. FD-03: under
+ * the read-only lock the list still shows what is watched, but nothing in it can be picked (the core refuses it too).
  */
 function WatchPicker({
   open,
@@ -328,6 +329,7 @@ function WatchPicker({
   watched,
   vmOf,
   onWatch,
+  readOnly,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -335,6 +337,8 @@ function WatchPicker({
   /** Session id -> the running VM it is linked to. */
   vmOf: Map<string, string>;
   onWatch: (id: string, watch: boolean) => void;
+  /** Why watching can't change now (the read-only lock), or null. */
+  readOnly: string | null;
 }) {
   const setOpen = onOpenChange;
   const [sessions, setSessions] = useState<SessionRecord[] | null>(null);
@@ -363,6 +367,7 @@ function WatchPicker({
                     <CommandItem
                       key={s.id}
                       value={`${s.name} ${s.host} ${s.tags.join(" ")} ${vmOf.get(s.id) ?? ""}`}
+                      disabled={readOnly !== null}
                       onSelect={() => onWatch(s.id, !on)}
                     >
                       <CheckIcon className={cn("size-4", on ? "opacity-100" : "opacity-0")} />
@@ -380,7 +385,7 @@ function WatchPicker({
           </CommandList>
         </Command>
         <p className="flex items-center gap-1 border-t px-3 py-1.5 text-xs text-muted-foreground">
-          Linux hosts over SSH, Windows hosts over WinRM; nothing on them changes.
+          {readOnly ?? "Linux hosts over SSH, Windows hosts over WinRM; nothing on them changes."}
           <HelpTip topic="dashboardPolling" side="top" />
         </p>
       </PopoverContent>
@@ -1056,6 +1061,7 @@ export function DashboardPage({
               watched={watched}
               vmOf={vmOf}
               onWatch={(id, on) => void watch(id, on)}
+              readOnly={readOnly}
             />
           ) : tab === "checks" ? (
             <WhyDisabled reason={readOnly}>

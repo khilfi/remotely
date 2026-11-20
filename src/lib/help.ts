@@ -52,8 +52,8 @@ export const HELP = {
   "addressPool.free": {
     title: "Which addresses a pool hands out",
     body: [
-      "A deploy gives each VM the next address of the range that no VM holds and nothing answers a ping on, checked again just before the VM is made. The gateway and the DNS servers are never handed out.",
-      "An address stays its VM's until Remotely deletes the VM. A host that drops pings looks free, so keep the range apart from addresses set by hand.",
+      "A deploy gives each VM the next address of the range that no VM holds and nothing answers on, checked by a ping and an ARP request from this PC, and again just before the VM is made. The gateway and the DNS servers are never handed out.",
+      "An address stays its VM's until Remotely deletes the VM. A host that drops pings still answers ARP, but one that is off looks free, so keep the range apart from addresses set by hand.",
     ],
   },
   "page.diskImages": {
@@ -706,7 +706,7 @@ export const HELP = {
     title: "Changing files",
     body: [
       "Renames, moves, copies, deletes, new folders and permission changes go through the approval rules, like uploads: a new folder or a rename is done at once; replacing, copying, changing permissions or deleting asks first; deleting a folder with what is in it asks for the full approval.",
-      "Up to four transfers run at a time on a host; the rest wait. A paused upload goes on from where it stopped if the file on the host is still what was sent; a paused download comes down again from the start. Replace if newer goes by the host's clock. A folder comes down without Git's data (.git) and links to folders.",
+      "Up to four transfers run at once on a host; the rest wait. A paused upload goes on if the host's file is still what was sent; a paused download comes down again from the start. Replace if newer compares modified times, each by its own side's clock. A folder comes down without Git's data (.git) and links to folders.",
     ],
   },
 } as const satisfies Record<string, HelpEntry>;

@@ -754,3 +754,38 @@ async fn watching_an_unknown_session_fails() {
         .is_err());
     assert!(core.metrics.watched().await.unwrap().is_empty());
 }
+
+#[tokio::test]
+async fn the_read_only_lock_refuses_starting_and_stopping_guest_metrics() {
+    // FD-03: watching is a setting (audited setting_changed; the app logs in to the host each round), so the lock
+    // refuses it as it refuses MO-13's background reads. Nothing connects here: the port is never tried.
+    let core = ssh_core().await;
+    let ctx = core.ctx();
+    let web = session(&core, "web01", 1, None).await;
+    let db = session(&core, "db01", 1, None).await;
+    core.metrics.set_watched(&ctx, db, true).await.unwrap();
+    let lock = |read_only| remotely_core::presentation::Presentation {
+        enabled: true,
+        read_only,
+    };
+    core.presentation.set(lock(true)).await.unwrap();
+    let changes = |audit: &[remotely_core::store::AuditEntry]| {
+        audit.iter().filter(|e| e.action.ends_with("guest metrics")).count()
+    };
+    let before = changes(&core.store.recent_audit(&ctx, 100).await.unwrap());
+    for (id, watch) in [(web, true), (db, false)] {
+        let err = core.metrics.set_watched(&ctx, id, watch).await.unwrap_err();
+        assert_eq!(err.code(), "read_only_lock", "{err}");
+        assert!(err.to_string().contains("Change settings"), "{err}");
+    }
+    assert_eq!(core.metrics.watched().await.unwrap(), vec![db], "nothing changed");
+    assert_eq!(
+        changes(&core.store.recent_audit(&ctx, 100).await.unwrap()),
+        before,
+        "nothing audited"
+    );
+    // Presenting without the lock, it changes as before.
+    core.presentation.set(lock(false)).await.unwrap();
+    core.metrics.set_watched(&ctx, web, true).await.unwrap();
+    assert_eq!(core.metrics.watched().await.unwrap(), vec![db, web]);
+}

@@ -32,7 +32,7 @@ use remotely_core::deploy::service::{DeployFrom, DeployRequest};
 use remotely_core::deploy::spec::VmInstall;
 use remotely_core::domain::Environment;
 use remotely_core::fakes::{install_isos, FakeVirtualBox, FakeVmware};
-use remotely_core::jobs::{JobEvent, JobStatus};
+use remotely_core::jobs::{JobEvent, JobStatus, TargetStatus};
 use remotely_core::known_hosts::HostKey;
 use remotely_core::policy::ApprovalStep;
 use remotely_core::ssh_keys::{GenerateKey, KeyType};
@@ -277,6 +277,43 @@ async fn notes_of(core: &Core, job: Uuid) -> String {
         )
 }
 
+/// One VM's end as the window hears it: its name, status and error code.
+type TargetEnd = (String, TargetStatus, Option<&'static str>);
+
+/// VM-29: each VM's `TargetFinished` (name, status, error code), which the Deploy dialog goes by, never the message's
+/// words. Gathered as they come, so the progress events can't push them out, until the job they belong to finishes.
+fn target_ends(core: &Core) -> tokio::task::JoinHandle<Vec<TargetEnd>> {
+    let mut events = core.jobs.subscribe();
+    tokio::spawn(async move {
+        let mut ends: Vec<(Uuid, TargetEnd)> = Vec::new();
+        loop {
+            match events.recv().await {
+                Ok(JobEvent::TargetFinished {
+                    job_id,
+                    name,
+                    status,
+                    error_code,
+                    ..
+                }) => ends.push((job_id, (name, status, error_code))),
+                Ok(JobEvent::Finished { job_id, .. }) if ends.iter().any(|(j, _)| *j == job_id) => {
+                    let mut ends: Vec<_> = ends.into_iter().filter(|(j, _)| *j == job_id).map(|(_, e)| e).collect();
+                    ends.sort_by(|a, b| a.0.cmp(&b.0));
+                    return ends;
+                }
+                Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                Err(_) => return Vec::new(),
+            }
+        }
+    })
+}
+
+async fn ends_of(ends: tokio::task::JoinHandle<Vec<TargetEnd>>) -> Vec<TargetEnd> {
+    tokio::time::timeout(Duration::from_secs(10), ends)
+        .await
+        .expect("the job's end was heard")
+        .unwrap()
+}
+
 fn ubuntu_lines(host: &str) -> Vec<String> {
     vec![
         "[    0.000000] Command line: BOOT_IMAGE=/casper/vmlinuz autoinstall console=tty0 console=ttyS0,115200n8 ---\r\n".into(),
@@ -519,6 +556,7 @@ async fn the_iso_copy_and_seed_carry_the_boot_menu_and_the_rendered_file() {
             None
         }
     });
+    let ends = target_ends(&core);
     let job = approve(&core, &approval).await;
     // No installer writes anything: the install runs out of its time. Its VM, ISO copy and log are kept for a look;
     // its seed (the answer file) is taken out.
@@ -527,6 +565,11 @@ async fn the_iso_copy_and_seed_carry_the_boot_menu_and_the_rendered_file() {
     let notes = notes_of(&core, job).await;
     assert!(notes.contains("the VM is kept for a look"), "{notes}");
     assert!(notes.contains("not done within"), "{notes}");
+    assert_eq!(
+        ends_of(ends).await,
+        vec![("db-1".to_owned(), TargetStatus::Failed, Some("install_failed"))],
+        "a timed-out install is a failed one that keeps its VM"
+    );
     assert!(
         notes.contains("answer file from"),
         "the step's notes stay with its error: {notes}"
@@ -634,6 +677,7 @@ async fn debian_on_virtualbox_nat_reaches_its_guest_through_a_rule_and_a_questio
             "\x1b[3;10H\x1b(0u\x1b(B\x1b[31m [!!] Partition disks \x1b[0m\x1b(0t\x1b(B\x1b[4;1H".into(),
         ],
     );
+    let ends = target_ends(&core);
     let job = approve(&core, &approval).await;
     let status = wait(&core, job).await;
     good.await.unwrap();
@@ -641,6 +685,13 @@ async fn debian_on_virtualbox_nat_reaches_its_guest_through_a_rule_and_a_questio
     banner.abort();
     let notes = notes_of(&core, job).await;
     assert_eq!(status, JobStatus::PartiallyFailed, "{notes}");
+    assert_eq!(
+        ends_of(ends).await,
+        vec![
+            ("db-1".to_owned(), TargetStatus::Succeeded, None),
+            ("db-2".to_owned(), TargetStatus::Failed, Some("install_failed")),
+        ]
+    );
     assert!(notes.contains("Partition disks"), "{notes}");
     assert!(notes.contains("installed, reached at 127.0.0.1"), "{notes}");
     let calls = vb.calls().join("\n");
@@ -1287,6 +1338,7 @@ async fn a_cancelled_install_takes_its_seed_out_and_says_what_it_keeps() {
         folder.join("web-1-serial.log"),
         vec!["Command line: BOOT_IMAGE=/casper/vmlinuz autoinstall ---\r\n".into()],
     );
+    let ends = target_ends(&core);
     let job = approve(&core, &approval).await;
     play.await.unwrap();
     tokio::time::sleep(Duration::from_millis(300)).await;
@@ -1295,6 +1347,12 @@ async fn a_cancelled_install_takes_its_seed_out_and_says_what_it_keeps() {
     assert_eq!(status, JobStatus::Cancelled);
     let notes = notes_of(&core, job).await;
     assert!(notes.contains("cancelled while it was watched"), "{notes}");
+    assert!(notes.contains("the VM goes on installing"), "{notes}");
+    assert_eq!(
+        ends_of(ends).await,
+        vec![("web-1".to_owned(), TargetStatus::Cancelled, Some("install_cancelled"))],
+        "the window hears that this cancel kept its VM"
+    );
     assert!(notes.contains("answer file from"), "{notes}");
     assert!(notes.contains("the VM is kept for a look"), "{notes}");
     let seed = read_joliet(&std::fs::read(folder.join("install-seed").join("web-1-seed.iso")).unwrap()).unwrap();
