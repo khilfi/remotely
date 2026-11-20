@@ -51,6 +51,7 @@ import { useReadOnlyReason } from "@/components/Presentation";
 import { formatWhen, plural } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import { diffReason } from "@/lib/disabled-reasons";
+import { retryBlockedReason } from "@/lib/results-list";
 import { canaryPrompt, retryChoices, timeLeft } from "@/lib/rollout";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { StatusBadge, TierBadge } from "./Badges";
@@ -210,14 +211,9 @@ export function BulkResultsView({ jobId, onRetry, bundle = false, extraActions }
   const canRetry = !bundle && !open && retries.failed > 0;
   // H9: the event may have come before this view opened; the results say whether the rest still wait.
   const waiting = canary ?? shown.canary;
-  // BX-02, BX-04: the journal no longer holds the script as it ran (the core refuses the retry too).
-  const retryBlocked = readOnly
-    ? readOnly
-    : job.bodiesRemoved
-      ? "Its script was removed after the retention period. Run it again from Compare hosts."
-      : job.commandRedacted
-        ? "Its script had something that looked like a secret, which the journal doesn't keep. Run it again from Compare hosts."
-        : null;
+  // BX-02, BX-04: the read-only lock, or the journal no longer holds the script as it ran (the core refuses the retry
+  // too); only a remote exec run's script is purged, so a push, fetch or key push stays retryable.
+  const retryBlocked = retryBlockedReason(job, readOnly);
 
   return (
     <div className="grid gap-4">

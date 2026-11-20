@@ -11,9 +11,8 @@ import {
   itemRunning,
   itemStatus,
   itemTitle,
-  noRetryReason,
   resultItems,
-  shownItem,
+  retryBlockedReason,
   shownKey,
   shownResult,
   TYPED_NO_RETRY,
@@ -98,20 +97,33 @@ test("each is badged with what it was and how many it reached", () => {
   );
 });
 
-test("only runs retry; a typed line says why it has none", () => {
-  const [run, typed] = resultItems([job("r", "2026-11-20T10:01:00Z")], [line("l", "2026-11-20T10:00:00Z")]);
-  assert.equal(noRetryReason(run), null);
-  assert.equal(noRetryReason(typed), TYPED_NO_RETRY);
-  assert.match(TYPED_NO_RETRY, /can't be retried/);
+test("items of the same instant keep one order: runs as the core listed them, then typed lines", () => {
+  const at = "2026-11-20T10:00:00Z";
+  const items = resultItems([job("r2", at), job("r1", at)], [line("l2", at), line("l1", at)]);
+  assert.deepEqual(
+    items.map((i) => i.key),
+    ["run:r2", "run:r1", "typed:l2", "typed:l1"],
+  );
+  // The same answer however often it is asked (a re-read doesn't reshuffle the list).
+  assert.deepEqual(
+    resultItems([job("r2", at), job("r1", at)], [line("l2", at), line("l1", at)]).map((i) => i.key),
+    items.map((i) => i.key),
+  );
 });
 
-test("the picked item while it is listed, else the newest", () => {
-  const items = resultItems([job("r", "2026-11-20T10:01:00Z")], [line("l", "2026-11-20T10:02:00Z")]);
-  assert.equal(shownItem(items, null)?.key, "typed:l");
-  assert.equal(shownItem(items, "run:r")?.key, "run:r");
-  // A typed line goes when typing stops: the newest shows instead.
-  assert.equal(shownItem(items, "typed:gone")?.key, "typed:l");
-  assert.equal(shownItem([], "run:r"), null);
+test("a failed host's retry is off only where the core refuses it", () => {
+  const lock = "Read-only while presenting";
+  const fresh = { commandType: "remoteExec", bodiesRemoved: false, commandRedacted: false };
+  assert.equal(retryBlockedReason(fresh, null), null);
+  assert.equal(retryBlockedReason(fresh, lock), lock, "the read-only lock first");
+  // The purge empties a remote exec run's script, so that run can't go again as it ran...
+  assert.match(retryBlockedReason({ ...fresh, bodiesRemoved: true }, null) ?? "", /removed after the retention period/);
+  // ...but a push, fetch or key push keeps what it needs: the core retries it.
+  for (const commandType of ["bulkFiles", "pushSshKey"])
+    assert.equal(retryBlockedReason({ ...fresh, commandType, bodiesRemoved: true }, null), null, commandType);
+  assert.match(retryBlockedReason({ ...fresh, commandRedacted: true }, null) ?? "", /looked like a secret/);
+  // A typed line has no retry at all, and says why.
+  assert.match(TYPED_NO_RETRY, /can't be retried/);
 });
 
 test("the panel opens the picked run even before the list is read again, and a gone line gives way", () => {

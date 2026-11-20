@@ -987,9 +987,10 @@ Bulk execution lives in the Terminal page (it replaced the MVP's Bulk run page):
 - **One results list** (UX-17, 0.9.0): under Run, newest first, Compare hosts lists its runs, the pushes and fetches
   to many hosts (from the Files page's Many hosts or a drop, whoever started them) and the lines typed in all tabs,
   each badged with what it was: "Run on 12 hosts", "Pushed to 5 hosts", "Fetched from 3 hosts", "Typed in 6 tabs".
-  The one you pick, or the newest, opens beside the list in the same grouped view. Retry and the canary's "Run on the
-  rest" are for runs, pushes and fetches only; a typed line goes when Type in all tabs is turned off. The One-shot run
-  and Type in all tabs views of 0.8 are gone.
+  The one you pick, or the newest, opens beside the list in the same grouped view. Retry of the failed hosts is for
+  runs, pushes and fetches, and the canary ("Run on one host first", then "Run on the rest") for runs only; a typed
+  line has neither and goes when Type in all tabs is turned off. The One-shot run and Type in all tabs views of 0.8 are
+  gone.
 - **Bulk jobs in Activity** (UX-18, 0.9.0): Activity opens a command run on many hosts, a push or fetch to many hosts
   and an SSH key push in that grouped view too, with the diff, retry of the failed hosts and export, and a support
   bundle in its own mode with Show folder; other jobs keep their per-target sheet. A job's notification, a failed

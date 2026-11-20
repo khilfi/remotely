@@ -53,11 +53,6 @@ export function resultItems(runs: readonly JobSummary[], lines: readonly Recorde
   return items.sort((a, b) => time(b.at) - time(a.at));
 }
 
-/** The item the panel shows: the one picked while it is still listed, else the newest. */
-export function shownItem(items: readonly ResultItem[], picked: string | null): ResultItem | null {
-  return items.find((i) => i.key === picked) ?? items[0] ?? null;
-}
-
 /** What the panel opens: a run's job (by id), or a typed line. */
 export type ShownResult = { kind: "run"; jobId: string } | { kind: "typed"; line: RecordedLine };
 
@@ -151,14 +146,22 @@ export const TYPED_NO_RETRY =
 /** How long a typed line is kept. */
 export const TYPED_KEPT = "It goes when Type in all tabs is turned off: typed lines are kept in memory only.";
 
-/** Why the item can't be retried as a whole, or null when its results view offers retry (runs only). */
-export function noRetryReason(item: ResultItem): string | null {
-  switch (item.kind) {
-    case "run":
-      return null;
-    case "typed":
-      return TYPED_NO_RETRY;
-  }
+/**
+ * BX-02, BX-04 (QL-08): why a finished job's failed hosts can't be retried, or null; the core's `retry_failed` refuses
+ * the same. The read-only lock first; then a remote exec run whose script the retention purge emptied (it empties only
+ * scripts, typed lines and a bundle's items, so a push, fetch or key push older than the retention period can still be
+ * retried); then a command the journal keeps as [redacted].
+ */
+export function retryBlockedReason(
+  job: Pick<JobSummary, "commandType" | "bodiesRemoved" | "commandRedacted">,
+  readOnly: string | null,
+): string | null {
+  if (readOnly) return readOnly;
+  if (job.bodiesRemoved && job.commandType === "remoteExec")
+    return "Its script was removed after the retention period. Run it again from Compare hosts.";
+  if (job.commandRedacted)
+    return "Its script had something that looked like a secret, which the journal doesn't keep. Run it again from Compare hosts.";
+  return null;
 }
 
 /**

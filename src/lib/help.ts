@@ -179,7 +179,7 @@ export const HELP = {
     title: "Activity",
     body: [
       "Every job, newest first, with each target's result and output, and the audit log of everything that changed.",
-      "A command run on many hosts, a push or fetch, an SSH key push or a support bundle opens grouped by output, as in Compare hosts, where its failed hosts can be retried (asked for again) and its results compared and exported.",
+      "A command run on many hosts, a push or fetch, or an SSH key push opens grouped by output, as in Compare hosts: its failed hosts can be retried (asked for again) and its results compared and exported. A support bundle shows what each host gave, with Show folder.",
     ],
     link: { label: "Job output retention", to: setting("retention") },
   },

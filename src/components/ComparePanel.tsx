@@ -66,6 +66,7 @@ import { requestLink } from "@/lib/links";
 import { EmptyState } from "@/components/EmptyState";
 import { compareRunReason, sudoWindowsReason } from "@/lib/disabled-reasons";
 import { formatWhen, plural } from "@/lib/format";
+import { changesJobList, progressesJob, PROGRESS_READ_MS } from "@/lib/job-events";
 import { readOnlyLocked } from "@/lib/presentation-state";
 import { capsNote } from "@/lib/recordings";
 import {
@@ -263,9 +264,11 @@ export function ComparePanel({
     };
   }, [commandKey, script]);
 
-  // Earlier runs, pushes and fetches; again whenever one is queued or ends, once per burst of job events (BX-03). UX-17:
-  // by the jobs' events, whoever started them (a push from the Files page or a drop shows here too).
-  const settledRuns = useDebounced(runsVersion);
+  // Earlier runs, pushes and fetches (BX-03); UX-17: by the jobs' events, whoever started them (a push from the Files
+  // page or a drop shows here too). Read again as a job is queued, counts down, starts, finishes a host or ends, so the
+  // list's status words keep up with the card beside it; asks join for a second (as Activity's), so a 50-host run reads
+  // it at most once a second.
+  const settledRuns = useDebounced(runsVersion, PROGRESS_READ_MS, PROGRESS_READ_MS);
   useEffect(() => {
     if (!active) return;
     let stale = false;
@@ -282,7 +285,7 @@ export function ComparePanel({
 
   useEffect(() => {
     const unlisten = api.onJobEvent((event) => {
-      if (event.event === "queued" || event.event === "finished") setRunsVersion((v) => v + 1);
+      if (changesJobList(event) || progressesJob(event)) setRunsVersion((v) => v + 1);
     });
     return () => void unlisten.then((stop) => stop());
   }, []);
@@ -575,6 +578,12 @@ export function ComparePanel({
                     </Alert>
                   )}
                 </section>
+              )}
+              {/* QL-12: the typed lines couldn't be read (the runs still list). */}
+              {typed.error && (
+                <p className="text-sm text-destructive" role="alert">
+                  Could not read the typed lines: {typed.error}
+                </p>
               )}
             </div>
 

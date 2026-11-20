@@ -1477,7 +1477,9 @@ src/                  React + TypeScript UI
                       event names, filters), results-list.ts (UX-17, UX-18, 0.9.0 H3: Compare hosts' one list's items, a
                       union of kinds (`run`, `typed`; QL-31, H7, adds a kept line) merged newest first, badges, status
                       words, the shown item (a run just queued opens before it is listed), why a typed line has no
-                      retry; activityView: which jobs Activity opens in BulkResultsView), palette.ts (UX-07 Ctrl+K's order; bulk actions only when searched for),
+                      retry; retryBlockedReason: a finished job's retry off only where the core's retry_failed refuses
+                      it (the lock, a purged remote exec run, a redacted command); activityView: which jobs Activity
+                      opens in BulkResultsView), palette.ts (UX-07 Ctrl+K's order; bulk actions only when searched for),
                       update-notice.ts (FD-14 the one update notice), catalog.ts (VM-19
                       to VM-21 texts, the size form), deploy.ts (VM-21, VM-10 the dialogs' reasons, counts and
                       packages, a job's steps from its events and targets), vm-insight-api.ts and vm-insight.ts (R4
