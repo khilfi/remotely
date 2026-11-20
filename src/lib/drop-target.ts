@@ -5,8 +5,13 @@
 //
 // The owner's constraint (docs/plan-0.9.md, Decisions): a drop on a terminal pane uploads into that terminal's shell
 // folder, or its home folder when the shell doesn't say, never as root, whatever the Files drawer beside it shows or
-// browses as. A pane decides alone: nothing about the drawer is read for it. H6 extends the terminal target (a push to
-// the picked hosts while typing in all tabs) and must leave this default as it is. Tested in drop-target.test.ts.
+// browses as. A pane decides alone: nothing about the drawer is read for it. Tested in drop-target.test.ts.
+//
+// QL-30 (0.9.0 H6): while Type in all tabs is on with more than one tab picked, a terminal pane's target also offers a
+// push to the picked hosts (`DropPlaces.typing`, `DropPush`): the page asks, and its default, taken by Enter, is that
+// same upload, unchanged. A push is one BX-10 job (`files_push` with the drop's staged id and the picked terminals as
+// `TargetPicks.terminal_ids`): quick connections are left out (they have no saved session), and so are terminals a
+// push can't take (not SSH, or not connected yet). Nothing changes without typing, or for the drawer.
 
 /** What is under a drop point, read from the pages' markers. */
 export interface DropSpot {
@@ -52,11 +57,46 @@ export interface DropPlaces {
   many?: boolean;
   /** The Virtual machines page: a VM's row or details takes an ISO. */
   vms?: boolean;
+  /** QL-30: Type in all tabs is on (the Terminal page); absent while it is off. */
+  typing?: DropTyping;
+}
+
+/** QL-30: a terminal of a tab picked for Type in all tabs. */
+export interface TypingPane {
+  /** Its core id; null until it has connected. */
+  terminalId: string | null;
+  /** Its saved session; null for a quick connection. */
+  sessionId: string | null;
+  /** An SSH terminal: a push goes over SSH, so a PowerShell, Telnet or serial tab can't take one. */
+  ssh: boolean;
+}
+
+/** QL-30: Type in all tabs while it is on: how many tabs are picked, and their terminals. */
+export interface DropTyping {
+  tabs: number;
+  panes: readonly TypingPane[];
+}
+
+/** QL-30: the push a drop on a terminal offers while typing in more than one tab. */
+export interface DropPush {
+  /** The terminals it goes to (`TargetPicks.terminal_ids`): connected SSH terminals of saved sessions. */
+  terminalIds: string[];
+  /** How many hosts that is: two tabs of one saved session are one host. */
+  hosts: number;
+  /** Picked quick connections left out: they have no saved session to push to. */
+  quick: number;
+  /** Other picked terminals left out: not SSH, or not connected yet. */
+  other: number;
+  /** Why the push can't be chosen now; null when it can. */
+  why: string | null;
 }
 
 export type DropTarget =
-  /** An upload into the pane's shell folder (`null`: its home folder), never as root. */
-  | { kind: "terminal"; paneKey: string; folder: string | null; asRoot: false }
+  /**
+   * An upload into the pane's shell folder (`null`: its home folder), never as root. QL-30: `push` only while typing in
+   * more than one tab.
+   */
+  | { kind: "terminal"; paneKey: string; folder: string | null; asRoot: false; push?: DropPush }
   /** An upload into the folder a host pane shows, or the folder row it fell on, as root when the pane browses so. */
   | { kind: "host"; key: string; terminalId: string; folder: string; asRoot: boolean }
   /** A host pane that can't take uploads now, and why. */
@@ -73,7 +113,10 @@ export function dropTarget(spot: DropSpot, places: DropPlaces): DropTarget {
   // A terminal pane decides alone, before anything else is looked at.
   if (places.panes && spot.paneKey !== undefined) {
     const pane = places.panes.find((p) => p.key === spot.paneKey);
-    return pane ? { kind: "terminal", paneKey: pane.key, folder: pane.folder, asRoot: false } : { kind: "none" };
+    if (!pane) return { kind: "none" };
+    const upload = { kind: "terminal", paneKey: pane.key, folder: pane.folder, asRoot: false } as const;
+    // QL-30: the push is offered beside the upload, only while typing in more than one tab.
+    return places.typing && places.typing.tabs > 1 ? { ...upload, push: dropPush(places.typing) } : upload;
   }
   if (places.hosts && spot.files === "host") {
     const host = places.hosts.find((h) => h.key === spot.filesTab);
@@ -106,32 +149,140 @@ export interface DropPaneSource {
   getSnapshot(): { folder?: { path: string | null } | null };
 }
 
+/** QL-30: the push a drop on a terminal offers, from the picked tabs' terminals. Pure. */
+export function dropPush(typing: DropTyping): DropPush {
+  const terminalIds: string[] = [];
+  const sessions = new Set<string>();
+  let quick = 0;
+  let other = 0;
+  for (const pane of typing.panes) {
+    if (!pane.ssh || pane.terminalId === null) other += 1;
+    else if (pane.sessionId === null) quick += 1;
+    else if (!terminalIds.includes(pane.terminalId)) {
+      terminalIds.push(pane.terminalId);
+      sessions.add(pane.sessionId);
+    }
+  }
+  const why =
+    terminalIds.length > 0
+      ? null
+      : quick > 0
+        ? "Quick connections can't take a push: save them as sessions first"
+        : "None of the picked tabs is a connected SSH session";
+  return { terminalIds, hosts: sessions.size, quick, other, why };
+}
+
+/** QL-30: the menu's push item, named for its hosts. */
+export function pushLabel(push: DropPush): string {
+  if (push.hosts === 0) return "Push to the picked hosts…";
+  return push.hosts === 1 ? "Push to the picked host…" : `Push to the ${push.hosts} picked hosts…`;
+}
+
+/** QL-30: the menu's line on what the push leaves out; null when it leaves nothing out. */
+export function pushLeftOut(push: DropPush): string | null {
+  const parts: string[] = [];
+  if (push.quick > 0) {
+    parts.push(
+      push.quick === 1
+        ? "1 quick connection left out: it isn't a saved session"
+        : `${push.quick} quick connections left out: they aren't saved sessions`,
+    );
+  }
+  if (push.other > 0) {
+    parts.push(
+      push.other === 1
+        ? "1 tab left out: it isn't a connected SSH terminal"
+        : `${push.other} tabs left out: they aren't connected SSH terminals`,
+    );
+  }
+  return parts.length > 0 ? parts.join("; ") : null;
+}
+
+/** QL-30: why the push can't take these files (a push sends files, the upload takes folders too); null: it can. */
+export function pushReason(push: DropPush, staged: { files: readonly { folder?: boolean }[] }): string | null {
+  if (push.why) return push.why;
+  return staged.files.some((f) => f.folder) ? "A push sends files: drop files, not folders" : null;
+}
+
+/** QL-30: the notice a push ends with (it leads to the job's results), from its hosts' statuses. */
+export interface PushNotice {
+  title: string;
+  description: string;
+  /** Every host that wasn't skipped got the files. */
+  ok: boolean;
+}
+
+/** QL-30: `what` was pushed into `folder`; the statuses are the job's targets' (`job_targets`), none when unread. Pure. */
+export function pushNotice(what: string, folder: string, statuses: readonly string[]): PushNotice {
+  const skipped = statuses.filter((s) => s === "skipped").length;
+  const ran = statuses.length - skipped;
+  const got = statuses.filter((s) => s === "succeeded").length;
+  const hosts = (n: number) => (n === 1 ? "1 host" : `${n} hosts`);
+  const description = `Into ${folder}${skipped > 0 ? `; ${hosts(skipped)} skipped (protected)` : ""}`;
+  if (statuses.length === 0) return { title: `The push of ${what} finished`, description, ok: true };
+  if (ran > 0 && got === ran) return { title: `Pushed ${what} to ${hosts(got)}`, description, ok: true };
+  if (got === 0) return { title: `The push of ${what} failed on ${hosts(ran)}`, description, ok: false };
+  return { title: `Pushed ${what} to ${got} of ${hosts(ran)}`, description, ok: false };
+}
+
+/** An upload through `pane` into `folder` (null: its shell's folder or home, as the page has always found it). */
+export interface TerminalPageUpload<P> {
+  kind: "upload";
+  pane: P;
+  folder: string | null;
+  asRoot: boolean;
+}
+
 /** What the Terminal page does with a drop. */
 export type TerminalPageDrop<P> =
-  /** An upload through `pane` into `folder` (null: its shell's folder or home, as the page has always found it). */
-  | { kind: "upload"; pane: P; folder: string | null; asRoot: boolean }
+  | TerminalPageUpload<P>
+  /**
+   * QL-30: typing in more than one tab, a drop on a terminal asks. `upload` is the default (Enter), exactly what the
+   * drop is without typing; `push` the other choice.
+   */
+  | { kind: "choose"; upload: TerminalPageUpload<P> & { asRoot: false }; push: DropPush }
   | { kind: "refused"; why: string }
   | { kind: "none" };
+
+/** What the Terminal page needs of a pane while typing in all tabs: a `DropPaneSource` with its session and kind. */
+export interface TypingPaneSource {
+  terminalId: string | null;
+  sessionId: string | null;
+  kind: string;
+}
+
+/** QL-30: Type in all tabs as `terminalPageDrop` takes it: the picked tabs and their panes. */
+export function dropTyping(pickedTabs: number, panes: readonly TypingPaneSource[]): DropTyping {
+  return {
+    tabs: pickedTabs,
+    panes: panes.map((p) => ({ terminalId: p.terminalId, sessionId: p.sessionId, ssh: p.kind === "ssh" })),
+  };
+}
 
 /**
  * The Terminal page's drop, from its panes and the drawer (null while it isn't shown). A pane takes a drop on it into
  * its own shell's folder (null: its home folder), never as root, through that pane; the drawer takes one into the folder
  * it shows, as root while it browses so, through its terminal's pane. The page then calls
- * `uploadStaged(pane, staged, folder, asRoot)` with exactly these. Pure.
+ * `uploadStaged(pane, staged, folder, asRoot)` with exactly these. QL-30: with `typing` (Type in all tabs on), a drop on
+ * a pane while more than one tab is picked is `choose`, whose `upload` is that same call. Pure.
  */
 export function terminalPageDrop<P extends DropPaneSource>(
   spot: DropSpot,
   panes: readonly P[],
   drawer: DropHost | null,
+  typing?: DropTyping,
 ): TerminalPageDrop<P> {
   const target = dropTarget(spot, {
     panes: panes.map((p) => ({ key: p.key, folder: p.getSnapshot().folder?.path ?? null })),
     hosts: drawer ? [drawer] : [],
+    ...(typing ? { typing } : {}),
   });
   switch (target.kind) {
     case "terminal": {
       const pane = panes.find((p) => p.key === target.paneKey);
-      return pane ? { kind: "upload", pane, folder: target.folder, asRoot: false } : { kind: "none" };
+      if (!pane) return { kind: "none" };
+      const upload = { kind: "upload", pane, folder: target.folder, asRoot: false } as const;
+      return target.push ? { kind: "choose", upload, push: target.push } : upload;
     }
     case "host": {
       const pane = panes.find((p) => p.terminalId === target.terminalId);

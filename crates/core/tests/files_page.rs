@@ -893,6 +893,116 @@ async fn pushing_to_many_hosts_checks_each_copy_and_is_high_from_five() {
     std::fs::remove_dir_all(&here).unwrap();
 }
 
+/// QL-30 (0.9.0 H6): files dropped on a terminal while typing in all tabs, pushed to the picked tabs as the Terminal
+/// page asks (`files_push`: the drop's staged files taken by id, the tabs' terminals as `TargetPicks.terminal_ids`).
+/// One host per saved session, a quick connection left out with a note, and the approval names every host, a Prod
+/// one moving the push up a tier.
+#[tokio::test]
+async fn a_drop_pushed_to_the_picked_tabs_names_every_host_and_leaves_quick_connections_out() {
+    let pw = password();
+    let mut servers = Vec::new();
+    for _ in 0..3 {
+        servers.push(
+            TestSshServer::start()
+                .await
+                .with_password("alice", &pw)
+                .with_sftp_dir("/home/alice/app"),
+        );
+    }
+    let (core, login) = core_for(&servers[0], &pw).await;
+    let other = core
+        .vault
+        .add(
+            &core.ctx(),
+            SecretKind::Password,
+            "alice login 2",
+            SecretString::new(&pw),
+        )
+        .await
+        .unwrap()
+        .id;
+    for server in &servers[1..] {
+        let key = HostKey {
+            host: "127.0.0.1".into(),
+            port: server.port(),
+            key_type: "ssh-ed25519".into(),
+            fingerprint: server.host_key_fingerprint(),
+        };
+        core.known_hosts.trust(&core.ctx(), &key, None).await.unwrap();
+    }
+    let web01 = session(&core, &servers[0], login, "web01", Environment::Lab).await;
+    let web02 = session(&core, &servers[1], other, "web02", Environment::Prod).await;
+
+    // The picked tabs: web01 split in two, web02, and a quick connection to the third server.
+    let mut picked = Vec::new();
+    for id in [web01, web01, web02] {
+        let handle = core.terminals.open(&core.ctx(), id, SIZE).await.unwrap();
+        picked.push(handle.id);
+        drain(&core, handle).await;
+    }
+    let quick = core
+        .terminals
+        .quick_connect(
+            &core.ctx(),
+            remotely_core::terminal::quick::QuickConnect {
+                host: format!("alice@127.0.0.1:{}", servers[2].port()),
+                port: None,
+                username: None,
+                auth: SessionAuth::Password { password_id: None },
+                password: Some(SecretString::new(&pw)),
+                save: None,
+                vault_password: None,
+            },
+            SIZE,
+        )
+        .await
+        .unwrap();
+    picked.push(quick.handle.id);
+    drain(&core, quick.handle).await;
+
+    // The drop, staged as the shell stages it, and taken by its id as files_push takes PushFrom::Staged.
+    let here = temp_folder("drop-push");
+    let body = b"listen 8080\n";
+    std::fs::write(here.join("app.conf"), body).unwrap();
+    let staged = core.files.stage(vec![here.join("app.conf")]).unwrap();
+    let paths = core.files.take_staged(staged.id).unwrap();
+    assert!(core.files.take_staged(staged.id).is_err(), "a drop is pushed once");
+
+    let picks = TargetPicks {
+        terminal_ids: picked,
+        ..Default::default()
+    };
+    let started = core
+        .bulk_files
+        .push(&picks, paths, "/home/alice/app", false, false)
+        .await
+        .unwrap();
+    let names: Vec<&str> = started.resolved.hosts.iter().map(|h| h.name.as_str()).collect();
+    assert_eq!(names, ["web01", "web02"], "two tabs of one session: one host");
+    assert_eq!(started.resolved.notes.len(), 1, "{:?}", started.resolved.notes);
+    assert!(started.resolved.notes[0].contains("is a quick connection, not a saved session"));
+
+    let SubmitOutcome::NeedsApproval { request } = &started.outcome else {
+        panic!("a push always asks");
+    };
+    assert_eq!(request.action, ActionKind::FilePush);
+    assert_eq!(request.tier, Tier::High, "Medium, and web02 is Prod");
+    let named: Vec<&str> = request.targets.iter().map(|t| t.name.as_str()).collect();
+    assert_eq!(named, ["web01", "web02"], "the approval names every host");
+    assert!(request.skipped.is_empty());
+
+    let (_, status, _, _) = run(&core, started.outcome).await;
+    assert_eq!(status, JobStatus::Succeeded);
+    for server in &servers[..2] {
+        assert_eq!(server.sftp_file("/home/alice/app/app.conf").unwrap(), body);
+    }
+    assert!(
+        servers[2].sftp_file("/home/alice/app/app.conf").is_none(),
+        "the quick connection's host gets nothing"
+    );
+    std::fs::remove_dir_all(&here).unwrap();
+}
+
 #[tokio::test]
 async fn fetching_from_many_hosts_saves_each_file_and_groups_by_content() {
     let pw = password();

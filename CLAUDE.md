@@ -929,7 +929,8 @@ crates/core/          remotely-core: all app logic
                       each pushed file's SHA-256 on the host (its sha256sum, else read back); each host's output is the
                       same for the same bytes (a push's lines, a fetch's SHA-256 line then its text up to 1 MB), so
                       BX-03's grouping and diff work on it. BulkFiles (Core.bulk_files) resolves the picks (Reach::Ssh),
-                      takes files from a dialog, a drop or the local pane, and checks a fetch's folder (save_guard,
+                      takes files from a dialog, a drop (Many hosts', or QL-30's on a terminal while typing in all tabs,
+                      with the picked tabs' terminals as the picks) or the local pane, and checks a fetch's folder (save_guard,
                       Remotely's data folder); never built by the UI
     support_bundle/   FD-04 support bundles (no migration): spec.rs BundleSpec (Command::SupportBundle; presets expanded
                       into its items before the bus rates them; refused from the UI: the zip's place comes from the
@@ -1163,7 +1164,9 @@ crates/core/          remotely-core: all app logic
                       files_page.rs: SS-14, BX-10 (0.8.0 G3) on the test SSH server's
                       SFTP folder and its toy find and sha256sum: find, preview and checksums as reads, bookmarks (audit,
                       lock, trash), the local pane by listing, compare and sync both ways at their tiers, pushes to five
-                      servers (Medium, High from 5, each copy's SHA-256) and fetches grouped by content;
+                      servers (Medium, High from 5, each copy's SHA-256) and fetches grouped by content; QL-30 a drop's
+                      staged files taken once and pushed to picked tabs (two tabs of one session one host, a quick
+                      connection left out with a note, the approval naming every host, a Prod one a tier up);
                       opt-in workstation_it.rs,
                       virtualbox_it.rs and
                       conversion_it.rs (the real conversion tools on small images in the temp folder)
@@ -1236,7 +1239,11 @@ src/                  React + TypeScript UI
                       BulkTargetPicker (BX-01, UX-16 the one host picker of every bulk job: sessions, VMs, tags, saved
                       filters and a Groups tab; `compact`), MultiExec
                       bar (UX-16: its Pick tabs menu in both states, with the saved groups), WhyDisabled for QL-08,
-                      PasteConfirmDialog for QL-05,
+                      PasteConfirmDialog for QL-05, DropPushMenu for QL-30 (0.9.0 H6: DropChoiceMenu at a drop's point
+                      while typing in more than one tab, "Upload to <tab>'s folder" focused for Enter, "Push to the N
+                      picked hosts…" off with its reason, Esc or a click away unstaging; DropPushDialog, the folder
+                      filled in with the tab's, replace or not, the hosts the core resolves, then `files_push` from
+                      the drop's staged id; showPushNotice, the job's toast replaced by one leading to its results),
                       FilesDrawer and TransfersList for SS-08 (UX-14, 0.9.0 H1: the drawer is files/HostPane in compact
                       mode on the current terminal, a pane per terminal that keeps its folder, Back and Forward and view
                       across tab switches (hidden files shown, as before), with EditingSessionsList and TransfersList
@@ -1451,7 +1458,14 @@ src/                  React + TypeScript UI
                       folder or home, never as root, whatever the drawer does (the owner's constraint, pinned by its
                       test); a host pane or its folder row, or refused with the reason it gives (not connected, no
                       folder, the read-only lock); Many hosts; a VM's ISO; terminalPageDrop, the Terminal page's whole
-                      choice: which pane uploads, into what folder, as root or not, tested), root-browsing.ts (UX-14: which
+                      choice: which pane uploads, into what folder, as root or not, tested; QL-30 (0.9.0 H6)
+                      DropPlaces.typing (dropTyping: Type in all tabs on, the picked tabs and their panes): with more
+                      than one tab picked a pane's drop is `choose`, its `upload` exactly the drop without typing (the
+                      default, Enter) beside dropPush (the picked SSH terminals of saved sessions as
+                      TargetPicks.terminal_ids, one host per session, quick connections and other tabs counted as left
+                      out, `why` when none can take it; pushReason: dropped folders), pushLabel, pushLeftOut and
+                      pushNotice (the push's notice from its hosts' statuses), tested in drop-target-typing.test.ts
+                      beside H1's unchanged test), root-browsing.ts (UX-14: which
                       terminals browse as root, the core's answer shared by the drawer and the Files page),
                       open-panes.ts (UX-14: also the Files page's editor tabs, requestEditorTab; the Terminal page's
                       panes published for the Files page's host tabs),

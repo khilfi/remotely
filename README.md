@@ -1080,6 +1080,17 @@ SS-08: files go up and down over SFTP on each terminal's own SSH connection, so 
   there already is replaced only after you say so and confirm (replacing is at least Medium; Settings won't take
   less). A folder you can't write to fails with a message saying so. Each uploaded file is audited with its name,
   size, destination and SHA-256.
+- **A drop while typing in all tabs** (QL-30, 0.9.0): with Type in all tabs on and more than one tab picked, files
+  dropped on a terminal open a small menu where they fell. **Upload to web01's folder** (the tab's name) is the
+  default (Enter): the same upload as above, into that terminal's folder, never as root. **Push to the N picked
+  hosts…** sends the same files into one folder on every picked tab's host instead: the folder starts as that tab's,
+  and you can change it and choose whether files of the same name are replaced. It is one push, like Files › Many hosts': Medium, High from 5
+  hosts, a Prod host one tier higher, protected hosts skipped, and its approval names every host. Two tabs of one
+  saved session are one host. A quick connection has no saved session, so it is left out (the menu says how many);
+  with no saved SSH session picked, the push is off and says why. A push sends files, so it is off for a dropped
+  folder. Esc or a click away uploads nothing. When the push ends, a notice says how many hosts got the files, with
+  **Show results** for the job's results in Activity. Without Type in all tabs, or with one tab picked, a drop uploads
+  as it always has.
 - **Folders** (SS-14, 0.8.0) go up and down whole, at most 10,000 files (files and folders, coming down) and 32
   levels deep. Links, junctions and other
   reparse points in a folder going up are left out, and so are, coming down, links to folders, devices and Git's data
@@ -1114,8 +1125,8 @@ SS-08: files go up and down over SFTP on each terminal's own SSH connection, so 
   size, time and the bytes already sent, read back and hashed), else it starts again; a paused download starts again.
   A new file that fails or is cancelled part way is deleted from the host; a file being replaced stays as it was (see
   [Safer operations on hosts](#safer-operations-on-hosts)).
-- With Type in all tabs (MultiExec) on, uploads and downloads still go through one terminal: the current one. ZMODEM
-  (`sz`/`rz`) is not supported.
+- With Type in all tabs (MultiExec) on, uploads and downloads still go through one terminal: the current one (a drop
+  can push to the picked hosts instead, above). ZMODEM (`sz`/`rz`) is not supported.
 
 ### Editing files on hosts
 
