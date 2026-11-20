@@ -4,6 +4,7 @@
 // alert events feed it.
 
 import type { JobEvent, JobStatus, JobSummary, UpdateCheck, VaultInfo } from "./api.ts";
+import type { AppLink } from "./links.ts";
 import type { OpenTunnel } from "./open-tunnels.ts";
 import { tunnelStateText } from "./tunnels.ts";
 
@@ -128,6 +129,19 @@ export class OpenJobs {
   get summaries(): string[] {
     return [...this.open.values()];
   }
+
+  /** The open job when it is the only one, else null. */
+  get only(): string | null {
+    return this.open.size === 1 ? ([...this.open.keys()][0] ?? null) : null;
+  }
+}
+
+/**
+ * UX-18 (0.9.0 H3): where the jobs item leads: the one open job's results in Activity (a bulk job in the grouped
+ * results view), or Activity's list while several are open.
+ */
+export function jobsLink(only: string | null): AppLink {
+  return only ? { kind: "job", jobId: only } : { kind: "page", page: "activity" };
 }
 
 export function jobsText(count: number, summaries: readonly string[]): StatusText | null {
@@ -136,7 +150,11 @@ export function jobsText(count: number, summaries: readonly string[]): StatusTex
   const more = summaries.length > 5 ? `\nand ${summaries.length - 5} more` : "";
   return {
     label: count === 1 ? "1 job running" : `${count} jobs running`,
-    title: `${shown}${more}\nOpen Activity to follow or cancel them.`,
+    // UX-18: one job opens its results there (jobsLink).
+    title:
+      count === 1
+        ? `${shown}\nOpen its results in Activity to follow or cancel it.`
+        : `${shown}${more}\nOpen Activity to follow or cancel them.`,
     tone: "normal",
   };
 }

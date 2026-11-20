@@ -648,6 +648,12 @@ export default function App() {
     }
   }
 
+  /** R10, UX-18: a job's results in Activity (a bulk job in the grouped results view, where it can be retried). */
+  const showJob = useCallback((jobId: string) => {
+    setJobFocus((prev) => ({ jobId, n: (prev?.n ?? 0) + 1 }));
+    setPage("activity");
+  }, []);
+
   // Job progress from the core -> toasts (one per job, updated in place) and an Activity refresh.
   useEffect(() => {
     const unlisten = api.onJobEvent((event) => {
@@ -712,12 +718,19 @@ export default function App() {
         }
         case "finished":
           if (event.status === "succeeded") toast.success("Job succeeded", { id, description: null, duration: 5000 });
-          else toast.error(`Job ${event.status.replace("_", " ")}`, { id, description: null, duration: 8000 });
+          else
+            toast.error(`Job ${event.status.replace("_", " ")}`, {
+              id,
+              description: null,
+              duration: 8000,
+              // UX-18: its results in Activity, where a bulk job's failed hosts can be retried.
+              action: { label: "Show", onClick: () => showJob(id) },
+            });
           break;
       }
     });
     return () => void unlisten.then((stop) => stop());
-  }, [submitted]);
+  }, [submitted, showJob]);
 
   async function submitCommand(command: Command) {
     try {
@@ -773,8 +786,7 @@ export default function App() {
           setPage("terminal");
           break;
         case "job":
-          setJobFocus((prev) => ({ jobId: link.jobId, n: (prev?.n ?? 0) + 1 }));
-          setPage("activity");
+          showJob(link.jobId);
           break;
         case "container":
           setContainerRequest((prev) => ({
@@ -873,7 +885,7 @@ export default function App() {
           break;
       }
     },
-    [go, openVms, openSchedules, openVmsPanel, openSupportBundle],
+    [go, openVms, openSchedules, openVmsPanel, openSupportBundle, showJob],
   );
 
   // UX-04: links from components without an onOpenLink prop (a HelpTip's "Open the setting").
@@ -1573,6 +1585,7 @@ export default function App() {
                   focusJob={jobFocus}
                   onHandover={openHandover}
                   onInventory={openInventory}
+                  onSubmitted={submitted}
                 />
               </ErrorBoundary>
             </section>

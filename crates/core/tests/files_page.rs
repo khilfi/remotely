@@ -22,8 +22,8 @@ use std::time::Duration;
 use common::{temp_folder, Setup, VAULT_PASSWORD};
 use remotely_core::adapters::remote::{AgentSource, EntryKind, PtySize};
 use remotely_core::bulk::{GroupOptions, TargetPicks};
-use remotely_core::command_bus::{ApprovalAnswers, ApprovalRequest, SubmitOutcome};
-use remotely_core::domain::Environment;
+use remotely_core::command_bus::{ApprovalAnswers, ApprovalRequest, Command, SubmitOutcome};
+use remotely_core::domain::{Environment, TargetRef};
 use remotely_core::fakes::ssh_server::TestSshServer;
 use remotely_core::fakes::{FakeFiles, FakeRemote, FakeVmware};
 use remotely_core::jobs::JobStatus;
@@ -871,6 +871,68 @@ async fn pushing_to_many_hosts_checks_each_copy_and_is_high_from_five() {
         .unwrap();
     assert_eq!(results.groups.len(), 2, "{:?}", results.groups);
     assert_eq!(results.groups[0].hosts.len(), 3);
+    let five_host_push = job;
+
+    // UX-17, UX-18 (0.9.0 H3): pushes are in Compare hosts' one results list, newest first, with their command type
+    // for Activity's grouped view, whoever started them.
+    let runs = core.bulk.recent(&core.ctx(), 20).await.unwrap();
+    assert_eq!(runs.len(), 2, "{runs:?}");
+    assert_eq!(runs[0].id, five_host_push.to_string());
+    assert!(runs
+        .iter()
+        .all(|r| r.command_type == "bulkFiles" && r.action == "filePush"));
+    // Retrying the two that failed (from Activity or the list) resubmits the same push on the bus, rated again for
+    // its own two hosts: Medium, under the bulk threshold, and still asked for.
+    let (retry, status, tier, asked) = run(&core, core.bus.retry_failed(&core.ctx(), job, false).await.unwrap()).await;
+    assert_eq!(tier, Tier::Medium);
+    assert_eq!(
+        asked.unwrap().action,
+        ActionKind::FilePush,
+        "a retry is never let through unasked"
+    );
+    assert_eq!(
+        status,
+        JobStatus::Failed,
+        "the two still have the file and the push doesn't replace"
+    );
+    let retried = core.store.job_targets(&core.ctx(), retry).await.unwrap();
+    assert_eq!(retried.len(), 2, "only the failed hosts: {retried:?}");
+    let runs = core.bulk.recent(&core.ctx(), 20).await.unwrap();
+    assert_eq!(runs[0].id, retry.to_string());
+    assert_eq!(runs[0].retry_of.as_deref(), Some(five_host_push.to_string().as_str()));
+    // A Compare hosts run joins the same list: the two types' pages merged newest first, and the limit holds across
+    // them (each type is read up to the limit, then the merge is cut).
+    let exec = Command::RemoteExec {
+        targets: hosts[..2]
+            .iter()
+            .map(|id| TargetRef::Session { session_id: *id })
+            .collect(),
+        script: "uptime".into(),
+        sudo: false,
+        sudo_password_id: None,
+        trust_new_host_keys: false,
+        timeout_secs: None,
+        rollout: Default::default(),
+    };
+    let (exec_job, status, _, _) = run(&core, core.bus.submit(&core.ctx(), exec).await.unwrap()).await;
+    assert_eq!(status, JobStatus::Succeeded);
+    let runs = core.bulk.recent(&core.ctx(), 20).await.unwrap();
+    assert_eq!(
+        runs.iter().map(|r| r.command_type.as_str()).collect::<Vec<_>>(),
+        ["remoteExec", "bulkFiles", "bulkFiles", "bulkFiles"],
+        "{runs:?}"
+    );
+    assert_eq!(runs[0].id, exec_job.to_string());
+    assert!(
+        runs.windows(2).all(|w| w[0].created_at >= w[1].created_at),
+        "newest first: {runs:?}"
+    );
+    let two = core.bulk.recent(&core.ctx(), 2).await.unwrap();
+    assert_eq!(
+        two.iter().map(|r| r.id.clone()).collect::<Vec<_>>(),
+        [exec_job.to_string(), retry.to_string()],
+        "the newest two of either type"
+    );
     // With replacing, every host gets the same bytes again.
     let started = core
         .bulk_files

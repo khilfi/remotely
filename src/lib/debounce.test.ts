@@ -23,6 +23,11 @@ test("100 events 5 ms apart reload once, 300 ms after the last", () => {
   assert.equal(due, 495 + RELOAD_WAIT_MS);
 });
 
+test("UX-17: with the pause as long as the longest wait, a run's events read the list once a second after the first", () => {
+  // Compare hosts' results list follows every host of a run: however the events come, one read a second.
+  for (const last of [0, 10, 400, 999, 5_000]) assert.equal(debounceAt(0, last, 1_000, 1_000), 1_000, `${last}`);
+});
+
 test("a longest wait shorter than the pause is the pause", () => {
   assert.equal(debounceAt(0, 0, 300, 100), 300);
 });

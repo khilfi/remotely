@@ -178,8 +178,8 @@ export const HELP = {
   "page.activity": {
     title: "Activity",
     body: [
-      "Every job, newest first, with each target's result and output, and the audit log of everything that changed.",
-      "Reports in the menu make the handover pack, the inventory workbook and the audit log's CSV file.",
+      "Every job, newest first, with each target's result and output, and the audit log of everything that changed. Reports in the menu make the handover pack, the inventory workbook and the audit log's CSV file.",
+      "A command run on many hosts, a push or fetch, or an SSH key push opens grouped by output, as in Compare hosts: its failed hosts can be retried (asked for again) and its results compared and exported. A support bundle shows what each host gave, with Show folder.",
     ],
     link: { label: "Job output retention", to: setting("retention") },
   },
@@ -283,8 +283,8 @@ export const HELP = {
   compareHosts: {
     title: "Compare hosts",
     body: [
-      "Runs one command once on each picked host, in its own login shell (PowerShell on a Windows host) rather than in your terminals, and groups the hosts whose output is the same. Each host is rated by its own rules: the shell's or PowerShell's.",
-      "The hosts start as the picked tabs and the sessions Ctrl+clicked in the tree (with nothing picked, the current tab); Change… adds sessions, VMs, tags, saved filters and saved groups. Its second view compares the lines you typed in all tabs, with what each terminal answered.",
+      "Runs a command once on each picked host in its own login shell (PowerShell on a Windows host), not in your terminals, and groups the hosts whose output is the same, each rated by its own rules. The hosts start as the picked tabs and the tree's Ctrl+clicks; Change… adds sessions, VMs, tags, saved filters and groups.",
+      "Its results list, newest first, holds its runs, pushes and fetches to many hosts, and the lines you typed in all tabs with what each terminal answered. Only runs, pushes and fetches can be retried; a typed line goes when Type in all tabs is turned off.",
     ],
   },
   "reports.inventory": {

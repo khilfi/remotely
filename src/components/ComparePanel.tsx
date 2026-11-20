@@ -10,8 +10,12 @@
 // adds sessions, VMs, tags, saved filters and saved groups. BX-01: the Sessions and VMs pages' "Run a command on
 // these…" open it with their selection.
 //
-// QL-12: a second view, MultiExec, shows the lines MultiExec recorded in the terminals, grouped the same way
-// (RecordedLinesView), so a line typed in the terminals can be compared without typing it again here.
+// UX-17 (0.9.0 H3): one results list under Run, newest first, of the one-shot jobs on hosts (its runs, and BX-10's
+// pushes and fetches, whoever started them: the list follows the bulk jobs' events) and the lines typed in all tabs
+// (QL-12, recorded in the terminals), each badged "Run on 12 hosts" or "Typed in 6 tabs" (lib/results-list.ts). The
+// one picked, or the newest, opens beside it in the same grouped card: BulkResultsView for a run, with retry of the
+// failed hosts and the canary's go-ahead; RecordedLineResults for a typed line, whose Retry says why it has none and
+// which goes when typing stops. Turning Type in all tabs on shows the newest again.
 // BX-03 layout: one column up to a 64rem wide panel, two above it; every column and track can shrink (minmax(0, ...),
 // min-w-0), so long text wraps or truncates inside its column instead of running into the results, and the panel
 // scrolls natively (Radix ScrollArea sizes its content like a table, which let it grow past the panel).
@@ -20,9 +24,10 @@ import { useEffect, useMemo, useState } from "react";
 import {
   ChevronRightIcon,
   KeyRoundIcon,
+  LoaderCircleIcon,
   OctagonAlertIcon,
   PlayIcon,
-  RadioTowerIcon,
+  ScissorsIcon,
   SquareTerminalIcon,
 } from "lucide-react";
 import { Alert, AlertAction, AlertDescription, AlertTitle } from "@/components/ui/alert";
@@ -34,13 +39,12 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectSeparator, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
-import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Textarea } from "@/components/ui/textarea";
 import { TierBadge } from "@/components/Badges";
 import { BulkResultsView } from "@/components/BulkResultsView";
 import { BulkTargetPicker } from "@/components/BulkTargetPicker";
 import { HelpTip } from "@/components/HelpTip";
-import { RecordedLinesView } from "@/components/RecordedLinesView";
+import { RecordedLineResults, useRecordings } from "@/components/RecordedLinesView";
 import { WhyDisabled } from "@/components/WhyDisabled";
 import { usePresentation } from "@/components/Presentation";
 import { useDebounced } from "@/hooks/use-debounced";
@@ -62,18 +66,26 @@ import { requestLink } from "@/lib/links";
 import { EmptyState } from "@/components/EmptyState";
 import { compareRunReason, sudoWindowsReason } from "@/lib/disabled-reasons";
 import { formatWhen, plural } from "@/lib/format";
+import { changesJobList, progressesJob, PROGRESS_READ_MS } from "@/lib/job-events";
 import { readOnlyLocked } from "@/lib/presentation-state";
+import { capsNote } from "@/lib/recordings";
+import {
+  itemBadge,
+  itemKey,
+  itemRunning,
+  itemStatus,
+  itemTitle,
+  resultItems,
+  shownKey,
+  shownResult,
+  type ResultItem,
+} from "@/lib/results-list";
 import { compareOptionsSummary, parseStopAfter } from "@/lib/rollout";
 import { cn } from "@/lib/utils";
-
-/** QL-12: a one-shot run here, or the lines MultiExec recorded in the terminals. */
-export type CompareView = "run" | "multiExec";
 
 interface Props {
   active: boolean;
   vault: VaultInfo | null;
-  view: CompareView;
-  onViewChange: (view: CompareView) => void;
   /** MultiExec is on: lines typed in the picked terminals are recorded. */
   multiExecOn: boolean;
   /**
@@ -110,8 +122,6 @@ function stepsText(steps: ApprovalStep[]) {
 export function ComparePanel({
   active,
   vault,
-  view,
-  onViewChange,
   multiExecOn,
   picks,
   onPicksChange,
@@ -138,14 +148,26 @@ export function ComparePanel({
   const [preview, setPreview] = useState<{ key: string; preview: CommandPreview } | null>(null);
   const [secrets, setSecrets] = useState<SecretMeta[]>([]);
   const [parallel, setParallel] = useState<number | null>(null);
-  const [jobId, setJobId] = useState<string | null>(null);
   const [runs, setRuns] = useState<JobSummary[]>([]);
   const [runsVersion, setRunsVersion] = useState(0);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   /** The picker asked for the hosts again with the same picks (a link it just confirmed). */
   const [resolveAgain, setResolveAgain] = useState(0);
-  const recorded = useRecordedCount(active);
+  // UX-17: the one results list (runs and typed lines) and the item picked in it (`run:<id>`, `typed:<id>`); none
+  // picked shows the newest.
+  const typed = useRecordings(active, multiExecOn);
+  const items = useMemo(() => resultItems(runs, typed.recordings?.lines ?? []), [runs, typed.recordings]);
+  const [picked, setPicked] = useState<string | null>(null);
+  const shown = shownResult(items, picked);
+  const openRun = (jobId: string) => setPicked(itemKey("run", jobId));
+  // Turning Type in all tabs on shows the newest again, so its first line shows as it is recorded.
+  const [typingSeen, setTypingSeen] = useState(multiExecOn);
+  if (multiExecOn !== typingSeen) {
+    setTypingSeen(multiExecOn);
+    if (multiExecOn) setPicked(null);
+  }
+  const caps = typed.recordings ? capsNote(typed.recordings.dropped, typed.recordings.limits) : null;
 
   // BX-13: WinRM hosts too: their commands run in PowerShell, rated by the PowerShell rules.
   const picksKey = JSON.stringify({ ...picks, winrm: true });
@@ -242,8 +264,11 @@ export function ComparePanel({
     };
   }, [commandKey, script]);
 
-  // Earlier runs; again whenever a run ends, once per burst of job events (BX-03).
-  const settledRuns = useDebounced(runsVersion);
+  // Earlier runs, pushes and fetches (BX-03); UX-17: by the jobs' events, whoever started them (a push from the Files
+  // page or a drop shows here too). Read again as a job is queued, counts down, starts, finishes a host or ends, so the
+  // list's status words keep up with the card beside it; asks join for a second (as Activity's), so a 50-host run reads
+  // it at most once a second.
+  const settledRuns = useDebounced(runsVersion, PROGRESS_READ_MS, PROGRESS_READ_MS);
   useEffect(() => {
     if (!active) return;
     let stale = false;
@@ -256,11 +281,11 @@ export function ComparePanel({
     return () => {
       stale = true;
     };
-  }, [active, settledRuns, jobId]);
+  }, [active, settledRuns]);
 
   useEffect(() => {
     const unlisten = api.onJobEvent((event) => {
-      if (event.event === "queued" || event.event === "finished") setRunsVersion((v) => v + 1);
+      if (changesJobList(event) || progressesJob(event)) setRunsVersion((v) => v + 1);
     });
     return () => void unlisten.then((stop) => stop());
   }, []);
@@ -270,7 +295,7 @@ export function ComparePanel({
     setSubmitting(true);
     setError(null);
     try {
-      onSubmit(await api.submit(command), setJobId);
+      onSubmit(await api.submit(command), openRun);
     } catch (err) {
       setError(errorMessage(err));
     } finally {
@@ -289,325 +314,345 @@ export function ComparePanel({
             Compare hosts
             <HelpTip topic="compareHosts" />
           </h2>
-          <Tabs value={view} onValueChange={(v) => onViewChange(v as CompareView)} className="ml-auto">
-            <TabsList>
-              <TabsTrigger value="run">One-shot run</TabsTrigger>
-              <TabsTrigger value="multiExec">
-                <RadioTowerIcon />
-                Type in all tabs
-                {recorded > 0 && (
-                  <Badge variant="secondary" className="ml-0.5 h-4 min-w-4 px-1 text-[10px] tabular-nums">
-                    {recorded}
-                  </Badge>
-                )}
-              </TabsTrigger>
-            </TabsList>
-          </Tabs>
         </div>
-        {view === "multiExec" && (
-          <p className="truncate text-sm text-muted-foreground">
-            {multiExecOn
-              ? "Each line typed in all tabs, with what each terminal answered."
-              : "Type in all tabs is off: turning it on starts a new recording."}
-          </p>
-        )}
       </div>
       <div className="@container min-h-0 flex-1 overflow-y-auto">
         <div className="p-3">
-          {view === "multiExec" ? (
-            <RecordedLinesView active={active} multiExecOn={multiExecOn} />
-          ) : (
-            <div className="grid grid-cols-1 gap-4 @5xl:grid-cols-[minmax(0,26rem)_minmax(0,1fr)]">
-              <div className="grid min-w-0 grid-cols-1 content-start gap-3">
-                {/* UX-16: the one host picker, as one line until Change… */}
-                <BulkTargetPicker
-                  active={active}
-                  picks={picks}
-                  onPicksChange={(next) => {
-                    setResolveAgain((n) => n + 1);
-                    onPicksChange(next);
+          <div className="grid grid-cols-1 gap-4 @5xl:grid-cols-[minmax(0,26rem)_minmax(0,1fr)]">
+            <div className="grid min-w-0 grid-cols-1 content-start gap-3">
+              {/* UX-16: the one host picker, as one line until Change… */}
+              <BulkTargetPicker
+                active={active}
+                picks={picks}
+                onPicksChange={(next) => {
+                  setResolveAgain((n) => n + 1);
+                  onPicksChange(next);
+                }}
+                resolved={resolved}
+                onOpenSessions={() => requestLink({ kind: "page", page: "sessions" })}
+                winrm
+                compact={{ tabs }}
+                refresh={groupsKey}
+                hideNotes
+              />
+              {resolved && resolved.notes.length > 0 && (
+                <Alert>
+                  <SquareTerminalIcon />
+                  <AlertTitle>Not every pick can run the command</AlertTitle>
+                  <AlertDescription>
+                    <ul className="list-disc pl-4">
+                      {resolved.notes.map((n) => (
+                        <li key={n}>{n}</li>
+                      ))}
+                    </ul>
+                  </AlertDescription>
+                </Alert>
+              )}
+              <div className="grid gap-1.5">
+                <Label htmlFor="compare-script" title="Ctrl+Enter runs it">
+                  Command or script{parallel ? `, on up to ${parallel} hosts at once` : ""}
+                </Label>
+                <Textarea
+                  id="compare-script"
+                  rows={4}
+                  spellCheck={false}
+                  className="font-mono text-xs"
+                  placeholder={"uptime\ndf -h /"}
+                  value={script}
+                  onChange={(e) => setScript(e.currentTarget.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+                      e.preventDefault();
+                      void run();
+                    }
                   }}
-                  resolved={resolved}
-                  onOpenSessions={() => requestLink({ kind: "page", page: "sessions" })}
-                  winrm
-                  compact={{ tabs }}
-                  refresh={groupsKey}
-                  hideNotes
                 />
-                {resolved && resolved.notes.length > 0 && (
-                  <Alert>
-                    <SquareTerminalIcon />
-                    <AlertTitle>Not every pick can run the command</AlertTitle>
-                    <AlertDescription>
-                      <ul className="list-disc pl-4">
-                        {resolved.notes.map((n) => (
-                          <li key={n}>{n}</li>
-                        ))}
-                      </ul>
-                    </AlertDescription>
-                  </Alert>
-                )}
-                <div className="grid gap-1.5">
-                  <Label htmlFor="compare-script" title="Ctrl+Enter runs it">
-                    Command or script{parallel ? `, on up to ${parallel} hosts at once` : ""}
-                  </Label>
-                  <Textarea
-                    id="compare-script"
-                    rows={4}
-                    spellCheck={false}
-                    className="font-mono text-xs"
-                    placeholder={"uptime\ndf -h /"}
-                    value={script}
-                    onChange={(e) => setScript(e.currentTarget.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
-                        e.preventDefault();
-                        void run();
-                      }
-                    }}
-                  />
-                </div>
+              </div>
 
-                {shownPreview && (
-                  <div className="grid gap-2">
-                    <div className="flex flex-wrap items-center gap-2 text-sm">
-                      <TierBadge tier={shownPreview.tier} />
-                      <span className="text-muted-foreground">{stepsText(shownPreview.steps)}</span>
-                    </div>
-                    {shownPreview.dangerous.length > 0 && (
-                      <Alert className="border-tier-high/40">
-                        <OctagonAlertIcon className="text-tier-high" />
-                        <AlertTitle>Flagged dangerous, so it needs approval</AlertTitle>
-                        <AlertDescription>
-                          <ul className="grid gap-1">
-                            {shownPreview.dangerous.map((d) => (
-                              <li key={d.rule}>
-                                Line {d.line}: <code className="font-mono text-xs">{d.text}</code> matches &ldquo;
-                                {d.rule}
-                                &rdquo;
-                              </li>
-                            ))}
-                          </ul>
-                        </AlertDescription>
-                      </Alert>
-                    )}
+              {shownPreview && (
+                <div className="grid gap-2">
+                  <div className="flex flex-wrap items-center gap-2 text-sm">
+                    <TierBadge tier={shownPreview.tier} />
+                    <span className="text-muted-foreground">{stepsText(shownPreview.steps)}</span>
                   </div>
-                )}
-
-                <Collapsible open={optionsOpen} onOpenChange={setOptionsOpen} className="rounded-md border">
-                  <CollapsibleTrigger asChild>
-                    <button
-                      type="button"
-                      className="flex w-full min-w-0 items-center gap-2 rounded-md px-3 py-2 text-left text-sm hover:bg-muted/60"
-                    >
-                      <ChevronRightIcon
-                        className={cn("size-4 shrink-0 transition-transform", optionsOpen && "rotate-90")}
-                        aria-hidden
-                      />
-                      <span className="font-medium">Options</span>
-                      <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground">{optionsSummary}</span>
-                    </button>
-                  </CollapsibleTrigger>
-                  <CollapsibleContent className="grid gap-3 border-t p-3">
-                    <div className="flex items-center gap-3">
-                      <WhyDisabled reason={sudoReason}>
-                        <Switch
-                          id="compare-sudo"
-                          checked={sudoOn}
-                          onCheckedChange={setSudo}
-                          disabled={sudoReason !== null}
-                        />
-                      </WhyDisabled>
-                      <Label htmlFor="compare-sudo" className="font-normal">
-                        Run with sudo
-                      </Label>
-                    </div>
-                    {sudoOn && (
-                      <div className="grid min-w-0 gap-1.5 pl-12">
-                        <Label htmlFor="compare-sudo-password" className="font-normal text-muted-foreground">
-                          Password for sudo, from the vault
-                        </Label>
-                        <Select value={sudoPassword} onValueChange={setSudoPassword}>
-                          <SelectTrigger id="compare-sudo-password" className="w-full">
-                            <SelectValue />
-                          </SelectTrigger>
-                          <SelectContent>
-                            <SelectItem value={LOGIN}>Each session&apos;s login password</SelectItem>
-                            {secrets.length > 0 && <SelectSeparator />}
-                            {secrets.map((s) => (
-                              <SelectItem key={s.id} value={s.id}>
-                                {s.label}
-                              </SelectItem>
-                            ))}
-                          </SelectContent>
-                        </Select>
-                        <p className="text-xs break-words text-muted-foreground">
-                          Given to sudo, never typed or shown.
-                        </p>
-                      </div>
-                    )}
-                    <div className="flex items-start gap-3">
-                      <Checkbox
-                        id="compare-trust"
-                        className="mt-0.5"
-                        checked={trustNew}
-                        onCheckedChange={(v) => setTrustNew(v === true)}
-                      />
-                      <div className="grid min-w-0 gap-0.5">
-                        <Label htmlFor="compare-trust" className="font-normal">
-                          Trust new host keys
-                        </Label>
-                        <p className="text-xs break-words text-muted-foreground">
-                          Else a host with a key not trusted yet fails (a Windows host&apos;s HTTPS certificate counts
-                          as its key). A changed key always blocks.
-                        </p>
-                      </div>
-                    </div>
-                    <div className="flex flex-wrap items-center gap-3">
-                      <Label htmlFor="compare-timeout" className="font-normal">
-                        Time limit per host
-                      </Label>
-                      <Input
-                        id="compare-timeout"
-                        className="w-24"
-                        inputMode="numeric"
-                        value={timeout}
-                        onChange={(e) => setTimeoutText(e.currentTarget.value)}
-                        aria-invalid={!timeoutOk || undefined}
-                      />
-                      <span className="text-sm text-muted-foreground">seconds (empty: none)</span>
-                    </div>
-                    <div className="flex items-start gap-3">
-                      <Checkbox
-                        id="compare-canary"
-                        className="mt-0.5"
-                        checked={canary}
-                        onCheckedChange={(v) => setCanary(v === true)}
-                      />
-                      <div className="grid min-w-0 gap-0.5">
-                        <Label htmlFor="compare-canary" className="font-normal">
-                          Run on one host first
-                        </Label>
-                        <p className="text-xs break-words text-muted-foreground">
-                          You see its result before the others run.
-                        </p>
-                      </div>
-                    </div>
-                    <div className="grid gap-0.5">
-                      <div className="flex flex-wrap items-center gap-3">
-                        <Label htmlFor="compare-stop-after" className="font-normal">
-                          Stop after
-                        </Label>
-                        <Input
-                          id="compare-stop-after"
-                          className="w-20"
-                          inputMode="numeric"
-                          placeholder="never"
-                          value={stopAfter}
-                          onChange={(e) => setStopAfter(e.currentTarget.value)}
-                          aria-invalid={!stopAfterParsed.ok || undefined}
-                        />
-                        <span className="text-sm text-muted-foreground">failures (empty: never)</span>
-                      </div>
-                      <p className="text-xs break-words text-muted-foreground">Hosts already running finish.</p>
-                    </div>
-                  </CollapsibleContent>
-                </Collapsible>
-
-                {vaultLocked && (
-                  <Alert>
-                    <KeyRoundIcon />
-                    <AlertTitle>
-                      {vault?.status === "notSetUp" ? "The vault is not set up" : "The vault is locked"}
-                    </AlertTitle>
-                    <AlertDescription>
-                      Hosts that log in with a saved password or key, and sudo, need the vault unlocked.
-                    </AlertDescription>
-                    <AlertAction>
-                      <Button size="sm" variant="outline" onClick={onOpenVault}>
-                        Vault
-                      </Button>
-                    </AlertAction>
-                  </Alert>
-                )}
-                {error && (
-                  <p className="text-sm text-destructive" role="alert">
-                    {error}
-                  </p>
-                )}
-                <div className="grid min-w-0 grid-cols-1 gap-2">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <WhyDisabled reason={notReady}>
-                      <Button onClick={() => void run()} disabled={notReady !== null}>
-                        <PlayIcon data-icon="inline-start" />
-                        {runCount > 0 ? `Run on ${plural(runCount, "host")}` : "Run"}
-                      </Button>
-                    </WhyDisabled>
-                  </div>
-                  {runs.length > 0 && (
-                    <Select value={jobId ?? ""} onValueChange={(id) => setJobId(id || null)}>
-                      <SelectTrigger className="w-full min-w-0" aria-label="Open an earlier run">
-                        <SelectValue placeholder="Earlier runs…" />
-                      </SelectTrigger>
-                      <SelectContent className="max-w-[min(36rem,90vw)]">
-                        {runs.map((r) => (
-                          <SelectItem key={r.id} value={r.id}>
-                            <span className="min-w-0 truncate font-mono text-xs">
-                              {r.retryOf && "Retry: "}
-                              {r.summary}
-                            </span>
-                            <span className="shrink-0 text-xs text-muted-foreground">
-                              {r.targetsSucceeded}/{r.targetsTotal} · {formatWhen(r.createdAt)}
-                            </span>
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
+                  {shownPreview.dangerous.length > 0 && (
+                    <Alert className="border-tier-high/40">
+                      <OctagonAlertIcon className="text-tier-high" />
+                      <AlertTitle>Flagged dangerous, so it needs approval</AlertTitle>
+                      <AlertDescription>
+                        <ul className="grid gap-1">
+                          {shownPreview.dangerous.map((d) => (
+                            <li key={d.rule}>
+                              Line {d.line}: <code className="font-mono text-xs">{d.text}</code> matches &ldquo;
+                              {d.rule}
+                              &rdquo;
+                            </li>
+                          ))}
+                        </ul>
+                      </AlertDescription>
+                    </Alert>
                   )}
                 </div>
+              )}
+
+              <Collapsible open={optionsOpen} onOpenChange={setOptionsOpen} className="rounded-md border">
+                <CollapsibleTrigger asChild>
+                  <button
+                    type="button"
+                    className="flex w-full min-w-0 items-center gap-2 rounded-md px-3 py-2 text-left text-sm hover:bg-muted/60"
+                  >
+                    <ChevronRightIcon
+                      className={cn("size-4 shrink-0 transition-transform", optionsOpen && "rotate-90")}
+                      aria-hidden
+                    />
+                    <span className="font-medium">Options</span>
+                    <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground">{optionsSummary}</span>
+                  </button>
+                </CollapsibleTrigger>
+                <CollapsibleContent className="grid gap-3 border-t p-3">
+                  <div className="flex items-center gap-3">
+                    <WhyDisabled reason={sudoReason}>
+                      <Switch
+                        id="compare-sudo"
+                        checked={sudoOn}
+                        onCheckedChange={setSudo}
+                        disabled={sudoReason !== null}
+                      />
+                    </WhyDisabled>
+                    <Label htmlFor="compare-sudo" className="font-normal">
+                      Run with sudo
+                    </Label>
+                  </div>
+                  {sudoOn && (
+                    <div className="grid min-w-0 gap-1.5 pl-12">
+                      <Label htmlFor="compare-sudo-password" className="font-normal text-muted-foreground">
+                        Password for sudo, from the vault
+                      </Label>
+                      <Select value={sudoPassword} onValueChange={setSudoPassword}>
+                        <SelectTrigger id="compare-sudo-password" className="w-full">
+                          <SelectValue />
+                        </SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value={LOGIN}>Each session&apos;s login password</SelectItem>
+                          {secrets.length > 0 && <SelectSeparator />}
+                          {secrets.map((s) => (
+                            <SelectItem key={s.id} value={s.id}>
+                              {s.label}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                      <p className="text-xs break-words text-muted-foreground">Given to sudo, never typed or shown.</p>
+                    </div>
+                  )}
+                  <div className="flex items-start gap-3">
+                    <Checkbox
+                      id="compare-trust"
+                      className="mt-0.5"
+                      checked={trustNew}
+                      onCheckedChange={(v) => setTrustNew(v === true)}
+                    />
+                    <div className="grid min-w-0 gap-0.5">
+                      <Label htmlFor="compare-trust" className="font-normal">
+                        Trust new host keys
+                      </Label>
+                      <p className="text-xs break-words text-muted-foreground">
+                        Else a host with a key not trusted yet fails (a Windows host&apos;s HTTPS certificate counts as
+                        its key). A changed key always blocks.
+                      </p>
+                    </div>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-3">
+                    <Label htmlFor="compare-timeout" className="font-normal">
+                      Time limit per host
+                    </Label>
+                    <Input
+                      id="compare-timeout"
+                      className="w-24"
+                      inputMode="numeric"
+                      value={timeout}
+                      onChange={(e) => setTimeoutText(e.currentTarget.value)}
+                      aria-invalid={!timeoutOk || undefined}
+                    />
+                    <span className="text-sm text-muted-foreground">seconds (empty: none)</span>
+                  </div>
+                  <div className="flex items-start gap-3">
+                    <Checkbox
+                      id="compare-canary"
+                      className="mt-0.5"
+                      checked={canary}
+                      onCheckedChange={(v) => setCanary(v === true)}
+                    />
+                    <div className="grid min-w-0 gap-0.5">
+                      <Label htmlFor="compare-canary" className="font-normal">
+                        Run on one host first
+                      </Label>
+                      <p className="text-xs break-words text-muted-foreground">
+                        You see its result before the others run.
+                      </p>
+                    </div>
+                  </div>
+                  <div className="grid gap-0.5">
+                    <div className="flex flex-wrap items-center gap-3">
+                      <Label htmlFor="compare-stop-after" className="font-normal">
+                        Stop after
+                      </Label>
+                      <Input
+                        id="compare-stop-after"
+                        className="w-20"
+                        inputMode="numeric"
+                        placeholder="never"
+                        value={stopAfter}
+                        onChange={(e) => setStopAfter(e.currentTarget.value)}
+                        aria-invalid={!stopAfterParsed.ok || undefined}
+                      />
+                      <span className="text-sm text-muted-foreground">failures (empty: never)</span>
+                    </div>
+                    <p className="text-xs break-words text-muted-foreground">Hosts already running finish.</p>
+                  </div>
+                </CollapsibleContent>
+              </Collapsible>
+
+              {vaultLocked && (
+                <Alert>
+                  <KeyRoundIcon />
+                  <AlertTitle>
+                    {vault?.status === "notSetUp" ? "The vault is not set up" : "The vault is locked"}
+                  </AlertTitle>
+                  <AlertDescription>
+                    Hosts that log in with a saved password or key, and sudo, need the vault unlocked.
+                  </AlertDescription>
+                  <AlertAction>
+                    <Button size="sm" variant="outline" onClick={onOpenVault}>
+                      Vault
+                    </Button>
+                  </AlertAction>
+                </Alert>
+              )}
+              {error && (
+                <p className="text-sm text-destructive" role="alert">
+                  {error}
+                </p>
+              )}
+              <div className="grid min-w-0 grid-cols-1 gap-2">
+                <div className="flex flex-wrap items-center gap-2">
+                  <WhyDisabled reason={notReady}>
+                    <Button onClick={() => void run()} disabled={notReady !== null}>
+                      <PlayIcon data-icon="inline-start" />
+                      {runCount > 0 ? `Run on ${plural(runCount, "host")}` : "Run"}
+                    </Button>
+                  </WhyDisabled>
+                </div>
               </div>
 
-              <div className="min-w-0">
-                {jobId ? (
-                  <BulkResultsView key={jobId} jobId={jobId} onRetry={(outcome) => onSubmit(outcome, setJobId)} />
-                ) : (
-                  <EmptyState
-                    icon={SquareTerminalIcon}
-                    title="No run open"
-                    description="Run a command: hosts with the same output are grouped together. Or open an earlier run."
-                  />
-                )}
-              </div>
+              {/* UX-17: one list, newest first, of runs and typed lines. */}
+              {items.length > 0 && (
+                <section className="grid min-w-0 grid-cols-1 gap-2" aria-label="Results">
+                  <div className="flex min-w-0 flex-wrap items-center gap-2">
+                    <h3 className="text-sm font-medium">Results</h3>
+                    <span className="text-xs text-muted-foreground">{plural(items.length, "item")}, newest first</span>
+                    {picked && shownKey(shown) !== items[0]?.key && (
+                      <Button size="xs" variant="ghost" className="ml-auto" onClick={() => setPicked(null)}>
+                        Show the newest
+                      </Button>
+                    )}
+                  </div>
+                  <ul
+                    className="grid max-h-[28rem] min-w-0 grid-cols-1 gap-1 overflow-y-auto rounded-md border p-1"
+                    role="list"
+                  >
+                    {items.map((item) => (
+                      <li key={item.key} className="min-w-0">
+                        <ResultRow
+                          item={item}
+                          selected={item.key === shownKey(shown)}
+                          onPick={() => setPicked(item.key)}
+                        />
+                      </li>
+                    ))}
+                  </ul>
+                  {caps && (
+                    <Alert>
+                      <ScissorsIcon />
+                      <AlertDescription className="text-xs">{caps}</AlertDescription>
+                    </Alert>
+                  )}
+                </section>
+              )}
+              {/* QL-12: the typed lines couldn't be read (the runs still list). */}
+              {typed.error && (
+                <p className="text-sm text-destructive" role="alert">
+                  Could not read the typed lines: {typed.error}
+                </p>
+              )}
             </div>
-          )}
+
+            <div className="min-w-0">
+              {shown?.kind === "run" ? (
+                <BulkResultsView
+                  key={shown.jobId}
+                  jobId={shown.jobId}
+                  onRetry={(outcome) => onSubmit(outcome, openRun)}
+                />
+              ) : shown?.kind === "typed" ? (
+                <RecordedLineResults key={shown.line.id} line={shown.line} version={typed.version} active={active} />
+              ) : (
+                <EmptyState
+                  icon={SquareTerminalIcon}
+                  title="No results yet"
+                  description={
+                    multiExecOn
+                      ? "Run a command, or type a line in one of the picked terminals: hosts and terminals with the same output are grouped together."
+                      : "Run a command: hosts with the same output are grouped together. Lines typed in all tabs show here too."
+                  }
+                />
+              )}
+            </div>
+          </div>
         </div>
       </div>
     </div>
   );
 }
 
-/** QL-12: how many lines MultiExec has recorded, for the view switch. */
-function useRecordedCount(active: boolean) {
-  const [count, setCount] = useState(0);
-  const [version, setVersion] = useState(0);
-  useEffect(() => {
-    const unlisten = api.onMultiExecEvent((event) => {
-      if (event.event === "recorded") setVersion((v) => v + 1);
-    });
-    return () => void unlisten.then((stop) => stop());
-  }, []);
-  useEffect(() => {
-    if (!active) return;
-    let stale = false;
-    api.multiExecRecordings().then(
-      (r) => {
-        if (!stale) setCount(r.lines.length);
-      },
-      () => undefined,
-    );
-    return () => {
-      stale = true;
-    };
-  }, [active, version]);
-  return count;
+/** "10:42" today, "18 Nov, 10:42" before; the full date and time on hover. */
+function shortWhen(ts: string) {
+  const at = new Date(ts);
+  const time = at.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  if (at.toDateString() === new Date().toDateString()) return time;
+  return `${at.toLocaleDateString([], { day: "numeric", month: "short" })}, ${time}`;
+}
+
+/** UX-17: one item of the results list: what it was, its badge, when, and where it stands. */
+function ResultRow({ item, selected, onPick }: { item: ResultItem; selected: boolean; onPick: () => void }) {
+  const title = itemTitle(item);
+  const tier = item.kind === "run" ? item.job.tier : item.line.tier;
+  return (
+    <button
+      type="button"
+      onClick={onPick}
+      aria-current={selected || undefined}
+      className={cn(
+        "grid w-full min-w-0 gap-1 rounded-md px-2 py-1.5 text-left text-sm hover:bg-accent",
+        selected && "bg-accent",
+      )}
+    >
+      <span className="flex min-w-0 items-center gap-2">
+        {itemRunning(item) && <LoaderCircleIcon className="size-3.5 shrink-0 animate-spin" aria-label="Running" />}
+        <code className="min-w-0 flex-1 truncate font-mono text-xs" title={title}>
+          {title}
+        </code>
+        {tier && <TierBadge tier={tier} />}
+      </span>
+      <span className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
+        <Badge variant="outline" className="font-normal">
+          {itemBadge(item)}
+        </Badge>
+        <time dateTime={item.at} title={formatWhen(item.at)}>
+          {shortWhen(item.at)}
+        </time>
+        <span className="min-w-0 truncate">{itemStatus(item)}</span>
+      </span>
+    </button>
+  );
 }
