@@ -2104,6 +2104,15 @@ pub fn read_only_refusal(locked: bool, action: ActionKind) -> Result<()> {
     Ok(())
 }
 
+/// FD-03: the same for what runs on a host without a command of its own on the bus: starting SS-14's root browsing
+/// runs sudo and an SFTP server as root there. `what` names it as the refusal says it.
+pub fn read_only_host_refusal(locked: bool, what: &str) -> Result<()> {
+    if locked {
+        return Err(CoreError::ReadOnlyLock { what: what.to_owned() });
+    }
+    Ok(())
+}
+
 /// FD-03: the same for edits of the app's own data, which skip the bus (sessions, settings, the vault, imports...).
 pub fn read_only_edit_refusal(locked: bool, change: Change) -> Result<()> {
     if locked {

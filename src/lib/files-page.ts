@@ -3,6 +3,7 @@
 // comparison's rows in words and which ones a sync takes by default. Tested in files-page.test.ts.
 
 import type { DiffRow, LocalEntry, RowState, SyncDirection } from "./files-page-api.ts";
+import { plural } from "./format.ts";
 
 /** What both panes show of an entry. */
 export interface PaneEntry {
@@ -153,17 +154,20 @@ export type DragItems =
 
 /** Where a drop does something, and what (`null`: nothing happens there). */
 export type DropAction =
-  { kind: "upload"; folder: string } | { kind: "download" } | { kind: "move"; into: string } | null;
+  { kind: "upload"; folder: string } | { kind: "download" } | { kind: "move"; into: string } | { kind: "push" } | null;
 
 /** What dropping `items` on `target` does: local files on the host pane upload, host files on the local pane download,
  * host files on a folder of the same host move into it. A local folder is never a drop target: nothing on this PC is
- * changed but by a download into the pane's folder. */
+ * changed but by a download into the pane's folder. UX-15: local rows let go on Many hosts fill its push
+ * ([`manyHostsDrop`]); a host's rows do nothing there. */
 export function dropAction(
   items: DragItems,
   target:
     | { pane: "local"; listing: string | null }
-    | { pane: "host"; terminalId: string; folder: string; intoFolder?: string },
+    | { pane: "host"; terminalId: string; folder: string; intoFolder?: string }
+    | { pane: "many" },
 ): DropAction {
+  if (target.pane === "many") return items.from === "local" ? { kind: "push" } : null;
   if (items.from === "local") {
     if (target.pane !== "host") return null;
     return { kind: "upload", folder: target.intoFolder ?? target.folder };
@@ -175,6 +179,35 @@ export function dropAction(
   if (items.paths.some((p) => into === p || into.startsWith(`${p}/`))) return null;
   if (into === items.folder) return null;
   return { kind: "move", into };
+}
+
+/** BX-10: which of this PC's picked names a push to many hosts sends: its files (a folder or a link isn't pushed). */
+export function pushableFiles(
+  names: readonly string[],
+  entries: readonly Pick<PaneEntry, "name" | "kind" | "link">[],
+): string[] {
+  return names.filter((n) => entries.some((e) => e.name === n && e.kind === "file" && !e.link));
+}
+
+/**
+ * UX-15: rows of this PC let go on Many hosts fill its push. From then on it sends those of them that are files (the
+ * rows dragged are the picked ones, which the push takes), in place of the `chosen` files picked with Choose files or
+ * dropped from Explorer (`unstage`), and the tab shows Push. With no file among them nothing changes, and it says why.
+ */
+export function manyHostsDrop(
+  names: readonly string[],
+  entries: readonly Pick<PaneEntry, "name" | "kind" | "link">[],
+  chosen: number | null,
+): { files: string[]; unstage: boolean; text: string } {
+  const files = pushableFiles(names, entries);
+  if (files.length === 0)
+    return { files, unstage: false, text: "Nothing changed: a push sends files, not folders or links." };
+  const instead = chosen === null ? "" : ` in place of the ${plural(chosen, "file")} chosen before`;
+  return {
+    files,
+    unstage: chosen !== null,
+    text: `Push now sends ${plural(files.length, "file")} from this PC${instead}.`,
+  };
 }
 
 /** A comparison's row in a few words. */

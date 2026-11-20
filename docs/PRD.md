@@ -188,6 +188,22 @@ Install configs (0.8.0, VM-28, `docs/plan-0.8.md` "Approval tiers"). An install 
 | Check a config, read its form, preview one VM's file with every secret masked | Reads: not audited, allowed by the read-only lock |
 | Deploy with an install config (G6) | As a VM deploy: Medium, High from 5 VMs or for Prod |
 
+Address pools (0.8.0, VM-32, `docs/plan-0.8.md` "Approval tiers"). A pool is a range of static IPv4 addresses for unattended deploys, per network of one hypervisor and per workspace; editing one touches no VM:
+
+| Action | Tier |
+| --- | --- |
+| Add, change or delete an address pool, or free an address by hand (a VM deleted outside Remotely leaves its lease) | No tier; audited (`address_pool_changed`), refused by the read-only lock |
+| A deploy's address from a pool: claimed at its VM's step once a ping and an ARP request find nothing there, the VM's until Remotely deletes it | Part of the deploy's job, at the deploy's tier |
+
+Golden image builds (0.8.0, VM-30, `docs/plan-0.8.md` "Approval tiers"). A build makes one new VM from an install config (G6's install), makes it generic, shuts it down and snapshots it as the image's next version; a Prod-labelled target moves each up one tier, and protected targets are skipped:
+
+| Action | Tier |
+| --- | --- |
+| Build or rebuild (by hand) a version of a golden image that keeps every version | Medium |
+| Any build of an image set to keep only its newest versions, even one with nothing to delete yet: older versions' VMs past the count and their files are deleted (never one a linked clone uses), each one a target of the approval | Critical, as deleting VMs |
+| A scheduled rebuild (VM-27) | Under the schedule's standing approval, at the build's tier; a build that differs from the approved one (its new VM's name aside), or rules that rate it otherwise, pause the schedule and ask again |
+| Change an image's build settings | No tier; audited, refused by the read-only lock; a schedule that rebuilds the image asks again before its next run |
+
 Support bundles (0.7.0, FD-04, `docs/plan-0.7.md` "Approval tiers"). The hosts are saved SSH sessions and (BX-13) WinRM sessions, each kind with its own presets and custom items (SS-12: an RDP, VNC, Telnet or serial session is refused); a Prod-labelled one moves the bundle up one tier, and protected ones are skipped:
 
 | Action | Tier |
@@ -262,7 +278,10 @@ Files on hosts (0.8.0, SS-14, `docs/plan-0.8.md` "Approval tiers"). Every change
 | Find files, preview a file, a file's SHA-256, compare a folder of this PC with the host's (0.8.0 G3, the Files page) | Reads: no tier, not audited |
 | Sync a folder to the host: its uploads and replacements as above, in one job; deleting on the host what this PC's folder doesn't have, only when chosen | Its biggest change counts; deleting there is High, never below Medium. A sync to this PC is downloads, and deletes nothing here |
 | Edit the Files page's bookmarks (per session) | No tier; audited (`file_bookmark_changed`), refused by the read-only lock |
-| Start or stop root browsing | No tier; audited (`files_root_started`, `files_root_stopped` with why it ended: stopped, the vault locked, the connection ended, sudo refused; `files_root_refused`); a vault password new to the host asks for the vault password (AP-06); its transfers are cancelled when it ends |
+| Start or stop root browsing | No tier; audited (`files_root_started`, `files_root_stopped` with why it ended: stopped, the vault locked, the connection ended, sudo refused; `files_root_refused`); a vault password new to the host asks for the vault password (AP-06); its transfers are cancelled when it ends; starting it is refused by the read-only lock (it runs sudo on the host), stopping never is |
+| Edit in the terminal (0.8.0 G4, SS-14): open a host's file in a terminal editor on the host, in a new tab of its own (the session's editor, else the first of nano, micro, vim and vi; `sudoedit` as root, with root browsing's password); never rated by the shell rules | Low; audited as its job, the file its target. Medium on Prod or as root, High as root on Prod |
+| Edit on this PC (0.8.0 G4, SS-08): a private copy opened in this PC's editor (audited `file_edit_opened`); one approval covers the editing session (up to 4 hours), and each save replaces the host's file once its copy there is checked to be the one opened (audited `file_changed` with the save's SHA-256); a save waits while the read-only lock is on | Medium, never below Medium (each save is a replacement). High on Prod or as root, Critical as root on Prod |
+| Choose a session's terminal editor | No tier; audited (`setting_changed`), refused by the read-only lock |
 
 One home per job (0.9.0, `docs/plan-0.9.md` "Approval tiers"; UX-14 to UX-22, BX-01, QL-30, QL-31, SS-04). 0.9.0 moves and merges screens onto the commands that exist, so what it moves keeps its tier; a Prod-labelled target moves the rest up one tier, and protected targets are skipped:
 

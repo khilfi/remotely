@@ -167,6 +167,8 @@ export function FilesPage({ active, request, onSubmitted, onOpenTerminal, onShow
   const [doubleClick, setDoubleClick] = useState<FileDoubleClick>("terminalEditor");
   /** UX-15: files dropped on Many hosts, for its push (the counter tells one drop from the next). */
   const [manyDrop, setManyDrop] = useState<{ staged: StagedFiles; n: number } | null>(null);
+  /** UX-15: rows of This PC dragged onto Many hosts, which fill its push (counted the same way). */
+  const [manyLocalDrop, setManyLocalDrop] = useState<{ names: string[]; n: number } | null>(null);
   /** UX-15: Many hosts asked for from elsewhere, with its mode and picks. */
   const [manyRequest, setManyRequest] = useState<{ mode: ManyMode; picks?: TargetPicks; n: number } | null>(null);
   const forgetManyRequest = useCallback(() => setManyRequest(null), []);
@@ -428,12 +430,13 @@ export function FilesPage({ active, request, onSubmitted, onOpenTerminal, onShow
 
   // ---- Drag and drop -------------------------------------------------------------------------------------------
 
-  /** What is under a point: the host pane's tab (and the folder row there), or the local pane. */
+  /** What is under a point: the host pane's tab (and the folder row there), the local pane, or Many hosts. */
   function targetAt(x: number, y: number) {
     const under = document.elementFromPoint(x, y);
     const pane = under?.closest<HTMLElement>("[data-files-drop]");
     if (!pane) return null;
     if (pane.dataset.filesDrop === "local") return { pane: "local" as const, listing: local?.path ? local.id : null };
+    if (pane.dataset.filesDrop === "many") return { pane: "many" as const };
     const tab = tabs.find((t) => t.key === pane.dataset.filesTab);
     const folder = tab ? folders[tab.key] : undefined;
     if (!tab || !folder?.folder) return null;
@@ -456,7 +459,10 @@ export function FilesPage({ active, request, onSubmitted, onOpenTerminal, onShow
       if (!target) return;
       const action = dropAction(items, target);
       if (!action) return;
-      if (action.kind === "upload" && items.from === "local" && target.pane === "host") {
+      if (action.kind === "push" && items.from === "local") {
+        // UX-15: the dragged rows (the picked ones) fill the push, in place of files chosen or dropped before.
+        setManyLocalDrop((prev) => ({ names: items.names, n: (prev?.n ?? 0) + 1 }));
+      } else if (action.kind === "upload" && items.from === "local" && target.pane === "host") {
         void uploadLocal(target.terminalId, items.listing, items.names, action.folder, target.asRoot);
       } else if (action.kind === "download" && items.from === "host") {
         void download(items.terminalId, items.paths, "here", items.asRoot);
@@ -662,6 +668,7 @@ export function FilesPage({ active, request, onSubmitted, onOpenTerminal, onShow
               local={local}
               localPicked={localPicked}
               dropped={manyDrop}
+              localDrop={manyLocalDrop}
               request={manyRequest}
               onRequestTaken={forgetManyRequest}
               onSubmitted={(outcome, onJob) => onSubmitted(outcome, onJob)}

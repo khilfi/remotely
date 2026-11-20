@@ -15,6 +15,8 @@ import {
   filterTest,
   go,
   localCrumbs,
+  manyHostsDrop,
+  pushableFiles,
   rowWords,
   syncSummary,
   syncTakes,
@@ -133,6 +135,39 @@ test("a drop uploads, downloads or moves, and never changes a folder of this PC"
   assert.equal(dropAction(host, { pane: "host", terminalId: "t1", folder: "/srv", intoFolder: "/srv/a/b" }), null);
   assert.equal(dropAction(host, { pane: "host", terminalId: "t2", folder: "/srv", intoFolder: "/x" }), null);
   assert.equal(dropAction(host, { pane: "host", terminalId: "t1", folder: "/srv" }), null);
+});
+
+test("rows of this PC let go on Many hosts fill its push, in place of files chosen before", () => {
+  // UX-15, the owner's hand check of #115: the drop was silent; then #116's review: a hint alone could be false.
+  const local: DragItems = { from: "local", listing: "l1", names: ["app.conf"] };
+  assert.deepEqual(dropAction(local, { pane: "many" }), { kind: "push" });
+  const host: DragItems = { from: "host", terminalId: "t1", folder: "/srv", paths: ["/srv/a"], asRoot: false };
+  assert.equal(dropAction(host, { pane: "many" }), null, "a host's rows don't push");
+
+  const entries = [entry("a.txt"), entry("b.txt"), entry("logs", "folder"), { ...entry("current.log"), link: true }];
+  assert.deepEqual(pushableFiles(["a.txt", "logs", "current.log", "gone.txt"], entries), ["a.txt"]);
+  // Nothing chosen before: the push sends the dragged files.
+  assert.deepEqual(manyHostsDrop(["a.txt", "logs"], entries, null), {
+    files: ["a.txt"],
+    unstage: false,
+    text: "Push now sends 1 file from this PC.",
+  });
+  // a.txt chosen with Choose files, then b.txt dragged: the push sends b.txt, never the chosen one.
+  assert.deepEqual(manyHostsDrop(["b.txt"], entries, 1), {
+    files: ["b.txt"],
+    unstage: true,
+    text: "Push now sends 1 file from this PC in place of the 1 file chosen before.",
+  });
+  assert.equal(
+    manyHostsDrop(["a.txt", "b.txt"], entries, 3).text,
+    "Push now sends 2 files from this PC in place of the 3 files chosen before.",
+  );
+  // No file among them: nothing changes, what was chosen stays, and it says why.
+  assert.deepEqual(manyHostsDrop(["logs", "current.log"], entries, 1), {
+    files: [],
+    unstage: false,
+    text: "Nothing changed: a push sends files, not folders or links.",
+  });
 });
 
 const row = (path: string, state: DiffRow["state"], extra: Partial<DiffRow> = {}): DiffRow => ({

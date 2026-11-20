@@ -56,6 +56,8 @@ export interface DeployStep {
   status: TargetStatus | "waiting";
   /** Why it failed or was skipped. */
   message: string | null;
+  /** The core's code for why it failed or what its cancel kept (VM-29: `install_failed`, `install_cancelled`). */
+  errorCode?: string | null;
   /** What it came to: its folder, IP, session... */
   note: string | null;
   durationMs: number | null;
@@ -113,7 +115,8 @@ export function applyJobEvent(progress: DeployProgress, event: JobEvent): Deploy
     case "targetFinished":
       return step(event.target, {
         status: event.status,
-        message: event.message,
+        message: withoutName(event.message, event.name),
+        errorCode: event.errorCode ?? null,
         note: withoutName(event.note ?? null, event.name),
         durationMs: event.durationMs,
       });
@@ -134,7 +137,7 @@ export function applyJobEvent(progress: DeployProgress, event: JobEvent): Deploy
   }
 }
 
-/** The job's note names its VM first (`web-1: ...`), which the step shows already. */
+/** The job's note and an install's error name their VM first (`web-1: ...`), which the step shows already. */
 function withoutName(note: string | null, name: string): string | null {
   return note?.startsWith(`${name}: `) ? note.slice(name.length + 2) : note;
 }
@@ -152,7 +155,8 @@ export function applyJobTargets(progress: DeployProgress, targets: JobTarget[]):
       return {
         ...s,
         status: t.status,
-        message: t.error ?? s.message,
+        message: withoutName(t.error, s.name) ?? s.message,
+        errorCode: t.errorCode ?? s.errorCode ?? null,
         note: t.output ?? s.note,
         durationMs: t.durationMs ?? s.durationMs,
       };
@@ -189,10 +193,14 @@ export function stepText(step: DeployStep): string {
     case "succeeded":
       return step.note ?? "Made";
     case "failed":
-      // VM-29: an install that failed keeps its VM, and says so itself.
-      if (step.message?.includes("is kept as it is")) return `Failed: ${step.message}.`;
-      return step.message ? `Failed: ${step.message}. What it made was removed.` : "Failed";
+      if (!step.message) return "Failed";
+      // VM-29: an install that failed or ran out of time keeps its VM, and a VM that wasn't made says what of it was
+      // removed: the core's message says which, so nothing is added to it. Told by the core's code, never its words.
+      if (step.errorCode === "install_failed" || step.errorCode === "deploy_failed") return `Failed: ${step.message}.`;
+      return `Failed: ${step.message}. What it made was removed.`;
     case "cancelled":
+      // VM-29: an install cancelled while it was watched keeps its VM, which goes on installing; the message says so.
+      if (step.errorCode === "install_cancelled" && step.message) return `Cancelled: ${step.message}.`;
       return "Cancelled; what it made was removed";
     case "skipped":
       return step.message ?? "Not started";
