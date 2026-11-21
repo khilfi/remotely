@@ -1606,6 +1606,17 @@ async fn a_finished_line_is_kept_as_a_run_once_audited_without_its_output_and_ne
         .await
         .unwrap();
     assert_eq!(diff.stdout.iter().filter(|l| l.kind != DiffKind::Same).count(), 2);
+    // Exported like a run, with its line as the run's script.
+    let path = std::env::temp_dir().join(format!("remotely-test-{}.html", Uuid::new_v4().simple()));
+    let export = core
+        .bulk
+        .export(&ctx, line, ExportFormat::Html, GroupOptions::default(), &path)
+        .await
+        .unwrap();
+    let text = std::fs::read_to_string(&path).unwrap();
+    std::fs::remove_file(&path).unwrap();
+    assert_eq!(export.hosts, 3);
+    assert!(text.contains("cat /etc/os-release") && text.contains("24.04") && text.contains("web03"));
     // Its line, terminals and sessions.
     let (_, command) = core.store.job_detail(&ctx, line).await.unwrap().unwrap();
     let Command::TerminalLine {
