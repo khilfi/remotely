@@ -773,6 +773,8 @@ pub struct RecordedLine {
     pub duration_ms: Option<i64>,
     /// QL-31: kept as a run in the job journal, whose job id is this line's id.
     pub kept: bool,
+    /// QL-31: terminals its Enter reached (their recording started); a line it reached none of can't be kept.
+    pub reached: usize,
 }
 
 /// QL-12: the MultiExec session's recorded lines.
@@ -884,21 +886,38 @@ fn millis(from: Option<Instant>, to: Option<Instant>) -> Option<i64> {
     }
 }
 
-/// A slot as a job target, so bulk.rs groups it like a host of a Compare run.
+/// A slot as a job target, so bulk.rs groups it like a host of a Compare run. QL-31: its exit state where known, as a
+/// kept line stores it too: the prompt came back (succeeded); Enter never reached it (failed); otherwise the prompt
+/// never came back, so how the command ended is not known (unknown, as a run's host that timed out: it went quiet, the
+/// next line came first, the time limit passed or the connection was lost mid-command). An unknown terminal keeps
+/// what it printed and its hashes, so those with the same output group together (bulk.rs `group_key`).
 fn target_record(v: &SlotView, now: Instant) -> JobTargetRecord {
     let (status, error, error_code) = match &v.state {
         CaptureState::Waiting => ("pending", None, None),
         CaptureState::Running => ("running", None, None),
-        CaptureState::Done { .. } => ("succeeded", None, None),
+        CaptureState::Done { how: CaptureEnd::Prompt } => ("succeeded", None, None),
+        CaptureState::Done { how: CaptureEnd::Quiet } => (
+            "unknown",
+            Some("The output went quiet but the prompt never came back: the command may still run, or wait for an answer".to_owned()),
+            Some("quiet"),
+        ),
+        CaptureState::Done {
+            how: CaptureEnd::NextLine,
+        } => (
+            "unknown",
+            Some("The next line was sent before the prompt came back".to_owned()),
+            Some("next_line"),
+        ),
         CaptureState::TimedOut => (
-            "failed",
+            "unknown",
             Some("Still running at the time limit, so recording stopped (the command goes on)".to_owned()),
             Some("time_limit"),
         ),
-        CaptureState::Lost { reason } => ("failed", Some(reason.clone()), Some("lost")),
+        CaptureState::Lost { reason } => ("unknown", Some(reason.clone()), Some("lost")),
         CaptureState::NotSent { reason } => ("failed", Some(reason.clone()), Some("not_sent")),
     };
-    let done = matches!(v.state, CaptureState::Done { .. });
+    // Every finished recording's hashes (an unknown one's too); none while it runs or for one that never started.
+    let done = v.state.is_final();
     let running = v.state == CaptureState::Running;
     JobTargetRecord {
         target_kind: "terminal".into(),
@@ -954,6 +973,7 @@ impl Line {
                 None
             },
             kept: self.kept,
+            reached: views.iter().filter(|v| v.started.is_some()).count(),
         }
     }
 
@@ -1380,12 +1400,24 @@ impl Recorder {
             }
         };
         let views = line.views();
+        let reached = views.iter().filter(|v| v.started.is_some()).count();
         let running = views.iter().filter(|v| !v.state.is_final()).count();
+        if running > 0 && reached == 0 {
+            // AP-03: its countdown, or its job waiting to start.
+            return Err(CoreError::InvalidInput(
+                "That line's Enter hasn't gone yet (its countdown may still run): keep it once it has run.".into(),
+            ));
+        }
         if running > 0 {
             return Err(CoreError::InvalidInput(format!(
                 "That line is still running in {}: keep it once every tab has finished it.",
                 tabs(running)
             )));
+        }
+        if reached == 0 {
+            return Err(CoreError::InvalidInput(
+                "Enter reached none of that line's tabs, so there is nothing to keep.".into(),
+            ));
         }
         let now = Instant::now();
         Ok(LineToKeep {
@@ -1580,12 +1612,17 @@ mod tests {
         let refused = recorder.to_keep(line, &|_| true).unwrap_err();
         assert!(refused.to_string().contains("waits for its approval"), "{refused}");
         recorder.approved(line, job);
+        // Approved, its Enter not gone yet (AP-03's countdown).
+        let refused = recorder.to_keep(line, &|_| true).unwrap_err();
+        assert!(refused.to_string().contains("Enter hasn't gone yet"), "{refused}");
+        assert_eq!(recorder.list(&|_| true).lines[0].reached, 0);
         let t0 = Instant::now();
         assert!(slots[0].start("$ uptime", vec![], None, t0));
         assert!(slots[1].start("$ uptime", vec![], None, t0));
         slots[0].output(b"\r\nup 3 days\r\n$ ", "$ ", false, t0);
         let refused = recorder.to_keep(line, &|_| true).unwrap_err();
         assert!(refused.to_string().contains("still running in 1 tab"), "{refused}");
+        slots[1].output(b"\r\npartial\r\n", "", false, t0);
         slots[1].lost("the connection ended");
 
         let kept = recorder.to_keep(line, &|_| true).unwrap();
@@ -1606,7 +1643,8 @@ mod tests {
             got,
             [
                 (web, Some(session), "succeeded", None),
-                (quick, None, "failed", Some("lost"))
+                // The connection ended mid-command: how it ended is not known.
+                (quick, None, "unknown", Some("lost"))
             ]
         );
         assert_eq!(kept.terminals[0].record.output.as_deref(), Some("up 3 days\n"));
@@ -1614,6 +1652,12 @@ mod tests {
             kept.terminals[0].record.output_hash.is_some(),
             "a finished terminal groups by its output"
         );
+        assert_eq!(kept.terminals[1].record.output.as_deref(), Some("partial\n"));
+        assert!(
+            kept.terminals[1].record.output_hash.is_some(),
+            "an unknown one too, by what it printed"
+        );
+        assert_eq!(recorder.list(&|_| true).lines[0].reached, 2);
 
         assert!(!recorder.list(&|_| true).lines[0].kept);
         recorder.mark_kept(line);
@@ -1621,6 +1665,14 @@ mod tests {
         // A line no longer kept in memory can't be kept.
         recorder.clear();
         assert!(recorder.to_keep(line, &|_| true).is_err());
+
+        // A line whose Enter reached none of its tabs has nothing to keep.
+        let nowhere = Uuid::new_v4();
+        let slots = recorder.begin(nowhere, "uptime", &[(web, "web01".into(), Some(session))]);
+        recorder.taken(nowhere, Tier::Low, Some(Uuid::new_v4()));
+        slots[0].not_sent("not connected when Enter was sent");
+        let refused = recorder.to_keep(nowhere, &|_| true).unwrap_err();
+        assert!(refused.to_string().contains("nothing to keep"), "{refused}");
     }
 
     #[test]

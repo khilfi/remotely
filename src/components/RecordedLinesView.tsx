@@ -10,7 +10,7 @@
 // run, and a line kept already offers it. FD-03: everything here is plain DOM text, so presentation mode masks it
 // like the rest of the page.
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import {
   ArchiveIcon,
@@ -55,7 +55,7 @@ import {
 import { diffReason } from "@/lib/disabled-reasons";
 import { plural } from "@/lib/format";
 import { captureText, shortDuration, type CaptureTone } from "@/lib/recordings";
-import { keepReason, TYPED_KEPT, TYPED_NO_RETRY } from "@/lib/results-list";
+import { keepReason, TERMINAL_UNKNOWN, TYPED_KEPT, TYPED_NO_RETRY } from "@/lib/results-list";
 import { cn } from "@/lib/utils";
 
 /** Reloads at most this often while terminals finish. */
@@ -166,6 +166,17 @@ export function RecordedLineResults({
   // FD-03: keeping writes to the journal, which the read-only lock refuses (the core too).
   const readOnly = useReadOnlyReason();
   const running = results ? results.line.finished < results.line.terminals : true;
+  // QL-31: still this line's view, on a page that shows (another item picked unmounts it: the panel keys it by line).
+  const showing = useRef(active);
+  useEffect(() => {
+    showing.current = active;
+  }, [active]);
+  useEffect(
+    () => () => {
+      showing.current = false;
+    },
+    [],
+  );
 
   async function keep() {
     setKeeping(true);
@@ -176,11 +187,12 @@ export function RecordedLineResults({
           ? "That line was kept already."
           : "Kept as a run: it stays in the results list and in Activity after typing stops.",
       );
-      onKept(kept.jobId);
+      // Left meanwhile: the list shows the kept run when read again, without moving the panel.
+      if (showing.current) onKept(kept.jobId);
     } catch (err) {
       toast.error(errorMessage(err));
     } finally {
-      setKeeping(false);
+      if (showing.current) setKeeping(false);
     }
   }
 
@@ -220,7 +232,8 @@ export function RecordedLineResults({
   const { counts, groups, hosts, terminals } = results;
   const names = new Map(hosts.map((h) => [h.targetKey, h.name]));
   const byId = new Map(terminals.map((t) => [t.terminalId, t]));
-  const done = counts.succeeded + counts.failed + counts.cancelled;
+  // QL-31: an unknown terminal (its prompt never came back) is done recording too.
+  const done = counts.succeeded + counts.failed + counts.cancelled + counts.unknown;
   const notKept = keeping ? "Keeping it…" : keepReason(results.line, readOnly);
 
   return (
@@ -311,9 +324,16 @@ export function RecordedLineResults({
           <span>
             {done} of {plural(counts.total, "terminal")} done
           </span>
+          {/* QL-31: each terminal's exit state where known, as a kept run says it. */}
+          {counts.succeeded > 0 && <span className="text-success">{counts.succeeded} with the prompt back</span>}
           {counts.running > 0 && <span>{counts.running} running</span>}
           {counts.pending > 0 && <span>{counts.pending} waiting for Enter</span>}
-          {counts.failed > 0 && <span className="text-destructive">{counts.failed} not finished</span>}
+          {counts.unknown > 0 && (
+            <span className="text-tier-medium" title={TERMINAL_UNKNOWN}>
+              {counts.unknown} outcome unknown
+            </span>
+          )}
+          {counts.failed > 0 && <span className="text-destructive">{counts.failed} not sent</span>}
           <span className="ml-auto flex items-center gap-2">
             <Switch id={`ignore-ws-${line.id}`} checked={ignoreWs} onCheckedChange={setIgnoreWs} size="sm" />
             <Label htmlFor={`ignore-ws-${line.id}`} className="text-xs font-normal">
@@ -337,7 +357,8 @@ export function RecordedLineResults({
               names={g.hosts.map((k) => names.get(k) ?? k)}
               defaultOpen={i < 2 || groups.length <= 4}
               terminals
-              badge={<Badge variant="outline">{g.ok ? "prompt back" : "not finished"}</Badge>}
+              // QL-31: an output group is the terminals whose prompt came back; the others group by why.
+              badge={<Badge variant="outline">prompt back</Badge>}
               load={() => api.multiExecRecordedOutput(line.id, g.sample)}
             />
           ))}

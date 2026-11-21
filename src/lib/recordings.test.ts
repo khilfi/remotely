@@ -31,6 +31,7 @@ function line(id: string, patch: Partial<RecordedLine> = {}): RecordedLine {
     fullScreen: false,
     durationMs: 1200,
     kept: false,
+    reached: 3,
     ...patch,
   };
 }

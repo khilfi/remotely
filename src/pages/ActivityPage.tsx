@@ -79,6 +79,7 @@ import {
   groupActivity,
   isFiltered,
   isOpenJob,
+  lateKeptRun,
   NO_FILTER,
   plainText,
   resultLabel,
@@ -93,7 +94,7 @@ import { exportAuditLog } from "@/lib/audit-export";
 import { formatWhen } from "@/lib/format";
 import { REPORT_LABELS } from "@/lib/reports";
 import { progressesJob, PROGRESS_READ_MS } from "@/lib/job-events";
-import { activityView } from "@/lib/results-list";
+import { activityView, KEPT_LINE } from "@/lib/results-list";
 import { cn } from "@/lib/utils";
 
 type View = "timeline" | "audit";
@@ -176,8 +177,11 @@ export function ActivityPage({
     setOpenedId(focusJob.jobId);
     setView("timeline");
   }
+  // QL-31: a kept line's run opened from its entry while its job is past the jobs' page (lateKeptRun).
+  const [lateKept, setLateKept] = useState<string | null>(null);
   const opened = jobs.find((j) => j.id === openedId);
   const pendingRetry = !opened && retried && retried.id === openedId ? retried : null;
+  const pendingKept = !opened && !pendingRetry && openedId !== null && lateKept === openedId ? openedId : null;
   const openRetry = useCallback(
     (outcome: SubmitOutcome, commandType: string) =>
       onSubmitted(outcome, (jobId) => {
@@ -427,6 +431,10 @@ export function ActivityPage({
                     unfolded={unfolded.has(group.key)}
                     onToggle={() => toggle(group.key)}
                     onOpen={(id) => setOpenedId(id)}
+                    onOpenKept={(id) => {
+                      setLateKept(id);
+                      setOpenedId(id);
+                    }}
                     onCancel={(id) => void cancel(id)}
                   />
                 ))}
@@ -531,11 +539,12 @@ export function ActivityPage({
       {/* One place for the bulk sheet, so a just-queued retry's sheet stays open as the list catches up. */}
       {opened && !activityView(opened.commandType) ? (
         <JobResults job={opened} version={asked + reloads} onClose={() => setOpenedId(null)} />
-      ) : opened || pendingRetry ? (
+      ) : opened || pendingRetry || pendingKept ? (
         <BulkJobResults
-          jobId={opened?.id ?? pendingRetry?.id ?? ""}
-          commandType={opened?.commandType ?? pendingRetry?.commandType ?? ""}
+          jobId={opened?.id ?? pendingRetry?.id ?? pendingKept ?? ""}
+          commandType={opened?.commandType ?? pendingRetry?.commandType ?? (pendingKept ? KEPT_LINE : "")}
           job={opened}
+          unlisted={pendingKept ? "kept" : "retry"}
           onRetry={openRetry}
           onClose={() => setOpenedId(null)}
         />
@@ -562,6 +571,7 @@ function GroupRows({
   unfolded,
   onToggle,
   onOpen,
+  onOpenKept,
   onCancel,
 }: {
   group: ActivityGroup;
@@ -569,6 +579,8 @@ function GroupRows({
   unfolded: boolean;
   onToggle: () => void;
   onOpen: (jobId: string) => void;
+  /** QL-31: opens a kept line's run whose job is past the jobs' page, by its entry's job id. */
+  onOpenKept: (jobId: string) => void;
   onCancel: (jobId: string) => void;
 }) {
   const job = group.job;
@@ -578,7 +590,9 @@ function GroupRows({
   // A job's steps (and an approval's) fold under its row; an entry of its own shows its detail on hover.
   const foldable = group.entries.length > 1 || (group.jobId !== null && group.entries.length > 0);
   const hover = single?.detail ? plainText(single.detail) : undefined;
-  const opens = job !== null;
+  const lateKept = lateKeptRun(group);
+  const opens = job !== null || lateKept !== null;
+  const open = () => (job ? onOpen(job.id) : lateKept && onOpenKept(lateKept));
   const subtitle = [single ? eventLabel(single.event) : null, targetsText(group.targets) || null]
     .filter(Boolean)
     .join(" · ");
@@ -588,7 +602,7 @@ function GroupRows({
       <TableRow
         title={hover}
         className={cn((opens || foldable) && "cursor-pointer")}
-        onClick={() => (opens && job ? onOpen(job.id) : foldable && onToggle())}
+        onClick={() => (opens ? open() : foldable && onToggle())}
       >
         <TableCell className="align-top">
           {foldable && (
@@ -608,13 +622,13 @@ function GroupRows({
           )}
         </TableCell>
         <TableCell className="whitespace-normal">
-          {opens && job ? (
+          {opens ? (
             <button
               type="button"
               className="text-left font-medium hover:underline"
               onClick={(e) => {
                 e.stopPropagation();
-                onOpen(job.id);
+                open();
               }}
             >
               {group.title}
@@ -707,18 +721,21 @@ const BUNDLE_SAVED = new Set(["succeeded", "partially_failed"]);
 /**
  * UX-18: a bulk job's results grouped by output, as Compare hosts shows them: progress, groups, the diff, retry of the
  * failed hosts and export; a support bundle in its bundle mode, with Show folder once its zip is saved. `job` is the
- * list's row; a retry just queued has none yet, so its summary and times show once the list has it.
+ * list's row; a retry just queued has none yet, so its summary and times show once the list has it. QL-31: nor has a
+ * kept line's run opened from its entry while its job is past the jobs' page (`unlisted` says which).
  */
 function BulkJobResults({
   jobId,
   commandType,
   job,
+  unlisted = "retry",
   onRetry,
   onClose,
 }: {
   jobId: string;
   commandType: string;
   job?: JobSummary;
+  unlisted?: "retry" | "kept";
   onRetry: (outcome: SubmitOutcome, commandType: string) => void;
   onClose: () => void;
 }) {
@@ -736,7 +753,9 @@ function BulkJobResults({
     <Sheet open onOpenChange={(open) => !open && onClose()}>
       <SheetContent className="gap-0 data-[side=right]:w-full data-[side=right]:sm:max-w-3xl">
         <SheetHeader>
-          <SheetTitle>{job?.summary ?? "Retry of the failed hosts"}</SheetTitle>
+          <SheetTitle>
+            {job?.summary ?? (unlisted === "kept" ? "Kept typed line" : "Retry of the failed hosts")}
+          </SheetTitle>
           <SheetDescription>
             {job ? (
               <>
@@ -745,6 +764,8 @@ function BulkJobResults({
                 {/* AP-08: the ticket or change number its approval was given with. */}
                 {job.changeId && ` · change ID ${job.changeId}`}
               </>
+            ) : unlisted === "kept" ? (
+              "Typed before the jobs listed here"
             ) : (
               "Queued just now"
             )}

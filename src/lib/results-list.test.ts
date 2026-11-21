@@ -2,6 +2,7 @@
 // UX-17, UX-18 (0.9.0 H3): Compare hosts' one results list and how Activity opens a job. Run with `npm test`.
 
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import type { JobSummary, RecordedLine } from "./api.ts";
 import {
@@ -18,6 +19,8 @@ import {
   retryBlockedReason,
   shownKey,
   shownResult,
+  TERMINAL_STATUS,
+  TERMINAL_UNKNOWN,
   TYPED_NO_RETRY,
 } from "./results-list.ts";
 
@@ -61,6 +64,7 @@ function line(id: string, recordedAt: string, more: Partial<RecordedLine> = {}):
     fullScreen: false,
     durationMs: 900,
     kept: false,
+    reached: 6,
     ...more,
   };
 }
@@ -189,11 +193,22 @@ test("a kept line lists among runs, badged as kept, and its typed original goes 
   assert.equal(keptItem.kind, "kept");
   assert.equal(itemBadge(keptItem), "Kept from 6 tabs");
   assert.equal(itemTitle(keptItem), "Typed `df -h /` in 6 tabs");
-  assert.equal(itemStatus(keptItem), "6 of 6 tabs finished");
+  assert.equal(itemStatus(keptItem), "6 of 6 tabs with the prompt back");
   assert.ok(!itemRunning(keptItem));
   assert.equal(itemStatus(items[2]), "Kept as a run · All 6 the same");
-  const partly = resultItems([kept("k", "2026-11-20T10:00:00Z", { targetsSucceeded: 4, targetsFailed: 2 })], [])[0];
-  assert.equal(itemStatus(partly), "4 of 6 tabs finished, 2 not finished");
+  // Each tab's exit state where known: the prompt back, unknown (it never came back), or Enter never sent.
+  const partly = resultItems(
+    [kept("k", "2026-11-20T10:00:00Z", { targetsSucceeded: 3, targetsUnknown: 2, targetsFailed: 1 })],
+    [],
+  )[0];
+  assert.equal(itemStatus(partly), "3 of 6 tabs with the prompt back, 2 outcome unknown, 1 not sent");
+});
+
+test("a typed or kept line's terminals read by their exit state where known", () => {
+  assert.equal(TERMINAL_STATUS.succeeded, "Prompt back");
+  assert.equal(TERMINAL_STATUS.unknown, "Outcome unknown");
+  assert.equal(TERMINAL_STATUS.failed, "Not sent");
+  assert.match(TERMINAL_UNKNOWN, /prompt never came back/);
 });
 
 test("a line picked and then kept shows as its kept run, even before the list is read again", () => {
@@ -211,14 +226,24 @@ test("a kept line is never retried, and a typed line is kept only once every tab
   const keptJob = { commandType: KEPT_LINE, bodiesRemoved: false, commandRedacted: false };
   assert.equal(retryBlockedReason(keptJob, null), KEPT_NO_RETRY);
   assert.equal(retryBlockedReason(keptJob, "Read-only while presenting"), KEPT_NO_RETRY);
-  assert.match(KEPT_NO_RETRY, /can't be retried/);
+  // Word for word as the core refuses it (crates/core/src/kept_lines.rs NO_RETRY).
+  const core = readFileSync(new URL("../../crates/core/src/kept_lines.rs", import.meta.url), "utf8");
+  const said = /pub const NO_RETRY: &str =\s*"([^"]*)";/.exec(core)?.[1];
+  assert.equal(said, KEPT_NO_RETRY);
 
   const lock = "Read-only while presenting";
-  const done = { waitingApproval: false, finished: 3, terminals: 3 };
+  const done = { waitingApproval: false, finished: 3, terminals: 3, reached: 3 };
   assert.equal(keepReason(done, null), null);
   assert.equal(keepReason(done, lock), lock);
-  assert.match(keepReason({ ...done, waitingApproval: true, finished: 0 }, null) ?? "", /waits for its approval/);
+  assert.match(
+    keepReason({ ...done, waitingApproval: true, finished: 0, reached: 0 }, null) ?? "",
+    /waits for its approval/,
+  );
+  // Approved, its Enter not gone yet: AP-03's countdown.
+  assert.match(keepReason({ ...done, finished: 0, reached: 0 }, null) ?? "", /countdown/);
   assert.match(keepReason({ ...done, finished: 2 }, null) ?? "", /still running it/);
+  // Enter reached none of its tabs: nothing to keep.
+  assert.match(keepReason({ ...done, reached: 0 }, null) ?? "", /nothing to keep/);
 });
 
 test("Activity opens bulk jobs in the grouped results view, a bundle in its mode, the rest in their sheet", () => {

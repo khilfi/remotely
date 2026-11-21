@@ -893,6 +893,8 @@ export interface RecordedLine {
   durationMs: number | null;
   /** QL-31: kept as a run in the job journal; the run's job id is this line's id. */
   kept: boolean;
+  /** QL-31: terminals its Enter reached; a line it reached none of can't be kept. */
+  reached: number;
 }
 
 /** QL-31: what "Keep this line" did. */

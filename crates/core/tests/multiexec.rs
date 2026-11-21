@@ -1679,11 +1679,13 @@ async fn a_finished_line_is_kept_as_a_run_once_audited_without_its_output_and_ne
     assert!(core.store.verify_audit_chain(&ctx).await.unwrap().ok);
 
     // No retry: pressing Enter again later could run it after something else.
+    // Word for word as the window says it (results-list.ts KEPT_NO_RETRY; its test reads kept_lines::NO_RETRY).
     let retry = core.bus.retry_failed(&ctx, line, true).await;
     assert!(
-        matches!(&retry, Err(CoreError::InvalidInput(m)) if m.contains("can't be retried")),
+        matches!(&retry, Err(CoreError::InvalidInput(m)) if m == remotely_core::kept_lines::NO_RETRY),
         "{retry:?}"
     );
+    assert!(remotely_core::kept_lines::NO_RETRY.starts_with("A kept line can't be retried:"));
 
     // Typing stops: the recording goes, the kept run stays.
     core.multiexec.stop().await.unwrap();
@@ -1755,8 +1757,39 @@ async fn a_kept_lines_secrets_are_redacted_and_the_purge_removes_its_line_and_ou
     let detail = entry.detail.as_deref().unwrap();
     assert!(!detail.contains("hunter2") && detail.contains("[redacted]"), "{detail}");
     let before = core.bulk.results(&ctx, line, GroupOptions::default()).await.unwrap();
-    assert_eq!(before.groups.len(), 1);
-    assert!(before.groups[0].stdout.as_deref().unwrap().contains("done"));
+    assert_eq!(
+        before.groups.len(),
+        1,
+        "the hashes stay as recorded, so the groups are the recording's"
+    );
+    // The outputs too: the echo printed the secret, which the recorder (scrubbing only known secrets) kept.
+    let printed = before.groups[0].stdout.as_deref().unwrap();
+    assert!(
+        printed.contains("--password=[redacted] done") && !printed.contains("hunter2"),
+        "{printed}"
+    );
+    for target in core.store.job_targets(&ctx, line).await.unwrap() {
+        let stored = format!("{:?} {:?} {:?}", target.output, target.error, target.stderr);
+        assert!(!stored.contains("hunter2"), "{}: {stored}", target.target_name);
+    }
+
+    // A pasted block's later lines are echoed at the shell's prompts, so its output can hold them as typed: whatever of
+    // it was recorded, nothing stored keeps the secret.
+    let paste = send_line(&fleet, 0, "echo first\recho deploy --password=hunter2-paste done\r").await;
+    line_recorded(&mut events, paste).await;
+    core.keep_line(paste).await.unwrap();
+    for target in core.store.job_targets(&ctx, paste).await.unwrap() {
+        let stored = format!("{:?} {:?} {:?}", target.output, target.error, target.stderr);
+        assert!(!stored.contains("hunter2-paste"), "{}: {stored}", target.target_name);
+    }
+    let (_, command) = core.store.job_detail(&ctx, paste).await.unwrap().unwrap();
+    let Command::TerminalLine { line: text, keys, .. } = command else {
+        panic!("a typed line");
+    };
+    assert!(
+        !text.contains("hunter2-paste") && !keys.contains("hunter2-paste"),
+        "{text} {keys:?}"
+    );
 
     // Older than the retention period (90 days by default): Purge now empties its line, keys and outputs, as a typed
     // line's and a run's, and keeps its rows, so it still lists and groups.
@@ -1800,6 +1833,145 @@ async fn a_kept_lines_secrets_are_redacted_and_the_purge_removes_its_line_and_ou
         .unwrap()
         .iter()
         .any(|j| j.id == line.to_string()));
+}
+
+/// The kept-line audit entries of the fleet's workspace.
+async fn kept_entries(fleet: &Fleet) -> usize {
+    fleet
+        .audit()
+        .await
+        .iter()
+        .filter(|e| e.event == "multiexec_line_kept")
+        .count()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_keep_and_its_audit_entry_land_together_and_a_line_whose_job_is_purged_or_missing_is_refused() {
+    let fleet = Fleet::new(2).await;
+    fleet.pick(&[0, 1]).await;
+    let mut events = fleet.core.multiexec.subscribe();
+    let core = &fleet.core;
+    let ctx = core.ctx();
+    let pool = core.store.pool();
+
+    // The audit write fails: nothing is kept, so the next keep is a keep, audited, not "kept already" (rule 4).
+    let line = send_line(&fleet, 0, "whoami\r").await;
+    line_recorded(&mut events, line).await;
+    sqlx::query(
+        "CREATE TRIGGER test_kept_audit_fails BEFORE INSERT ON audit_log WHEN NEW.event = 'multiexec_line_kept'
+         BEGIN SELECT RAISE(ABORT, 'the audit log could not be written'); END",
+    )
+    .execute(pool)
+    .await
+    .unwrap();
+    let failed = core.keep_line(line).await;
+    assert!(failed.is_err(), "{failed:?}");
+    assert!(
+        core.store.job_detail(&ctx, line).await.unwrap().is_none(),
+        "the job rolled back with its entry"
+    );
+    assert!(core.store.job_targets(&ctx, line).await.unwrap().is_empty());
+    assert!(!core.multiexec.recordings().lines[0].kept);
+    sqlx::query("DROP TRIGGER test_kept_audit_fails")
+        .execute(pool)
+        .await
+        .unwrap();
+    let kept = core.keep_line(line).await.unwrap();
+    assert!(!kept.already_kept);
+    assert_eq!(kept_entries(&fleet).await, 1);
+
+    // The line's own job was purged (BX-02): refused, nothing written.
+    let purged = send_line(&fleet, 0, "hostname\r").await;
+    line_recorded(&mut events, purged).await;
+    let purged_job = core.multiexec.recordings().lines[0].job_id.unwrap();
+    sqlx::query("UPDATE jobs SET bodies_removed_at = '2026-01-01T00:00:00Z' WHERE id = ?")
+        .bind(purged_job.to_string())
+        .execute(pool)
+        .await
+        .unwrap();
+    let refused = core.keep_line(purged).await;
+    assert!(
+        matches!(&refused, Err(CoreError::InvalidInput(m)) if m.contains("older than how long job outputs are kept")),
+        "{refused:?}"
+    );
+    assert!(core.store.job_detail(&ctx, purged).await.unwrap().is_none());
+
+    // The line's own job is not in the journal at all (QL-15: its write failed): said as such, not as another
+    // workspace's.
+    let missing = send_line(&fleet, 0, "uptime\r").await;
+    line_recorded(&mut events, missing).await;
+    let missing_job = core.multiexec.recordings().lines[0].job_id.unwrap();
+    sqlx::query("DELETE FROM job_targets WHERE job_id = ?")
+        .bind(missing_job.to_string())
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query("DELETE FROM jobs WHERE id = ?")
+        .bind(missing_job.to_string())
+        .execute(pool)
+        .await
+        .unwrap();
+    let refused = core.keep_line(missing).await;
+    assert!(
+        matches!(&refused, Err(CoreError::InvalidInput(m)) if m.contains("not in the journal")),
+        "{refused:?}"
+    );
+    assert_eq!(kept_entries(&fleet).await, 1, "no refusal is audited as a keep");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_tabs_exit_state_is_kept_where_known_and_unknown_when_its_prompt_never_came_back() {
+    let fleet = Fleet::new(2).await;
+    fleet.core.multiexec.set_record_limits(RecordLimits {
+        line_time: Duration::from_millis(800),
+        ..RecordLimits::default()
+    });
+    fleet.pick(&[0, 1]).await;
+    let mut events = fleet.core.multiexec.subscribe();
+    let core = &fleet.core;
+    let ctx = core.ctx();
+
+    // Still running at the time limit: the command goes on, so how it ended is not known.
+    let line = send_line(&fleet, 0, "sleep 3\r").await;
+    line_recorded(&mut events, line).await;
+    let live = core.multiexec.recorded(line, GroupOptions::default()).unwrap();
+    assert!(
+        live.hosts.iter().all(|h| h.status == "unknown"),
+        "the live view says it as the kept run does"
+    );
+    core.keep_line(line).await.unwrap();
+    let job = core
+        .bulk
+        .recent(&ctx, 20)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|j| j.id == line.to_string())
+        .unwrap();
+    assert_eq!(
+        job.status, "failed",
+        "no prompt came back, as a run of hosts that all timed out"
+    );
+    assert_eq!(
+        (job.targets_succeeded, job.targets_failed, job.targets_unknown),
+        (0, 0, 2)
+    );
+    let results = core.bulk.results(&ctx, line, GroupOptions::default()).await.unwrap();
+    assert_eq!(results.counts.unknown, 2);
+    assert_eq!(results.groups.len(), 1, "same cause, same output");
+    assert_eq!(results.groups[0].error_code.as_deref(), Some("time_limit"));
+    for target in core.store.job_targets(&ctx, line).await.unwrap() {
+        assert_eq!(
+            (target.status.as_str(), target.error_code.as_deref()),
+            ("unknown", Some("time_limit"))
+        );
+        assert!(
+            target.output_hash.is_some(),
+            "it keeps what it printed, and groups by it"
+        );
+    }
+    // And retry_failed has nothing it would send: it is a kept line.
+    assert!(core.bus.retry_failed(&ctx, line, true).await.is_err());
 }
 
 // ---- QL-07: one notification per MultiExec line -------------------------------------------------

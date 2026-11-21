@@ -157,11 +157,18 @@ crates/core/          remotely-core: all app logic
                       command_type and its index, the purge and Activity all fit) whose id is the line's, so keeping
                       twice keeps once: the line's own job's TerminalLine (as for_journal redacts it) with each target's
                       session, its action, tier and change ID, created when the line was held, one target per terminal
-                      with its scrubbed output, hashes, times and how it ended (no exit code); audited
-                      multiexec_line_kept under that job (the line as its summary shows it, the terminals, where; never
-                      the output), refused by the read-only lock (Change::KeptLines), no tier; refused while it waits
-                      for its approval or a tab still runs it, for another workspace's job and a purged one;
-                      CommandBus::retry_failed refuses a kept line; RecordedLine.kept for the list
+                      with its output (scrubbed by the recorder, then redact_secrets on output and error, since a paste's
+                      later lines are echoed at the prompts; hashes as recorded), times and its exit state where known
+                      (no exit code: succeeded when the prompt came back, failed when Enter never reached it, unknown
+                      otherwise, so the job's status follows as a run's); audited multiexec_line_kept under that job (the
+                      line as its summary shows it, the terminals, where; never the output) in one transaction with the
+                      job and its targets (Store::insert_kept_line under lock_audit_chain, append_audit_on; everything
+                      it names read first), refused by the read-only lock (Change::KeptLines), no tier; refused while it
+                      waits for its approval or countdown, while a tab still runs it, when Enter reached no tab, for a
+                      purged line job, one missing from the journal (its own message) and another workspace's
+                      (NotInWorkspace, also for another workspace's row on its id); CommandBus::retry_failed refuses a
+                      kept line with NO_RETRY, which results-list.ts's KEPT_NO_RETRY says word for word (its test reads
+                      it); RecordedLine.kept and .reached for the list
     save_guard.rs     No save path writes into a Git working tree (audit CSV, Compare and MultiExec exports, saved
                       output, session logs, downloads, FD-07 exports, FD-04 bundles, FD-09's upload folder);
                       write_atomically (a `.part` file, renamed), and AtomicFile, the same for a file written bit by bit
@@ -717,7 +724,10 @@ crates/core/          remotely-core: all app logic
                       output per terminal from Enter until the prompt is back (TextRenderer drops escapes and replays line
                       redraws; RecordSlot handed to the pane through its input before the Enter, with the terminal's
                       saved session; Recorder keeps the session's lines in memory with caps, grouped and diffed through
-                      bulk.rs; QL-31 to_keep, a finished line for kept_lines.rs, and mark_kept); folder.rs SS-08 the
+                      bulk.rs; QL-31 target_record: each terminal's exit state where known, the prompt back succeeded,
+                      not sent failed, otherwise unknown with its output and hashes (quiet, next line, time limit, lost),
+                      in the live view as in a kept run; to_keep, a finished line for kept_lines.rs, and mark_kept);
+                      folder.rs SS-08 the
                       shell's folder (OSC 7) and
                       the invisible prompt hook typed into bash and zsh on connect (hidden from the terminal, logs,
                       MultiExec and QL-07; the startup command waits for it; typed only at a line that looks like a
@@ -940,7 +950,9 @@ crates/core/          remotely-core: all app logic
                       `via`, a read, not audited; A4, H11 a VM only through a
                       chosen or confirmed link, else ResolvedTargets::vms_unconfirmed; BX-13 TargetPicks.winrm: WinRM
                       sessions and PowerShell tabs are hosts for Compare hosts and support bundles, never the SS-09 key
-                      push; BulkHost.script_kind), BX-03 grouped results and diff,
+                      push; BulkHost.script_kind), BX-03 grouped results and diff (QL-31 group_key: an unknown target
+                      with output, a typed line's terminal, groups by its cause and that output; a run's unknown host
+                      has none and groups by cause alone),
                       BX-05 exports: the Terminal page's Compare output (running is RemoteExec on the bus; UX-17, 0.9.0
                       H3: `recent` lists its runs and BX-10's pushes and fetches, whoever started them, and QL-31's
                       kept lines, whose results show their line as the run's script); QL-12
@@ -1468,7 +1480,8 @@ src/                  React + TypeScript UI
                       palette and a VM's Schedules tab open it). R10: App's `openLink` opens every AppLink (lib/links.ts), and pages
                       take a request to show one item (Sessions `focus`, Activity `focusJob` (UX-18, 0.9.0 H3: a bulk
                       job, lib/results-list.ts activityView, opens BulkResultsView in its sheet (QL-31: a kept line
-                      too, without retry), a support bundle in its
+                      too, without retry, and from its multiexec_line_kept entry when its job, dated when the line was
+                      typed, is past the jobs' page: activity.ts lateKeptRun), a support bundle in its
                       bundle mode with Show folder, every other job the per-target sheet; a retry goes through App's
                       `submitted` and its approval, then its job opens; job notifications, a failed job's toast (Show) and the
                       status bar's jobs item lead there), Settings `focus` by
@@ -1557,7 +1570,11 @@ src/                  React + TypeScript UI
                       badges ("Kept from 6 tabs"), status words, the shown item (a run just queued or a line just kept
                       opens before it is listed; a typed line picked and kept since shows its run), why a typed or kept
                       line has no retry (TYPED_NO_RETRY, KEPT_NO_RETRY) and keepReason (the lock, an approval waited
-                      for, a tab still running it); retryBlockedReason: a finished job's retry off only where the core's
+                      for, its Enter not gone yet (a countdown), a tab still running it, Enter reaching no tab);
+                      TERMINAL_STATUS and TERMINAL_UNKNOWN, a typed or kept line's terminals by their exit state where
+                      known (prompt back, outcome unknown, not sent), the same words in every view of them (counts,
+                      the Every terminal table, the output dialog, the export's toast, the diff in terminals);
+                      retryBlockedReason: a finished job's retry off only where the core's
                       retry_failed refuses it (a kept line, the lock, a purged remote exec run, a redacted command);
                       activityView: which jobs Activity opens in BulkResultsView, kept lines included), palette.ts (UX-07 Ctrl+K's order; bulk actions only when searched for),
                       update-notice.ts (FD-14 the one update notice), catalog.ts (VM-19

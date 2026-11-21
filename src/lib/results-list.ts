@@ -185,9 +185,10 @@ export function itemStatus(item: ResultItem): string {
       return parts.join(", ");
     }
     case "kept": {
-      const { targetsTotal, targetsSucceeded, targetsFailed } = item.job;
-      const parts = [`${targetsSucceeded} of ${plural(targetsTotal, "tab")} finished`];
-      if (targetsFailed > 0) parts.push(`${targetsFailed} not finished`);
+      const { targetsTotal, targetsSucceeded, targetsFailed, targetsUnknown } = item.job;
+      const parts = [`${targetsSucceeded} of ${plural(targetsTotal, "tab")} with the prompt back`];
+      if (targetsUnknown > 0) parts.push(`${targetsUnknown} outcome unknown`);
+      if (targetsFailed > 0) parts.push(`${targetsFailed} not sent`);
       return parts.join(", ");
     }
     case "typed":
@@ -201,8 +202,8 @@ export const TYPED_NO_RETRY =
   "A typed line can't be retried: pressing Enter again later could run it after something else. Type it again, or run it here as a command.";
 
 /**
- * QL-31: why a kept line has no retry or canary, word for word as the core's `retry_failed` refuses it (shown in
- * Compare hosts and in Activity alike).
+ * QL-31: why a kept line has no retry or canary, word for word as the core's `retry_failed` refuses it (the core's
+ * `kept_lines::NO_RETRY`; the test reads it there), shown in Compare hosts and in Activity alike.
  */
 export const KEPT_NO_RETRY =
   "A kept line can't be retried: pressing Enter again later could run it after something else. Type it again, or run it from Compare hosts as a command.";
@@ -212,16 +213,39 @@ export const TYPED_KEPT =
   "It goes when Type in all tabs is turned off, unless you keep it as a run: then it stays for as long as job outputs are kept.";
 
 /**
+ * QL-31: a terminal of a typed or kept line, by its exit state where known (the core's `record.rs` target_record): the
+ * prompt came back; Enter never reached it; or the prompt never came back, so the command may still run.
+ */
+export const TERMINAL_STATUS: Record<string, string> = {
+  pending: "Waiting for Enter",
+  running: "Running",
+  succeeded: "Prompt back",
+  failed: "Not sent",
+  unknown: "Outcome unknown",
+  cancelled: "Cancelled",
+  skipped: "Not started",
+};
+
+/** QL-31: what a terminal's unknown outcome means, for its tooltip. */
+export const TERMINAL_UNKNOWN =
+  "The prompt never came back (the output went quiet, the next line came first, the time limit passed or the connection was lost), so the command may still run.";
+
+/**
  * QL-31 (QL-08): why "Keep this line" is off for a typed line, or null. The core refuses the same: the read-only lock,
- * a line that waits for its approval, and one some tab is still running. A line kept already offers its run instead.
+ * a line that waits for its approval, one whose Enter hasn't gone yet (AP-03's countdown), one some tab is still
+ * running, and one whose Enter reached no tab. A line kept already offers its run instead. (Whether the line's own job
+ * was purged only the core knows: it says so if asked.)
  */
 export function keepReason(
-  line: Pick<RecordedLine, "waitingApproval" | "finished" | "terminals">,
+  line: Pick<RecordedLine, "waitingApproval" | "finished" | "terminals" | "reached">,
   readOnly: string | null,
 ): string | null {
   if (readOnly) return readOnly;
   if (line.waitingApproval) return "It waits for its approval: keep it once it has run.";
+  if (line.finished < line.terminals && line.reached === 0)
+    return "Its Enter hasn't gone yet (its countdown may still run): keep it once it has run.";
   if (line.finished < line.terminals) return "Some tabs are still running it: keep it once every tab has finished it.";
+  if (line.reached === 0) return "Enter reached none of its tabs, so there is nothing to keep.";
   return null;
 }
 

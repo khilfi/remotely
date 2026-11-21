@@ -53,7 +53,7 @@ import { useReadOnlyReason } from "@/components/Presentation";
 import { formatWhen, plural } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import { diffReason } from "@/lib/disabled-reasons";
-import { isKeptLine, KEPT_NO_RETRY, retryBlockedReason } from "@/lib/results-list";
+import { isKeptLine, KEPT_NO_RETRY, retryBlockedReason, TERMINAL_STATUS, TERMINAL_UNKNOWN } from "@/lib/results-list";
 import { canaryPrompt, retryChoices, timeLeft } from "@/lib/rollout";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { StatusBadge, TierBadge } from "./Badges";
@@ -191,7 +191,9 @@ export function BulkResultsView({ jobId, onRetry, bundle = false, extraActions }
       if (!done) return;
       const redacted =
         done.redacted > 0 ? `; ${plural(done.redacted, "text")} had something like a secret, now [redacted]` : "";
-      toast.success(`Exported ${plural(done.hosts, "host")} to ${done.path}${redacted}`);
+      // QL-31: a kept line's targets are its terminals.
+      const unit = results && isKeptLine(results.job) ? "terminal" : "host";
+      toast.success(`Exported ${plural(done.hosts, unit)} to ${done.path}${redacted}`);
     } catch (err) {
       toast.error(errorMessage(err));
     }
@@ -338,20 +340,24 @@ export function BulkResultsView({ jobId, onRetry, bundle = false, extraActions }
           <span>
             {done} of {plural(counts.total, unit)} done
           </span>
+          {/* QL-31: a kept line's terminals by their exit state where known. */}
           {counts.succeeded > 0 && (
             <span className="text-success">
-              {counts.succeeded} {kept ? "finished" : "succeeded"}
+              {counts.succeeded} {kept ? "with the prompt back" : "succeeded"}
             </span>
           )}
           {counts.failed > 0 && (
             <span className="text-destructive">
-              {counts.failed} {kept ? "not finished" : "failed"}
+              {counts.failed} {kept ? "not sent" : "failed"}
             </span>
           )}
           {counts.running > 0 && <span>{counts.running} running</span>}
           {counts.pending > 0 && <span>{counts.pending} waiting</span>}
           {counts.unknown > 0 && (
-            <span className="text-tier-medium" title="Timed out, or cancelled while the command ran: it may have run">
+            <span
+              className="text-tier-medium"
+              title={kept ? TERMINAL_UNKNOWN : "Timed out, or cancelled while the command ran: it may have run"}
+            >
               {counts.unknown} outcome unknown
             </span>
           )}
@@ -389,7 +395,8 @@ export function BulkResultsView({ jobId, onRetry, bundle = false, extraActions }
               defaultOpen={i < 2 || groups.length <= 4}
               load={() => api.bulkHostOutput(jobId, g.sample)}
               terminals={kept}
-              badge={kept ? <Badge variant="outline">{g.ok ? "prompt back" : "not finished"}</Badge> : undefined}
+              // QL-31: an output group is the terminals whose prompt came back; the others group by why.
+              badge={kept ? <Badge variant="outline">prompt back</Badge> : undefined}
             />
           ))}
         </div>
@@ -429,7 +436,7 @@ export function BulkResultsView({ jobId, onRetry, bundle = false, extraActions }
                       {h.error && <div className="text-xs text-destructive">{h.error}</div>}
                     </TableCell>
                     <TableCell>
-                      <HostStatus host={h} now={now} />
+                      <HostStatus host={h} now={now} terminals={kept} />
                     </TableCell>
                     <TableCell className="text-right tabular-nums">{h.exitCode ?? "—"}</TableCell>
                     <TableCell className="text-right tabular-nums">{seconds(h.durationMs)}</TableCell>
@@ -446,6 +453,7 @@ export function BulkResultsView({ jobId, onRetry, bundle = false, extraActions }
         <OutputDiffDialog
           load={(left, right, options) => api.bulkDiff(jobId, left, right, options)}
           groups={groups}
+          terminals={kept}
           ignoreTrailingWhitespace={ignoreWs}
           left={comparing.left}
           right={comparing.right}
@@ -456,6 +464,7 @@ export function BulkResultsView({ jobId, onRetry, bundle = false, extraActions }
         <HostOutputDialog
           host={viewing}
           load={() => api.bulkHostOutput(jobId, viewing.targetKey)}
+          description={kept ? `${TERMINAL_STATUS[viewing.status]} · ${seconds(viewing.durationMs)}` : undefined}
           onClose={() => setViewing(null)}
         />
       )}
@@ -483,7 +492,8 @@ const STATUS_LABEL: Record<HostResult["status"], string> = {
   unknown: "Outcome unknown",
 };
 
-function HostStatus({ host, now }: { host: HostResult; now: number }) {
+/** `terminals` (QL-31, a kept line): a terminal's exit state where known, as its line's other views say it. */
+function HostStatus({ host, now, terminals = false }: { host: HostResult; now: number; terminals?: boolean }) {
   if (host.status === "running") {
     const since = host.startedAt ? Math.max(0, Math.floor((now - new Date(host.startedAt).getTime()) / 1000)) : null;
     return (
@@ -501,8 +511,15 @@ function HostStatus({ host, now }: { host: HostResult; now: number }) {
     skipped: "text-muted-foreground",
     unknown: "text-tier-medium",
   }[host.status];
-  const label = STATUS_LABEL[host.status];
-  return <span className={cn("text-sm", className)}>{label}</span>;
+  const label = terminals ? TERMINAL_STATUS[host.status] : STATUS_LABEL[host.status];
+  return (
+    <span
+      className={cn("text-sm", className)}
+      title={terminals && host.status === "unknown" ? TERMINAL_UNKNOWN : undefined}
+    >
+      {label}
+    </span>
+  );
 }
 
 /**

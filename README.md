@@ -986,14 +986,19 @@ Bulk execution lives in the Terminal page (it replaced the MVP's Bulk run page):
   says what was exported and where, never the output.
 - **Keep a typed line** (QL-31, 0.9.0): **Keep this line**, beside a recorded line's results once every tab has
   finished it, stores it as a run in the job journal: the line (as the journal keeps typed lines, with anything that
-  looks like a secret `[redacted]`), its tabs and their saved sessions, and what each tab printed, already scrubbed.
-  It then lists among the runs, badged "Kept from 6 tabs", and opens in the same grouped view, with the diff and
-  export, in Compare hosts and in Activity, after Type in all tabs is turned off and after a restart. It is never
-  retried (its Retry says why, as a typed line's does), and a typed line has no exit code to keep: each tab shows
-  whether its prompt came back. It is kept like a run's outputs: the retention purge (Settings, General) removes its
-  line and outputs with theirs. Keeping a line is audited (the line, the tabs and where it is kept, never the output),
-  has no approval tier, is refused while presenting with the read-only lock, and keeping it twice keeps it once. It
-  belongs to the workspace it was typed in. A line you don't keep still goes when typing stops.
+  looks like a secret `[redacted]`), its tabs and their saved sessions, and what each tab printed, already scrubbed
+  (and with anything that looks like a secret `[redacted]` too: a pasted block's later lines are echoed at the
+  prompts). It then lists among the runs, badged "Kept from 6 tabs", and opens in the same grouped view, with the diff
+  and export, in Compare hosts and in Activity, after Type in all tabs is turned off and after a restart. It is never
+  retried (its Retry says why, as a typed line's does). A typed line has no exit code to keep, so each tab keeps its
+  outcome where it is known: **Prompt back**; **Not sent** when Enter never reached it; otherwise **Outcome unknown**
+  (the output went quiet, the next line came first, the time limit passed or the connection was lost, so the command
+  may still run), as a run's host that timed out. A typed line's own view says the same. A line Enter reached no tab
+  of, or one still waiting for its approval or countdown, can't be kept. It is kept like a run's outputs: the
+  retention purge (Settings, General) removes its line and outputs with theirs. Keeping a line is audited (the line,
+  the tabs and where it is kept, never the output) in the same transaction as the kept run, has no approval tier, is
+  refused while presenting with the read-only lock, and keeping it twice keeps it once. It belongs to the workspace it
+  was typed in. A line you don't keep still goes when typing stops.
 - **Saved MultiExec groups** (QL-19, 0.5.0; UX-16, 0.9.0): named sets of saved sessions, such as "all web servers",
   in the **Pick tabs** menu of the bar under the tabs (shown while Type in all tabs is on or several tabs are picked),
   and in Ctrl+K: type the group's name for **Open group: web servers**, or "Manage groups". **Open group** opens

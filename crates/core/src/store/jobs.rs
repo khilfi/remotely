@@ -15,7 +15,7 @@ use serde_json::Value;
 use sqlx::Row;
 use uuid::Uuid;
 
-use super::{serde_name, Store};
+use super::{serde_name, NewAuditEntry, Store};
 use crate::command_bus::{ApprovalRecord, Command};
 use crate::domain::{now_rfc3339, Context, Target, TargetRef};
 use crate::error::Result;
@@ -464,15 +464,24 @@ impl Store {
     }
 
     /// QL-31: stores a typed line kept as a run, a [`KEPT_LINE`] job that has ended, with each terminal's result and
-    /// recorded output, in one transaction. Returns false when it is kept already (the same line's id): nothing is
-    /// written then. The line and keys go through [`Command::for_journal`] and the summary through
-    /// [`redact_secrets`], as every job's do.
-    pub(crate) async fn insert_kept_line(&self, ctx: &Context, line: NewKeptLine<'_>) -> Result<bool> {
+    /// recorded output, and `entry`, its audit entry, in one transaction under the audit chain's lock, so neither lands
+    /// without the other (rule 4). Returns false when it is kept already (the same line's id): nothing is written or
+    /// audited then. The line and keys go through [`Command::for_journal`], and the summary, each output and each error
+    /// through [`redact_secrets`]: a pasted block's later lines are echoed at the shell's prompts, so the output can
+    /// hold them as typed. The hashes stay as recorded, so the groups are the recording's.
+    pub(crate) async fn insert_kept_line(
+        &self,
+        ctx: &Context,
+        line: NewKeptLine<'_>,
+        entry: NewAuditEntry<'_>,
+    ) -> Result<bool> {
         let ws = ctx.workspace_id.to_string();
         let user = ctx.user_id.to_string();
         let id = line.id.to_string();
         let (kept, redacted) = line.command.for_journal();
         let (summary, _) = redact_secrets(line.summary);
+        let clean = |text: &Option<String>| text.as_deref().map(|t| redact_secrets(t).0);
+        let _chain = self.lock_audit_chain().await;
         let mut tx = self.pool.begin().await?;
         // Only the id's conflict is let go (a CHECK that fails still fails).
         let inserted = sqlx::query(
@@ -508,7 +517,7 @@ impl Store {
             tx.rollback().await?;
             return match theirs {
                 Some(theirs) if theirs == ws => Ok(false),
-                _ => Err(crate::error::CoreError::NotInWorkspace(format!("job {id}"))),
+                _ => Err(crate::error::CoreError::NotInWorkspace("That kept line".into())),
             };
         }
         for t in line.targets {
@@ -526,8 +535,8 @@ impl Store {
             .bind(&t.target_name)
             .bind(&t.status)
             .bind(t.exit_code)
-            .bind(&t.output)
-            .bind(&t.error)
+            .bind(clean(&t.output))
+            .bind(clean(&t.error))
             .bind(&t.error_code)
             .bind(&t.started_at)
             .bind(&t.finished_at)
@@ -539,8 +548,18 @@ impl Store {
             .execute(&mut *tx)
             .await?;
         }
+        Store::append_audit_on(&mut tx, ctx, entry).await?;
         tx.commit().await?;
         Ok(true)
+    }
+
+    /// QL-31: the workspace whose journal holds a job, whichever is shown; `None` for a job in none (its journal write
+    /// failed, QL-15). Only to tell a keep's refusals apart; never to read another workspace's job.
+    pub(crate) async fn job_workspace(&self, id: Uuid) -> Result<Option<String>> {
+        Ok(sqlx::query_scalar("SELECT workspace_id FROM jobs WHERE id = ?")
+            .bind(id.to_string())
+            .fetch_optional(&self.pool)
+            .await?)
     }
 
     pub(crate) async fn set_job_status(&self, id: Uuid, status: JobStatus) -> Result<()> {
