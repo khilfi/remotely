@@ -891,6 +891,16 @@ export interface RecordedLine {
   fullScreen: boolean;
   /** From the first Enter to the last prompt, once every terminal is done. */
   durationMs: number | null;
+  /** QL-31: kept as a run in the job journal; the run's job id is this line's id. */
+  kept: boolean;
+}
+
+/** QL-31: what "Keep this line" did. */
+export interface KeptLine {
+  /** The kept run's job: the recorded line's id. */
+  jobId: string;
+  /** It was kept before; nothing was written again. */
+  alreadyKept: boolean;
 }
 
 export interface RecordLimits {
@@ -4180,6 +4190,8 @@ export const api = {
   /** QL-12: one line (`lineId`) or all of them (null); a save dialog in Rust; null when cancelled. */
   multiExecExport: (lineId: string | null, format: ExportFormat, options: GroupOptions) =>
     invoke<RecordedExport | null>("multiexec_export", { lineId, format, options }),
+  /** QL-31: keeps a finished recorded line as a run in the job journal (audited; refused by the read-only lock). */
+  multiExecKeep: (lineId: string) => invoke<KeptLine>("multiexec_keep", { lineId }),
   onMultiExecEvent: (handler: (event: MultiExecEvent) => void): Promise<UnlistenFn> =>
     listen<MultiExecEvent>("multiexec://event", (e) => handler(e.payload)),
   terminalResize: (id: string, cols: number, rows: number) => invoke<void>("terminal_resize", { id, cols, rows }),

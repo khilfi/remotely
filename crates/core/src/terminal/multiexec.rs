@@ -1054,6 +1054,16 @@ impl MultiExec {
         self.shared.recorder.runs(line_id)
     }
 
+    /// QL-31: a finished recorded line as "Keep this line" stores it ([`crate::Core::keep_line`]).
+    pub(crate) fn line_to_keep(&self, line_id: Uuid) -> Result<crate::terminal::record::LineToKeep> {
+        self.shared.recorder.to_keep(line_id, &self.alive())
+    }
+
+    /// QL-31: the line was kept as a run.
+    pub(crate) fn mark_kept(&self, line_id: Uuid) {
+        self.shared.recorder.mark_kept(line_id);
+    }
+
     /// Turns MultiExec on for these terminals, or changes them. A line being typed keeps going to the
     /// targets it started with that are still picked; ones picked meanwhile join at the next line.
     pub async fn set_targets(&self, targets: Vec<Uuid>) -> Result<MultiExecStatus> {
@@ -1888,11 +1898,12 @@ impl MultiExec {
         let line_id = Uuid::new_v4();
         // QL-12: each terminal gets its recording before anything can send the Enter (a Low line's
         // job may run before `submit` returns), through its input, so it comes first.
-        let names: Vec<(Uuid, String)> = to
+        // QL-31: with each terminal's saved session, which a kept line keeps.
+        let names: Vec<(Uuid, String, Option<Uuid>)> = to
             .iter()
-            .map(|id| {
-                let name = self.shared.terminals.pane_info(*id).map(|i| i.name);
-                (*id, name.unwrap_or_else(|| "a closed terminal".into()))
+            .map(|id| match self.shared.terminals.pane_info(*id) {
+                Some(info) => (*id, info.name, info.session_id),
+                None => (*id, "a closed terminal".into(), None),
             })
             .collect();
         for slot in self.shared.recorder.begin(line_id, &script, &names) {

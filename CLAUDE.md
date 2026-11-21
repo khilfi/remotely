@@ -149,7 +149,19 @@ crates/core/          remotely-core: all app logic
     retention.rs      BX-02 how long the job journal keeps outputs and command text (Settings: 30 days, 90 by default,
                       1 year, forever; `jobs.retention`): the purge at start and daily (JournalRetention::run, wall
                       clock), Purge now, audited journal_purged; secure_delete, a WAL checkpoint and VACUUM after a big
-                      purge; the read-only lock refuses the setting and Purge now, never the schedule
+                      purge; the read-only lock refuses the setting and Purge now, never the schedule; QL-31 a kept
+                      line's outputs, line and keys go like a typed line's and a run's
+    kept_lines.rs     QL-31 (0.9.0 H7) "Keep this line": Core::keep_line stores a recorded line every tab has finished
+                      (record.rs Recorder::to_keep: each terminal's record and saved session) as a run in the job
+                      journal, a job of type `keptLine` (store::KEPT_LINE; no migration: terminal targets, statuses,
+                      command_type and its index, the purge and Activity all fit) whose id is the line's, so keeping
+                      twice keeps once: the line's own job's TerminalLine (as for_journal redacts it) with each target's
+                      session, its action, tier and change ID, created when the line was held, one target per terminal
+                      with its scrubbed output, hashes, times and how it ended (no exit code); audited
+                      multiexec_line_kept under that job (the line as its summary shows it, the terminals, where; never
+                      the output), refused by the read-only lock (Change::KeptLines), no tier; refused while it waits
+                      for its approval or a tab still runs it, for another workspace's job and a purged one;
+                      CommandBus::retry_failed refuses a kept line; RecordedLine.kept for the list
     save_guard.rs     No save path writes into a Git working tree (audit CSV, Compare and MultiExec exports, saved
                       output, session logs, downloads, FD-07 exports, FD-04 bundles, FD-09's upload folder);
                       write_atomically (a `.part` file, renamed), and AtomicFile, the same for a file written bit by bit
@@ -703,8 +715,9 @@ crates/core/          remotely-core: all app logic
                       through only at a password prompt, as Terminals::send_keys_if_running, which each console checks
                       again as the keys arrive); record.rs QL-12 MultiExec recording: each sent line's
                       output per terminal from Enter until the prompt is back (TextRenderer drops escapes and replays line
-                      redraws; RecordSlot handed to the pane through its input before the Enter; Recorder keeps the
-                      session's lines in memory with caps, grouped and diffed through bulk.rs); folder.rs SS-08 the
+                      redraws; RecordSlot handed to the pane through its input before the Enter, with the terminal's
+                      saved session; Recorder keeps the session's lines in memory with caps, grouped and diffed through
+                      bulk.rs; QL-31 to_keep, a finished line for kept_lines.rs, and mark_kept); folder.rs SS-08 the
                       shell's folder (OSC 7) and
                       the invisible prompt hook typed into bash and zsh on connect (hidden from the terminal, logs,
                       MultiExec and QL-07; the startup command waits for it; typed only at a line that looks like a
@@ -929,7 +942,8 @@ crates/core/          remotely-core: all app logic
                       sessions and PowerShell tabs are hosts for Compare hosts and support bundles, never the SS-09 key
                       push; BulkHost.script_kind), BX-03 grouped results and diff,
                       BX-05 exports: the Terminal page's Compare output (running is RemoteExec on the bus; UX-17, 0.9.0
-                      H3: `recent` lists its runs and BX-10's pushes and fetches, whoever started them); QL-12
+                      H3: `recent` lists its runs and BX-10's pushes and fetches, whoever started them, and QL-31's
+                      kept lines, whose results show their line as the run's script); QL-12
                       recorded MultiExec lines group (group_with_output), diff and export (export_recorded, audited
                       multiexec_exported) through the same code; Reach: runs keep SSH sessions, F6's Ansible export
                       SSH and WinRM (resolve_reaching)
@@ -1072,9 +1086,11 @@ crates/core/          remotely-core: all app logic
                       0033 with trash rows of every kind, opened by 0035's trash rebuild); jobs.rs: the journal stores
                       Command::for_journal (scripts and lines redacted), command_type
                       (migration 0017) for the lists, which pick a page of ids on an index first (AP-03, BX-03; UX-17,
-                      0.9.0 H3: recent_bulk_jobs merges the remoteExec and bulkFiles pages; UX-18 JobSummary.command_type,
-                      so Activity knows a bulk job);
-                      purge_job_bodies and redact_old_commands; audit.rs redacts every entry's text before hashing it,
+                      0.9.0 H3: recent_bulk_jobs merges the remoteExec and bulkFiles pages, and QL-31 the keptLine one;
+                      UX-18 JobSummary.command_type, so Activity knows a bulk job);
+                      purge_job_bodies and redact_old_commands (BODY_FIELDS, PURGE_BODIES: QL-31 a keptLine job's line
+                      and keys like a terminalLine's); QL-31 insert_kept_line (KEPT_LINE, NewKeptLine: one transaction,
+                      ON CONFLICT (id) DO NOTHING, so a line kept twice is kept once); audit.rs redacts every entry's text before hashing it,
                       and verifies and exports with row streams; multiexec_groups.rs (QL-19, migration 0021);
                       terminal_rules.rs (QL-17 rules and built-in overrides, migration 0021); timeline.rs (VM-25 the
                       audit entries whose targets hold `"vmxPath":<key>`, any letter case, and the VM's job rows;
@@ -1137,7 +1153,10 @@ crates/core/          remotely-core: all app logic
                       hypervisors (copies by FakeDiskTools into VM folders in the temp folder, the refusals, Prod) and
                       CV-04 a System_Disk and Data_Disk pair imported as one VM (SATA, firmware from the partition
                       table, the seed read back with read_joliet); workspaces.rs: FD-02 isolation of every service and
-                      switching (UX-16: another workspace's group refused as a pick); bulk.rs: BX-01 to BX-07, UX-16 a run
+                      switching (UX-16: another workspace's group refused as a pick; QL-31: a kept line in its own
+                      workspace's journal only); multiexec.rs: SS-10, QL-12, QL-07, QL-19 and QL-31 (a line kept once,
+                      audited without its output, never retried, refused by the read-only lock, redacted like a typed
+                      line and emptied by Purge now); bulk.rs: BX-01 to BX-07, UX-16 a run
                       on a tag, a saved filter, a group and picked VMs rated and skipped as hosts picked one by one;
                       change_ids.rs: AP-08; vm_sessions.rs: QL-29 (a deploy's user and key, refusals, the
                       bulk save, the lock, another workspace's VM); support_bundle.rs: FD-04 on the test SSH server,
@@ -1196,7 +1215,7 @@ src-tauri/            Tauri 2 shell (VM-30 0.8.0 G7: golden.rs the build dialog'
                       listings with the shell's Home and Downloads, uploads from a listing, downloads into one, find, preview,
                       checksums, bookmarks, compare and sync, push and fetch with the push's file dialog and the fetch's
                       folder dialog): window, IPC commands (ipc.rs; UX-19 metrics_watched, every watched session and
-                      the poll interval, a read), terminal bridge, MultiExec (multiexec.rs; groups.rs
+                      the poll interval, a read), terminal bridge, MultiExec (multiexec.rs, QL-31 multiexec_keep; groups.rs
                       QL-19 saved MultiExec groups; terminal_rules.rs QL-17 rules), command
                       panel, notifications and QL-13 manual links opened with ShellExecute after the core's check
                       (command_panel.rs; QL-17 notify_terminal_alert; UX-20 favourite_add_from_library), clipboard.rs (the clipboard read for right-click paste, and QL-05/SS-11
@@ -1259,7 +1278,12 @@ src/                  React + TypeScript UI
                       in all tabs, badged "Run on 12 hosts" or "Typed in 6 tabs", lib/results-list.ts; the one picked or
                       the newest opens beside it: BulkResultsView for a run, with retry and the canary, RecordedLinesView's
                       RecordedLineResults for a typed line (QL-12, useRecordings), whose Retry says why it has none and
-                      which goes when typing stops; BulkResultsView's GroupCard and OutputDiffDialog serve both; UX-16 its
+                      which goes when typing stops; BulkResultsView's GroupCard and OutputDiffDialog serve both; QL-31
+                      (0.9.0 H7) RecordedLineResults' "Keep this line" (off with its reason until every tab has finished
+                      the line, and under the read-only lock; "Show the kept run" once kept), then the kept run among the
+                      runs, badged "Kept from 6 tabs", in BulkResultsView's kept mode (terminals, "prompt back" or "not
+                      finished" groups, Retry off with KEPT_NO_RETRY), its typed original gone from the list once it is
+                      listed; UX-16 its
                       hosts from BulkTargetPicker's compact mode: one summary line, lib/bulk-picks.ts, with Change…),
                       BulkTargetPicker (BX-01, UX-16 the one host picker of every bulk job: sessions, VMs, tags, saved
                       filters and a Groups tab; `compact`), MultiExec
@@ -1443,7 +1467,8 @@ src/                  React + TypeScript UI
                       tab so links open either; SchedulesPage (VM-14, VM-27; Ctrl+. still opens it), also from the
                       palette and a VM's Schedules tab open it). R10: App's `openLink` opens every AppLink (lib/links.ts), and pages
                       take a request to show one item (Sessions `focus`, Activity `focusJob` (UX-18, 0.9.0 H3: a bulk
-                      job, lib/results-list.ts activityView, opens BulkResultsView in its sheet, a support bundle in its
+                      job, lib/results-list.ts activityView, opens BulkResultsView in its sheet (QL-31: a kept line
+                      too, without retry), a support bundle in its
                       bundle mode with Show folder, every other job the per-target sheet; a retry goes through App's
                       `submitted` and its approval, then its job opens; job notifications, a failed job's toast (Show) and the
                       status bar's jobs item lead there), Settings `focus` by
@@ -1527,11 +1552,14 @@ src/                  React + TypeScript UI
                       ID in any UI string), links.ts's requestLink (a link opened without an onOpenLink prop),
                       activity.ts (UX-02, UX-06 Activity: jobs with their audit entries and approvals folded, plain
                       event names, filters), results-list.ts (UX-17, UX-18, 0.9.0 H3: Compare hosts' one list's items, a
-                      union of kinds (`run`, `typed`; QL-31, H7, adds a kept line) merged newest first, badges, status
-                      words, the shown item (a run just queued opens before it is listed), why a typed line has no
-                      retry; retryBlockedReason: a finished job's retry off only where the core's retry_failed refuses
-                      it (the lock, a purged remote exec run, a redacted command); activityView: which jobs Activity
-                      opens in BulkResultsView), palette.ts (UX-07 Ctrl+K's order; bulk actions only when searched for),
+                      union of kinds (`run`, `typed`; QL-31, H7: `kept`, a typed line kept as a run, KEPT_LINE jobs of
+                      the runs' list, whose typed original leaves the list once it is listed) merged newest first,
+                      badges ("Kept from 6 tabs"), status words, the shown item (a run just queued or a line just kept
+                      opens before it is listed; a typed line picked and kept since shows its run), why a typed or kept
+                      line has no retry (TYPED_NO_RETRY, KEPT_NO_RETRY) and keepReason (the lock, an approval waited
+                      for, a tab still running it); retryBlockedReason: a finished job's retry off only where the core's
+                      retry_failed refuses it (a kept line, the lock, a purged remote exec run, a redacted command);
+                      activityView: which jobs Activity opens in BulkResultsView, kept lines included), palette.ts (UX-07 Ctrl+K's order; bulk actions only when searched for),
                       update-notice.ts (FD-14 the one update notice), catalog.ts (VM-19
                       to VM-21 texts, the size form), deploy.ts (VM-21, VM-10 the dialogs' reasons, counts and
                       packages, a job's steps from its events and targets), vm-insight-api.ts and vm-insight.ts (R4

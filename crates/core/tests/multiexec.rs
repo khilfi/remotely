@@ -9,6 +9,8 @@
 //! QL-12: each line sent is recorded in each terminal until its prompt comes back, grouped and diffed
 //! like a Compare run, with password prompts, full-screen keys and cancelled lines left out, secrets
 //! scrubbed, caps kept, and exports audited without their output. QL-07: one notification per line.
+//! QL-31: a finished line kept as a run in the job journal (once, audited without its output, never retried,
+//! refused by the read-only lock, redacted like a typed line and emptied by the retention purge).
 //! QL-19: a saved group's open terminals, picked as MultiExec's targets, each get the line.
 //!
 //! SSH goes to `fakes::ssh_server` on 127.0.0.1 (one server per host, passwords made at run time); its
@@ -30,6 +32,7 @@ use remotely_core::fakes::FakeVmware;
 use remotely_core::known_hosts::HostKey;
 use remotely_core::multiexec_groups::GroupInput;
 use remotely_core::policy::{ActionKind, ApprovalStep, Tier};
+use remotely_core::presentation::Presentation;
 use remotely_core::sessions::{SessionAuth, SessionInput};
 use remotely_core::store::AuditEntry;
 use remotely_core::terminal::folder::{FolderInfo, FolderTracking};
@@ -1531,6 +1534,261 @@ async fn recorded_lines_export_with_groups_and_diffs_and_the_audit_keeps_what_an
         assert!(!text.contains("22.04") && !text.contains("VERSION_ID"), "{entry:?}");
     }
     assert!(core.store.verify_audit_chain(&core.ctx()).await.unwrap().ok);
+}
+
+// ---- QL-31: keeping a typed line as a run --------------------------------------------------------
+
+const LOCKED: Presentation = Presentation {
+    enabled: true,
+    read_only: true,
+};
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_finished_line_is_kept_as_a_run_once_audited_without_its_output_and_never_retried() {
+    let fleet = Fleet::build(
+        3,
+        |i, s| s.with_file("/etc/os-release", &os_release(if i == 2 { "24.04" } else { "22.04" })),
+        |_| Environment::Lab,
+    )
+    .await;
+    fleet.pick(&[0, 1, 2]).await;
+    let mut events = fleet.core.multiexec.subscribe();
+    let (line, tier, _, line_job) = held(fleet.type_in(0, "cat /etc/os-release\r").await);
+    assert_eq!(tier, Tier::Low);
+    line_recorded(&mut events, line).await;
+    let core = &fleet.core;
+    let ctx = core.ctx();
+    assert!(!core.multiexec.recordings().lines[0].kept);
+
+    let kept = core.keep_line(line).await.unwrap();
+    assert_eq!((kept.job_id, kept.already_kept), (line, false));
+    assert!(
+        core.multiexec.recordings().lines[0].kept,
+        "the typed line says it was kept"
+    );
+
+    // A run among Compare hosts' runs, of its own type, with the line's tier.
+    let listed = core.bulk.recent(&ctx, 20).await.unwrap();
+    let job = listed
+        .iter()
+        .find(|j| j.id == line.to_string())
+        .expect("listed among runs");
+    assert_eq!(job.command_type, "keptLine");
+    assert_eq!(job.summary, "Typed `cat /etc/os-release` in 3 tabs");
+    assert_eq!((job.status.as_str(), job.tier.as_str()), ("succeeded", "low"));
+    assert_eq!(
+        (job.targets_total, job.targets_succeeded, job.targets_failed),
+        (3, 3, 0)
+    );
+    assert!(job.finished_at.is_some() && !job.is_open());
+    // Grouped, diffed and shown as the recording was.
+    let results = core.bulk.results(&ctx, line, GroupOptions::default()).await.unwrap();
+    assert_eq!(results.headline, "2 hosts same, 1 differ");
+    assert_eq!(results.groups[0].hosts, ids(&fleet, &[0, 1]));
+    assert_eq!(results.groups[0].stdout.as_deref(), Some(os_release("22.04").as_str()));
+    assert_eq!(results.groups[1].hosts, ids(&fleet, &[2]));
+    assert_eq!(results.run.as_ref().unwrap().script, "cat /etc/os-release");
+    let names: Vec<&str> = results.hosts.iter().map(|h| h.name.as_str()).collect();
+    assert_eq!(names, ["web01", "web02", "web03"]);
+    assert!(
+        results.hosts.iter().all(|h| h.exit_code.is_none()),
+        "a typed line has no exit code"
+    );
+    let diff = core
+        .bulk
+        .diff(
+            &ctx,
+            line,
+            &fleet.id(0).to_string(),
+            &fleet.id(2).to_string(),
+            GroupOptions::default(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(diff.stdout.iter().filter(|l| l.kind != DiffKind::Same).count(), 2);
+    // Its line, terminals and sessions.
+    let (_, command) = core.store.job_detail(&ctx, line).await.unwrap().unwrap();
+    let Command::TerminalLine {
+        targets, line: text, ..
+    } = command
+    else {
+        panic!("a typed line");
+    };
+    assert_eq!(text, "cat /etc/os-release");
+    let expected: Vec<TargetRef> = (0..3)
+        .map(|i| TargetRef::Terminal {
+            terminal_id: fleet.id(i),
+            session_id: Some(fleet.sessions[i]),
+        })
+        .collect();
+    assert_eq!(targets, expected);
+    // The line's own job is still there, as it was.
+    let (own, _) = core.store.job_detail(&ctx, line_job.unwrap()).await.unwrap().unwrap();
+    assert_eq!(own.command_type, "terminalLine");
+
+    // Keeping it again keeps it once.
+    let again = core.keep_line(line).await.unwrap();
+    assert_eq!((again.job_id, again.already_kept), (line, true));
+    assert_eq!(
+        core.bulk
+            .recent(&ctx, 20)
+            .await
+            .unwrap()
+            .iter()
+            .filter(|j| j.command_type == "keptLine")
+            .count(),
+        1
+    );
+
+    // Audited once, under the kept run: the line, the terminals and their sessions, where; never the output.
+    let audit = fleet.audit().await;
+    let entries: Vec<&AuditEntry> = audit.iter().filter(|e| e.event == "multiexec_line_kept").collect();
+    assert_eq!(entries.len(), 1);
+    let entry = entries[0];
+    assert_eq!(entry.job_id.as_deref(), Some(line.to_string().as_str()));
+    assert_eq!(entry.tier, None);
+    assert_eq!(
+        entry.detail.as_deref(),
+        Some(
+            "`cat /etc/os-release` from 3 terminals; kept in the job journal like a run, whose outputs are kept for 90 days"
+        )
+    );
+    for i in 0..3 {
+        assert!(
+            entry.targets_json.contains(&fleet.sessions[i].to_string()),
+            "{}",
+            entry.targets_json
+        );
+        assert!(entry.targets_json.contains(&fleet.id(i).to_string()));
+    }
+    for entry in &audit {
+        let text = format!("{entry:?}");
+        assert!(!text.contains("22.04") && !text.contains("VERSION_ID"), "{entry:?}");
+    }
+    assert!(core.store.verify_audit_chain(&ctx).await.unwrap().ok);
+
+    // No retry: pressing Enter again later could run it after something else.
+    let retry = core.bus.retry_failed(&ctx, line, true).await;
+    assert!(
+        matches!(&retry, Err(CoreError::InvalidInput(m)) if m.contains("can't be retried")),
+        "{retry:?}"
+    );
+
+    // Typing stops: the recording goes, the kept run stays.
+    core.multiexec.stop().await.unwrap();
+    assert!(core.multiexec.recordings().lines.is_empty());
+    assert!(core.keep_line(line).await.is_err(), "nothing left to keep");
+    let results = core.bulk.results(&ctx, line, GroupOptions::default()).await.unwrap();
+    assert_eq!(results.groups.len(), 2);
+    let output = core
+        .bulk
+        .host_output(&ctx, line, &fleet.id(2).to_string())
+        .await
+        .unwrap();
+    assert_eq!(output.stdout, os_release("24.04"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn the_read_only_lock_refuses_keeping_a_line_in_the_core() {
+    let fleet = Fleet::new(2).await;
+    fleet.pick(&[0, 1]).await;
+    let mut events = fleet.core.multiexec.subscribe();
+    let (line, _, _, _) = held(fleet.type_in(0, "whoami\r").await);
+    line_recorded(&mut events, line).await;
+    let core = &fleet.core;
+
+    core.presentation.set(LOCKED).await.unwrap();
+    let refused = core.keep_line(line).await;
+    assert!(
+        matches!(&refused, Err(CoreError::ReadOnlyLock { what }) if what == "Keep typed lines"),
+        "{refused:?}"
+    );
+    assert!(!core.multiexec.recordings().lines[0].kept);
+    assert!(
+        core.store.job_detail(&core.ctx(), line).await.unwrap().is_none(),
+        "nothing kept"
+    );
+    assert!(!fleet.audit().await.iter().any(|e| e.event == "multiexec_line_kept"));
+
+    core.presentation.set(Presentation::default()).await.unwrap();
+    assert!(!core.keep_line(line).await.unwrap().already_kept);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_kept_lines_secrets_are_redacted_and_the_purge_removes_its_line_and_outputs() {
+    let fleet = Fleet::new(2).await;
+    fleet.pick(&[0, 1]).await;
+    let mut events = fleet.core.multiexec.subscribe();
+    let typed = "echo deploy --password=hunter2-kept done\r";
+    let line = send_line(&fleet, 0, typed).await;
+    line_recorded(&mut events, line).await;
+    let core = &fleet.core;
+    let ctx = core.ctx();
+    let line_job = core.multiexec.recordings().lines[0].job_id.unwrap();
+    core.keep_line(line).await.unwrap();
+
+    // What the journal redacts in a typed line is redacted in the kept one too, and in its summary and audit entry.
+    let (job, command) = core.store.job_detail(&ctx, line).await.unwrap().unwrap();
+    let Command::TerminalLine { line: text, keys, .. } = command else {
+        panic!("a typed line");
+    };
+    assert!(!text.contains("hunter2") && text.contains("[redacted]"), "{text}");
+    assert!(!keys.contains("hunter2"), "{keys:?}");
+    assert!(
+        job.command_redacted && !job.summary.contains("hunter2"),
+        "{}",
+        job.summary
+    );
+    let audit = fleet.audit().await;
+    let entry = audit.iter().find(|e| e.event == "multiexec_line_kept").unwrap();
+    let detail = entry.detail.as_deref().unwrap();
+    assert!(!detail.contains("hunter2") && detail.contains("[redacted]"), "{detail}");
+    let before = core.bulk.results(&ctx, line, GroupOptions::default()).await.unwrap();
+    assert_eq!(before.groups.len(), 1);
+    assert!(before.groups[0].stdout.as_deref().unwrap().contains("done"));
+
+    // Older than the retention period (90 days by default): Purge now empties its line, keys and outputs, as a typed
+    // line's and a run's, and keeps its rows, so it still lists and groups.
+    for job in [line, line_job] {
+        let at = time::OffsetDateTime::now_utc() - time::Duration::days(100);
+        let at = at.format(&time::format_description::well_known::Rfc3339).unwrap();
+        sqlx::query("UPDATE jobs SET created_at = ? WHERE id = ?")
+            .bind(at)
+            .bind(job.to_string())
+            .execute(core.store.pool())
+            .await
+            .unwrap();
+    }
+    let report = core.retention.purge_now().await.unwrap();
+    assert!(report.removed.jobs >= 2 && report.removed.commands >= 2, "{report:?}");
+    assert!(report.removed.outputs >= 2, "{report:?}");
+    let (job, command) = core.store.job_detail(&ctx, line).await.unwrap().unwrap();
+    assert!(job.bodies_removed);
+    let Command::TerminalLine {
+        line: text,
+        keys,
+        targets,
+        ..
+    } = command
+    else {
+        panic!("a typed line");
+    };
+    assert_eq!((text.as_str(), keys.as_str()), ("", ""));
+    assert_eq!(targets.len(), 2, "its terminals stay");
+    for target in core.store.job_targets(&ctx, line).await.unwrap() {
+        assert_eq!(target.output, None, "{}", target.target_name);
+        assert_eq!(target.status, "succeeded");
+    }
+    let after = core.bulk.results(&ctx, line, GroupOptions::default()).await.unwrap();
+    assert_eq!(after.groups.len(), 1, "it still groups by its hashes");
+    assert_eq!(after.groups[0].stdout.as_deref(), Some(""));
+    assert!(core
+        .bulk
+        .recent(&ctx, 20)
+        .await
+        .unwrap()
+        .iter()
+        .any(|j| j.id == line.to_string()));
 }
 
 // ---- QL-07: one notification per MultiExec line -------------------------------------------------

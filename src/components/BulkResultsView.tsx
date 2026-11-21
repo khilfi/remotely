@@ -4,7 +4,9 @@
 // groups and export. Grouping happens in the core; this view reloads it as hosts finish. QL-12: the group cards and
 // the output dialog serve the Compare panel's typed lines too (terminals instead of hosts). UX-18 (0.9.0 H3): Activity
 // opens bulk jobs here as well (a push or fetch, a key push, a support bundle's mode); a retry is the same command
-// resubmitted on the bus, rated again, and says why it is off under the read-only lock.
+// resubmitted on the bus, rated again, and says why it is off under the read-only lock. QL-31 (0.9.0 H7): a typed line
+// kept as a run (its job's commandType `keptLine`) shows here too, in terminals, badged "Kept from 6 tabs", with its
+// line, groups, diff and export, and a Retry that is off and says why (as a typed line's).
 
 import { useEffect, useState, type ReactNode } from "react";
 import { toast } from "sonner";
@@ -51,7 +53,7 @@ import { useReadOnlyReason } from "@/components/Presentation";
 import { formatWhen, plural } from "@/lib/format";
 import { cn } from "@/lib/utils";
 import { diffReason } from "@/lib/disabled-reasons";
-import { retryBlockedReason } from "@/lib/results-list";
+import { isKeptLine, KEPT_NO_RETRY, retryBlockedReason } from "@/lib/results-list";
 import { canaryPrompt, retryChoices, timeLeft } from "@/lib/rollout";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { StatusBadge, TierBadge } from "./Badges";
@@ -205,10 +207,13 @@ export function BulkResultsView({ jobId, onRetry, bundle = false, extraActions }
   if (!shown) return <Skeleton className="h-64" />;
 
   const { job, counts, groups, hosts, run } = shown;
+  // QL-31: a typed line kept as a run: terminals, never retried.
+  const kept = isKeptLine(job);
+  const unit = kept ? "terminal" : "host";
   const names = new Map(hosts.map((h) => [h.targetKey, h.name]));
   const done = counts.succeeded + counts.failed + counts.cancelled + counts.unknown + counts.skipped;
   const retries = retryChoices(counts);
-  const canRetry = !bundle && !open && retries.failed > 0;
+  const canRetry = !bundle && !kept && !open && retries.failed > 0;
   // H9: the event may have come before this view opened; the results say whether the rest still wait.
   const waiting = canary ?? shown.canary;
   // BX-02, BX-04: the read-only lock, or the journal no longer holds the script as it ran (the core refuses the retry
@@ -221,6 +226,7 @@ export function BulkResultsView({ jobId, onRetry, bundle = false, extraActions }
         <div className="flex flex-wrap items-center gap-2">
           <StatusBadge status={job.status} />
           <TierBadge tier={job.tier} />
+          {kept && <Badge variant="outline">Kept from {plural(counts.total, "tab")}</Badge>}
           {run?.sudo && <Badge variant="outline">sudo</Badge>}
           {job.retryOf && <Badge variant="outline">retry</Badge>}
           <span className="text-xs text-muted-foreground">{formatWhen(job.startedAt ?? job.createdAt)}</span>
@@ -235,6 +241,15 @@ export function BulkResultsView({ jobId, onRetry, bundle = false, extraActions }
               Cancel
             </Button>
           )}
+          {/* QL-31: as a typed line's, a kept line's Retry is off and says why. */}
+          {kept && (
+            <WhyDisabled reason={KEPT_NO_RETRY}>
+              <Button variant="outline" size="sm" disabled>
+                <RotateCcwIcon data-icon="inline-start" />
+                Retry
+              </Button>
+            </WhyDisabled>
+          )}
           {canRetry && (
             <WhyDisabled reason={busy ? "Submitting the retry…" : retryBlocked}>
               <Button variant="outline" size="sm" onClick={() => void retry()} disabled={busy || retryBlocked !== null}>
@@ -243,7 +258,7 @@ export function BulkResultsView({ jobId, onRetry, bundle = false, extraActions }
               </Button>
             </WhyDisabled>
           )}
-          {!bundle && !open && retries.withUnknown !== null && (
+          {!bundle && !kept && !open && retries.withUnknown !== null && (
             <WhyDisabled reason={busy ? "Submitting the retry…" : retryBlocked}>
               <Button
                 variant="outline"
@@ -317,14 +332,22 @@ export function BulkResultsView({ jobId, onRetry, bundle = false, extraActions }
       <div className="grid gap-2">
         <Progress
           value={counts.total ? (done / counts.total) * 100 : 0}
-          aria-label={`${done} of ${counts.total} hosts done`}
+          aria-label={`${done} of ${counts.total} ${unit}s done`}
         />
         <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
           <span>
-            {done} of {plural(counts.total, "host")} done
+            {done} of {plural(counts.total, unit)} done
           </span>
-          {counts.succeeded > 0 && <span className="text-success">{counts.succeeded} succeeded</span>}
-          {counts.failed > 0 && <span className="text-destructive">{counts.failed} failed</span>}
+          {counts.succeeded > 0 && (
+            <span className="text-success">
+              {counts.succeeded} {kept ? "finished" : "succeeded"}
+            </span>
+          )}
+          {counts.failed > 0 && (
+            <span className="text-destructive">
+              {counts.failed} {kept ? "not finished" : "failed"}
+            </span>
+          )}
           {counts.running > 0 && <span>{counts.running} running</span>}
           {counts.pending > 0 && <span>{counts.pending} waiting</span>}
           {counts.unknown > 0 && (
@@ -365,6 +388,8 @@ export function BulkResultsView({ jobId, onRetry, bundle = false, extraActions }
               names={g.hosts.map((k) => names.get(k) ?? k)}
               defaultOpen={i < 2 || groups.length <= 4}
               load={() => api.bulkHostOutput(jobId, g.sample)}
+              terminals={kept}
+              badge={kept ? <Badge variant="outline">{g.ok ? "prompt back" : "not finished"}</Badge> : undefined}
             />
           ))}
         </div>
@@ -377,7 +402,7 @@ export function BulkResultsView({ jobId, onRetry, bundle = false, extraActions }
               className="transition-transform group-data-[state=open]:rotate-90"
               data-icon="inline-start"
             />
-            Every host ({hosts.length})
+            Every {unit} ({hosts.length})
           </Button>
         </CollapsibleTrigger>
         <CollapsibleContent>
@@ -385,7 +410,7 @@ export function BulkResultsView({ jobId, onRetry, bundle = false, extraActions }
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead>Host</TableHead>
+                  <TableHead>{kept ? "Terminal" : "Host"}</TableHead>
                   <TableHead>Status</TableHead>
                   <TableHead className="text-right">Exit</TableHead>
                   <TableHead className="text-right">Time</TableHead>

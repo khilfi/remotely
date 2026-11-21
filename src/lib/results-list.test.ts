@@ -11,6 +11,9 @@ import {
   itemRunning,
   itemStatus,
   itemTitle,
+  keepReason,
+  KEPT_LINE,
+  KEPT_NO_RETRY,
   resultItems,
   retryBlockedReason,
   shownKey,
@@ -57,8 +60,20 @@ function line(id: string, recordedAt: string, more: Partial<RecordedLine> = {}):
     truncated: false,
     fullScreen: false,
     durationMs: 900,
+    kept: false,
     ...more,
   };
+}
+
+/** QL-31: a typed line kept as a run: its job's id is the line's. */
+function kept(id: string, createdAt: string, more: Partial<JobSummary> = {}): JobSummary {
+  return job(id, createdAt, {
+    summary: "Typed `df -h /` in 6 tabs",
+    targetsTotal: 6,
+    targetsSucceeded: 6,
+    commandType: KEPT_LINE,
+    ...more,
+  });
 }
 
 test("runs and typed lines are one list, newest first, whatever started them", () => {
@@ -154,10 +169,63 @@ test("where each stands, in words", () => {
   assert.ok(itemRunning(typing));
 });
 
+test("a kept line lists among runs, badged as kept, and its typed original goes once its run is listed", () => {
+  const runs = [
+    job("r2", "2026-11-20T10:05:00Z"),
+    kept("l2", "2026-11-20T10:04:00Z"),
+    job("r1", "2026-11-20T10:00:00Z"),
+  ];
+  // l2 is kept and listed; l1 was kept too, but its run is past the list's page: it stays, saying it was kept.
+  const lines = [
+    line("l2", "2026-11-20T10:04:00Z", { kept: true }),
+    line("l1", "2026-11-20T10:01:00Z", { kept: true }),
+  ];
+  const items = resultItems(runs, lines);
+  assert.deepEqual(
+    items.map((i) => i.key),
+    ["run:r2", "kept:l2", "typed:l1", "run:r1"],
+  );
+  const keptItem = items[1];
+  assert.equal(keptItem.kind, "kept");
+  assert.equal(itemBadge(keptItem), "Kept from 6 tabs");
+  assert.equal(itemTitle(keptItem), "Typed `df -h /` in 6 tabs");
+  assert.equal(itemStatus(keptItem), "6 of 6 tabs finished");
+  assert.ok(!itemRunning(keptItem));
+  assert.equal(itemStatus(items[2]), "Kept as a run · All 6 the same");
+  const partly = resultItems([kept("k", "2026-11-20T10:00:00Z", { targetsSucceeded: 4, targetsFailed: 2 })], [])[0];
+  assert.equal(itemStatus(partly), "4 of 6 tabs finished, 2 not finished");
+});
+
+test("a line picked and then kept shows as its kept run, even before the list is read again", () => {
+  const before = resultItems([], [line("l", "2026-11-20T10:00:00Z")]);
+  // Just kept: the panel asks for its run by id.
+  assert.deepEqual(shownResult(before, "kept:l"), { kind: "kept", jobId: "l" });
+  assert.equal(shownKey(shownResult(before, "kept:l")), "kept:l");
+  // Read again: the typed original is gone and its pick finds the kept run.
+  const after = resultItems([kept("l", "2026-11-20T10:00:00Z")], [line("l", "2026-11-20T10:00:00Z", { kept: true })]);
+  assert.deepEqual(shownResult(after, "typed:l"), { kind: "kept", jobId: "l" });
+  assert.deepEqual(shownResult(after, null), { kind: "kept", jobId: "l" });
+});
+
+test("a kept line is never retried, and a typed line is kept only once every tab has finished it", () => {
+  const keptJob = { commandType: KEPT_LINE, bodiesRemoved: false, commandRedacted: false };
+  assert.equal(retryBlockedReason(keptJob, null), KEPT_NO_RETRY);
+  assert.equal(retryBlockedReason(keptJob, "Read-only while presenting"), KEPT_NO_RETRY);
+  assert.match(KEPT_NO_RETRY, /can't be retried/);
+
+  const lock = "Read-only while presenting";
+  const done = { waitingApproval: false, finished: 3, terminals: 3 };
+  assert.equal(keepReason(done, null), null);
+  assert.equal(keepReason(done, lock), lock);
+  assert.match(keepReason({ ...done, waitingApproval: true, finished: 0 }, null) ?? "", /waits for its approval/);
+  assert.match(keepReason({ ...done, finished: 2 }, null) ?? "", /still running it/);
+});
+
 test("Activity opens bulk jobs in the grouped results view, a bundle in its mode, the rest in their sheet", () => {
   assert.equal(activityView("remoteExec"), "results");
   assert.equal(activityView("bulkFiles"), "results");
   assert.equal(activityView("pushSshKey"), "results");
+  assert.equal(activityView(KEPT_LINE), "results", "a kept line, shown there without retry");
   assert.equal(activityView("supportBundle"), "bundle");
   for (const other of ["vmPower", "terminalLine", "fileUpload", "deploy", ""])
     assert.equal(activityView(other), null, other);

@@ -984,6 +984,16 @@ Bulk execution lives in the Terminal page (it replaced the MVP's Bulk run page):
   32 MB per session, and 64 KB per terminal per line (the middle of a longer output is cut, as in Compare); the view
   says when a cap was hit. Export a line, or all of them, as CSV, JSON or HTML with groups and diffs; the audit log
   says what was exported and where, never the output.
+- **Keep a typed line** (QL-31, 0.9.0): **Keep this line**, beside a recorded line's results once every tab has
+  finished it, stores it as a run in the job journal: the line (as the journal keeps typed lines, with anything that
+  looks like a secret `[redacted]`), its tabs and their saved sessions, and what each tab printed, already scrubbed.
+  It then lists among the runs, badged "Kept from 6 tabs", and opens in the same grouped view, with the diff and
+  export, in Compare hosts and in Activity, after Type in all tabs is turned off and after a restart. It is never
+  retried (its Retry says why, as a typed line's does), and a typed line has no exit code to keep: each tab shows
+  whether its prompt came back. It is kept like a run's outputs: the retention purge (Settings, General) removes its
+  line and outputs with theirs. Keeping a line is audited (the line, the tabs and where it is kept, never the output),
+  has no approval tier, is refused while presenting with the read-only lock, and keeping it twice keeps it once. It
+  belongs to the workspace it was typed in. A line you don't keep still goes when typing stops.
 - **Saved MultiExec groups** (QL-19, 0.5.0; UX-16, 0.9.0): named sets of saved sessions, such as "all web servers",
   in the **Pick tabs** menu of the bar under the tabs (shown while Type in all tabs is on or several tabs are picked),
   and in Ctrl+K: type the group's name for **Open group: web servers**, or "Manage groups". **Open group** opens
@@ -1005,14 +1015,16 @@ Bulk execution lives in the Terminal page (it replaced the MVP's Bulk run page):
   export. Quick connections that were not saved as sessions can't be compared.
 - **One results list** (UX-17, 0.9.0): under Run, newest first, Compare hosts lists its runs, the pushes and fetches
   to many hosts (from the Files page's Many hosts or a drop, whoever started them) and the lines typed in all tabs,
-  each badged with what it was: "Run on 12 hosts", "Pushed to 5 hosts", "Fetched from 3 hosts", "Typed in 6 tabs".
+  each badged with what it was: "Run on 12 hosts", "Pushed to 5 hosts", "Fetched from 3 hosts", "Typed in 6 tabs",
+  and (QL-31) "Kept from 6 tabs" for a typed line you kept, which replaces the typed one in the list.
   The one you pick, or the newest, opens beside the list in the same grouped view. Retry of the failed hosts is for
   runs, pushes and fetches, and the canary ("Run on one host first", then "Run on the rest") for runs only; a typed
-  line has neither and goes when Type in all tabs is turned off. The One-shot run and Type in all tabs views of 0.8 are
-  gone.
+  or kept line has neither, and a typed line goes when Type in all tabs is turned off unless you keep it. The One-shot
+  run and Type in all tabs views of 0.8 are gone.
 - **Bulk jobs in Activity** (UX-18, 0.9.0): Activity opens a command run on many hosts, a push or fetch to many hosts
-  and an SSH key push in that grouped view too, with the diff, retry of the failed hosts and export, and a support
-  bundle in its own mode with Show folder; other jobs keep their per-target sheet. A job's notification, a failed
+  and an SSH key push in that grouped view too, with the diff, retry of the failed hosts and export, a kept typed line
+  (QL-31) without retry, and a support bundle in its own mode with Show folder; other jobs keep their per-target sheet.
+  A job's notification, a failed
   job's toast (Show) and the status bar's jobs item lead there. **Retry** sends the same command for the failed hosts
   through the approval rules again, rated for those hosts as a new run on them would be (a retry of 2 hosts out of 5
   may need less approval than the run did), and its job opens in its place. While presenting with the read-only lock on, the retry and the
@@ -1961,7 +1973,7 @@ a dependency of the app. App-specific colours (risk tiers, environment labels) a
 | SSH key manager    | `crates/core/src/ssh_keys.rs`                                                                                   | SS-09                                                                                                                                                             | Working: Ed25519 or RSA 4096 keys in the vault; public keys; attach to sessions; push to authorized_keys as a bus command                                                                                                                                            |
 | Terminal           | `crates/core/src/terminal/`                                                                                     | SS-03, SS-07, SS-08, SS-10, SS-11, QL-02, QL-03, QL-06, QL-07                                                                                                     | Working: supervised panes through jump hosts (reconnects spread at random, fast then slow, woken by a resume or a network change), tunnels on the bus, quick connect, host name and IP, output saved or logged, vault passwords typed at prompts, MultiExec          |
 | MultiExec          | `crates/core/src/terminal/multiexec.rs`                                                                         | SS-10, QL-07, QL-12                                                                                                                                               | Working: keys to the picked terminals, line buffer, Enter held and rated on the bus, password prompts and full-screen programs passed through, never logged                                                                                                          |
-| Recording          | `crates/core/src/terminal/record.rs`                                                                            | QL-12                                                                                                                                                             | Working: each line's output per terminal until the prompt is back, escapes removed, secrets scrubbed, grouped and exported through Compare's code, kept in memory                                                                                                    |
+| Recording          | `crates/core/src/terminal/record.rs`, `kept_lines.rs`                                                           | QL-12, QL-31                                                                                                                                                      | Working: each line's output per terminal until the prompt is back, escapes removed, secrets scrubbed, grouped and exported through Compare's code, kept in memory, or kept as a run in the job journal                                                               |
 | File transfer      | `crates/core/src/terminal/files.rs`, `folder.rs`, `shell_user.rs`                                               | SS-08, SS-14, QL-09                                                                                                                                               | Working: the shell's folder (OSC 7, a hidden prompt hook for bash and zsh), listing, downloads (audited), uploads on the bus, folders both ways, a queue of 4 per connection with pause, resume, cancel and retry                                                    |
 | File changes       | `crates/core/src/terminal/file_ops.rs`, `root_files.rs`, `adapters/remote/sftp_root.rs`                         | SS-14                                                                                                                                                             | Working: new, rename, move, copy, delete, permissions and owner on the bus with a step per path; root browsing through the host's sftp-server under sudo, one tier higher                                                                                            |
 | Files page         | `crates/core/src/local_files.rs`, `bookmarks.rs`, `terminal/file_reads.rs`, `terminal/sync.rs`, `bulk_files.rs` | SS-14, BX-10                                                                                                                                                      | Working: This PC's folders (read only), bookmarks, find, preview, checksums, compare and sync, push and fetch on many hosts with each copy's SHA-256                                                                                                                 |

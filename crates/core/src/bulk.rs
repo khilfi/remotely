@@ -644,6 +644,13 @@ fn run_info(command: &Command) -> Option<RunInfo> {
             trust_new_host_keys: *trust_new_host_keys,
             timeout_secs: *timeout_secs,
         }),
+        // QL-31: a typed line kept as a run shows its line (as the journal keeps it, redacted).
+        Command::TerminalLine { line, .. } => Some(RunInfo {
+            script: line.clone(),
+            sudo: false,
+            trust_new_host_keys: false,
+            timeout_secs: None,
+        }),
         _ => None,
     }
 }

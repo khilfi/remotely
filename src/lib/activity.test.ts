@@ -88,6 +88,7 @@ test("every event the core writes has plain words, and none is a code", () => {
     "canary_go_on",
     "job_exported",
     "multiexec_exported",
+    "multiexec_line_kept",
     "host_key_trusted",
     "host_key_retrusted",
     "host_key_changed",

@@ -30,6 +30,7 @@ export const EVENT_LABELS: Record<string, string> = {
   canary_go_on: "Went on after the first host",
   job_exported: "Results exported",
   multiexec_exported: "Typed lines exported",
+  multiexec_line_kept: "Typed line kept as a run",
   // Hosts, terminals, files and tunnels.
   host_key_trusted: "Host key trusted",
   host_key_retrusted: "Host key replaced",

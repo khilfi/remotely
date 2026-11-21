@@ -2211,6 +2211,12 @@ impl CommandBus {
                 "That job is still running. Retry its failed targets once it has ended.".into(),
             ));
         }
+        // QL-31: a kept line is a typed line (SS-10): pressing Enter again later could run it after something else.
+        if job.command_type == crate::store::KEPT_LINE {
+            return Err(CoreError::InvalidInput(
+                "A kept line can't be retried: pressing Enter again later could run it after something else. Type it again, or run it from Compare hosts as a command.".into(),
+            ));
+        }
         // BX-02: what the journal no longer holds can't run again as it ran.
         if job.bodies_removed && matches!(command, Command::RemoteExec { .. }) {
             return Err(CoreError::InvalidInput(
