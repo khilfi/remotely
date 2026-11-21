@@ -16,6 +16,9 @@
 // one picked, or the newest, opens beside it in the same grouped card: BulkResultsView for a run, with retry of the
 // failed hosts and the canary's go-ahead; RecordedLineResults for a typed line, whose Retry says why it has none and
 // which goes when typing stops. Turning Type in all tabs on shows the newest again.
+// QL-31 (0.9.0 H7): a typed line kept as a run ("Keep this line") lists among the runs, badged "Kept from 6 tabs",
+// and opens in BulkResultsView without retry; its typed original leaves the list once the kept run is listed, and the
+// panel shows the kept run as soon as the line is kept.
 // BX-03 layout: one column up to a 64rem wide panel, two above it; every column and track can shrink (minmax(0, ...),
 // min-w-0), so long text wraps or truncates inside its column instead of running into the results, and the panel
 // scrolls natively (Radix ScrollArea sizes its content like a table, which let it grow past the panel).
@@ -161,6 +164,11 @@ export function ComparePanel({
   const [picked, setPicked] = useState<string | null>(null);
   const shown = shownResult(items, picked);
   const openRun = (jobId: string) => setPicked(itemKey("run", jobId));
+  // QL-31: a line just kept shows as its run, and the list reads its runs again (a keep is no job event).
+  const openKept = (jobId: string) => {
+    setPicked(itemKey("kept", jobId));
+    setRunsVersion((v) => v + 1);
+  };
   // Turning Type in all tabs on shows the newest again, so its first line shows as it is recorded.
   const [typingSeen, setTypingSeen] = useState(multiExecOn);
   if (multiExecOn !== typingSeen) {
@@ -588,14 +596,21 @@ export function ComparePanel({
             </div>
 
             <div className="min-w-0">
-              {shown?.kind === "run" ? (
+              {/* QL-31: a kept line is a run without retry, shown by the same view. */}
+              {shown?.kind === "run" || shown?.kind === "kept" ? (
                 <BulkResultsView
                   key={shown.jobId}
                   jobId={shown.jobId}
                   onRetry={(outcome) => onSubmit(outcome, openRun)}
                 />
               ) : shown?.kind === "typed" ? (
-                <RecordedLineResults key={shown.line.id} line={shown.line} version={typed.version} active={active} />
+                <RecordedLineResults
+                  key={shown.line.id}
+                  line={shown.line}
+                  version={typed.version}
+                  active={active}
+                  onKept={openKept}
+                />
               ) : (
                 <EmptyState
                   icon={SquareTerminalIcon}
@@ -626,7 +641,7 @@ function shortWhen(ts: string) {
 /** UX-17: one item of the results list: what it was, its badge, when, and where it stands. */
 function ResultRow({ item, selected, onPick }: { item: ResultItem; selected: boolean; onPick: () => void }) {
   const title = itemTitle(item);
-  const tier = item.kind === "run" ? item.job.tier : item.line.tier;
+  const tier = item.kind === "typed" ? item.line.tier : item.job.tier;
   return (
     <button
       type="button"

@@ -141,11 +141,13 @@ pub enum Change {
     /// VM-32 (0.8.0 G6): adding, changing and deleting address pools, and freeing an address by hand. (A deploy's
     /// claims are part of its job, which the bus refuses anyway.)
     AddressPools,
+    /// QL-31 (0.9.0 H7): keeping a line typed in all tabs as a run in the job journal.
+    KeptLines,
 }
 
 impl Change {
     /// Every kind of edit, for tests.
-    pub const ALL: [Change; 27] = [
+    pub const ALL: [Change; 28] = [
         Change::Sessions,
         Change::VmLabels,
         Change::VmLinks,
@@ -173,6 +175,7 @@ impl Change {
         Change::HealthChecks,
         Change::FileBookmarks,
         Change::AddressPools,
+        Change::KeptLines,
     ];
 
     pub fn label(self) -> &'static str {
@@ -204,6 +207,7 @@ impl Change {
             Change::HealthChecks => "Add, change, pause or delete health checks",
             Change::FileBookmarks => "Edit file bookmarks",
             Change::AddressPools => "Edit address pools",
+            Change::KeptLines => "Keep typed lines",
         }
     }
 }

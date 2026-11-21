@@ -719,6 +719,7 @@ fn commands() -> impl Fn(tauri::ipc::Invoke) -> bool + Send + Sync + 'static {
         multiexec::multiexec_recorded_output,
         multiexec::multiexec_recorded_diff,
         multiexec::multiexec_export,
+        multiexec::multiexec_keep,
         groups::multiexec_groups_list,
         groups::multiexec_group_create,
         groups::multiexec_group_update,

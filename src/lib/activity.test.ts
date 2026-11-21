@@ -14,6 +14,7 @@ import {
   isFiltered,
   kindOfAction,
   kindOfEvent,
+  lateKeptRun,
   NO_FILTER,
   plainText,
   rangeStart,
@@ -88,6 +89,7 @@ test("every event the core writes has plain words, and none is a code", () => {
     "canary_go_on",
     "job_exported",
     "multiexec_exported",
+    "multiexec_line_kept",
     "host_key_trusted",
     "host_key_retrusted",
     "host_key_changed",
@@ -383,4 +385,21 @@ test("today starts at local midnight; any time has no start", () => {
 test("steps read in words", () => {
   assert.equal(stepsText(1), "1 step");
   assert.equal(stepsText(4), "4 steps");
+});
+
+test("a kept line's entry opens its run when the job is past the jobs' page", () => {
+  const kept = entry("multiexec_line_kept", "Kept a typed line as a run", "2026-11-21T10:40:00Z", { jobId: "k1" });
+  // Its job (dated when the line was typed) is not in the page read: the entry still opens it.
+  const [late] = groupActivity([], [kept]);
+  assert.equal(late.job, null);
+  assert.equal(lateKeptRun(late), "k1");
+  // Listed with its job: it opens as any job does.
+  const [listed] = groupActivity([job("k1", "Typed `uptime` in 2 tabs", "2026-11-21T10:38:00Z")], [kept]);
+  assert.equal(lateKeptRun(listed), null);
+  // Another job's entries without their job open nothing.
+  const [other] = groupActivity(
+    [],
+    [entry("job_finished", "Run `uptime` on 2 hosts", "2026-11-21T10:41:00Z", { jobId: "r1" })],
+  );
+  assert.equal(lateKeptRun(other), null);
 });

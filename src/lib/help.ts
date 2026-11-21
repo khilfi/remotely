@@ -284,7 +284,7 @@ export const HELP = {
     title: "Compare hosts",
     body: [
       "Runs a command once on each picked host in its own login shell (PowerShell on a Windows host), not in your terminals, and groups the hosts whose output is the same, each rated by its own rules. The hosts start as the picked tabs and the tree's Ctrl+clicks; Change… adds sessions, VMs, tags, saved filters and groups.",
-      "Its results list, newest first, holds its runs, pushes and fetches to many hosts, and the lines you typed in all tabs with what each terminal answered. Only runs, pushes and fetches can be retried; a typed line goes when Type in all tabs is turned off.",
+      "Its results list, newest first, holds its runs, pushes and fetches to many hosts, and the lines you typed in all tabs with what each terminal answered. Only runs, pushes and fetches can be retried. A typed line goes when Type in all tabs is turned off, unless you keep it as a run.",
     ],
   },
   "reports.inventory": {
@@ -326,7 +326,7 @@ export const HELP = {
     title: "Recorded lines",
     body: [
       "While Type in all tabs is on, each line you send is recorded in every terminal, from Enter until its prompt comes back, its output goes quiet, or a time limit passes.",
-      "Password prompts and keys sent to full-screen programs are not recorded, and secrets are scrubbed. Recordings stay in memory until Type in all tabs is turned off.",
+      "Password prompts and keys sent to full-screen programs are not recorded, and secrets are scrubbed. Recordings stay in memory until Type in all tabs is turned off; Keep this line stores one as a run in the job journal, removed with other job outputs after the retention period, never retried.",
     ],
   },
   "winrm.signIn": {

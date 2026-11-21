@@ -5,11 +5,21 @@
 // the line picked with the same grouped card as a run: identical outputs grouped A, B..., the diff between groups,
 // the ignore-trailing-whitespace switch, each terminal's state as it fills in, and CSV, JSON or HTML export of this
 // line or all of them. A typed line has no retry or canary (it says why) and goes when Type in all tabs is turned
-// off. FD-03: everything here is plain DOM text, so presentation mode masks it like the rest of the page.
+// off. QL-31 (0.9.0 H7): "Keep this line" stores it, once every tab has finished it, as a run in the job journal
+// (kept for as long as job outputs are; off with the reason under the read-only lock); the panel then shows the kept
+// run, and a line kept already offers it. FD-03: everything here is plain DOM text, so presentation mode masks it
+// like the rest of the page.
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
-import { ChevronRightIcon, DownloadIcon, GitCompareArrowsIcon, LoaderCircleIcon, RotateCcwIcon } from "lucide-react";
+import {
+  ArchiveIcon,
+  ChevronRightIcon,
+  DownloadIcon,
+  GitCompareArrowsIcon,
+  LoaderCircleIcon,
+  RotateCcwIcon,
+} from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
@@ -30,6 +40,7 @@ import { TierBadge } from "@/components/Badges";
 import { GroupCard, HostOutputDialog } from "@/components/BulkResultsView";
 import { HelpTip } from "@/components/HelpTip";
 import { OutputDiffDialog } from "@/components/OutputDiffDialog";
+import { useReadOnlyReason } from "@/components/Presentation";
 import { WhyDisabled } from "@/components/WhyDisabled";
 import {
   api,
@@ -44,7 +55,7 @@ import {
 import { diffReason } from "@/lib/disabled-reasons";
 import { plural } from "@/lib/format";
 import { captureText, shortDuration, type CaptureTone } from "@/lib/recordings";
-import { TYPED_KEPT, TYPED_NO_RETRY } from "@/lib/results-list";
+import { keepReason, TERMINAL_UNKNOWN, TYPED_KEPT, TYPED_NO_RETRY } from "@/lib/results-list";
 import { cn } from "@/lib/utils";
 
 /** Reloads at most this often while terminals finish. */
@@ -136,11 +147,14 @@ export function RecordedLineResults({
   line,
   version,
   active,
+  onKept,
 }: {
   line: RecordedLine;
   /** Moves with each read of the recordings. */
   version: number;
   active: boolean;
+  /** QL-31: the line is kept as a run (just now, or before): show that run, by its job id. */
+  onKept: (jobId: string) => void;
 }) {
   const [results, setResults] = useState<RecordedResults | null>(null);
   const [ignoreWs, setIgnoreWs] = useState(false);
@@ -148,7 +162,39 @@ export function RecordedLineResults({
   const [error, setError] = useState<string | null>(null);
   const [comparing, setComparing] = useState<{ left: string; right: string } | null>(null);
   const [viewing, setViewing] = useState<{ host: HostResult; terminal: RecordedTerminal | undefined } | null>(null);
+  const [keeping, setKeeping] = useState(false);
+  // FD-03: keeping writes to the journal, which the read-only lock refuses (the core too).
+  const readOnly = useReadOnlyReason();
   const running = results ? results.line.finished < results.line.terminals : true;
+  // QL-31: still this line's view, on a page that shows (another item picked unmounts it: the panel keys it by line).
+  const showing = useRef(active);
+  useEffect(() => {
+    showing.current = active;
+  }, [active]);
+  useEffect(
+    () => () => {
+      showing.current = false;
+    },
+    [],
+  );
+
+  async function keep() {
+    setKeeping(true);
+    try {
+      const kept = await api.multiExecKeep(line.id);
+      toast.success(
+        kept.alreadyKept
+          ? "That line was kept already."
+          : "Kept as a run: it stays in the results list and in Activity after typing stops.",
+      );
+      // Left meanwhile: the list shows the kept run when read again, without moving the panel.
+      if (showing.current) onKept(kept.jobId);
+    } catch (err) {
+      toast.error(errorMessage(err));
+    } finally {
+      if (showing.current) setKeeping(false);
+    }
+  }
 
   useEffect(() => {
     let stale = false;
@@ -186,7 +232,9 @@ export function RecordedLineResults({
   const { counts, groups, hosts, terminals } = results;
   const names = new Map(hosts.map((h) => [h.targetKey, h.name]));
   const byId = new Map(terminals.map((t) => [t.terminalId, t]));
-  const done = counts.succeeded + counts.failed + counts.cancelled;
+  // QL-31: an unknown terminal (its prompt never came back) is done recording too.
+  const done = counts.succeeded + counts.failed + counts.cancelled + counts.unknown;
+  const notKept = keeping ? "Keeping it…" : keepReason(results.line, readOnly);
 
   return (
     <div className="grid min-w-0 gap-4">
@@ -208,6 +256,20 @@ export function RecordedLineResults({
           {results.line.waitingApproval ? "Waiting for approval: Enter is held in every terminal" : results.headline}
         </p>
         <div className="flex flex-wrap items-center gap-2">
+          {/* QL-31: kept as a run, once every tab has finished it; one kept already offers that run. */}
+          {results.line.kept ? (
+            <Button variant="outline" size="sm" onClick={() => onKept(line.id)}>
+              <ArchiveIcon data-icon="inline-start" />
+              Show the kept run
+            </Button>
+          ) : (
+            <WhyDisabled reason={notKept}>
+              <Button variant="outline" size="sm" disabled={notKept !== null} onClick={() => void keep()}>
+                <ArchiveIcon data-icon="inline-start" />
+                Keep this line
+              </Button>
+            </WhyDisabled>
+          )}
           {/* UX-17: only runs retry; a typed line says why it has none. */}
           <WhyDisabled reason={TYPED_NO_RETRY}>
             <Button variant="outline" size="sm" disabled>
@@ -262,9 +324,16 @@ export function RecordedLineResults({
           <span>
             {done} of {plural(counts.total, "terminal")} done
           </span>
+          {/* QL-31: each terminal's exit state where known, as a kept run says it. */}
+          {counts.succeeded > 0 && <span className="text-success">{counts.succeeded} with the prompt back</span>}
           {counts.running > 0 && <span>{counts.running} running</span>}
           {counts.pending > 0 && <span>{counts.pending} waiting for Enter</span>}
-          {counts.failed > 0 && <span className="text-destructive">{counts.failed} not finished</span>}
+          {counts.unknown > 0 && (
+            <span className="text-tier-medium" title={TERMINAL_UNKNOWN}>
+              {counts.unknown} outcome unknown
+            </span>
+          )}
+          {counts.failed > 0 && <span className="text-destructive">{counts.failed} not sent</span>}
           <span className="ml-auto flex items-center gap-2">
             <Switch id={`ignore-ws-${line.id}`} checked={ignoreWs} onCheckedChange={setIgnoreWs} size="sm" />
             <Label htmlFor={`ignore-ws-${line.id}`} className="text-xs font-normal">
@@ -288,7 +357,8 @@ export function RecordedLineResults({
               names={g.hosts.map((k) => names.get(k) ?? k)}
               defaultOpen={i < 2 || groups.length <= 4}
               terminals
-              badge={<Badge variant="outline">{g.ok ? "prompt back" : "not finished"}</Badge>}
+              // QL-31: an output group is the terminals whose prompt came back; the others group by why.
+              badge={<Badge variant="outline">prompt back</Badge>}
               load={() => api.multiExecRecordedOutput(line.id, g.sample)}
             />
           ))}

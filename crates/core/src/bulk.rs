@@ -408,19 +408,26 @@ pub fn group_label(index: usize) -> String {
 }
 
 /// The group a finished target belongs to, or `None` while it waits or runs, or when it was cancelled
-/// or never started. H9: hosts whose outcome is unknown group by why (a time limit, a cancel).
+/// or never started. H9: hosts whose outcome is unknown group by why (a time limit, a cancel). QL-31: a typed line's
+/// terminal whose prompt never came back (quiet, the time limit, a lost connection) is unknown too, but keeps what it
+/// printed: those group by why and by that output, so different outputs stay apart. A run's unknown host keeps no
+/// output, so it groups by why alone, as before.
 fn group_key(t: &JobTargetRecord, opts: GroupOptions) -> Option<String> {
-    if t.status == TargetStatus::Unknown.as_str() {
-        return Some(format!("err:{}", t.error_code.as_deref().unwrap_or("unknown")));
-    }
-    if t.status != TargetStatus::Succeeded.as_str() && t.status != TargetStatus::Failed.as_str() {
-        return None;
-    }
     let hash = if opts.ignore_trailing_whitespace {
         &t.output_hash_loose
     } else {
         &t.output_hash
     };
+    if t.status == TargetStatus::Unknown.as_str() {
+        let why = t.error_code.as_deref().unwrap_or("unknown");
+        return Some(match hash {
+            Some(hash) => format!("unk:{why}:{hash}"),
+            None => format!("err:{why}"),
+        });
+    }
+    if t.status != TargetStatus::Succeeded.as_str() && t.status != TargetStatus::Failed.as_str() {
+        return None;
+    }
     let exit = t.exit_code.map_or_else(|| "-".to_owned(), |c| c.to_string());
     Some(match hash {
         Some(hash) => format!("out:{exit}:{hash}"),
@@ -452,12 +459,14 @@ fn group_targets(targets: &[JobTargetRecord], opts: GroupOptions) -> (Vec<Output
             (key, list)
         })
         .collect();
+    // An error group: a cause, not output that ran (QL-31: an unknown terminal's output with its cause too).
+    let by_cause = |key: &str| key.starts_with("err:") || key.starts_with("unk:");
     // Largest first; then what worked, then by exit code; ties keep the run's order.
     groups.sort_by_key(|(key, list)| {
         let first = &targets[list[0]];
         (
             std::cmp::Reverse(list.len()),
-            key.starts_with("err:"),
+            by_cause(key),
             first.status != TargetStatus::Succeeded.as_str(),
             first.exit_code,
         )
@@ -471,7 +480,7 @@ fn group_targets(targets: &[JobTargetRecord], opts: GroupOptions) -> (Vec<Output
                 of_target[i] = Some(index);
             }
             let first = &targets[list[0]];
-            let error_group = key.starts_with("err:");
+            let error_group = by_cause(&key);
             let messages: HashSet<Option<&str>> = list.iter().map(|&i| targets[i].error.as_deref()).collect();
             OutputGroup {
                 label: group_label(index),
@@ -643,6 +652,13 @@ fn run_info(command: &Command) -> Option<RunInfo> {
             sudo: false,
             trust_new_host_keys: *trust_new_host_keys,
             timeout_secs: *timeout_secs,
+        }),
+        // QL-31: a typed line kept as a run shows its line (as the journal keeps it, redacted).
+        Command::TerminalLine { line, .. } => Some(RunInfo {
+            script: line.clone(),
+            sudo: false,
+            trust_new_host_keys: false,
+            timeout_secs: None,
         }),
         _ => None,
     }
@@ -1870,6 +1886,54 @@ mod tests {
         t.error_code = Some(code.into());
         t.error = Some(message.into());
         t
+    }
+
+    #[test]
+    fn unknown_terminals_group_by_cause_and_output_and_a_runs_unknown_hosts_by_cause_alone() {
+        let unknown = |key: &str, code: &str, hash: Option<&str>| {
+            let mut t = target(key, "unknown", None, hash, hash);
+            t.error_code = Some(code.into());
+            t.error = Some(format!("{code} on {key}"));
+            t
+        };
+        // QL-31: a kept line's terminals whose prompt never came back keep what they printed.
+        let targets = vec![
+            target("ok", "succeeded", None, Some("x"), Some("x")),
+            unknown("q1", "quiet", Some("a")),
+            unknown("q2", "quiet", Some("a")),
+            unknown("q3", "quiet", Some("b")),
+            unknown("t1", "time_limit", Some("a")),
+        ];
+        let (groups, of_target) = group_targets(&targets, GroupOptions::default());
+        let shape: Vec<(Vec<&str>, GroupKind, Option<&str>)> = groups
+            .iter()
+            .map(|g| {
+                (
+                    g.hosts.iter().map(String::as_str).collect(),
+                    g.kind,
+                    g.error_code.as_deref(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            shape,
+            [
+                (vec!["q1", "q2"], GroupKind::Error, Some("quiet")),
+                (vec!["ok"], GroupKind::Output, None),
+                (vec!["q3"], GroupKind::Error, Some("quiet")),
+                (vec!["t1"], GroupKind::Error, Some("time_limit")),
+            ]
+        );
+        assert!(groups.iter().filter(|g| g.kind == GroupKind::Error).all(|g| !g.ok));
+        assert_eq!(of_target, [Some(1), Some(0), Some(0), Some(2), Some(3)]);
+        // H9: a run's host that timed out keeps no output: by why alone, as before.
+        let runs = vec![
+            unknown("h1", "command_timed_out", None),
+            unknown("h2", "command_timed_out", None),
+        ];
+        let (groups, _) = group_targets(&runs, GroupOptions::default());
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].hosts, ["h1", "h2"]);
     }
 
     #[test]

@@ -5,13 +5,17 @@
 //! a typed line is stored with what looks like a secret replaced by `[redacted]`
 //! ([`Command::for_journal`]), and the retention purge ([`Store::purge_job_bodies`], run by
 //! [`crate::retention`]) empties old jobs' outputs and their script or line text, keeping the rest.
+//!
+//! QL-31 (0.9.0 H7): a line typed in all tabs and kept ("Keep this line", [`crate::kept_lines`]) is a job of its own
+//! here, of type [`KEPT_LINE`]: the line as its own `terminalLine` job journaled it, one target per terminal with its
+//! recorded output, and nothing that runs. The purge and the redaction treat its line and keys as a typed line's.
 
 use serde::Serialize;
 use serde_json::Value;
 use sqlx::Row;
 use uuid::Uuid;
 
-use super::{serde_name, Store};
+use super::{serde_name, NewAuditEntry, Store};
 use crate::command_bus::{ApprovalRecord, Command};
 use crate::domain::{now_rfc3339, Context, Target, TargetRef};
 use crate::error::Result;
@@ -23,8 +27,17 @@ use crate::policy::{ActionKind, Tier};
 /// for long.
 const BATCH: i64 = 200;
 
+/// QL-31: the `command_type` of a typed line kept as a run. Its `command_json` is the line's
+/// [`Command::TerminalLine`], each target naming its terminal and saved session, so it reads as one; the type tells it
+/// from the line's own job, which sent its Enter.
+pub const KEPT_LINE: &str = "keptLine";
+
 /// The free text in a command's JSON that the journal redacts and the purge removes, by command type.
-const BODY_FIELDS: [(&str, &[&str]); 2] = [("remoteExec", &["script"]), ("terminalLine", &["line", "keys"])];
+const BODY_FIELDS: [(&str, &[&str]); 3] = [
+    ("remoteExec", &["script"]),
+    ("terminalLine", &["line", "keys"]),
+    (KEPT_LINE, &["line", "keys"]),
+];
 
 /// The same, as the purge's SQL: for each type, how many non-empty bodies a batch (a JSON list of job ids)
 /// holds and their bytes, then emptying them. JSON that can't be read, of any type, keeps only its type, so
@@ -49,16 +62,19 @@ const PURGE_BODIES: [(&str, &str); 4] = [
         "UPDATE jobs SET command_json = json_set(command_json, '$.script', '')
          WHERE id IN (SELECT value FROM json_each(?)) AND command_type = 'remoteExec' AND json_valid(command_json)",
     ),
+    // SS-10: a typed line; QL-31: a typed line kept as a run, whose outputs go with every job's above.
     (
         "SELECT COUNT(*) AS commands,
                 COALESCE(SUM(LENGTH(CAST(IFNULL(json_extract(command_json, '$.line'), '') AS BLOB))
                            + LENGTH(CAST(IFNULL(json_extract(command_json, '$.keys'), '') AS BLOB))), 0) AS bytes
          FROM jobs
-         WHERE id IN (SELECT value FROM json_each(?)) AND command_type = 'terminalLine' AND json_valid(command_json)
+         WHERE id IN (SELECT value FROM json_each(?)) AND command_type IN ('terminalLine', 'keptLine')
+           AND json_valid(command_json)
            AND LENGTH(IFNULL(json_extract(command_json, '$.line'), '') || IFNULL(json_extract(command_json, '$.keys'), ''))
                > 0",
         "UPDATE jobs SET command_json = json_set(command_json, '$.line', '', '$.keys', '')
-         WHERE id IN (SELECT value FROM json_each(?)) AND command_type = 'terminalLine' AND json_valid(command_json)",
+         WHERE id IN (SELECT value FROM json_each(?)) AND command_type IN ('terminalLine', 'keptLine')
+           AND json_valid(command_json)",
     ),
     (
         "SELECT COUNT(*) AS commands, COALESCE(SUM(LENGTH(CAST(command_json AS BLOB))), 0) AS bytes
@@ -81,6 +97,32 @@ pub(crate) struct NewJob<'a> {
     pub countdown_until: Option<&'a str>,
     /// BX-04: the job whose failed targets this one retries.
     pub retry_of: Option<Uuid>,
+}
+
+/// QL-31: a typed line kept as a run ([`Store::insert_kept_line`]).
+pub(crate) struct NewKeptLine<'a> {
+    /// The recorded line's id, so keeping it twice keeps it once.
+    pub id: Uuid,
+    pub summary: &'a str,
+    /// As the line's own job was rated (its `action` and `tier` columns): the keep itself has no tier.
+    pub action: &'a str,
+    pub tier: &'a str,
+    /// The line's [`Command::TerminalLine`], each target naming its terminal and saved session; journaled as
+    /// [`Command::for_journal`] keeps it.
+    pub command: &'a Command,
+    pub status: JobStatus,
+    /// When the line was held, so it lists among runs at the time it ran, and the retention counts from then.
+    pub created_at: &'a str,
+    /// The first terminal's Enter and the last one's end.
+    pub started_at: Option<&'a str>,
+    pub finished_at: Option<&'a str>,
+    /// AP-08: the change ID the line's approval was given with.
+    pub change_id: Option<&'a str>,
+    /// BX-04: the line's own job had something redacted (its journaled line, which this one copies, says
+    /// `[redacted]` already).
+    pub command_redacted: bool,
+    /// One per terminal, in the order the line went to them, with its recorded output.
+    pub targets: &'a [JobTargetRecord],
 }
 
 #[derive(Default)]
@@ -421,6 +463,105 @@ impl Store {
         Ok(())
     }
 
+    /// QL-31: stores a typed line kept as a run, a [`KEPT_LINE`] job that has ended, with each terminal's result and
+    /// recorded output, and `entry`, its audit entry, in one transaction under the audit chain's lock, so neither lands
+    /// without the other (rule 4). Returns false when it is kept already (the same line's id): nothing is written or
+    /// audited then. The line and keys go through [`Command::for_journal`], and the summary, each output and each error
+    /// through [`redact_secrets`]: a pasted block's later lines are echoed at the shell's prompts, so the output can
+    /// hold them as typed. The hashes stay as recorded, so the groups are the recording's.
+    pub(crate) async fn insert_kept_line(
+        &self,
+        ctx: &Context,
+        line: NewKeptLine<'_>,
+        entry: NewAuditEntry<'_>,
+    ) -> Result<bool> {
+        let ws = ctx.workspace_id.to_string();
+        let user = ctx.user_id.to_string();
+        let id = line.id.to_string();
+        let (kept, redacted) = line.command.for_journal();
+        let (summary, _) = redact_secrets(line.summary);
+        let clean = |text: &Option<String>| text.as_deref().map(|t| redact_secrets(t).0);
+        let _chain = self.lock_audit_chain().await;
+        let mut tx = self.pool.begin().await?;
+        // Only the id's conflict is let go (a CHECK that fails still fails).
+        let inserted = sqlx::query(
+            "INSERT INTO jobs (id, workspace_id, user_id, summary, action, tier, command_json, approval_json, status,
+                               created_at, started_at, finished_at, command_type, command_redacted, change_id)
+             VALUES (?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT (id) DO NOTHING",
+        )
+        .bind(&id)
+        .bind(&ws)
+        .bind(&user)
+        .bind(&summary)
+        .bind(line.action)
+        .bind(line.tier)
+        .bind(serde_json::to_string(&kept)?)
+        .bind(line.status.as_str())
+        .bind(line.created_at)
+        .bind(line.started_at)
+        .bind(line.finished_at)
+        .bind(KEPT_LINE)
+        .bind(redacted || line.command_redacted)
+        .bind(line.change_id)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected()
+            > 0;
+        if !inserted {
+            // FD-02: a line of this workspace only.
+            let theirs: Option<String> = sqlx::query_scalar("SELECT workspace_id FROM jobs WHERE id = ?")
+                .bind(&id)
+                .fetch_optional(&mut *tx)
+                .await?;
+            tx.rollback().await?;
+            return match theirs {
+                Some(theirs) if theirs == ws => Ok(false),
+                _ => Err(crate::error::CoreError::NotInWorkspace("That kept line".into())),
+            };
+        }
+        for t in line.targets {
+            sqlx::query(
+                "INSERT INTO job_targets (job_id, workspace_id, user_id, target_kind, target_key, target_name, status,
+                                          exit_code, output, error, error_code, started_at, finished_at, duration_ms,
+                                          stdout_bytes, output_truncated, output_hash, output_hash_loose)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            )
+            .bind(&id)
+            .bind(&ws)
+            .bind(&user)
+            .bind(&t.target_kind)
+            .bind(&t.target_key)
+            .bind(&t.target_name)
+            .bind(&t.status)
+            .bind(t.exit_code)
+            .bind(clean(&t.output))
+            .bind(clean(&t.error))
+            .bind(&t.error_code)
+            .bind(&t.started_at)
+            .bind(&t.finished_at)
+            .bind(t.duration_ms)
+            .bind(t.stdout_bytes)
+            .bind(t.output_truncated)
+            .bind(&t.output_hash)
+            .bind(&t.output_hash_loose)
+            .execute(&mut *tx)
+            .await?;
+        }
+        Store::append_audit_on(&mut tx, ctx, entry).await?;
+        tx.commit().await?;
+        Ok(true)
+    }
+
+    /// QL-31: the workspace whose journal holds a job, whichever is shown; `None` for a job in none (its journal write
+    /// failed, QL-15). Only to tell a keep's refusals apart; never to read another workspace's job.
+    pub(crate) async fn job_workspace(&self, id: Uuid) -> Result<Option<String>> {
+        Ok(sqlx::query_scalar("SELECT workspace_id FROM jobs WHERE id = ?")
+            .bind(id.to_string())
+            .fetch_optional(&self.pool)
+            .await?)
+    }
+
     pub(crate) async fn set_job_status(&self, id: Uuid, status: JobStatus) -> Result<()> {
         let now = now_rfc3339();
         sqlx::query(
@@ -494,10 +635,12 @@ impl Store {
 
     /// UX-17 (0.9.0 H3): the newest one-shot jobs on hosts that group by output, newest first, for Compare hosts' one
     /// results list: its runs and BX-10's pushes and fetches, whoever started them (Compare hosts, the Files page's
-    /// Many hosts, a drop). Each type's page comes from its own index, then the two are merged.
+    /// Many hosts, a drop), and (QL-31, H7) the typed lines kept as runs. Each type's page comes from its own index,
+    /// then they are merged.
     pub async fn recent_bulk_jobs(&self, ctx: &Context, limit: u32) -> Result<Vec<JobSummary>> {
         let mut jobs = self.recent_jobs_of(ctx, Some("remoteExec"), limit).await?;
         jobs.extend(self.recent_jobs_of(ctx, Some("bulkFiles"), limit).await?);
+        jobs.extend(self.recent_jobs_of(ctx, Some(KEPT_LINE), limit).await?);
         // RFC 3339 times written by one clock in one format sort as text; the id keeps ties in one order.
         jobs.sort_by(|a, b| b.created_at.cmp(&a.created_at).then_with(|| b.id.cmp(&a.id)));
         jobs.truncate(limit as usize);

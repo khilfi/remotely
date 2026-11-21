@@ -88,6 +88,7 @@ pub mod impact;
 pub mod import;
 pub mod inventory;
 pub mod jobs;
+pub mod kept_lines;
 pub mod known_hosts;
 pub mod linked_clones;
 pub mod local_files;

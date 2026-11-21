@@ -1,7 +1,8 @@
 //! FD-02 customer workspaces end to end, on the fakes (and the test SSH server for terminals): what is made in one
 //! workspace is invisible, unusable and unexportable from another; VMs belong to one workspace at most and the bus
 //! refuses the others; switching closes what the old workspace had open and waits for its jobs; each workspace's
-//! audit log is its own chain; schedules of a hidden workspace still run, audited in it. No real host or VM.
+//! audit log is its own chain; schedules of a hidden workspace still run, audited in it; a typed line kept as a run
+//! (QL-31) stays in its workspace's journal. No real host or VM.
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
@@ -29,6 +30,7 @@ use remotely_core::presentation::Presentation;
 use remotely_core::sessions::{SessionAuth, SessionFilter, SessionInput};
 use remotely_core::stars::{RecentKind, StarKind};
 use remotely_core::store::AuditEntry;
+use remotely_core::terminal::multiexec::{InputOutcome, MultiExecEvent};
 use remotely_core::terminal::rules::{RuleScope, RuleStyle, TerminalRuleInput};
 use remotely_core::terminal::{TerminalEvent, TerminalStatus, TerminalTuning};
 use remotely_core::transfer::{ExportRequest, ItemAction, ItemChoice, TransferCommit};
@@ -1621,6 +1623,123 @@ async fn switching_waits_for_running_jobs_then_closes_terminals_multiexec_and_ap
     // Nor can Acme's closed pane be a target from Globex.
     assert!(core.terminals.target(&core.ctx(), pane).await.is_err());
     core.terminals.close_all().await;
+}
+
+// ---- QL-31: kept lines ----------------------------------------------------------------------------------------------
+
+/// Types a Low line into `pane` with Type in all tabs and waits until it is recorded; its id and its own job.
+async fn typed_line(
+    core: &Core,
+    pane: Uuid,
+    lines: &mut tokio::sync::broadcast::Receiver<MultiExecEvent>,
+    keys: &str,
+) -> (Uuid, Uuid) {
+    let InputOutcome::Held {
+        line_id,
+        job_id: Some(job),
+        ..
+    } = core.multiexec.input(pane, keys.as_bytes().to_vec()).await.unwrap()
+    else {
+        panic!("held, then sent at once");
+    };
+    timeout(WAIT, async {
+        loop {
+            if let MultiExecEvent::LineFinished { line_id: done, .. } = lines.recv().await.unwrap() {
+                if done == line_id {
+                    return;
+                }
+            }
+        }
+    })
+    .await
+    .expect("recorded in time");
+    (line_id, job)
+}
+
+#[tokio::test]
+async fn a_typed_line_kept_as_a_run_stays_in_its_workspaces_journal() {
+    let core = ssh_core(FakeVmware::default()).await;
+    let acme = core.ctx();
+    let globex = create(&core, "Globex").await;
+    let password = format!("pw-{}", Uuid::new_v4().simple());
+    let server = TestSshServer::start().await.with_password("alice", &password);
+    let (session, _) = session_to(&core, &server, &password, "acme01").await;
+    let (pane, _events) = open_connected(&core, session).await;
+    core.multiexec.set_targets(vec![pane]).await.unwrap();
+    let mut lines = core.multiexec.subscribe();
+    let (line_id, _) = typed_line(&core, pane, &mut lines, "whoami\r").await;
+    let kept = core.keep_line(line_id).await.unwrap();
+    assert_eq!(kept.job_id, line_id);
+    let kept_in = |jobs: &[remotely_core::store::JobSummary]| jobs.iter().any(|j| j.id == line_id.to_string());
+    assert!(kept_in(&core.bulk.recent(&acme, 20).await.unwrap()));
+    assert!(
+        kept_in(&core.store.recent_jobs(&acme, 50).await.unwrap()),
+        "listed in its own workspace's Activity"
+    );
+    let kept_entries = |log: &[AuditEntry]| log.iter().filter(|e| e.event == "multiexec_line_kept").count();
+    assert_eq!(kept_entries(&audit_of(&core, &acme).await), 1);
+
+    // The line's own job is another workspace's: refused, saying nothing of it.
+    let pool = core.store.pool();
+    let (moved, moved_job) = typed_line(&core, pane, &mut lines, "hostname\r").await;
+    for sql in [
+        "UPDATE job_targets SET workspace_id = ? WHERE job_id = ?",
+        "UPDATE jobs SET workspace_id = ? WHERE id = ?",
+    ] {
+        sqlx::query(sql)
+            .bind(globex.id.to_string())
+            .bind(moved_job.to_string())
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+    let refused = core.keep_line(moved).await;
+    assert!(matches!(&refused, Err(CoreError::NotInWorkspace(_))), "{refused:?}");
+
+    // Another workspace's row holds the kept run's id: refused too, nothing written or audited here.
+    let (taken, _) = typed_line(&core, pane, &mut lines, "uptime\r").await;
+    sqlx::query(
+        "INSERT INTO jobs (id, workspace_id, user_id, summary, action, tier, command_json, status, created_at,
+                           command_type)
+         VALUES (?, ?, ?, 'Typed `uptime` in 1 tab', 'execReadOnly', 'low', '{}', 'succeeded', ?, 'keptLine')",
+    )
+    .bind(taken.to_string())
+    .bind(globex.id.to_string())
+    .bind(acme.user_id.to_string())
+    .bind("2026-11-21T00:00:00Z")
+    .execute(pool)
+    .await
+    .unwrap();
+    let refused = core.keep_line(taken).await;
+    assert!(matches!(&refused, Err(CoreError::NotInWorkspace(_))), "{refused:?}");
+    assert!(core.store.job_detail(&acme, taken).await.unwrap().is_none());
+    assert_eq!(
+        kept_entries(&audit_of(&core, &acme).await),
+        1,
+        "neither refusal audited as a keep"
+    );
+
+    // Globex reads none of Acme's, and can't keep it again: Acme's typing closed with the switch.
+    switch(&core, &globex).await;
+    let ctx = core.ctx();
+    assert!(!kept_in(&core.bulk.recent(&ctx, 20).await.unwrap()));
+    assert!(!kept_in(&core.store.recent_jobs(&ctx, 50).await.unwrap()));
+    assert!(core.store.job_detail(&ctx, line_id).await.unwrap().is_none());
+    assert!(core.store.job_targets(&ctx, line_id).await.unwrap().is_empty());
+    assert!(core.bulk.results(&ctx, line_id, Default::default()).await.is_err());
+    assert!(core.bulk.host_output(&ctx, line_id, &pane.to_string()).await.is_err());
+    assert!(core.keep_line(line_id).await.is_err());
+    assert_eq!(kept_entries(&audit_of(&core, &ctx).await), 0);
+
+    // Back in Acme, it is there.
+    core.switch_workspace(acme.workspace_id).await.unwrap();
+    let results = core
+        .bulk
+        .results(&core.ctx(), line_id, Default::default())
+        .await
+        .unwrap();
+    assert_eq!(results.hosts.len(), 1);
+    assert_eq!(results.hosts[0].status, "succeeded");
 }
 
 // ---- schedules ----------------------------------------------------------------------------------------------------

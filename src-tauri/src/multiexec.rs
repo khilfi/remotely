@@ -8,9 +8,13 @@
 //! list, one line grouped by output, a terminal's output, the diff between two, and the BX-05 export
 //! (CSV, JSON or HTML) through a save dialog here in Rust. Recordings change as `multiexec://event`
 //! (`recorded`, and `lineFinished` once a line is done everywhere: QL-07's one notification).
+//!
+//! QL-31 (0.9.0 H7): "Keep this line" stores a finished recorded line as a run in the job journal
+//! (`remotely_core::kept_lines`), in the shown workspace.
 
 use remotely_core::bulk::{self, ExportFormat, GroupOptions, HostOutput, OutputDiff, RecordedExport};
 use remotely_core::command_bus::ApprovalAnswers;
+use remotely_core::kept_lines::KeptLine;
 use remotely_core::terminal::multiexec::{InputOutcome, MultiExecStatus};
 use remotely_core::terminal::record::{RecordedResults, Recordings};
 use remotely_core::CoreError;
@@ -111,6 +115,15 @@ pub async fn multiexec_recorded_diff(
         .core
         .multiexec
         .recorded_diff(line_id, left, right, options.unwrap_or_default())?)
+}
+
+/// QL-31: keeps a recorded line, once every tab has finished it, as a run in the job journal (audited, never with the
+/// output; refused by the read-only lock). Keeping it again keeps it once.
+#[tauri::command]
+pub async fn multiexec_keep(state: State<'_, AppState>, line_id: Uuid) -> IpcResult<KeptLine> {
+    let kept = state.core.keep_line(line_id).await?;
+    tracing::info!(already = kept.already_kept, "a typed line kept as a run");
+    Ok(kept)
 }
 
 /// QL-12, BX-05: saves one recorded line (`line_id`) or all of them as CSV, JSON or HTML, with groups

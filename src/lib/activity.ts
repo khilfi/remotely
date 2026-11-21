@@ -30,6 +30,7 @@ export const EVENT_LABELS: Record<string, string> = {
   canary_go_on: "Went on after the first host",
   job_exported: "Results exported",
   multiexec_exported: "Typed lines exported",
+  multiexec_line_kept: "Typed line kept as a run",
   // Hosts, terminals, files and tunnels.
   host_key_trusted: "Host key trusted",
   host_key_retrusted: "Host key replaced",
@@ -209,6 +210,16 @@ const EVENT_KINDS: [prefix: string, kind: ActivityKind][] = [
   ["catalog_", "vms"],
   ["stack_", "vms"],
 ];
+
+/**
+ * QL-31: the kept run a group of entries stands for when its job is not on the jobs' page: a kept line's job is dated
+ * when the line was typed and its `multiexec_line_kept` entry when it was kept, so after many jobs the entry can list
+ * without its job. Activity opens that run by the entry's job id. `null` for every other group.
+ */
+export function lateKeptRun(group: Pick<ActivityGroup, "job" | "jobId" | "entries">): string | null {
+  if (group.job || !group.jobId) return null;
+  return group.entries.some((e) => e.event === "multiexec_line_kept") ? group.jobId : null;
+}
 
 /** What an audit entry of no job is about, from its event. */
 export function kindOfEvent(event: string): ActivityKind {

@@ -24,6 +24,9 @@
 //!   go first, and the UI says how many went. Outputs never reach the audit log; an export is audited
 //!   with what and where only (`bulk::BulkRuns::export_recorded`).
 //! * Grouping, the headline and the diff are bulk.rs's (BX-03), on records built from the captures.
+//! * QL-31 (0.9.0 H7): "Keep this line" stores a line every terminal has finished as a run in the job journal
+//!   ([`Recorder::to_keep`] hands over each terminal's record and saved session; `crate::kept_lines` stores it).
+//!   The recording itself stays in memory as before, marked kept ([`RecordedLine::kept`]).
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, Weak};
@@ -458,6 +461,8 @@ struct SlotView {
 pub struct RecordSlot {
     line_id: Uuid,
     terminal_id: Uuid,
+    /// QL-31: the terminal's saved session when the line was typed (`None` for a quick connection).
+    session_id: Option<Uuid>,
     inner: Mutex<SlotInner>,
     hub: Weak<Hub>,
 }
@@ -766,6 +771,10 @@ pub struct RecordedLine {
     pub full_screen: bool,
     /// From the first Enter to the last prompt, once every terminal is done.
     pub duration_ms: Option<i64>,
+    /// QL-31: kept as a run in the job journal, whose job id is this line's id.
+    pub kept: bool,
+    /// QL-31: terminals its Enter reached (their recording started); a line it reached none of can't be kept.
+    pub reached: usize,
 }
 
 /// QL-12: the MultiExec session's recorded lines.
@@ -823,6 +832,37 @@ struct Line {
     slots: Vec<Arc<RecordSlot>>,
     /// LineFinished went out.
     finished_sent: bool,
+    /// QL-31: kept as a run.
+    kept: bool,
+}
+
+/// QL-31: one terminal of a line to keep: its result as a job target, and its saved session.
+#[derive(Debug, Clone)]
+pub(crate) struct KeptTerminal {
+    pub record: JobTargetRecord,
+    pub session_id: Option<Uuid>,
+}
+
+/// QL-31: a recorded line every terminal has finished, as "Keep this line" stores it (`crate::kept_lines`). The line's
+/// text, tier and run key come from its own job in the journal, where they are kept as [`crate::command_bus::Command::for_journal`]
+/// redacts them.
+#[derive(Debug, Clone)]
+pub(crate) struct LineToKeep {
+    pub id: Uuid,
+    /// The job that sent its Enter.
+    pub job_id: Uuid,
+    /// When the line was held (RFC 3339).
+    pub recorded_at: String,
+    /// In the order the line went to them.
+    pub terminals: Vec<KeptTerminal>,
+}
+
+fn tabs(n: usize) -> String {
+    if n == 1 {
+        "1 tab".into()
+    } else {
+        format!("{n} tabs")
+    }
 }
 
 struct Book {
@@ -846,21 +886,38 @@ fn millis(from: Option<Instant>, to: Option<Instant>) -> Option<i64> {
     }
 }
 
-/// A slot as a job target, so bulk.rs groups it like a host of a Compare run.
+/// A slot as a job target, so bulk.rs groups it like a host of a Compare run. QL-31: its exit state where known, as a
+/// kept line stores it too: the prompt came back (succeeded); Enter never reached it (failed); otherwise the prompt
+/// never came back, so how the command ended is not known (unknown, as a run's host that timed out: it went quiet, the
+/// next line came first, the time limit passed or the connection was lost mid-command). An unknown terminal keeps
+/// what it printed and its hashes, so those with the same output group together (bulk.rs `group_key`).
 fn target_record(v: &SlotView, now: Instant) -> JobTargetRecord {
     let (status, error, error_code) = match &v.state {
         CaptureState::Waiting => ("pending", None, None),
         CaptureState::Running => ("running", None, None),
-        CaptureState::Done { .. } => ("succeeded", None, None),
+        CaptureState::Done { how: CaptureEnd::Prompt } => ("succeeded", None, None),
+        CaptureState::Done { how: CaptureEnd::Quiet } => (
+            "unknown",
+            Some("The output went quiet but the prompt never came back: the command may still run, or wait for an answer".to_owned()),
+            Some("quiet"),
+        ),
+        CaptureState::Done {
+            how: CaptureEnd::NextLine,
+        } => (
+            "unknown",
+            Some("The next line was sent before the prompt came back".to_owned()),
+            Some("next_line"),
+        ),
         CaptureState::TimedOut => (
-            "failed",
+            "unknown",
             Some("Still running at the time limit, so recording stopped (the command goes on)".to_owned()),
             Some("time_limit"),
         ),
-        CaptureState::Lost { reason } => ("failed", Some(reason.clone()), Some("lost")),
+        CaptureState::Lost { reason } => ("unknown", Some(reason.clone()), Some("lost")),
         CaptureState::NotSent { reason } => ("failed", Some(reason.clone()), Some("not_sent")),
     };
-    let done = matches!(v.state, CaptureState::Done { .. });
+    // Every finished recording's hashes (an unknown one's too); none while it runs or for one that never started.
+    let done = v.state.is_final();
     let running = v.state == CaptureState::Running;
     JobTargetRecord {
         target_kind: "terminal".into(),
@@ -915,6 +972,8 @@ impl Line {
             } else {
                 None
             },
+            kept: self.kept,
+            reached: views.iter().filter(|v| v.started.is_some()).count(),
         }
     }
 
@@ -1055,17 +1114,23 @@ impl Recorder {
         let _ = self.hub.events.send(event);
     }
 
-    /// A line is about to be rated: a slot for each terminal it goes to, `(id, name)`, in order.
+    /// A line is about to be rated: a slot for each terminal it goes to, `(id, name, saved session)`, in order.
     /// Not shown until [`Recorder::taken`].
-    pub(crate) fn begin(&self, line_id: Uuid, line: &str, targets: &[(Uuid, String)]) -> Vec<Arc<RecordSlot>> {
+    pub(crate) fn begin(
+        &self,
+        line_id: Uuid,
+        line: &str,
+        targets: &[(Uuid, String, Option<Uuid>)],
+    ) -> Vec<Arc<RecordSlot>> {
         let mut book = locks::lock(&self.hub.book);
         let limits = book.limits;
         let slots: Vec<Arc<RecordSlot>> = targets
             .iter()
-            .map(|(id, name)| {
+            .map(|(id, name, session_id)| {
                 Arc::new(RecordSlot {
                     line_id,
                     terminal_id: *id,
+                    session_id: *session_id,
                     inner: Mutex::new(SlotInner {
                         name: name.clone(),
                         state: CaptureState::Waiting,
@@ -1093,6 +1158,7 @@ impl Recorder {
             recorded_at: now_rfc3339(),
             slots: slots.clone(),
             finished_sent: false,
+            kept: false,
         });
         slots
     }
@@ -1318,6 +1384,75 @@ impl Recorder {
         })
     }
 
+    /// QL-31: a line as "Keep this line" stores it, once every terminal is done with it: each terminal's record (as
+    /// [`Recorder::results`] groups it) and saved session. Refused while it waits for its approval or a terminal still
+    /// runs it, and for a line no longer kept in memory.
+    pub(crate) fn to_keep(&self, line_id: Uuid, alive: &dyn Fn(Uuid) -> bool) -> Result<LineToKeep> {
+        self.forget_closed(alive);
+        let book = locks::lock(&self.hub.book);
+        let line = book.line(line_id)?;
+        let job_id = match line.job_id {
+            Some(job) if !line.waiting_approval => job,
+            _ => {
+                return Err(CoreError::InvalidInput(
+                    "That line waits for its approval: keep it once it has run.".into(),
+                ))
+            }
+        };
+        let views = line.views();
+        let reached = views.iter().filter(|v| v.started.is_some()).count();
+        let running = views.iter().filter(|v| !v.state.is_final()).count();
+        if running > 0 && reached == 0 {
+            // AP-03: its countdown, or its job waiting to start.
+            return Err(CoreError::InvalidInput(
+                "That line's Enter hasn't gone yet (its countdown may still run): keep it once it has run.".into(),
+            ));
+        }
+        if running > 0 {
+            return Err(CoreError::InvalidInput(format!(
+                "That line is still running in {}: keep it once every tab has finished it.",
+                tabs(running)
+            )));
+        }
+        if reached == 0 {
+            return Err(CoreError::InvalidInput(
+                "Enter reached none of that line's tabs, so there is nothing to keep.".into(),
+            ));
+        }
+        let now = Instant::now();
+        Ok(LineToKeep {
+            id: line.id,
+            job_id,
+            recorded_at: line.recorded_at.clone(),
+            terminals: line
+                .slots
+                .iter()
+                .zip(&views)
+                .map(|(slot, v)| KeptTerminal {
+                    record: target_record(v, now),
+                    session_id: slot.session_id,
+                })
+                .collect(),
+        })
+    }
+
+    /// QL-31: the line was kept as a run; the list says so.
+    pub(crate) fn mark_kept(&self, line_id: Uuid) {
+        let changed = {
+            let mut book = locks::lock(&self.hub.book);
+            match book.line_mut(line_id) {
+                Some(line) if !line.kept => {
+                    line.kept = true;
+                    line.shown
+                }
+                _ => false,
+            }
+        };
+        if changed {
+            self.send(MultiExecEvent::Recorded { line_id: Some(line_id) });
+        }
+    }
+
     /// One line, or every one (oldest first), for an export.
     pub(crate) fn runs(&self, line_id: Option<Uuid>) -> Result<Vec<RecordedRun>> {
         let book = locks::lock(&self.hub.book);
@@ -1428,7 +1563,7 @@ mod tests {
         recorder.set_limits(limits);
         let line = Uuid::new_v4();
         let terminal = Uuid::new_v4();
-        let slots = recorder.begin(line, "uptime", &[(terminal, "web01".into())]);
+        let slots = recorder.begin(line, "uptime", &[(terminal, "web01".into(), None)]);
         recorder.taken(line, Tier::Low, Some(Uuid::new_v4()));
         (recorder, Arc::clone(&slots[0]), line)
     }
@@ -1456,6 +1591,88 @@ mod tests {
             }
         );
         assert_eq!(results.line.finished, 1);
+    }
+
+    #[test]
+    fn a_line_is_kept_only_once_every_terminal_is_done_with_its_records_and_sessions() {
+        let (events, _) = broadcast::channel(64);
+        let recorder = Recorder::new(events);
+        let (line, job) = (Uuid::new_v4(), Uuid::new_v4());
+        let (web, quick, session) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        let slots = recorder.begin(
+            line,
+            "uptime",
+            &[
+                (web, "web01".into(), Some(session)),
+                (quick, "alice@db01.test:22 (not saved)".into(), None),
+            ],
+        );
+        // Waiting for its approval: no job yet.
+        recorder.taken(line, Tier::Medium, None);
+        let refused = recorder.to_keep(line, &|_| true).unwrap_err();
+        assert!(refused.to_string().contains("waits for its approval"), "{refused}");
+        recorder.approved(line, job);
+        // Approved, its Enter not gone yet (AP-03's countdown).
+        let refused = recorder.to_keep(line, &|_| true).unwrap_err();
+        assert!(refused.to_string().contains("Enter hasn't gone yet"), "{refused}");
+        assert_eq!(recorder.list(&|_| true).lines[0].reached, 0);
+        let t0 = Instant::now();
+        assert!(slots[0].start("$ uptime", vec![], None, t0));
+        assert!(slots[1].start("$ uptime", vec![], None, t0));
+        slots[0].output(b"\r\nup 3 days\r\n$ ", "$ ", false, t0);
+        let refused = recorder.to_keep(line, &|_| true).unwrap_err();
+        assert!(refused.to_string().contains("still running in 1 tab"), "{refused}");
+        slots[1].output(b"\r\npartial\r\n", "", false, t0);
+        slots[1].lost("the connection ended");
+
+        let kept = recorder.to_keep(line, &|_| true).unwrap();
+        assert_eq!((kept.id, kept.job_id), (line, job));
+        let got: Vec<(Uuid, Option<Uuid>, &str, Option<&str>)> = kept
+            .terminals
+            .iter()
+            .map(|t| {
+                (
+                    Uuid::parse_str(&t.record.target_key).unwrap(),
+                    t.session_id,
+                    t.record.status.as_str(),
+                    t.record.error_code.as_deref(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            got,
+            [
+                (web, Some(session), "succeeded", None),
+                // The connection ended mid-command: how it ended is not known.
+                (quick, None, "unknown", Some("lost"))
+            ]
+        );
+        assert_eq!(kept.terminals[0].record.output.as_deref(), Some("up 3 days\n"));
+        assert!(
+            kept.terminals[0].record.output_hash.is_some(),
+            "a finished terminal groups by its output"
+        );
+        assert_eq!(kept.terminals[1].record.output.as_deref(), Some("partial\n"));
+        assert!(
+            kept.terminals[1].record.output_hash.is_some(),
+            "an unknown one too, by what it printed"
+        );
+        assert_eq!(recorder.list(&|_| true).lines[0].reached, 2);
+
+        assert!(!recorder.list(&|_| true).lines[0].kept);
+        recorder.mark_kept(line);
+        assert!(recorder.list(&|_| true).lines[0].kept);
+        // A line no longer kept in memory can't be kept.
+        recorder.clear();
+        assert!(recorder.to_keep(line, &|_| true).is_err());
+
+        // A line whose Enter reached none of its tabs has nothing to keep.
+        let nowhere = Uuid::new_v4();
+        let slots = recorder.begin(nowhere, "uptime", &[(web, "web01".into(), Some(session))]);
+        recorder.taken(nowhere, Tier::Low, Some(Uuid::new_v4()));
+        slots[0].not_sent("not connected when Enter was sent");
+        let refused = recorder.to_keep(nowhere, &|_| true).unwrap_err();
+        assert!(refused.to_string().contains("nothing to keep"), "{refused}");
     }
 
     #[test]
@@ -1554,7 +1771,7 @@ mod tests {
         });
         let ids: Vec<Uuid> = (0..3).map(|_| Uuid::new_v4()).collect();
         for (i, id) in ids.iter().enumerate() {
-            recorder.begin(*id, &format!("echo {i}"), &[(Uuid::new_v4(), "web01".into())]);
+            recorder.begin(*id, &format!("echo {i}"), &[(Uuid::new_v4(), "web01".into(), None)]);
             recorder.taken(*id, Tier::Low, Some(Uuid::new_v4()));
         }
         let list = recorder.list(&|_| true);
