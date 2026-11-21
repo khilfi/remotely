@@ -5,6 +5,32 @@
 import type { DateRange } from "./activity.ts";
 import type { AnsibleExport, HandoverExport, InventoryExport, ReadProgress, ReadSummary } from "./reports-api.ts";
 
+/**
+ * UX-21 (0.9.0): each report's one label, in Activity's "⋯" › Reports ▸ and in the palette (as "Reports: <label>").
+ * The Sessions page's own exports keep theirs (SESSION_EXPORT_LABELS).
+ */
+export const REPORT_LABELS = {
+  handover: "Handover pack…",
+  inventory: "Inventory (Excel)…",
+  audit: "Audit log (CSV)…",
+} as const;
+
+/**
+ * UX-21: the Sessions page's "⋯" names these so; the Ansible inventory and the support bundle are also on its selection
+ * bar and in the palette, under the same labels.
+ */
+export const SESSION_EXPORT_LABELS = {
+  importApp: "Import from another app…",
+  moveLaptop: "Move to another laptop",
+  ansible: "Export an Ansible inventory…",
+  bundle: "Collect a support bundle…",
+} as const;
+
+/** UX-21: a report as the palette lists it, under the menu it is in. */
+export function reportPaletteLabel(report: keyof typeof REPORT_LABELS): string {
+  return `Reports: ${REPORT_LABELS[report]}`;
+}
+
 /** The core's longest range, in days (`MAX_RANGE_DAYS`). */
 export const MAX_RANGE_DAYS = 366;
 /** "Prepared by" at most (`MAX_PREPARED_BY`). */

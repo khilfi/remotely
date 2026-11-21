@@ -8,6 +8,7 @@ import {
   groupTitle,
   searchCards,
   searchSettings,
+  sectionLink,
   sectionCard,
   SETTINGS_GROUPS,
   SETTINGS_SECTIONS,
@@ -37,7 +38,12 @@ test("the search finds a setting by its name, a word it covers or its group", ()
   assert.deepEqual(ids(""), []);
   assert.deepEqual(ids("   "), []);
   assert.deepEqual(ids("vmrun"), ["vmware"]);
-  assert.deepEqual(ids("idle lock"), ["vault"]);
+  assert.deepEqual(ids("idle lock"), ["vault-lock"]);
+  // UX-22: unlocking lives on the Vault page: the search finds it, its group doesn't list it.
+  assert.deepEqual(ids("windows login"), ["vault"]);
+  assert.ok(!groupSections("privacy").some((s) => s.id === "vault"));
+  assert.deepEqual(sectionLink(settingsSection("vault")!), { kind: "vault", card: "unlocking" });
+  assert.deepEqual(sectionLink(settingsSection("vault-lock")!), { kind: "setting", section: "vault-lock" });
   assert.deepEqual(ids("DENS"), ["appearance"]);
   assert.ok(ids("prompt hook").includes("terminal"));
   // UX-14: one double-click setting, under Files, for Files here and the Files page.

@@ -26,10 +26,12 @@
 //! * A new master password, like an FD-07 export passphrase, needs 10 characters and must be hard to
 //!   guess ([`strength`]); Remotely can make one up ([`generate_passphrase`]). An existing vault keeps
 //!   the password it has.
-//! * The vault locks after 15 minutes without the user doing anything ([`IDLE_TIMEOUT`]) and on
-//!   demand. Only the user's own input and the actions they start count ([`Vault::note_activity`]):
-//!   background reads (the dashboard's logins, the Containers page's sudo) don't keep it open. Locking
-//!   drops the data key, which zeroizes it, and the core closes what holds decrypted secrets.
+//! * The vault locks after a time without the user doing anything and on demand: 15 minutes
+//!   ([`IDLE_TIMEOUT`]) unless this PC's setting says 1 to 60 ([`IDLE_LOCK_KEY`], [`VaultService::set_idle_lock`],
+//!   audited and refused by the read-only lock; a change applies at once, unlocked too, counting from the change).
+//!   Only the user's own input and the actions they start count ([`Vault::note_activity`]): background reads (the
+//!   dashboard's logins, the Containers page's sudo) don't keep it open. Locking drops the data key, which zeroizes
+//!   it, and the core closes what holds decrypted secrets.
 //! * [`bindings`]: a vault password goes, without the master password being asked again, only where
 //!   it already goes.
 //! * Secrets never reach logs, the audit log, job output, error messages, exports or the UI. The UI
@@ -60,7 +62,7 @@ use crate::error::{CoreError, Result};
 
 pub use bindings::{Destination, SecretBindings, REAUTH_GRACE};
 pub use crypto::KdfParams;
-pub use local::{LocalVault, VaultOptions, IDLE_TIMEOUT};
+pub use local::{idle_timeout, LocalVault, VaultOptions, IDLE_LOCK_KEY, IDLE_LOCK_MINUTES, IDLE_TIMEOUT};
 pub use passphrase::{generate_passphrase, PASSPHRASE_WORDS};
 pub use protector::{Dpapi, KeyProtector};
 pub use service::VaultService;
@@ -283,6 +285,10 @@ pub trait Vault: Send + Sync {
     /// SS-04: the user did something (typed, clicked, started an action), so the idle lock starts again.
     /// Reading a secret ([`Vault::get`]) doesn't count: background reads must not keep the vault open.
     fn note_activity(&self) {}
+
+    /// SS-04: how long the vault stays unlocked without the user doing anything, from now on. A change while it is
+    /// unlocked counts from the change (the user made it), so a shorter time never locks it under them at once.
+    fn set_idle_timeout(&self, _timeout: std::time::Duration) {}
 
     /// Labels and kinds only. Works while locked, so sessions can name their credentials.
     async fn list(&self, ctx: &Context) -> Result<Vec<SecretMeta>>;

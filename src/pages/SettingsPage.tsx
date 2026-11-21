@@ -11,9 +11,13 @@
 // card or row). One save model: every change saves at once, with a quiet "Saved" and Undo in the card's header
 // (SaveStatus); only the approval rules' Advanced editor keeps a Save button (PolicyRulesEditor says why). Each card
 // shows at most one line of help; the rest is behind "?".
+//
+// UX-22 (0.9.0): presentation mode is one line pointing at the top bar's Present (its home); the Vault card went (the
+// search points at the Vault page's Unlocking card); SS-04: Privacy and data has "Lock the vault after", this PC's
+// idle lock.
 
 import { useEffect, useState, type ReactNode } from "react";
-import { CompassIcon, FileTextIcon, FolderOpenIcon, KeyRoundIcon, SearchIcon, XIcon } from "lucide-react";
+import { CompassIcon, FileTextIcon, FolderOpenIcon, SearchIcon, XIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -37,7 +41,7 @@ import { EmptyState } from "@/components/EmptyState";
 import { HelpTip } from "@/components/HelpTip";
 import { HostFactsSetting } from "@/components/HostFactsSetting";
 import { PageHeader } from "@/components/PageHeader";
-import { PresentationCard, useReadOnlyReason } from "@/components/Presentation";
+import { PresentationLine, useReadOnlyReason } from "@/components/Presentation";
 import { NumberSetting, SaveStatus, useSaveStatus } from "@/components/SaveStatus";
 import { ShowTipsAgainButton } from "@/components/Tip";
 import { TerminalRulesCard } from "@/components/TerminalRulesCard";
@@ -46,10 +50,19 @@ import { FilesSettingsCard } from "@/components/FilesSettingsCard";
 import { ToolPathsCard } from "@/components/ToolPathsCard";
 import { UpdateTokenField } from "@/components/UpdateTokenField";
 import { WhyDisabled } from "@/components/WhyDisabled";
-import { api, errorMessage, type AppInfo, type LogsInfo, type Settings, type VaultInfo } from "@/lib/api";
+import {
+  api,
+  errorMessage,
+  IDLE_LOCK_MINUTES,
+  type AppInfo,
+  type LogsInfo,
+  type Settings,
+  type VaultInfo,
+} from "@/lib/api";
 import { DENSITIES, useDensity, type Density } from "@/lib/density";
 import { requestFirstRun } from "@/lib/first-run";
 import type { SettingsChange } from "@/lib/job-events";
+import { linkLabel, requestLink } from "@/lib/links";
 import { navigationApi } from "@/lib/navigation-api";
 import { reveal } from "@/lib/reveal";
 import {
@@ -158,9 +171,11 @@ export function SettingsPage({ onChanged, vault, onVaultChanged, onOpenVault, fo
       case "rules":
         return <ApprovalRulesCard lit={lit} openAdvanced={foundSections.has("rules")} />;
       case "presentation":
-        return <PresentationCard />;
+        return <PresentationLine />;
+      case "vault-lock":
+        return <VaultLockCard vault={vault} onVaultChanged={onVaultChanged} />;
       case "vault":
-        return <VaultSettingsCard vault={vault} onOpenVault={onOpenVault} />;
+        return <ElsewhereCard id="vault" />;
       case "retention":
         return <DataRetentionCard />;
       case "trash":
@@ -521,27 +536,77 @@ function CompareCard({ settings, onSettings }: SettingsCardProps) {
   );
 }
 
-/** SS-04: how the vault locks and unlocks is set on the Vault page; this says how it is now. */
-function VaultSettingsCard({ vault, onOpenVault }: { vault: VaultInfo | null; onOpenVault: () => void }) {
-  const set = vault && vault.status !== "notSetUp";
+/**
+ * SS-04 (0.9.0): "Lock the vault after", this PC's setting (the same in every workspace): 1 to 60 minutes without you
+ * typing or clicking, 15 by default. It applies at once, and the status bar's countdown starts again from the change.
+ * Audited and refused by the read-only lock. How the vault unlocks is the Vault page's Unlocking card.
+ */
+function VaultLockCard({
+  vault,
+  onVaultChanged,
+}: {
+  vault: VaultInfo | null;
+  onVaultChanged: (info: VaultInfo) => void;
+}) {
+  const status = useSaveStatus();
+  const readOnly = useReadOnlyReason();
+  const save = async (minutes: number) => onVaultChanged(await api.vaultSetIdleLock(minutes));
   return (
     <Card>
       <CardHeader>
         <CardTitle className="flex items-center gap-1">
-          Vault
+          Lock the vault after
           <HelpTip topic="vaultIdleLock" />
         </CardTitle>
-        <CardDescription>
-          {set
-            ? `Locks after ${vault.idleLockMinutes} minutes without activity. Your Windows login ${vault.windowsLogin ? "unlocks it too" : "doesn't unlock it"}.`
-            : "Not set up yet."}
-        </CardDescription>
+        <CardDescription>Minutes without you typing or clicking in Remotely, on this PC.</CardDescription>
         <CardAction>
-          <Button variant="outline" onClick={onOpenVault}>
-            <KeyRoundIcon data-icon="inline-start" />
-            {set ? "Open the Vault" : "Set up the vault"}
-          </Button>
+          <SaveStatus status={status} />
         </CardAction>
+      </CardHeader>
+      <CardContent>
+        <WhyDisabled reason={readOnly}>
+          <div>
+            <NumberSetting
+              id="vault-idle-lock"
+              label="Without activity for"
+              suffix="minutes"
+              min={IDLE_LOCK_MINUTES.min}
+              max={IDLE_LOCK_MINUTES.max}
+              disabled={readOnly !== null}
+              value={vault?.idleLockMinutes}
+              onCommit={(next) => {
+                if (!vault) return;
+                const before = vault.idleLockMinutes;
+                void status.run(
+                  () => save(next),
+                  () => save(before),
+                );
+              }}
+            />
+          </div>
+        </WhyDisabled>
+      </CardContent>
+    </Card>
+  );
+}
+
+/** UX-22 (0.9.0): a section whose home is elsewhere, as the search shows it: one line and the link there. */
+function ElsewhereCard({ id }: { id: string }) {
+  const section = settingsSection(id);
+  if (!section?.elsewhere) return null;
+  const link = section.elsewhere;
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>{section.title}</CardTitle>
+        <CardDescription className="flex flex-wrap items-center gap-x-1">
+          {link.kind === "vault"
+            ? "The Windows login and the vault password are on the Vault page's Unlocking card."
+            : "It is on another page."}
+          <Button variant="link" className="h-auto p-0" onClick={() => requestLink(link)}>
+            {linkLabel(link)}
+          </Button>
+        </CardDescription>
       </CardHeader>
     </Card>
   );

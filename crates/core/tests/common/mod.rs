@@ -133,6 +133,11 @@ impl Setup {
 
     pub async fn build(self) -> Core {
         let store = Store::open_in_memory().await.unwrap();
+        self.build_on(store).await
+    }
+
+    /// The app started again on `store` (a real vault is unlocked with its password when set up already).
+    pub async fn build_on(self, store: Store) -> Core {
         let ctx = store.ensure_identity(r"LAB\alice", "Alice").await.unwrap();
         store
             .put_setting(&ctx, remotely_core::store::POLICY_RULES_KEY, &self.rules)
@@ -147,10 +152,19 @@ impl Setup {
             )
             .await
             .unwrap();
-            vault
-                .setup(&ctx, SecretString::new(VAULT_PASSWORD), true)
-                .await
-                .unwrap();
+            if vault.status() == remotely_core::vault::VaultStatus::NotSetUp {
+                vault
+                    .setup(&ctx, SecretString::new(VAULT_PASSWORD), true)
+                    .await
+                    .unwrap();
+            } else {
+                vault
+                    .unlock(remotely_core::vault::UnlockMethod::MasterPassword(SecretString::new(
+                        VAULT_PASSWORD,
+                    )))
+                    .await
+                    .unwrap();
+            }
             Arc::new(vault)
         } else {
             Arc::new(FakeVault::with_password(VAULT_PASSWORD))

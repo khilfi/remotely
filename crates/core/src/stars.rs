@@ -1,10 +1,12 @@
 //! QL-26 stars and recents, per workspace.
 //!
-//! * A star marks a session, a VM or a command (a saved one, `favourite:<id>`, or a built-in one, `library:<id>`), so
-//!   it comes first in the session tree, the VMs list and Ctrl+K. The window calls them "starred" (BX-08's saved
-//!   commands are already its "favourites").
-//! * Recents: the [`MAX_RECENTS`] sessions, VMs and pages opened last, newest first, for Ctrl+K's and the Terminal
-//!   page's "Recent". A terminal opening notes its session here by itself (`Store::record_session_opened`).
+//! * A star marks a session or a VM, so it comes first in the session tree, the Sessions page, the VMs list and Ctrl+K.
+//!   The window calls them "starred". UX-20 (0.9.0): commands have no stars; BX-08's favourites are their one way to be
+//!   kept, and the command stars 0.8.x made move into them once ([`crate::snippets::Snippets::move_command_stars`]).
+//! * Recents: the [`MAX_RECENTS`] sessions, the [`MAX_RECENTS`] VMs and the [`MAX_RECENTS`] pages opened last (each kind
+//!   kept on its own, so visiting pages never pushes a session out), newest first: Ctrl+K shows the newest of them all,
+//!   and (UX-22) the session tree's Recent group and the New terminal dialog the sessions. A terminal opening notes its
+//!   session here by itself (`Store::record_session_opened`).
 //! * Like the notification centre (QL-25), neither is audited and the read-only lock leaves them alone: they change
 //!   only how the window orders what it shows. Stars are kept by key, not by foreign key, so a session restored from
 //!   the trash (QL-27) keeps its star; one whose item is gone is simply not shown.
@@ -15,7 +17,7 @@ use crate::domain::Context;
 use crate::error::{CoreError, Result};
 use crate::store::Store;
 
-/// Recently opened items kept per workspace.
+/// Recently opened items kept per workspace, of each kind.
 pub const MAX_RECENTS: usize = 20;
 /// Stars kept per workspace.
 pub const MAX_STARS: i64 = 2000;
@@ -27,7 +29,6 @@ const MAX_KEY: usize = 1024;
 pub enum StarKind {
     Session,
     Vm,
-    Command,
 }
 
 impl StarKind {
@@ -35,15 +36,14 @@ impl StarKind {
         match self {
             StarKind::Session => "session",
             StarKind::Vm => "vm",
-            StarKind::Command => "command",
         }
     }
 
+    /// UX-20: a command star left from 0.8.x is none of these, so it is never listed.
     pub fn parse(s: &str) -> Option<Self> {
         match s {
             "session" => Some(StarKind::Session),
             "vm" => Some(StarKind::Vm),
-            "command" => Some(StarKind::Command),
             _ => None,
         }
     }

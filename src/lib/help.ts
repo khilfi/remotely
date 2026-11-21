@@ -32,7 +32,7 @@ export const HELP = {
     title: "Templates",
     body: [
       "Describe VMs once, then deploy them. A size sets CPU, memory and disks; an image is where the OS comes from; an install config lets an ISO install itself; a launch template puts them together with the network, SSH key and names.",
-      "A stack deploys several launch templates in boot order, as one. Disk images reads and converts other hypervisors' disk files.",
+      "A stack deploys several launch templates in boot order, as one. Other hypervisors' disk files are the Toolbox's Disk images.",
     ],
   },
   "installConfig.placeholders": {
@@ -94,7 +94,7 @@ export const HELP = {
   "page.toolbox": {
     title: "Toolbox",
     body: [
-      "Ping, trace route, DNS lookups, port checks, certificates, a subnet calculator, Wake-on-LAN and a file server, run from this PC. Only Wake up and the file server change something, so only they go through the approval rules.",
+      "Ping, trace route, DNS lookups, port checks, certificates, a subnet calculator, Wake-on-LAN, a file server and disk images, run from this PC. Only Wake up, the file server and a disk conversion change something, so only they go through the approval rules.",
       "A session behind a jump host has its ports and certificate checked from the jump host. Ping and trace route can't go that way.",
     ],
   },
@@ -178,7 +178,7 @@ export const HELP = {
   "page.activity": {
     title: "Activity",
     body: [
-      "Every job, newest first, with each target's result and output, and the audit log of everything that changed.",
+      "Every job, newest first, with each target's result and output, and the audit log of everything that changed. Reports in the menu make the handover pack, the inventory workbook and the audit log's CSV file.",
       "A command run on many hosts, a push or fetch, or an SSH key push opens grouped by output, as in Compare hosts: its failed hosts can be retried (asked for again) and its results compared and exported. A support bundle shows what each host gave, with Show folder.",
     ],
     link: { label: "Job output retention", to: setting("retention") },
@@ -216,9 +216,10 @@ export const HELP = {
   vaultIdleLock: {
     title: "When the vault locks",
     body: [
-      "The vault locks itself after a set time without you typing or clicking in Remotely; background reads don't count. You can also lock it yourself from the Vault page or the palette.",
+      "The vault locks itself after 1 to 60 minutes without you typing or clicking in Remotely, 15 unless you change it; background reads don't count. You can also lock it yourself from the Vault page or the palette.",
+      "The time is kept for this PC, whatever workspace is open. A change applies at once and the countdown starts again from it.",
     ],
-    link: { label: "Vault settings", to: setting("vault") },
+    link: { label: "Lock the vault after", to: setting("vault-lock") },
   },
   vaultReauth: {
     title: "Why the vault password is asked again",
@@ -239,9 +240,8 @@ export const HELP = {
     title: "Presentation mode",
     body: [
       "For screen shares: host names, IP addresses, user names and your Windows user name are replaced on screen by stand-ins such as host-3 or ip-5.",
-      "Copies, saved output, session logs and exports keep the real text. Printing is masked, since its preview is on screen; Windows file dialogs show real paths.",
+      "Copies, saved output, session logs and exports keep the real text. Printing is masked, since its preview is on screen; Windows file dialogs show real paths. Present is in the top bar, and in the palette.",
     ],
-    link: { label: "Presentation settings", to: setting("presentation") },
   },
   hideTerminals: {
     title: "Hide terminal output",
@@ -253,9 +253,8 @@ export const HELP = {
     title: "Read-only lock",
     body: [
       "While you present, it blocks every change: power actions, snapshots, commands, uploads, tunnels, imports and edits.",
-      "Reading, downloads and typing into a single terminal still work.",
+      "Reading, downloads and typing into a single terminal still work. Turn it on or off in the top bar's Presenting menu.",
     ],
-    link: { label: "Presentation settings", to: setting("presentation") },
   },
   promptHook: {
     title: "Prompt hook",
@@ -319,7 +318,7 @@ export const HELP = {
   supportBundle: {
     title: "Support bundle",
     body: [
-      "Runs the same commands on each host and reads the chosen files as the session's user (never with sudo), into one zip with a folder per host and a manifest. Linux hosts are reached over SSH, Windows hosts over WinRM, each with presets that only read. Remote desktop, VNC, Telnet and serial sessions can't be hosts.",
+      "Runs the same commands on each host, with sudo if you tick it, and reads the chosen files as the session's user, never with sudo: one zip, a folder per host and a manifest. Linux hosts over SSH, Windows hosts over WinRM, with presets that only read. Remote desktop, VNC, Telnet and serial sessions can't be hosts.",
       "What looks like a password, token or private key is redacted in every file, but look through the zip before you share it. Each file keeps up to 10 MB, each host 100 MB and the bundle 1 GB; what is cut or left out is in the manifest.",
     ],
   },
@@ -527,7 +526,7 @@ export const HELP = {
   qemuImg: {
     title: "Converting with qemu-img",
     body: [
-      "Converting to or from qcow2 and VHDX needs qemu-img from QEMU for Windows, which Remotely doesn't ship. Install QEMU, or set qemu-img.exe's path in Settings.",
+      "Converting to or from qcow2 and VHDX needs qemu-img from QEMU for Windows. Remotely never ships it (it is GPL-licensed): install QEMU from its own download page and Remotely finds it, or set qemu-img.exe's path in Settings.",
       "Workstation's and VirtualBox's own tools handle the other formats.",
     ],
     link: { label: "Conversion tools", to: setting("qemu-img") },
@@ -640,7 +639,7 @@ export const HELP = {
     title: "Audit log",
     body: [
       "Every change is written to the audit log when it starts and when it ends, each entry chained to the one before, so a missing or edited entry shows.",
-      "Activity shows it, and you can export it as a CSV file.",
+      "Activity shows it, and its Reports menu exports it as a CSV file.",
     ],
     link: { label: "Open Activity", to: { kind: "page", page: "activity" } },
   },

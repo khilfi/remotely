@@ -12,6 +12,7 @@ import {
   jobsLink,
   jobsText,
   LOCK_WARNING_SECS,
+  lockWarningSecs,
   OpenJobs,
   reportVault,
   secondsLeft,
@@ -79,6 +80,19 @@ test("the vault in words: amber in the last minute", () => {
   assert.equal(vaultText({ ...unlocked, status: "locked", locksInSecs: null }, null).label, "Vault locked");
   assert.equal(vaultText({ ...unlocked, status: "notSetUp", locksInSecs: null }, null).label, "No vault yet");
   assert.equal(vaultText(null, null).label, "Vault");
+  // SS-04 (0.9.0): the idle lock is a setting, so it can be one minute.
+  assert.match(vaultText({ ...unlocked, idleLockMinutes: 1 }, 30).title, /^Locks after 1 minute without/);
+  assert.match(vaultText(unlocked, 30).title, /^Locks after 15 minutes without/);
+});
+
+test("SS-04: a short idle lock turns amber in its last quarter, not all along", () => {
+  assert.equal(lockWarningSecs(15), LOCK_WARNING_SECS);
+  assert.equal(lockWarningSecs(60), LOCK_WARNING_SECS);
+  assert.equal(lockWarningSecs(1), 15);
+  assert.equal(lockWarningSecs(2), 30);
+  const oneMinute = { ...unlocked, idleLockMinutes: 1 };
+  assert.equal(vaultText(oneMinute, 50).tone, "good");
+  assert.equal(vaultText(oneMinute, 15).tone, "warning");
 });
 
 test("open jobs: seeded from the recent ones, then followed by their events", () => {

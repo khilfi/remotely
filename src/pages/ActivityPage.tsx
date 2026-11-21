@@ -29,6 +29,8 @@ import {
   ChevronRightIcon,
   DownloadIcon,
   EraserIcon,
+  FileOutputIcon,
+  FileSpreadsheetIcon,
   FilterXIcon,
   FolderOpenIcon,
   ListChecksIcon,
@@ -41,7 +43,12 @@ import {
 import { toast } from "sonner";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
-import { DropdownMenuItem } from "@/components/ui/dropdown-menu";
+import {
+  DropdownMenuItem,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -82,7 +89,9 @@ import {
   type ActivityKind,
   type DateRange,
 } from "@/lib/activity";
-import { formatWhen, plural } from "@/lib/format";
+import { exportAuditLog } from "@/lib/audit-export";
+import { formatWhen } from "@/lib/format";
+import { REPORT_LABELS } from "@/lib/reports";
 import { progressesJob, PROGRESS_READ_MS } from "@/lib/job-events";
 import { activityView } from "@/lib/results-list";
 import { cn } from "@/lib/utils";
@@ -131,6 +140,7 @@ export function ActivityPage({
   active,
   focusJob = null,
   onHandover,
+  onInventory,
   onSubmitted,
 }: {
   version: number;
@@ -139,6 +149,8 @@ export function ActivityPage({
   focusJob?: { jobId: string; n: number } | null;
   /** FD-08: the handover pack's dialog, on the dates the filter shows. */
   onHandover: (range: DateRange) => void;
+  /** FD-05, UX-21: the inventory to Excel's dialog. */
+  onInventory: () => void;
   /** UX-18: a retry was submitted; the app asks for its approval, and `onJob` gets its job once queued. */
   onSubmitted: (outcome: SubmitOutcome, onJob?: (jobId: string) => void) => void;
 }) {
@@ -248,22 +260,11 @@ export function ActivityPage({
     }
   }
 
+  /** UX-21: Reports ▸ Audit log (CSV)…, as the palette's; the export is audited, so the list is read again. */
   async function exportCsv() {
     setExporting(true);
     try {
-      const report = await api.exportAudit();
-      if (report) {
-        const redacted = report.redacted
-          ? ` ${plural(report.redacted, "row")} had something that looked like a secret, replaced by [redacted].`
-          : "";
-        toast.success(`Exported ${entriesText(report.entries)}`, {
-          description: `${report.path}.${redacted}`,
-          duration: 8000,
-        });
-        setReloads((n) => n + 1);
-      }
-    } catch (err) {
-      toast.error(`Could not export the audit log: ${errorMessage(err)}`);
+      if (await exportAuditLog()) setReloads((n) => n + 1);
     } finally {
       setExporting(false);
     }
@@ -299,13 +300,36 @@ export function ActivityPage({
         page="activity"
         toolsClassName="w-72"
         tools={
-          <DropdownMenuItem onSelect={() => onHandover(filter.range)}>
-            <PackageCheckIcon />
-            <span className="grid">
-              Make a handover pack…
-              <span className="text-xs text-muted-foreground">What was done in these dates, for the customer</span>
-            </span>
-          </DropdownMenuItem>
+          // UX-21: every report in one place, each with the one label it has in the palette too.
+          <DropdownMenuSub>
+            <DropdownMenuSubTrigger>
+              <FileOutputIcon />
+              Reports
+            </DropdownMenuSubTrigger>
+            <DropdownMenuSubContent className="w-72">
+              <DropdownMenuItem onSelect={() => onHandover(filter.range)}>
+                <PackageCheckIcon />
+                <span className="grid">
+                  {REPORT_LABELS.handover}
+                  <span className="text-xs text-muted-foreground">What was done in these dates, for the customer</span>
+                </span>
+              </DropdownMenuItem>
+              <DropdownMenuItem onSelect={onInventory}>
+                <FileSpreadsheetIcon />
+                <span className="grid">
+                  {REPORT_LABELS.inventory}
+                  <span className="text-xs text-muted-foreground">VMs, hosts, networks and checks</span>
+                </span>
+              </DropdownMenuItem>
+              <DropdownMenuItem disabled={exporting} onSelect={() => void exportCsv()}>
+                <DownloadIcon />
+                <span className="grid">
+                  {exporting ? "Exporting the audit log…" : REPORT_LABELS.audit}
+                  <span className="text-xs text-muted-foreground">Every entry, secrets redacted</span>
+                </span>
+              </DropdownMenuItem>
+            </DropdownMenuSubContent>
+          </DropdownMenuSub>
         }
         tabs={
           <TabsList>
@@ -431,10 +455,6 @@ export function ActivityPage({
             >
               <ShieldCheckIcon data-icon="inline-start" />
               Verify the chain
-            </Button>
-            <Button variant="outline" size="sm" onClick={() => void exportCsv()} disabled={exporting}>
-              <DownloadIcon data-icon="inline-start" />
-              {exporting ? "Exporting…" : "Export CSV…"}
             </Button>
           </div>
         </div>

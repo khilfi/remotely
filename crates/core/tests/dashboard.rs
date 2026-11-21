@@ -13,7 +13,7 @@ use remotely_core::adapters::host_counters::VmProcess;
 use remotely_core::adapters::remote::AgentSource;
 use remotely_core::adapters::vmware::VmxInfo;
 use remotely_core::alerts::{Alert, AlertMetric, AlertTarget, AlertTargetKind, Severity};
-use remotely_core::dashboard::{ChartMetric, ChartRange, DashboardLayout, Widget, WidgetKind, LAYOUT_KEY};
+use remotely_core::dashboard::{ChartMetric, DashboardLayout, Widget, WidgetKind, LAYOUT_KEY};
 use remotely_core::domain::{Environment, THIS_PC_KEY};
 use remotely_core::fakes::ssh_server::host::HostFixture;
 use remotely_core::fakes::ssh_server::TestSshServer;
@@ -486,7 +486,6 @@ async fn a_layout_is_saved_per_workspace_audited_reset_and_locked_while_presenti
             key: Some(vmx("web")),
             name: Some("web".into()),
             metric: ChartMetric::Cpu,
-            range: ChartRange::Day,
         },
     });
     layout.widgets.push(Widget {

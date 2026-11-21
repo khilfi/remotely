@@ -5,6 +5,9 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   ansibleReason,
+  REPORT_LABELS,
+  reportPaletteLabel,
+  SESSION_EXPORT_LABELS,
   ansibleSavedText,
   busyText,
   dayRange,
@@ -105,4 +108,12 @@ test("what the toasts say", () => {
   assert.equal(readText({ asked: 1, read: 1, problems: [] }), "1 of 1 host read again.");
   assert.equal(readText(null), null);
   assert.equal(handoverCountText(1, 0, 2), "1 job, 0 other changes and 2 marked notes");
+});
+
+test("UX-21: each report and Sessions export has one label, the palette's under Reports", () => {
+  const labels = [...Object.values(REPORT_LABELS), ...Object.values(SESSION_EXPORT_LABELS)];
+  assert.equal(new Set(labels).size, labels.length);
+  assert.equal(reportPaletteLabel("inventory"), "Reports: Inventory (Excel)…");
+  assert.equal(reportPaletteLabel("audit"), "Reports: Audit log (CSV)…");
+  assert.equal(reportPaletteLabel("handover"), "Reports: Handover pack…");
 });

@@ -23,6 +23,7 @@ test("the explanations the 0.5.0 audit found repeated are each one entry", () =>
     "windowsUnlock",
     "presentationMode",
     "readOnlyLock",
+    "hideTerminals",
     "promptHook",
     "toolPaths",
     "retention",

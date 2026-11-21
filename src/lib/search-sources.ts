@@ -17,7 +17,7 @@ import type { CachedContainers } from "./container-cache.ts";
 import type { GlossaryEntry } from "./glossary.ts";
 import type { SearchField, SearchItem } from "./search.ts";
 import type { ScheduleView } from "./schedules-api.ts";
-import type { SettingsSection } from "./settings-index.ts";
+import { sectionLink, type SettingsSection } from "./settings-index.ts";
 import type { HostNetwork } from "./topology.ts";
 
 function field(text: string | null | undefined, kind: SearchField["kind"]): SearchField[] {
@@ -211,9 +211,10 @@ export function settingItems(sections: readonly SettingsSection[]): SearchItem[]
     id: `setting:${s.id}`,
     provider: "settings",
     title: s.title,
-    detail: "Settings",
+    // UX-22: a setting whose home is elsewhere (the Vault page's Unlocking card) opens there.
+    detail: s.elsewhere ? "Vault" : "Settings",
     fields: [...field(s.title, "name"), ...s.keywords.split(/\s+/).flatMap((w) => field(w, "tag"))],
-    target: { open: { kind: "setting" as const, section: s.id } },
+    target: { open: sectionLink(s) },
   }));
 }
 

@@ -19,7 +19,7 @@ use remotely_core::sessions::{SessionAuth, SessionInput};
 use remotely_core::store::Store;
 use remotely_core::vault::{
     KeyProtector, LocalVault, SecretKind, SecretString, UnlockMethod, Vault, VaultOptions, VaultService, VaultStatus,
-    IDLE_TIMEOUT,
+    IDLE_LOCK_KEY, IDLE_TIMEOUT,
 };
 use remotely_core::workspaces::WorkspaceInput;
 use remotely_core::CoreError;
@@ -997,4 +997,136 @@ async fn a_reset_empties_every_workspace_keeps_the_sessions_and_is_audited_in_ea
     );
     assert!(core.store.verify_audit_chain(&home).await.unwrap().ok);
     assert!(core.store.verify_audit_chain(&there).await.unwrap().ok);
+}
+
+// ---- SS-04 (0.9.0): the idle lock as this PC's setting ----------------------------------------------------------------
+
+#[tokio::test]
+async fn the_idle_lock_takes_1_to_60_minutes_is_audited_and_refused_by_the_read_only_lock() {
+    let core = Setup::new(FakeVmware::default()).with_real_vault().build().await;
+    let ctx = core.ctx();
+    assert_eq!(core.vault.info().idle_lock_minutes, 15, "15 minutes by default");
+    for outside in [0, 61, u64::MAX] {
+        let err = core.vault.set_idle_lock(&ctx, outside).await.unwrap_err();
+        assert!(matches!(err, CoreError::InvalidInput(_)), "{outside}: {err}");
+        assert!(err.to_string().contains("1 to 60 minutes"), "{err}");
+    }
+    assert_eq!(core.vault.info().idle_lock_minutes, 15);
+    assert_eq!(core.store.get_setting::<u64>(&ctx, IDLE_LOCK_KEY).await.unwrap(), None);
+
+    let before = core.store.recent_audit(&ctx, 200).await.unwrap().len();
+    for minutes in [1, 60, 5] {
+        let info = core.vault.set_idle_lock(&ctx, minutes).await.unwrap();
+        assert_eq!(info.idle_lock_minutes, minutes);
+        // Unlocked: the status bar's countdown starts again from the change.
+        let left = info.locks_in_secs.expect("a countdown");
+        assert!((minutes * 60 - 1..=minutes * 60).contains(&left), "{minutes}: {left}");
+    }
+    // The same value again changes nothing and isn't audited.
+    core.vault.set_idle_lock(&ctx, 5).await.unwrap();
+    let audit = core.store.recent_audit(&ctx, 200).await.unwrap();
+    assert_eq!(audit.len(), before + 3);
+    assert!(audit[..3]
+        .iter()
+        .all(|e| e.event == "vault_changed" && e.action == "Changed when the vault locks itself"));
+    assert_eq!(
+        audit[0].detail.as_deref(),
+        Some("after 5 minutes without activity, was 60")
+    );
+    assert_eq!(
+        audit[2].detail.as_deref(),
+        Some("after 1 minute without activity, was 15")
+    );
+    assert_eq!(
+        core.store.get_setting::<u64>(&ctx, IDLE_LOCK_KEY).await.unwrap(),
+        Some(5)
+    );
+
+    core.presentation
+        .set(Presentation {
+            enabled: true,
+            read_only: true,
+        })
+        .await
+        .unwrap();
+    assert!(matches!(
+        core.vault.set_idle_lock(&ctx, 10).await,
+        Err(CoreError::ReadOnlyLock { .. })
+    ));
+    assert_eq!(core.vault.info().idle_lock_minutes, 5);
+}
+
+#[tokio::test]
+async fn a_shorter_idle_lock_set_while_unlocked_counts_from_the_change_and_locks_on_time() {
+    let (_ctx, vault) = quick_to_lock(Duration::from_secs(60)).await;
+    let mut status = vault.watch();
+    status.borrow_and_update();
+    tokio::time::sleep(Duration::from_millis(1200)).await;
+    vault.set_idle_timeout(Duration::from_millis(1500));
+    let info = vault.info();
+    assert_eq!(info.idle_lock_minutes, 1, "part of a minute shows as one");
+    assert!(info.locks_in_secs.unwrap() <= 2);
+    // From the last activity it would be over; from the change it isn't.
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    assert_eq!(vault.status(), VaultStatus::Unlocked);
+    // The idle check, which looked every 15 seconds for the old time, follows the new one.
+    tokio::time::timeout(Duration::from_secs(5), status.changed())
+        .await
+        .expect("locked on time")
+        .unwrap();
+    assert_eq!(*status.borrow(), VaultStatus::Locked);
+    // A longer one while locked: it applies from the next unlock.
+    vault.set_idle_timeout(Duration::from_secs(120));
+    assert_eq!(vault.info().locks_in_secs, None);
+    vault.unlock(UnlockMethod::MasterPassword(pw(PASSWORD))).await.unwrap();
+    assert!(vault.info().locks_in_secs.unwrap() > 60);
+}
+
+#[tokio::test]
+async fn the_idle_lock_stays_with_this_pc_across_workspaces_and_restarts() {
+    let core = Setup::new(FakeVmware::default()).with_real_vault().build().await;
+    let home = core.ctx();
+    let acme = core
+        .workspaces
+        .create(WorkspaceInput {
+            name: "Acme".into(),
+            color: None,
+        })
+        .await
+        .unwrap();
+    let there = Context {
+        workspace_id: acme.id,
+        user_id: home.user_id,
+    };
+    // Set from another workspace: the same setting in the home one, and audited where it was set.
+    core.vault.set_idle_lock(&there, 7).await.unwrap();
+    assert_eq!(
+        core.store.get_setting::<u64>(&home, IDLE_LOCK_KEY).await.unwrap(),
+        Some(7)
+    );
+    assert_eq!(
+        core.store.get_setting::<u64>(&there, IDLE_LOCK_KEY).await.unwrap(),
+        Some(7)
+    );
+    assert_eq!(
+        core.store.recent_audit(&there, 1).await.unwrap()[0].action,
+        "Changed when the vault locks itself"
+    );
+    core.switch_workspace(acme.id).await.unwrap();
+    assert_eq!(
+        core.vault.info().idle_lock_minutes,
+        7,
+        "the shown workspace doesn't change it"
+    );
+
+    // The app started again: the setting applies from the start, whichever workspace opens.
+    let store = core.store.clone();
+    drop(core);
+    let again = Setup::new(FakeVmware::default())
+        .with_real_vault()
+        .build_on(store)
+        .await;
+    assert_eq!(again.ctx().workspace_id, acme.id, "the workspace shown last");
+    assert_eq!(again.vault.info().idle_lock_minutes, 7);
+    assert!(again.vault.info().locks_in_secs.unwrap() <= 7 * 60);
 }

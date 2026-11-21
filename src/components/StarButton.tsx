@@ -1,6 +1,6 @@
-// QL-26: the star on a session, VM or command row. Filled while starred; otherwise shown on the row's hover (the row's
-// `group` class) or focus, so it doesn't crowd the list. Starred items come first in the session tree, the VMs list and
-// Ctrl+K. Not audited, and allowed while presenting.
+// QL-26: the star on a session or VM row (UX-20, 0.9.0: commands have none). Filled while starred; otherwise shown on
+// the row's hover (the row's `group` class) or focus, so it doesn't crowd the list. Starred items come first in the
+// session tree, the Sessions page, the VMs list and Ctrl+K. Not audited, and allowed while presenting.
 
 import { StarIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";

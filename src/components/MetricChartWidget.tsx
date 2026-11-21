@@ -1,5 +1,6 @@
 // MO-16: one metric of a VM (its host side), a watched host (its guest) or this PC, as a dashboard widget. It shows the
-// dashboard's one range (UX-07; the range a layout saved for it from 0.5.0 is kept but no longer used). Live reads the collector's last 30 minutes each round; a longer range reads the history on disk (MO-06) and carries on
+// dashboard's one range (UX-07; UX-22, 0.9.0: a layout keeps no range per chart, one saved from 0.5.0 is read past).
+// Live reads the collector's last 30 minutes each round; a longer range reads the history on disk (MO-06) and carries on
 // with the live rounds. Reads only while the dashboard shows and the window is visible.
 
 import { LineChartIcon } from "lucide-react";

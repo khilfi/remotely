@@ -4,8 +4,8 @@
 // links and the sidebar. PageHeader takes each page's title from here, so a title always matches the sidebar.
 //
 // Pages that became part of another page keep their id, so links, notifications and the palette still reach them:
-// Snapshots (QL-14) is a view of Virtual machines, Image tools the Templates page's Disk images tab, the Map a Dashboard
-// tab and Known hosts a Vault tab. A 0.5.0 shortcut that no page uses now still opens what it opened (Ctrl+0 the map,
+// Snapshots (QL-14) is a view of Virtual machines, Image tools the Toolbox's Disk images tab (UX-22: the Templates
+// page's until 0.9.0), the Map a Dashboard tab and Known hosts a Vault tab. A 0.5.0 shortcut that no page uses now still opens what it opened (Ctrl+0 the map,
 // Ctrl+; Disk images, Ctrl+. Schedules); the others now open the page in that place of the sidebar. Tested in
 // navigation.test.ts.
 
@@ -59,15 +59,15 @@ export const PAGES: readonly PageInfo[] = [
   { id: "settings", label: "Settings", group: null, shortcut: "Ctrl+," },
 ];
 
-/** The tabs pages gained in 0.6.0, by their home page. */
-export type TemplatesHomeTab = "disks";
+/** The tabs pages gained in 0.6.0, by their home page (Disk images, a Toolbox tab, is a `ToolboxTool`). */
 export type DashboardTab = "metrics" | "checks" | "map";
 export type VaultTab = "secrets" | "knownHosts";
 
 /** Pages that are now a tab or view of another page, with their 0.5.0 shortcut when no page has taken it since. */
 export const MOVED_PAGES = {
   snapshots: { label: "Snapshots", home: "vms", tab: "snapshots" },
-  images: { label: "Disk images", home: "templates", tab: "disks", shortcut: "Ctrl+;" },
+  // UX-22 (0.9.0): Disk images left the Templates page for a Toolbox tab; its id and Ctrl+; follow it.
+  images: { label: "Disk images", home: "toolbox", tab: "disks", shortcut: "Ctrl+;" },
   map: { label: "Map", home: "dashboard", tab: "map", shortcut: "Ctrl+0" },
   knownHosts: { label: "Known hosts", home: "vault", tab: "knownHosts" },
 } as const satisfies Record<string, { label: string; home: PageId; tab: string; shortcut?: string }>;

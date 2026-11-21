@@ -265,7 +265,13 @@ test("settings are found by their cards' labels and the words they cover", () =>
   const items = settingItems(SETTINGS_SECTIONS);
   assert.equal(rankItems("vmrun", items)[0].item.title, "VMware Workstation");
   assert.equal(rankItems("density", items)[0].item.title, "Appearance");
-  assert.equal(rankItems("idle lock", items)[0].item.title, "Vault");
+  assert.equal(rankItems("idle lock", items)[0].item.title, "Lock the vault after");
+  // UX-22: unlocking opens the Vault page's Unlocking card.
+  const unlocking = rankItems("windows login", items)[0].item;
+  assert.deepEqual(
+    [unlocking.title, unlocking.target],
+    ["Vault unlocking", { open: { kind: "vault", card: "unlocking" } }],
+  );
   assert.deepEqual(items.find((i) => i.title === "Updates")?.target, { open: { kind: "setting", section: "updates" } });
 });
 

@@ -249,13 +249,6 @@ pub async fn quick_connect_forget(state: State<'_, AppState>, id: Option<Uuid>) 
     Ok(core.terminals.forget_quick_connects(&core.ctx(), id).await?)
 }
 
-/// QL-02: the sessions opened most recently, newest first.
-#[tauri::command]
-pub async fn sessions_recent(state: State<'_, AppState>, limit: Option<u32>) -> IpcResult<Vec<SessionRecord>> {
-    let core = &state.core;
-    Ok(core.sessions.recent(&core.ctx(), limit.unwrap_or(10).min(50)).await?)
-}
-
 /// QL-04: the Terminal page's session tree.
 #[tauri::command]
 pub async fn session_tree(

@@ -40,7 +40,7 @@ test("the pages are listed in sidebar order, then the tabs that kept their short
       "Ctrl+8 Activity",
       "Ctrl+9 Vault",
       "Ctrl+, Settings",
-      "Ctrl+; Templates › Disk images",
+      "Ctrl+; Toolbox › Disk images",
       "Ctrl+0 Dashboard › Map",
     ],
   );

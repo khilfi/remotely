@@ -9,7 +9,9 @@
 // card; how secrets are kept (AES-256-GCM, Argon2id) is behind "?".
 //
 // SS-04: a forgotten vault password can't be recovered or replaced while the secrets stay, so "Reset the vault…"
-// (the "⋯", the Unlocking card, and the unlock form while locked) deletes every secret and sets a new password.
+// (UX-22, 0.9.0: the "⋯" and the unlock form while locked, nowhere else) deletes every secret and sets a new password.
+// The idle lock's time is this PC's setting (Settings › Privacy and data, SS-04): the Unlocking card says it and links
+// there, and Settings' search for unlocking points at this card.
 
 import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
@@ -74,6 +76,9 @@ import {
 } from "@/lib/api";
 import { formatWhen, plural } from "@/lib/format";
 import { usePasswordStrength } from "@/hooks/use-password-strength";
+import { requestLink } from "@/lib/links";
+import { reveal } from "@/lib/reveal";
+import { cn } from "@/lib/utils";
 
 /** The vault password's minimum length, as the core checks it (with how hard it is to guess). */
 const MIN_PASSWORD = 10;
@@ -89,7 +94,12 @@ interface Props {
   /** SS-09: a key push goes through the app, which opens the approval dialog. */
   onSubmitted: (outcome: SubmitOutcome, onJob: (jobId: string) => void) => void;
   onOpenSessions: () => void;
+  /** UX-22 (0.9.0): a link to the Unlocking card (Settings' search points there): it is scrolled to and lit. */
+  focus?: { card: "unlocking"; n: number } | null;
 }
+
+/** UX-22: the Unlocking card's element id, for links to it. */
+const VAULT_UNLOCKING_ID = "vault-unlocking";
 
 type DialogState =
   | { kind: "add"; secretKind: SecretKind }
@@ -220,6 +230,7 @@ function VaultSecrets({
   active,
   onSubmitted,
   onOpenSessions,
+  focus = null,
   ask,
 }: Omit<Props, "tab" | "onTabChange"> & { ask: Ask | null }) {
   const [secrets, setSecrets] = useState<SecretMeta[]>([]);
@@ -227,6 +238,23 @@ function VaultSecrets({
   const [dialog, setDialog] = useState<DialogState>(null);
   const [keyRequest, setKeyRequest] = useState<SshKeyRequest | null>(null);
   const readOnly = useReadOnlyReason();
+
+  // UX-22: the Unlocking card a link asked for, lit until it has been seen.
+  const [lit, setLit] = useState(false);
+  const [focusHandled, setFocusHandled] = useState(focus?.n ?? 0);
+  if (focus && focus.n !== focusHandled) {
+    setFocusHandled(focus.n);
+    setLit(true);
+  }
+  useEffect(() => {
+    if (!lit) return;
+    const frame = window.requestAnimationFrame(() => reveal(document.getElementById(VAULT_UNLOCKING_ID), "top"));
+    const timer = window.setTimeout(() => setLit(false), 2500);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      window.clearTimeout(timer);
+    };
+  }, [lit]);
 
   // The header's Add and "⋯" menus.
   const [asked, setAsked] = useState(ask?.n ?? 0);
@@ -381,8 +409,8 @@ function VaultSecrets({
 
       <UnlockingCard
         vault={vault}
+        lit={lit}
         onChangePassword={() => setDialog({ kind: "password" })}
-        onReset={() => setDialog({ kind: "reset" })}
         onWindowsLogin={(enable) => {
           // SS-04: turning it off removes a way in, so it needs no password; turning it on does.
           if (enable) setDialog({ kind: "windowsLogin", enable });
@@ -569,26 +597,37 @@ export function SetupCard({ vault, onDone }: { vault: VaultInfo; onDone: (info: 
  * the vault password. */
 function UnlockingCard({
   vault,
+  lit,
   onChangePassword,
-  onReset,
   onWindowsLogin,
 }: {
   vault: VaultInfo;
+  /** UX-22: a link asked for this card (Settings' search, the palette): it is scrolled to and lit. */
+  lit: boolean;
   onChangePassword: () => void;
-  /** SS-04: a forgotten vault password. */
-  onReset: () => void;
   onWindowsLogin: (enable: boolean) => void;
 }) {
   const readOnly = useReadOnlyReason();
   return (
-    <Card>
+    <Card
+      id={VAULT_UNLOCKING_ID}
+      className={cn("scroll-mt-4 transition-shadow", lit && "ring-2 ring-ring ring-offset-2")}
+    >
       <CardHeader>
         <CardTitle className="flex items-center gap-1">
           Unlocking
           <HelpTip topic="vaultIdleLock" />
         </CardTitle>
-        <CardDescription>
-          Locks itself after {vault.idleLockMinutes} minutes without you typing or clicking in Remotely.
+        <CardDescription className="flex flex-wrap items-center gap-x-1">
+          Locks itself after {plural(vault.idleLockMinutes, "minute")} without you typing or clicking in Remotely.
+          {/* SS-04 (0.9.0): the time is this PC's setting, in Settings › Privacy and data. */}
+          <Button
+            variant="link"
+            className="h-auto p-0"
+            onClick={() => requestLink({ kind: "setting", section: "vault-lock" })}
+          >
+            Change
+          </Button>
         </CardDescription>
       </CardHeader>
       <CardContent className="grid gap-4">
@@ -622,12 +661,13 @@ function UnlockingCard({
             <HelpTip topic="vaultReauth" />
           </span>
           <WhyDisabled reason={readOnly}>
-            <Button variant="ghost" size="sm" className="ml-auto" disabled={readOnly !== null} onClick={onReset}>
-              Reset the vault…
-            </Button>
-          </WhyDisabled>
-          <WhyDisabled reason={readOnly}>
-            <Button variant="outline" size="sm" disabled={readOnly !== null} onClick={onChangePassword}>
+            <Button
+              variant="outline"
+              size="sm"
+              className="ml-auto"
+              disabled={readOnly !== null}
+              onClick={onChangePassword}
+            >
               Change the password…
             </Button>
           </WhyDisabled>

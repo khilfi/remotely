@@ -49,22 +49,6 @@ pub enum ChartMetric {
     DiskUsed,
 }
 
-/// A chart widget's range: the live rounds in memory, or MO-06's history.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub enum ChartRange {
-    #[default]
-    #[serde(rename = "live")]
-    Live,
-    #[serde(rename = "1h")]
-    Hour,
-    #[serde(rename = "6h")]
-    SixHours,
-    #[serde(rename = "24h")]
-    Day,
-    #[serde(rename = "7d")]
-    Week,
-}
-
 /// A widget and what it shows.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase", rename_all_fields = "camelCase")]
@@ -84,7 +68,8 @@ pub enum WidgetKind {
         #[serde(default)]
         session_id: Option<Uuid>,
     },
-    /// A metric of a VM (host side), a watched host (guest) or this PC, live or from the history.
+    /// A metric of a VM (host side), a watched host (guest) or this PC, over the dashboard's one range (UX-07). The
+    /// `range` a 0.5.0 layout saved per chart is read past and no longer written.
     Chart {
         #[serde(default)]
         source: Option<HistorySource>,
@@ -94,8 +79,6 @@ pub enum WidgetKind {
         #[serde(default)]
         name: Option<String>,
         metric: ChartMetric,
-        #[serde(default)]
-        range: ChartRange,
     },
 }
 
@@ -360,7 +343,6 @@ mod tests {
                 key: key.map(str::to_owned),
                 name: Some("web-01".into()),
                 metric: ChartMetric::Cpu,
-                range: ChartRange::Day,
             },
         }
     }
@@ -383,10 +365,17 @@ mod tests {
             json,
             serde_json::json!({
                 "id": "cpu-1", "w": 2, "h": 2, "kind": "chart", "source": "host",
-                "key": r"C:\VMs\web\web.vmx", "name": "web-01", "metric": "cpu", "range": "24h"
+                "key": r"C:\VMs\web\web.vmx", "name": "web-01", "metric": "cpu"
             })
         );
         assert_eq!(serde_json::from_value::<Widget>(json).unwrap(), widget);
+        // A layout 0.5.0 to 0.8.x saved, with a range per chart, still reads.
+        let saved: Widget = serde_json::from_value(serde_json::json!({
+            "id": "cpu-1", "w": 2, "h": 2, "kind": "chart", "source": "host",
+            "key": r"C:\VMs\web\web.vmx", "name": "web-01", "metric": "cpu", "range": "24h"
+        }))
+        .unwrap();
+        assert_eq!(saved, widget);
         let services: Widget = serde_json::from_str(r#"{"id":"s","w":1,"h":3,"kind":"services"}"#).unwrap();
         assert_eq!(services.kind, WidgetKind::Services { session_id: None });
         assert!(

@@ -54,12 +54,13 @@ export interface RenderedNote {
 
 // ---- Stars and recents ------------------------------------------------------------------------------------------
 
-export type StarKind = "session" | "vm" | "command";
+/** UX-20 (0.9.0): commands have no stars; the favourites keep them. */
+export type StarKind = "session" | "vm";
 export type RecentKind = "session" | "vm" | "page";
 
 export interface Star {
   kind: StarKind;
-  /** A session's id, a VM's key, or a command's `favourite:<id>` / `library:<id>`. */
+  /** A session's id or a VM's key. */
   key: string;
   createdAt: string;
 }

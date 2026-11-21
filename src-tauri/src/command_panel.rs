@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use remotely_core::snippets::manual;
-use remotely_core::snippets::{CommandInfo, Favourite, FavouriteInput, LibraryEntry};
+use remotely_core::snippets::{AddedFavourite, CommandInfo, Favourite, FavouriteInput, LibraryEntry};
 use remotely_core::vault::{SecretId, SecretString};
 use remotely_core::CoreError;
 use tauri::{AppHandle, State};
@@ -41,6 +41,14 @@ pub async fn favourites_list(state: State<'_, AppState>) -> IpcResult<Vec<Favour
 pub async fn favourite_add(state: State<'_, AppState>, input: FavouriteInput) -> IpcResult<Favourite> {
     let core = &state.core;
     Ok(core.snippets.add(&core.ctx(), input).await?)
+}
+
+/// UX-20 (0.9.0): a library row's "Add to favourites": into the Starred folder, audited as an add; or the favourite
+/// that holds its command already.
+#[tauri::command]
+pub async fn favourite_add_from_library(state: State<'_, AppState>, id: String) -> IpcResult<AddedFavourite> {
+    let core = &state.core;
+    Ok(core.snippets.add_from_library(&core.ctx(), &id).await?)
 }
 
 /// BX-08: changes a favourite; another folder puts it at that folder's end. Audited.

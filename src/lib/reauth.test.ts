@@ -5,6 +5,8 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   ACTIVITY_PING_MS,
+  activityPingMs,
+  MIN_ACTIVITY_PING_MS,
   isReauthCancelled,
   reauthReason,
   shouldPingActivity,
@@ -114,4 +116,14 @@ test("activity reaches the core at most every 20 seconds", () => {
   assert.equal(shouldPingActivity(null, 1_000), true);
   assert.equal(shouldPingActivity(1_000, 1_000 + ACTIVITY_PING_MS - 1), false);
   assert.equal(shouldPingActivity(1_000, 1_000 + ACTIVITY_PING_MS), true);
+});
+
+test("SS-04: a short idle lock hears of activity more often, a quarter of it, never under 5 seconds", () => {
+  assert.equal(activityPingMs(15), ACTIVITY_PING_MS);
+  assert.equal(activityPingMs(60), ACTIVITY_PING_MS);
+  assert.equal(activityPingMs(1), 15_000);
+  assert.equal(activityPingMs(null), ACTIVITY_PING_MS, "the vault not read yet");
+  assert.equal(activityPingMs(0.1), MIN_ACTIVITY_PING_MS, "never under 5 seconds");
+  assert.equal(shouldPingActivity(1_000, 1_000 + 15_000, activityPingMs(1)), true);
+  assert.equal(shouldPingActivity(1_000, 1_000 + 14_999, activityPingMs(1)), false);
 });

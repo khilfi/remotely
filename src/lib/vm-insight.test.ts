@@ -30,6 +30,9 @@ import {
   vmnetKindLabel,
   wasteTotals,
   type ForwardPlace,
+  choicesWith,
+  wasteDefaults,
+  WASTE_DEFAULTS,
 } from "./vm-insight.ts";
 import type { VirtualNic } from "./api.ts";
 import { networkKey } from "./topology.ts";
@@ -408,4 +411,12 @@ test("a mask's prefix length, and none for what isn't a mask", () => {
   assert.equal(prefixLength("255.255.255"), null);
   assert.equal(prefixLength("255.255.256.0"), null);
   assert.equal(prefixLength(null), null);
+});
+
+test("UX-22: the waste finder starts from the Schedules page's chain limits, past them as the warnings are", () => {
+  assert.deepEqual(wasteDefaults({ maxDepth: 5, maxSizeGb: 100 }), { idleDays: 3, chainDepth: 6, chainGb: 100 });
+  assert.deepEqual(wasteDefaults({ maxDepth: 1, maxSizeGb: 1 }), { idleDays: 3, chainDepth: 2, chainGb: 1 });
+  assert.deepEqual(wasteDefaults(null), WASTE_DEFAULTS, "limits that could not be read");
+  assert.deepEqual(choicesWith([3, 5, 10], 6), [3, 5, 6, 10]);
+  assert.deepEqual(choicesWith([3, 5, 10], 5), [3, 5, 10]);
 });

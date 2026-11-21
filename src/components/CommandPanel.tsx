@@ -4,7 +4,8 @@
 // pastes into the current terminal without pressing Enter; Shift+click also presses Enter. A command with
 // {{variables}} asks for them first. Any library entry can be copied into the favourites. QL-13: each library entry
 // has a "Manual" link that opens its official manual page in the default browser (through Rust, which only opens
-// documentation sites).
+// documentation sites). UX-20 (0.9.0): no stars here; a library row's star is "Add to favourites", into the Starred
+// folder (filled once a favourite holds its command), and the ⋯ menu's "Copy to favourites…" edits it first.
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
@@ -13,6 +14,7 @@ import {
   ArrowUpIcon,
   BookOpenIcon,
   ChevronRightIcon,
+  CopyIcon,
   EllipsisIcon,
   FolderIcon,
   FolderOpenIcon,
@@ -37,12 +39,9 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { RiskBadge } from "@/components/Badges";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { FavouriteDialog } from "@/components/FavouriteDialog";
-import { StarButton } from "@/components/StarButton";
-import { commandStarKey, isStarred, starredFirst } from "@/lib/stars";
-import { useStars } from "@/lib/stars-store";
 import { toastDeleted } from "@/lib/undo-delete";
 import { FillCommandDialog } from "@/components/FillCommandDialog";
-import { ReasonLine } from "@/components/WhyDisabled";
+import { ReasonLine, WhyDisabled } from "@/components/WhyDisabled";
 import {
   api,
   errorMessage,
@@ -160,12 +159,8 @@ export function CommandPanel({ active, targetName, onSend, query = null }: Props
   const words = text.toLowerCase().split(/\s+/).filter(Boolean);
   const searching = words.length > 0;
 
-  // QL-26: starred commands first in each group.
-  const stars = useStars();
-  const starredItem = useCallback(
-    (item: Item) => isStarred(stars, "command", commandStarKey(item.favourite ? "favourite" : "library", item.key)),
-    [stars],
-  );
+  // UX-20: the commands the favourites hold already (by their text), whose library rows say so.
+  const held = useMemo(() => new Set(favourites.map((f) => f.command.trim())), [favourites]);
   const favouriteGroups = useMemo<Group[]>(() => {
     const groups = new Map<string, Group>();
     for (const f of favourites) {
@@ -182,8 +177,8 @@ export function CommandPanel({ active, targetName, onSend, query = null }: Props
       });
       groups.set(key, group);
     }
-    return [...groups.values()].map((g) => ({ ...g, items: starredFirst(g.items, starredItem) }));
-  }, [favourites, starredItem]);
+    return [...groups.values()];
+  }, [favourites]);
 
   const libraryGroups = useMemo<Group[]>(() => {
     const groups = new Map<string, Group>();
@@ -203,8 +198,8 @@ export function CommandPanel({ active, targetName, onSend, query = null }: Props
       });
       groups.set(key, group);
     }
-    return [...groups.values()].map((g) => ({ ...g, items: starredFirst(g.items, starredItem) }));
-  }, [library, starredItem]);
+    return [...groups.values()];
+  }, [library]);
 
   const folders = useMemo(
     () => favouriteGroups.map((g) => g.folder).filter((f): f is string => Boolean(f)),
@@ -236,6 +231,19 @@ export function CommandPanel({ active, targetName, onSend, query = null }: Props
 
   function openManual(entry: LibraryEntry) {
     api.openManual(entry.manual).catch((err) => toast.error(errorMessage(err)));
+  }
+
+  /** UX-20: a library row's "Add to favourites", into the Starred folder (audited by the core). */
+  async function addToFavourites(entry: LibraryEntry) {
+    try {
+      const { favourite, added } = await api.addFavouriteFromLibrary(entry.id);
+      load();
+      const where = favourite.folder ?? "the top level";
+      if (added) toast.success(`Added '${favourite.name}' to ${where}`);
+      else toast.info(`'${favourite.name}' in ${where} has this command already`);
+    } catch (err) {
+      toast.error(errorMessage(err));
+    }
   }
 
   async function move(group: Group, item: Favourite, by: -1 | 1) {
@@ -294,6 +302,8 @@ export function CommandPanel({ active, targetName, onSend, query = null }: Props
                 onDelete={() => item.favourite && setDeleting(item.favourite)}
                 onMove={(by) => item.favourite && void move(group, item.favourite, by)}
                 onManual={() => item.library && openManual(item.library)}
+                held={Boolean(item.library) && held.has(item.command.trim())}
+                onAdd={() => item.library && void addToFavourites(item.library)}
                 onCopy={() =>
                   item.library &&
                   setEditing({
@@ -377,7 +387,7 @@ export function CommandPanel({ active, targetName, onSend, query = null }: Props
               <EmptyState
                 icon={StarIcon}
                 title="No favourites yet"
-                description="Add your own commands with +, or copy one from the Library (its ⋯ menu)."
+                description="Add your own commands with +, or a Library command with its star."
               />
             ) : shownFavourites.length === 0 ? (
               <p className="px-1 py-2 text-sm text-muted-foreground">No favourite matches.</p>
@@ -463,6 +473,8 @@ function CommandRow({
   onDelete,
   onMove,
   onManual,
+  held,
+  onAdd,
   onCopy,
 }: {
   item: Item;
@@ -474,6 +486,9 @@ function CommandRow({
   onDelete: () => void;
   onMove: (by: -1 | 1) => void;
   onManual: () => void;
+  /** UX-20: a library row whose command a favourite holds already. */
+  held: boolean;
+  onAdd: () => void;
   onCopy: () => void;
 }) {
   const tooltip = [item.description, item.command, "Click pastes; Shift+click also presses Enter."]
@@ -507,13 +522,39 @@ function CommandRow({
           Manual
         </button>
       )}
-      <StarButton
-        kind="command"
-        itemKey={commandStarKey(item.favourite ? "favourite" : "library", item.key)}
-        name={item.name}
-        hoverGroup="row"
-        className="mt-0.5"
-      />
+      {/* UX-20: a library row's star adds it to the favourites (the Starred folder); favourites have none. */}
+      {item.library &&
+        (held ? (
+          <WhyDisabled reason="In your favourites already">
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              className="mt-0.5 size-6 shrink-0"
+              aria-label={`${item.name} is in your favourites`}
+              disabled
+            >
+              <StarIcon className="fill-amber-400 text-amber-500" />
+            </Button>
+          </WhyDisabled>
+        ) : (
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                className="mt-0.5 size-6 shrink-0 opacity-0 group-hover/row:opacity-100 focus-visible:opacity-100"
+                aria-label={`Add ${item.name} to favourites`}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onAdd();
+                }}
+              >
+                <StarIcon />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>Add to favourites (Starred)</TooltipContent>
+          </Tooltip>
+        ))}
       <DropdownMenu>
         <DropdownMenuTrigger asChild>
           <Button
@@ -561,8 +602,9 @@ function CommandRow({
                 <BookOpenIcon />
                 Open the manual page
               </DropdownMenuItem>
+              {/* UX-20: the star adds it as it is; this edits it first, into any folder. */}
               <DropdownMenuItem onSelect={onCopy}>
-                <StarIcon />
+                <CopyIcon />
                 Copy to favourites…
               </DropdownMenuItem>
             </>

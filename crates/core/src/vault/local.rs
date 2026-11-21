@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use tokio::sync::watch;
-use tokio::time::{Instant, MissedTickBehavior};
+use tokio::time::Instant;
 use uuid::Uuid;
 
 use super::crypto::{self, KdfParams, Key, SALT_LEN};
@@ -19,13 +19,35 @@ use crate::error::{CoreError, Result};
 use crate::locks;
 use crate::store::{Store, VaultMetaRow};
 
-/// SS-04: the vault locks after this long without the user doing anything ([`Vault::note_activity`]).
+/// SS-04: the vault locks after this long without the user doing anything ([`Vault::note_activity`]), unless this
+/// PC's [`IDLE_LOCK_KEY`] says otherwise.
 pub const IDLE_TIMEOUT: Duration = Duration::from_secs(15 * 60);
+
+/// SS-04 (0.9.0): this PC's setting (one of `settings::MACHINE_KEYS`): minutes without activity before the vault
+/// locks itself, within [`IDLE_LOCK_MINUTES`]; unset, [`IDLE_TIMEOUT`].
+pub const IDLE_LOCK_KEY: &str = "vault.idleLockMinutes";
+
+/// The minutes the setting takes.
+pub const IDLE_LOCK_MINUTES: std::ops::RangeInclusive<u64> = 1..=60;
+
+/// The idle lock for `minutes` of the setting; refused outside [`IDLE_LOCK_MINUTES`].
+pub fn idle_timeout(minutes: u64) -> Result<Duration> {
+    if IDLE_LOCK_MINUTES.contains(&minutes) {
+        Ok(Duration::from_secs(minutes * 60))
+    } else {
+        Err(CoreError::InvalidInput(format!(
+            "The vault locks after {} to {} minutes without activity.",
+            IDLE_LOCK_MINUTES.start(),
+            IDLE_LOCK_MINUTES.end()
+        )))
+    }
+}
 
 pub struct VaultOptions {
     /// Used when a master key is made: at setup and at a password change. Unlocking uses the
     /// parameters saved with the vault.
     pub kdf: KdfParams,
+    /// The idle lock at the start; [`Vault::set_idle_timeout`] changes it.
     pub idle_timeout: Duration,
 }
 
@@ -61,6 +83,8 @@ struct State {
     /// `None` until the vault is set up; then whether the Windows login unlocks it.
     windows_login: Option<bool>,
     open: Option<OpenKey>,
+    /// SS-04: how long the key stays without activity, now.
+    idle_timeout: Duration,
 }
 
 struct Inner {
@@ -73,6 +97,8 @@ struct Inner {
     /// One change of the stored key or items at a time, so an item sealed under the old key can't land
     /// after the key was replaced.
     writes: tokio::sync::Mutex<()>,
+    /// SS-04: wakes the idle check when the idle lock changes, so a shorter one applies on time.
+    idle_changed: Arc<tokio::sync::Notify>,
 }
 
 /// AAD of the master-key copy of the data key: it belongs to this workspace's vault.
@@ -116,20 +142,19 @@ impl Inner {
 
     /// Drops the key (zeroizing it) once it has gone unused for the idle timeout.
     fn expire_if_idle(&self, state: &mut State) {
-        if state
-            .open
-            .as_ref()
-            .is_some_and(|open| open.last_used.elapsed() >= self.options.idle_timeout)
-        {
+        let idle = state.idle_timeout;
+        if state.open.as_ref().is_some_and(|open| open.last_used.elapsed() >= idle) {
             state.open = None;
             tracing::info!("the vault locked after being idle");
             self.publish(state);
         }
     }
 
-    fn lock_if_idle(&self) {
+    /// Locks when idle; returns how long until the next look ([`spawn_idle_check`]).
+    fn lock_if_idle(&self) -> Duration {
         let mut state = locks::lock(&self.state);
         self.expire_if_idle(&mut state);
+        (state.idle_timeout / 4).clamp(Duration::from_millis(100), Duration::from_secs(30))
     }
 
     /// Runs `f` with the data key. Short and synchronous: no await under the lock. Not activity: the
@@ -238,6 +263,7 @@ impl LocalVault {
         let state = State {
             windows_login: meta.map(|m| m.dpapi_key.is_some()),
             open: None,
+            idle_timeout: options.idle_timeout,
         };
         let initial = if state.windows_login.is_some() {
             VaultStatus::Locked
@@ -252,23 +278,23 @@ impl LocalVault {
             state: Mutex::new(state),
             status: watch::channel(initial).0,
             writes: tokio::sync::Mutex::new(()),
+            idle_changed: Arc::new(tokio::sync::Notify::new()),
         });
-        spawn_idle_check(Arc::downgrade(&inner), inner.options.idle_timeout);
+        spawn_idle_check(Arc::downgrade(&inner), Arc::clone(&inner.idle_changed));
         Ok(Self { inner })
     }
 }
 
 /// Locks the vault on time even when nothing touches it, so the key leaves memory and the UI hears
-/// of it. Stops once the vault is dropped.
-fn spawn_idle_check(inner: Weak<Inner>, idle_timeout: Duration) {
-    let every = (idle_timeout / 4).clamp(Duration::from_millis(100), Duration::from_secs(30));
+/// of it. It looks every quarter of the idle lock as it is now (100 ms to 30 s), and at once when the
+/// idle lock changes. Stops once the vault is dropped.
+fn spawn_idle_check(inner: Weak<Inner>, changed: Arc<tokio::sync::Notify>) {
     tokio::spawn(async move {
-        let mut tick = tokio::time::interval(every);
-        tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
-        loop {
-            tick.tick().await;
-            let Some(inner) = inner.upgrade() else { break };
-            inner.lock_if_idle();
+        while let Some(next) = inner.upgrade().map(|inner| inner.lock_if_idle()) {
+            tokio::select! {
+                () = tokio::time::sleep(next) => {}
+                () = changed.notified() => {}
+            }
         }
     });
 }
@@ -279,7 +305,7 @@ impl Vault for LocalVault {
         let inner = &self.inner;
         let mut state = locks::lock(&inner.state);
         inner.expire_if_idle(&mut state);
-        let idle = inner.options.idle_timeout;
+        let idle = state.idle_timeout;
         VaultInfo {
             status: inner.status_of(&state),
             windows_login: state.windows_login.unwrap_or(false),
@@ -482,6 +508,18 @@ impl Vault for LocalVault {
 
     fn note_activity(&self) {
         self.inner.touch();
+    }
+
+    fn set_idle_timeout(&self, timeout: Duration) {
+        let inner = &self.inner;
+        let mut state = locks::lock(&inner.state);
+        // The change is the user's own doing: the time counts from it, so the vault doesn't lock under them at once.
+        if let Some(open) = state.open.as_mut() {
+            open.last_used = Instant::now();
+        }
+        state.idle_timeout = timeout;
+        drop(state);
+        inner.idle_changed.notify_one();
     }
 
     async fn list(&self, ctx: &Context) -> Result<Vec<SecretMeta>> {

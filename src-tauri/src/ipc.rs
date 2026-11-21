@@ -714,6 +714,14 @@ pub async fn vault_reset(
     Ok(state.core.reset_vault(password, windows_login).await?)
 }
 
+/// SS-04 (0.9.0): Settings › Privacy and data's "Lock the vault after", 1 to 60 minutes, for this PC. It applies at
+/// once (the status bar's countdown from the answer). Audited; refused by the read-only lock.
+#[tauri::command]
+pub async fn vault_set_idle_lock(state: State<'_, AppState>, minutes: u64) -> IpcResult<VaultInfo> {
+    let core = &state.core;
+    Ok(core.vault.set_idle_lock(&core.ctx(), minutes).await?)
+}
+
 /// SS-04: the user typed or clicked in the window (the UI sends this at most every few seconds), so
 /// the vault's idle lock counts from now. Background reads never count.
 #[tauri::command]
