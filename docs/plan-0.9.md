@@ -37,7 +37,7 @@ setting, and running a command on the Sessions and VMs pages' picks.
 | A command on picked sessions or VMs (G3) | **Agreed.** "Run a command on these…" on the Sessions page's selection bar and the VMs page's More › Organise, opening Compare hosts with those picks (VMs through their confirmed links, as BX-01 says). |
 | Monitoring setup (C9) | **Agreed.** Alert rules open from the Dashboard header's ⋯ and the palette, not only from the Alerts widget. Rows and the palette get **Monitor ▸** (Watch its metrics, Add a check), and "Add a check" leaves the Toolbox submenu. A Toolbox result offers "Keep checking this…". |
 | Reachability dots from checks | **Later, not in 0.9.0** unless the owner asks: a session whose host and port a check already covers would show the check's state instead of knocking again. |
-| Commands: favourites and stars (C7) | **Agreed.** No stars in the Commands panel. A library row's star becomes "Add to favourites" (into a "Starred" folder); existing command stars move there once, audited as favourite adds. Stars stay on sessions and VMs. |
+| Commands: favourites and stars (C7) | **Agreed.** No stars in the Commands panel. A library row's star becomes "Add to favourites" (into a "Starred" folder); existing starred library commands move there once, audited as favourite adds. A starred command that is already a favourite stays in its own folder and moves to the top of it, audited as a reorder (agreed with the owner on 21 Nov 2026). Stars stay on sessions and VMs. |
 | Reports (C11) | **Agreed.** Activity ⋯ › **Reports ▸** holds the handover pack, the inventory (Excel) and the audit log (CSV). The Sessions page keeps Import from another app, **Move to another laptop ▸** (Export, Import), the Ansible inventory and the support bundle. One label per action everywhere. |
 | Disk images (C13) | **Agreed.** Inspect, Convert and Verify move from the Templates page to a Toolbox tab; `MOVED_PAGES` keeps Ctrl+; and the old id. |
 | Repeated controls (C14 to C16) | **Agreed.** Presentation: the top bar is the home, the palette the shortcut, and Settings shows one line with a link. Vault: "Reset the vault…" in the ⋯ menu and the locked form only; Settings' Vault card goes, and the settings search points at the Vault page's Unlocking card. The Waste finder uses the Schedules page's stored chain limits. One "recent" list (QL-26's) feeds the tree, the New terminal dialog and Ctrl+K. |
@@ -196,6 +196,8 @@ H9 is not in 0.9.0. No migration is needed unless H7 keeps lines in a table of t
   - The Commands panel loses its stars; a library row's star becomes "Add to favourites", into "Starred".
   - A one-time step in the core moves each workspace's command stars into favourites (library entries by their text and
     name), audits them as adds and deletes the stars. It isn't SQL, because the library lives in code.
+  - Starred library commands are added to "Starred". A starred command that is already a favourite stays in its own
+    folder and moves to the top of it, audited as a reorder (agreed with the owner on 21 Nov 2026).
 - **Reports (UX-21).**
   - Activity ⋯ › Reports ▸ holds Handover pack…, Inventory (Excel)… and Audit log (CSV)….
   - The Sessions page's ⋯ keeps Import from another app, Move to another laptop ▸, Export an Ansible inventory… and

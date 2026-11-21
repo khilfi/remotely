@@ -1,7 +1,8 @@
 // UX-19 (0.9.0 H4): Monitor ▸ in a session's row menu (the Sessions page and the Terminal page's tree) and, as an icon
 // menu, in the VM details panel's header: "Watch its metrics" (or "Stop watching") and "Add a check", each with one
 // line on what it costs. Watching is MO-02's (a VM through a linked SSH or WinRM session; any watched session can be
-// stopped), audited by the core with no tier; a row that can't be watched has the item disabled with the reason.
+// stopped), audited by the core with no tier and refused by the read-only lock like a setting; a row that can't be
+// watched, or any row under the lock, has the item disabled with the reason.
 // "Add a check" opens MO-08's check editor on the Dashboard's Checks tab through a `checks` link, the same dialog
 // every "Add a check" opens; under the read-only lock it is disabled with the reason, as the Checks tab's own. The
 // palette's VM and session views list the same two (CommandPalette's Monitor group). Which sessions are watched is
@@ -43,7 +44,7 @@ function MonitorItems({ target }: { target: MonitorTarget }) {
   return (
     <>
       <DropdownMenuItem
-        disabled={state === null || !state.can}
+        disabled={state === null || !state.can || readOnly !== null}
         onSelect={() => {
           if (state?.can) void watch(state.sessionId, !state.watching);
         }}
@@ -52,7 +53,7 @@ function MonitorItems({ target }: { target: MonitorTarget }) {
         <div className="flex flex-col">
           <span>{watching ? "Stop watching" : "Watch its metrics"}</span>
           <span className="text-xs text-muted-foreground">
-            {state === null ? "Reading…" : state.can ? watchCostText(state, intervalSecs) : state.reason}
+            {state === null ? "Reading…" : state.can ? (readOnly ?? watchCostText(state, intervalSecs)) : state.reason}
           </span>
         </div>
       </DropdownMenuItem>

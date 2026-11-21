@@ -118,7 +118,7 @@ export function newWidget(layout: DashboardLayout, kind: WidgetKindName): Widget
     case "services":
       return { id, w, h, kind, sessionId: null };
     case "chart":
-      return { id, w, h, kind, source: null, key: null, name: null, metric: "cpu", range: "live" };
+      return { id, w, h, kind, source: null, key: null, name: null, metric: "cpu" };
     default:
       return { id, w, h, kind } as Widget;
   }

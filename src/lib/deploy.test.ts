@@ -6,6 +6,7 @@ import { test } from "node:test";
 import type { DeployCheck, DeployPreview, JobEvent } from "./api.ts";
 import {
   applyJobEvent,
+  applyJobTargets,
   bytesText,
   cloneReason,
   deployReason,
@@ -117,9 +118,21 @@ test("a deploy job's events become one step per VM", () => {
     stepText({ ...p.steps[1], status: "failed", message: "vmrun clone failed" }),
     /Failed: vmrun clone failed\. What it made was removed\./,
   );
+  // A VM that wasn't made says itself what of it was removed (DeployFailed), once.
+  const notMade = "web-2 was not made: vmrun clone failed; what it made was removed but for C:\\VMs\\lab\\web-2";
+  assert.equal(
+    stepText({ ...p.steps[1], status: "failed", message: notMade, errorCode: "deploy_failed" }),
+    `Failed: ${notMade}.`,
+  );
 });
 
-test("an unattended install shows its stage, and a failed one keeps its VM", () => {
+// VM-29: what the core's `abandon_install` and `deploy_one` say, word for word.
+const KEPT =
+  "the VM is kept for a look, with its install ISO copy and its serial log C:\\VMs\\lab\\web-1\\web-1-serial.log: " +
+  "delete it from the VMs page when done";
+const SEED = "its seed (the answer file) is taken out, and its drive keeps an empty disc";
+
+function installEnd(status: "failed" | "cancelled", errorCode: string, why: string) {
   const vms = [{ name: "web-1", target: newVmKey("vmware", "web-1") }];
   let p = startProgress("job", vms);
   p = applyJobEvent(p, { event: "targetStarted", jobId: "job", target: vms[0].target, name: "web-1" });
@@ -131,8 +144,69 @@ test("an unattended install shows its stage, and a failed one keeps its VM", () 
     step: "installing: Installing the base system",
   });
   assert.equal(stepText(p.steps[0]), "Installing: Installing the base system…");
-  const failed = { ...p.steps[0], status: "failed" as const, message: "the install failed; the VM is kept as it is" };
-  assert.equal(stepText(failed), "Failed: the install failed; the VM is kept as it is.");
+  return applyJobEvent(p, {
+    event: "targetFinished",
+    jobId: "job",
+    target: vms[0].target,
+    name: "web-1",
+    status,
+    message: `web-1: made in C:\\VMs\\lab\\web-1; ${why}; ${SEED}; ${KEPT}`,
+    errorCode,
+    exitCode: null,
+    durationMs: 90_000,
+    safetySnapshot: null,
+  }).steps[0];
+}
+
+test("a failed unattended install keeps its VM and says so, never that it was removed", () => {
+  const step = installEnd("failed", "install_failed", "the install failed (installing): [!!] Partition disks");
+  const text = stepText(step);
+  assert.equal(
+    text,
+    `Failed: made in C:\\VMs\\lab\\web-1; the install failed (installing): [!!] Partition disks; ${SEED}; ${KEPT}.`,
+    "the step shows the name already",
+  );
+  assert.doesNotMatch(text, /was removed/);
+});
+
+test("a timed-out unattended install is a failed one: its VM is kept", () => {
+  const why =
+    "the install failed (installing): not done within 90 minutes (it was at: installing, Installing the base system)";
+  const text = stepText(installEnd("failed", "install_failed", why));
+  assert.match(text, /^Failed: .*not done within 90 minutes/);
+  assert.match(text, /the VM is kept for a look/);
+  assert.doesNotMatch(text, /was removed/);
+});
+
+test("a cancelled unattended install says its VM goes on installing, never that it was removed", () => {
+  const why = "the install was cancelled while it was watched; the VM goes on installing";
+  const step = installEnd("cancelled", "install_cancelled", why);
+  const text = stepText(step);
+  assert.match(text, /^Cancelled: made in C:\\VMs\\lab\\web-1; .*the VM goes on installing/);
+  assert.match(text, /the VM is kept for a look/);
+  assert.doesNotMatch(text, /was removed/);
+  // The journal's rows, read when the dialog follows a job it didn't start, carry the same code.
+  const reread = applyJobTargets(startProgress("job", [{ name: "web-1", target: step.target }]), [
+    {
+      targetKind: "new_vm",
+      targetKey: step.target,
+      targetName: "web-1",
+      status: "cancelled",
+      exitCode: null,
+      output: null,
+      error: `web-1: ${why}`,
+      startedAt: null,
+      finishedAt: null,
+      durationMs: 90_000,
+      safetySnapshot: null,
+      stderr: null,
+      stdoutBytes: null,
+      stderrBytes: null,
+      outputTruncated: false,
+      errorCode: "install_cancelled",
+    },
+  ]).steps[0];
+  assert.equal(stepText(reread), `Cancelled: ${why}.`);
 });
 
 test("sizes read in GB and TB", () => {

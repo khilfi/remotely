@@ -89,7 +89,8 @@ crates/core/          remotely-core: all app logic
     settings.rs       QL-15 settings this version can't read are set aside (`<key>.unreadable`), audited, and get
                       their defaults at start, instead of stopping the app; FD-02 MACHINE_KEYS, this PC's settings,
                       which the store keeps in the home workspace whichever is shown, and WORKSPACE_KEYS
-    policy/           tiers and steps; FD-03 read_only_refusal: the read-only lock refuses every command and edit;
+    policy/           tiers and steps; FD-03 read_only_refusal: the read-only lock refuses every command and edit
+                      (read_only_host_refusal for what runs on a host without a command: starting root browsing);
                       AP-01 RUNS_ANYTHING: shells, interpreters and command runners can't be read-only entries
                       SS-07 a loopback SOCKS tunnel is at least Medium while other users are signed in to this PC
                       (set_other_users, from HostCounters::other_users_signed_in: WTSEnumerateSessionsW);
@@ -455,7 +456,8 @@ crates/core/          remotely-core: all app logic
     untrusted.rs      A3, A8, A9 hostile input: path_refusal (shares `\\x` `//x`, `\\?\` `\\.\` `\??\`, DOS device
                       names; by text alone, never the file system), read_capped (a file whole up to a cap, or
                       TooLarge; MAX_VM_CONFIG_BYTES 4 MB), is_format_char (Unicode 16.0's Cf table), is_device_name
-    metrics/          MO-01 to MO-04: mod.rs (collector, in-memory history, dashboard rows; MO-15 allocated memory, swap
+    metrics/          MO-01 to MO-04: mod.rs (collector, in-memory history, dashboard rows; MO-02 set_watched audited
+                      setting_changed and refused by the read-only lock like a setting; MO-15 allocated memory, swap
                       and this PC's RAM and paging files per round; RoundObserver: after each round, history.rs and
                       alerts; collect_once_at for tests' own clock), history.rs (MO-06 Rollup: 1-minute averages with
                       min and max, written once a minute in one transaction; bucket: ranges of 1 h to 7 d;
@@ -525,7 +527,8 @@ crates/core/          remotely-core: all app logic
                       still match), ScheduleEvent for the UI and QL-25, schedule_* audit events; VM-30
                       ScheduleAction::RebuildImage on one ScheduleTarget::Image (run_rebuild through Core.golden)
     dashboard.rs      MO-16 the layout (`dashboard.layout`, per workspace, null is the default): widgets on 4 columns
-                      and 1 to 6 rows, checks, audited dashboard_layout_changed, Change::DashboardLayout
+                      and 1 to 6 rows, checks, audited dashboard_layout_changed, Change::DashboardLayout; UX-22 (0.9.0)
+                      a chart has no range of its own (the dashboard's one range; a saved one is read past)
     notifications.rs  QL-25 the notification centre's history in memory (no migration; the module says why): the UI
                       adds entries, titles and bodies through export::redact_secrets and without control or Cf
                       characters, MAX_NOTIFICATIONS 500, per workspace, read, unread, clear, `once` keys; links are the
@@ -540,10 +543,14 @@ crates/core/          remotely-core: all app logic
                       and app links (session:, vm:, vault: by label, command:, runbook:) are links, each
                       `data-note-link="N"` with no address (RenderedNote.links), code blocks `data-note-code="N"`
                       (codeBlocks, for Send to terminal), looks_secret from export::redact_secrets
-    stars.rs          QL-26 (migration 0033): Stars (Core.stars): stars on sessions, VMs (by key) and commands
-                      (`favourite:<id>`, `library:<id>`), and the MAX_RECENTS (20) sessions, VMs and pages opened last
-                      (a terminal's session notes itself in Store::record_session_opened); per workspace, not audited,
-                      not locked, kept by key so a restored session keeps its star
+    stars.rs          QL-26 (migration 0033): Stars (Core.stars): stars on sessions and VMs (by key), and the
+                      MAX_RECENTS (20) sessions, 20 VMs and 20 pages opened last, each kind trimmed on its own (a
+                      terminal's session notes itself in Store::record_session_opened; UX-22: the one recent list, Ctrl+K
+                      showing the newest 20 of all, the tree's Recent and New terminal the sessions, which pages and
+                      VMs never push out);
+                      per workspace, not audited, not locked, kept by key so a restored session keeps its star. UX-20
+                      (0.9.0): commands have no stars (StarKind has none); 0.8.x's (`favourite:<id>`, `library:<id>`)
+                      are read only by store/stars.rs command_stars for snippets' one-time move
     bookmarks.rs      SS-14 (0.8.0 G3, migration 0034): Bookmarks (Core.bookmarks): the Files page's named folders per saved
                       session (MAX_BOOKMARKS 100, a name of MAX_NAME_CHARS 80, the path checked by check_path), per
                       workspace; audited file_bookmark_changed with the session as target, refused by the read-only lock
@@ -741,7 +748,8 @@ crates/core/          remotely-core: all app logic
                       is deleted as a link; permissions and owners refuse a link), and FileTransfers::change
                       (FileChange from the drawer: what is there decides replace and recursive; RemotePathTaken unless
                       replace was asked; a link refused for permissions and owners); root_files.rs SS-14 root browsing
-                      (Terminals::browse_as_root, stop_root, root_browsing): the server probed, BX-07's sudo password
+                      (Terminals::browse_as_root, stop_root, root_browsing): refused by the read-only lock before
+                      anything reaches the host (stopping never is), the server probed, BX-07's sudo password
                       (chosen, the session's login password, or the typed login), rule 7 (SecretBindings::may_go,
                       confirm, allow), a refused password parked per session and password (login_guard
                       ParkScope::Sudo { secret } with sudo_key, shared with Containers' SudoWatch; a quick connection
@@ -833,7 +841,13 @@ crates/core/          remotely-core: all app logic
                       that reference them; two LibrarySections), {{variables}} (variables.rs); classified by the bus's
                       policy engine (read-only additions in policy/commands.rs, writing forms in commands/writes.rs);
                       QL-13 each entry's manual page (manual.rs: Manual, MANUAL_HOSTS, `checked` refuses any other
-                      address; opening one is not audited and the read-only lock allows it)
+                      address; opening one is not audited and the read-only lock allows it); UX-20 (0.9.0)
+                      add_from_library, a library row's "Add to favourites" into STARRED_FOLDER under its name (or the
+                      first free "name (2)"; the favourite holding its command already instead), audited as an add and
+                      refused by the read-only lock; move_command_stars, once per workspace at start
+                      (move_command_stars_everywhere, each workspace's ctx, from Core::init): 0.8.x's starred library
+                      commands into STARRED_FOLDER, starred favourites first in their folders (audited as an add and a
+                      reorder), then each star deleted; safe to run again, refused by the read-only lock (the stars wait)
     toolbox/          FD-09 (Core.toolbox; reads only: no bus, no audit, not stopped by the read-only lock): mod.rs
                       Toolbox (ProbeTarget: a typed host, a session, a VM's guest IP; Route with the session's own jump
                       host; each probe callable on its own with a cancel token and ProbeProgress as it goes, which F2's
@@ -914,7 +928,8 @@ crates/core/          remotely-core: all app logic
                       chosen or confirmed link, else ResolvedTargets::vms_unconfirmed; BX-13 TargetPicks.winrm: WinRM
                       sessions and PowerShell tabs are hosts for Compare hosts and support bundles, never the SS-09 key
                       push; BulkHost.script_kind), BX-03 grouped results and diff,
-                      BX-05 exports: the Terminal page's Compare output (running is RemoteExec on the bus); QL-12
+                      BX-05 exports: the Terminal page's Compare output (running is RemoteExec on the bus; UX-17, 0.9.0
+                      H3: `recent` lists its runs and BX-10's pushes and fetches, whoever started them); QL-12
                       recorded MultiExec lines group (group_with_output), diff and export (export_recorded, audited
                       multiexec_exported) through the same code; Reach: runs keep SSH sessions, F6's Ansible export
                       SSH and WinRM (resolve_reaching)
@@ -1033,7 +1048,11 @@ crates/core/          remotely-core: all app logic
                       out); A9 the source up to 10 MB, included files 1 MB each and 4 MB and 256 files in all
                       (openssh.rs IncludeFiles: DiskIncludes, or memory in tests)
     vault/            SS-04 vault: crypto (AES-256-GCM, Argon2id), DPAPI (opt-in for new vaults; turn_off_windows_login
-                      needs no password), LocalVault (idle lock from note_activity only, never from get; a password
+                      needs no password), LocalVault (idle lock from note_activity only, never from get; SS-04 0.9.0
+                      set_idle_timeout applies at once, counting from the change, and wakes the idle check;
+                      VaultService::set_idle_lock is this PC's IDLE_LOCK_KEY `vault.idleLockMinutes`, IDLE_LOCK_MINUTES
+                      1 to 60, IDLE_TIMEOUT 15 unset, a MACHINE_KEY, audited vault_changed, refused by the read-only
+                      lock, load_idle_lock at assemble; a password
                       change makes a new data key and reseals every item in one transaction; secure_delete and a WAL
                       checkpoint after vault changes; reset, for a forgotten password: every item of every workspace
                       deleted and a new data key under a new password in one transaction, no password needed since it
@@ -1052,7 +1071,9 @@ crates/core/          remotely-core: all app logic
     store/            install_configs.rs (VM-28 rows, migration 0035; install_configs_upgrade_tests.rs a database at
                       0033 with trash rows of every kind, opened by 0035's trash rebuild); jobs.rs: the journal stores
                       Command::for_journal (scripts and lines redacted), command_type
-                      (migration 0017) for the lists, which pick a page of ids on an index first (AP-03, BX-03);
+                      (migration 0017) for the lists, which pick a page of ids on an index first (AP-03, BX-03; UX-17,
+                      0.9.0 H3: recent_bulk_jobs merges the remoteExec and bulkFiles pages; UX-18 JobSummary.command_type,
+                      so Activity knows a bulk job);
                       purge_job_bodies and redact_old_commands; audit.rs redacts every entry's text before hashing it,
                       and verifies and exports with row streams; multiexec_groups.rs (QL-19, migration 0021);
                       terminal_rules.rs (QL-17 rules and built-in overrides, migration 0021); timeline.rs (VM-25 the
@@ -1178,7 +1199,7 @@ src-tauri/            Tauri 2 shell (VM-30 0.8.0 G7: golden.rs the build dialog'
                       the poll interval, a read), terminal bridge, MultiExec (multiexec.rs; groups.rs
                       QL-19 saved MultiExec groups; terminal_rules.rs QL-17 rules), command
                       panel, notifications and QL-13 manual links opened with ShellExecute after the core's check
-                      (command_panel.rs; QL-17 notify_terminal_alert), clipboard.rs (the clipboard read for right-click paste, and QL-05/SS-11
+                      (command_panel.rs; QL-17 notify_terminal_alert; UX-20 favourite_add_from_library), clipboard.rs (the clipboard read for right-click paste, and QL-05/SS-11
                       copies: selections through terminal_copy_selection, Copy output through terminal_output_copy,
                       scrubbed by the core and written with Windows' clipboard-history, cloud and monitor exclusion
                       formats), SS-08 file
@@ -1233,8 +1254,12 @@ src-tauri/            Tauri 2 shell (VM-30 0.8.0 G7: golden.rs the build dialog'
                       window only for the shown workspace
 src/                  React + TypeScript UI
   components/ui/      shadcn/ui components (generated)
-  components/         app components (approval dialog, badges, Compare panel with its one-shot and MultiExec views
-                      (RecordedLinesView, QL-12; BulkResultsView's GroupCard and OutputDiffDialog serve both; UX-16 its
+  components/         app components (approval dialog, badges, Compare panel (UX-17, 0.9.0 H3: no view switch; one
+                      results list under Run, newest first, of its runs, BX-10's pushes and fetches and the lines typed
+                      in all tabs, badged "Run on 12 hosts" or "Typed in 6 tabs", lib/results-list.ts; the one picked or
+                      the newest opens beside it: BulkResultsView for a run, with retry and the canary, RecordedLinesView's
+                      RecordedLineResults for a typed line (QL-12, useRecordings), whose Retry says why it has none and
+                      which goes when typing stops; BulkResultsView's GroupCard and OutputDiffDialog serve both; UX-16 its
                       hosts from BulkTargetPicker's compact mode: one summary line, lib/bulk-picks.ts, with Change…),
                       BulkTargetPicker (BX-01, UX-16 the one host picker of every bulk job: sessions, VMs, tags, saved
                       filters and a Groups tab; `compact`), MultiExec
@@ -1264,13 +1289,15 @@ src/                  React + TypeScript UI
                       (SS-14: sudo's password from the vault when the session saves none), UploadConflictDialog (SS-08,
                       SS-14: replace, replace
                       if newer, keep both or skip, for uploads and downloads), ForwardsEditor and TunnelsPanel for SS-07, Presentation
-                      for FD-03: the Present button and menu, the confirm, the frame, page notices, the Settings card;
+                      for FD-03: the Present button and menu (their one home), the confirm, the frame, page notices,
+                      and (UX-22, 0.9.0) Settings' one line, whose "Show it" lights the button (pointAtPresentButton);
                       VmDetailsPanel and SnapshotTree for QL-14: a VM's Details and Snapshots tabs beside the list;
                       VmSettingsTab and VmSettingsDialogs for VM-23: the Settings tab and its edit dialogs (bulk
                       resize too, VM-12; VM-31 DiskAttachDialog, the Disks card's Attach…, copy or use in place, then
                       the shell's file dialog); VmLogTab (follows through usePoll) and VmTimelineTab for VM-25;
-                      HostNetworksSheet (VM-11, its add-forward dialog) and WasteFinderSheet (VM-16, VM-14), opened from
-                      the VMs page's Networks and Waste finder buttons or the palette;
+                      HostNetworksSheet (VM-11, its add-forward dialog) and WasteFinderSheet (VM-16, VM-14; UX-22, 0.9.0:
+                      its chain defaults from the Schedules page's `schedule_chain_limits`, one set of limits), opened
+                      from the VMs page's Networks and Waste finder buttons or the palette;
                       ContainerHostDialog, ContainerDetailsPanel (Overview, Logs, Stats) and ContainerResources (images,
                       volumes, networks) for CT-01; HostDetailsSheet (MO-13 System, MO-14 Admin) for a session,
                       VmSystemTab (MO-13: a VM's System tab), ThisPcMemoryChart (MO-15) and MetricChart's own legend
@@ -1318,22 +1345,28 @@ src/                  React + TypeScript UI
                       VmSchedulesTab (a VM's Schedules tab and chain), ApprovalDialog's StandingSummary; FD-04
                       SupportBundleDialog (hosts, presets, commands and files, options; then BulkResultsView's bundle
                       mode with Show folder; the Sessions page's "⋯" and Ctrl+K open it) and ApprovalDialog's
-                      BundleSummary; 0.7.0 F6 InventoryExportDialog (FD-05; the Sessions page's "⋯", beside the other
-                      exports, and Ctrl+K), AnsibleExportDialog (BX-12; BulkTargetPicker with purpose "export", YAML or
+                      BundleSummary; 0.7.0 F6 InventoryExportDialog (FD-05; UX-21, 0.9.0: Activity's "⋯" › Reports ▸
+                      and Ctrl+K), AnsibleExportDialog (BX-12; BulkTargetPicker with purpose "export", YAML or
                       INI, groups, the file's preview; the Sessions page's "⋯" and selection bar, Ctrl+K),
-                      HandoverPackDialog (FD-08; the Activity page's "⋯" on its date filter's days, Ctrl+K on the last
-                      30); the inventory's and the pack's Cancel, or closing them, stops their host reads
+                      HandoverPackDialog (FD-08; Activity's "⋯" › Reports ▸ on its date filter's days, Ctrl+K on the
+                      last 30; UX-21: Reports ▸ also holds the audit log's CSV, lib/audit-export.ts, which the Audit log
+                      tab no longer repeats; each report and Sessions export has one label, lib/reports.ts
+                      REPORT_LABELS and SESSION_EXPORT_LABELS, the palette's "Reports: <label>"); the inventory's and the pack's Cancel, or closing them, stops their host reads
                       (hooks/use-export-run.ts, with the count of hosts done); FD-02
                       WorkspaceSwitcher (the top bar's menu, the switch, edit and manage dialogs; the window loads again
-                      after a switch), UnassignedVmsSheet; AP-08 ChangeIdSetting (ChangeIdCard.tsx, a row of the
+                      after a switch; UX-22: the palette's "Switch workspace…" opens the menu, `openRequest`),
+                      UnassignedVmsSheet; AP-08 ChangeIdSetting (ChangeIdCard.tsx, a row of the
                       approval rules' card) and the approval dialog's one reason or change ID field; MO-13
                       HostFactsSetting (a row of the dashboard polling card, `host-facts`: the workspace's background
                       reads of host facts, `host_background_reads(_set)`); UX-10 Settings:
                       SaveStatus (useSaveStatus, SaveStatus: "Saved" with Undo in a card's header; NumberSetting saves
                       on Enter or blur), ToolPathsCard (every tool path in one table, Change opens a dialog; qemu-img
                       too), ApprovalRulesCard (the summary, the change ID rule, PolicyRulesEditor under Advanced with
-                      its sticky Save bar, Shell and BX-13 PowerShell tabs sharing a DangerousList); the Vault page's
-                      Unlocking card holds the Windows-login switch and warning;
+                      its sticky Save bar, Shell and BX-13 PowerShell tabs sharing a DangerousList), SS-04 (0.9.0)
+                      VaultLockCard (Privacy and data's "Lock the vault after", this PC's idle lock); the Vault page's
+                      Unlocking card holds the Windows-login switch and warning, says the idle lock and links to its
+                      setting (UX-22: the Settings Vault card went; the settings search's "Vault unlocking" points at
+                      the card, settings-index.ts `elsewhere`; "Reset the vault…" is in the "⋯" and the locked form only);
                       UX-01 to UX-13 (0.6.0), the shared pieces every page uses ("UI rules" under Conventions):
                       PageHeader, HelpTip, Term, SelectionBar, RowMenu, EmptyState, Tip and ShowTipsAgainButton,
                       RefreshButton; FD-09 toolbox/: the Toolbox's tabs (ProbeTools: Ping, Trace route, DNS lookup,
@@ -1396,18 +1429,24 @@ src/                  React + TypeScript UI
                       UX-08 the sidebar's order and shortcuts are lib/navigation.ts's: Machines (VMs Ctrl+1, Templates
                       Ctrl+2, Schedules Ctrl+3), Remote (Sessions Ctrl+4, Terminal Ctrl+5, SS-14's FilesPage (no digit:
                       Ctrl+K, `files` links, the Terminal drawer's Expand), Containers Ctrl+6, and
-                      FD-09's ToolboxPage, which has no digit and opens from Ctrl+K, rows and `toolbox` links),
+                      FD-09's ToolboxPage, which has no digit and opens from Ctrl+K, rows and `toolbox` links; UX-22
+                      its last tab is Disk images),
                       Overview (Dashboard Ctrl+7, Activity Ctrl+8), then Vault Ctrl+9 and Settings Ctrl+,;
                       TemplatesPage: VM-19 to VM-21 sizes, images and launch
                       templates, Deploy on a template's row; the VMs page's Deploy, and Clone for the selection,
                       VM-21 and VM-10, Import... and the selection's Export..., CV-01 and VM-17; ImageToolsPage
-                      (UX-08: the Templates page's Disk images tab, Ctrl+; still opens it): CV-03 Inspect, Convert,
-                      Verify, the tools found and QEMU's link; MapPage (UX-08: the Dashboard's Map tab, Ctrl+0 still
+                      (UX-22, 0.9.0: the Toolbox's Disk images tab, the Templates page's from 0.6.0 to 0.8.x; Ctrl+;
+                      and MOVED_PAGES.images open it): CV-03 Inspect, Convert, Verify, the tools found and QEMU's
+                      link, with the one qemu-img help key (also in the Import and Export dialogs); MapPage (UX-08: the Dashboard's Map tab, Ctrl+0 still
                       opens it): QL-21 HTML nodes over an SVG of lines only, so FD-03's DOM masking covers it;
                       KnownHostsPage (UX-08: the Vault page's Known hosts tab); App keeps the Dashboard's and Vault's
                       tab so links open either; SchedulesPage (VM-14, VM-27; Ctrl+. still opens it), also from the
                       palette and a VM's Schedules tab open it). R10: App's `openLink` opens every AppLink (lib/links.ts), and pages
-                      take a request to show one item (Sessions `focus`, Activity `focusJob`, Settings `focus` by
+                      take a request to show one item (Sessions `focus`, Activity `focusJob` (UX-18, 0.9.0 H3: a bulk
+                      job, lib/results-list.ts activityView, opens BulkResultsView in its sheet, a support bundle in its
+                      bundle mode with Show folder, every other job the per-target sheet; a retry goes through App's
+                      `submitted` and its approval, then its job opens; job notifications, a failed job's toast (Show) and the
+                      status bar's jobs item lead there), Settings `focus` by
                       settings-index.ts, Containers `request`, Terminal `focusRequest` and `snippetRequest`,
                       Templates `request.id`). P6: App memoises every page and passes
                       stable callbacks, and renders
@@ -1487,18 +1526,26 @@ src/                  React + TypeScript UI
                       tips.ts (UX-09 dismissed tips in local storage), requirement-ids.test.ts (UX-06 no requirement
                       ID in any UI string), links.ts's requestLink (a link opened without an onOpenLink prop),
                       activity.ts (UX-02, UX-06 Activity: jobs with their audit entries and approvals folded, plain
-                      event names, filters), palette.ts (UX-07 Ctrl+K's order; bulk actions only when searched for),
+                      event names, filters), results-list.ts (UX-17, UX-18, 0.9.0 H3: Compare hosts' one list's items, a
+                      union of kinds (`run`, `typed`; QL-31, H7, adds a kept line) merged newest first, badges, status
+                      words, the shown item (a run just queued opens before it is listed), why a typed line has no
+                      retry; retryBlockedReason: a finished job's retry off only where the core's retry_failed refuses
+                      it (the lock, a purged remote exec run, a redacted command); activityView: which jobs Activity
+                      opens in BulkResultsView), palette.ts (UX-07 Ctrl+K's order; bulk actions only when searched for),
                       update-notice.ts (FD-14 the one update notice), catalog.ts (VM-19
                       to VM-21 texts, the size form), deploy.ts (VM-21, VM-10 the dialogs' reasons, counts and
                       packages, a job's steps from its events and targets), vm-insight-api.ts and vm-insight.ts (R4
                       wrappers; a followed log, search, timeline groups, the forward form and its command, the waste
-                      rows' QL-08 reasons), install-configs.ts and install-configs-api.ts (VM-28 kinds, blank files, copy
+                      rows' QL-08 reasons; UX-22 wasteDefaults from the chain limits and choicesWith),
+                      audit-export.ts (UX-21: Reports ▸ Audit log (CSV)'s save and toasts, for Activity and the
+                      palette), install-configs.ts and install-configs-api.ts (VM-28 kinds, blank files, copy
                       names, vault picks and variables a file needs, fitsImage; types and IPC wrappers), golden.ts and
                       golden-api.ts (VM-30 the build dialog's form, the configs and ISOs a build may use, version and
                       retention words; types and IPC wrappers), stacks.ts and
                       stacks-api.ts (VM-08, VM-26 texts, QL-08 reasons, the VMs
                       page's grouping by instance; types and IPC wrappers), convert.ts and convert-api.ts (CV-01 to
-                      CV-03, VM-17 texts, QL-08 reasons, the Verify verdict; the conversion IPC's types and wrappers),
+                      CV-03, VM-17 texts, QL-08 reasons, the Verify verdict, UX-22 qemuNote's one sentence beside the
+                      `qemuImg` help key; the conversion IPC's types and wrappers),
                       vm-snapshots.ts (QL-14 snapshot reasons, picks, tier hints), vm-settings.ts
                       (VM-23 the Settings tab's QL-08 reasons, bulk resize targets, sizes, MACs, networks), containers.ts
                       (CT-01 target keys, actions and their QL-08 reasons, filters, ports, log follow, how often stats
@@ -1519,7 +1566,8 @@ src/                  React + TypeScript UI
                       support-bundle.ts (FD-04 the dialog's typed lines, item count, QL-08 reasons and caps; BX-13
                       windowsPathProblem, per-kind item counts and shownPresets for the picked host kinds),
                       reports.ts and reports-api.ts (0.7.0 F6: local days as the core's range, the Activity filter as
-                      days, the dialogs' QL-08 reasons and toasts; the exports' types and wrappers),
+                      days, the dialogs' QL-08 reasons and toasts; UX-21 REPORT_LABELS, SESSION_EXPORT_LABELS and
+                      reportPaletteLabel, one label per action; the exports' types and wrappers),
                       key-options.ts (SS-09 expiry-time and from for a pushed key),
                       presentation-dom.ts (masks every text node and text attribute before paint, `data-mask` fields,
                       `data-presentation-skip` for terminals; a value learnt later re-masks only the text that
@@ -1530,14 +1578,16 @@ src/                  React + TypeScript UI
                       `groupRequest` opens, or Manage groups without an id), search-providers.ts (SEARCH_PROVIDERS: later
                       packages add theirs), settings-index.ts
                       (UX-10 Settings' groups for the side list and its sections by label, for the page's search and
-                      the palette's), settings-summary.ts (UX-10 the tools table's rows and the approval rules'
+                      the palette's; UX-22 `elsewhere`: a section whose home is another page, the Vault page's Unlocking
+                      card, that the search points at and sectionLink opens), settings-summary.ts (UX-10 the tools table's rows and the approval rules'
                       summary), approval.ts (UX-11 the approval dialog's tier line, type-to-confirm phrase, and the
                       reason and change ID read from one field), container-cache.ts (what the Containers page read last; search
                       makes no logins), host-networks-cache.ts (VM-11 the host networks the map or the networks view
                       read last, for search), topology.ts and topology-layout.ts (QL-21 graph, networkKey for R4's
                       host networks: vm-insight.ts topologyHostNetworks keys them alike and links them to the VM
                       page's Networks sheet, AppLink `hostNetworks`; layered layout), open-tunnels.ts (every pane's
-                      tunnels, from their events), status-bar.ts (QL-22 texts, the vault countdown store, OpenJobs),
+                      tunnels, from their events), status-bar.ts (QL-22 texts, the vault countdown store, OpenJobs; UX-18
+                      jobsLink: the one open job's results in Activity, else Activity),
                       notifications.ts and notifications-store.ts (QL-25 entries per source, JobNotes, grouping),
                       navigation-api.ts,
                       density.ts (QL-24 `--spacing` and `--radius` through `data-density`), shortcuts.ts (QL-24 every
@@ -1555,8 +1605,9 @@ src/                  React + TypeScript UI
                       (notes, stars, recents, trash, bulk edit: types and wrappers), notes.ts (FD-06 link actions and
                       titles, excerpts, the note link), note-send.ts (a code block to the Terminal page's current pane, its
                       last line break taken off, and asked about whatever the paste setting when it has more lines:
-                      PaneSession.paste's alwaysAsk), stars.ts and stars-store.ts (QL-26 sets, starred first, the search
-                      boost; one shared store), trash.ts and undo-delete.ts (QL-27 names, messages, the delete toast's
+                      PaneSession.paste's alwaysAsk), stars.ts and stars-store.ts (QL-26 sets of sessions and VMs,
+                      starred first, the search boost; UX-22 recentSessions, the one recent list's sessions for the
+                      tree's Recent group and the New terminal dialog; one shared store), trash.ts and undo-delete.ts (QL-27 names, messages, the delete toast's
                       Undo), bulk-edit.ts (QL-28 the form as a BulkEdit); pure helpers with
                       *.test.ts
                       next to them (Node's test runner: `npm test`)

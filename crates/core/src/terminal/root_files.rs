@@ -35,6 +35,7 @@ use crate::domain::Context;
 use crate::error::{CoreError, Result};
 use crate::locks;
 use crate::login_guard::{self, LoginGuard, ParkReason, ParkScope, Parked};
+use crate::policy;
 use crate::vault::{SecretId, SecretString};
 
 /// SS-14: a terminal's root browsing while it lasts.
@@ -52,6 +53,9 @@ pub(crate) struct RootFiles {
     /// G4: where sudo's password went (rule 7): an editor tab's sudoedit gives it only to the same place.
     pub(crate) place: crate::vault::Destination,
 }
+
+/// FD-03: what the read-only lock's refusal calls starting root browsing.
+pub const ROOT_BROWSING: &str = "Browse files as root";
 
 /// SS-14: how long root browsing's cancelled transfers get to delete what they made before its channels close.
 pub const ROOT_SETTLE: std::time::Duration = std::time::Duration::from_secs(5);
@@ -125,8 +129,8 @@ impl Terminals {
         })
     }
 
-    /// SS-14: starts root browsing on an open SSH terminal. Errors say why not: no sftp-server, sudo refused (parked),
-    /// no password for sudo, or the vault password needed first (`reauth_required`).
+    /// SS-14: starts root browsing on an open SSH terminal. Errors say why not: the read-only lock (FD-03), no
+    /// sftp-server, sudo refused (parked), no password for sudo, or the vault password needed first (`reauth_required`).
     pub async fn browse_as_root(&self, ctx: &Context, id: Uuid, request: RootRequest) -> Result<RootBrowsing> {
         let control = self
             .control(id)
@@ -134,6 +138,9 @@ impl Terminals {
         if control.workspace != ctx.workspace_id {
             return Err(CoreError::NotInWorkspace(format!("Terminal {id}")));
         }
+        // FD-03: starting it runs sudo on the host, which the lock refuses as the bus refuses every command (the UI's
+        // disabled item is only a hint), before anything is probed or sent there. Stopping it stays possible.
+        policy::read_only_host_refusal(self.inner.store.read_only().is_locked(), ROOT_BROWSING)?;
         if control.kind != PaneKind::Ssh {
             return Err(CoreError::InvalidInput(
                 "Only SSH terminals browse files, as root or not.".into(),

@@ -7,8 +7,8 @@ use std::sync::Arc;
 use tokio::sync::watch;
 
 use super::{
-    SecretBindings, SecretId, SecretKind, SecretMeta, SecretString, UnlockMethod, Vault, VaultInfo, VaultResetDone,
-    VaultResetPreview, VaultStatus,
+    idle_timeout, SecretBindings, SecretId, SecretKind, SecretMeta, SecretString, UnlockMethod, Vault, VaultInfo,
+    VaultResetDone, VaultResetPreview, VaultStatus, IDLE_LOCK_KEY,
 };
 use crate::domain::Context;
 use crate::error::{CoreError, Result};
@@ -79,6 +79,49 @@ impl VaultService {
 
     pub fn info(&self) -> VaultInfo {
         self.vault.info()
+    }
+
+    /// SS-04 (0.9.0): the idle lock this PC's setting ([`IDLE_LOCK_KEY`]) keeps, at start. Unset, or (written by hand)
+    /// outside its bounds, the default stays.
+    pub async fn load_idle_lock(&self, ctx: &Context) -> Result<()> {
+        if let Some(minutes) = self.store.get_setting::<u64>(ctx, IDLE_LOCK_KEY).await? {
+            match idle_timeout(minutes) {
+                Ok(timeout) => self.vault.set_idle_timeout(timeout),
+                Err(err) => {
+                    tracing::warn!(minutes, error = %err, "the saved idle lock is ignored; the default applies")
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// SS-04 (0.9.0): Settings › Privacy and data's "Lock the vault after": 1 to 60 minutes without activity, kept for
+    /// this PC whatever workspace is shown (`settings::MACHINE_KEYS`). It applies at once; while unlocked, the time
+    /// counts from the change. Audited when it changes; refused by the read-only lock.
+    pub async fn set_idle_lock(&self, ctx: &Context, minutes: u64) -> Result<VaultInfo> {
+        self.store.read_only().check(Change::Vault)?;
+        let timeout = idle_timeout(minutes)?;
+        let before = self.info().idle_lock_minutes;
+        if before == minutes {
+            return Ok(self.info());
+        }
+        self.store.put_setting(ctx, IDLE_LOCK_KEY, &minutes).await?;
+        self.vault.set_idle_timeout(timeout);
+        self.audit(
+            ctx,
+            "vault_changed",
+            "Changed when the vault locks itself",
+            Some(&format!(
+                "after {} without activity, was {before}",
+                if minutes == 1 {
+                    "1 minute".to_owned()
+                } else {
+                    format!("{minutes} minutes")
+                }
+            )),
+        )
+        .await?;
+        Ok(self.info())
     }
 
     pub fn watch(&self) -> watch::Receiver<VaultStatus> {

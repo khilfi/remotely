@@ -1,18 +1,18 @@
 // FD-03 presentation mode in the app chrome: the Present button in the top bar (always visible), which becomes a
-// "Presenting" menu with the read-only lock, "Hide terminal output" and "Stop presenting"; a coloured frame round the
-// window while presenting; the one confirm before presenting or the lock stops; and the Settings card. The palette
-// has the same commands (App.tsx).
+// "Presenting" menu with the read-only lock, "Hide terminal output" and "Stop presenting" (UX-22, 0.9.0: their one
+// home); a coloured frame round the window while presenting; the one confirm before presenting or the lock stops; and
+// Settings' one line, whose "Show it" lights the button. The palette has the same commands (App.tsx).
 //
 // Starting masks the screen at once and then tells the core (which saves and audits it); stopping, or turning the lock
 // off, asks first and changes the screen only once the core has saved it, so a failure leaves the screen masked.
 
-import { useSyncExternalStore } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore, type RefObject } from "react";
 import { toast } from "sonner";
 import { EyeOffIcon, LockKeyholeIcon, PresentationIcon } from "lucide-react";
 import { ConfirmDialog } from "@/components/ConfirmDialog";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import {
   DropdownMenu,
   DropdownMenuCheckboxItem,
@@ -22,11 +22,10 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { Label } from "@/components/ui/label";
-import { Switch } from "@/components/ui/switch";
 import { HelpTip } from "@/components/HelpTip";
 import { api, errorMessage } from "@/lib/api";
 import { READ_ONLY_REASON } from "@/lib/disabled-reasons";
+import { cn } from "@/lib/utils";
 import { workspacesApi } from "@/lib/workspaces-api";
 import {
   presentationView,
@@ -170,11 +169,16 @@ export function PresentationLayer() {
 /** The top bar's control: Present, or the Presenting menu. */
 export function PresentationButton() {
   const view = usePresentation();
+  // UX-22: Settings' "Show it" lights this button and focuses it.
+  const [ref, lit] = usePointedAt();
+  const ring = lit ? "ring-2 ring-ring ring-offset-2" : undefined;
   if (!view.presenting) {
     return (
       <Button
+        ref={ref}
         variant="outline"
         size="sm"
+        className={ring}
         title="Present: mask host names, IP addresses and user names for a screen share"
         onClick={() => void startPresenting()}
       >
@@ -186,7 +190,12 @@ export function PresentationButton() {
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
-        <Button size="sm" className="bg-presenting text-white hover:bg-presenting/90" aria-label="Presenting: options">
+        <Button
+          ref={ref}
+          size="sm"
+          className={cn("bg-presenting text-white hover:bg-presenting/90", ring)}
+          aria-label="Presenting: options"
+        >
           <PresentationIcon />
           Presenting
           {view.readOnly && <LockKeyholeIcon aria-label="read-only" />}
@@ -225,8 +234,48 @@ export function PresentationButton() {
   );
 }
 
-/** Settings › Privacy and data. Each switch applies at once, as the top bar's menu does. */
-export function PresentationCard() {
+// ---- UX-22 (0.9.0): Settings' one line points at the top bar, presentation mode's home ----
+
+let pointed = 0;
+const pointListeners = new Set<() => void>();
+
+/** Lights the top bar's Present (or Presenting) button and gives it the focus. */
+export function pointAtPresentButton() {
+  pointed += 1;
+  pointListeners.forEach((l) => l());
+}
+
+function usePointed(): number {
+  return useSyncExternalStore(
+    (listener) => {
+      pointListeners.add(listener);
+      return () => pointListeners.delete(listener);
+    },
+    () => pointed,
+  );
+}
+
+/** While Settings points at it: the button's ref to focus, and whether it is lit. */
+function usePointedAt(): [RefObject<HTMLButtonElement | null>, boolean] {
+  const asked = usePointed();
+  const ref = useRef<HTMLButtonElement>(null);
+  const [handled, setHandled] = useState(asked);
+  const [lit, setLit] = useState(false);
+  if (asked !== handled) {
+    setHandled(asked);
+    setLit(true);
+  }
+  useEffect(() => {
+    if (!lit) return;
+    ref.current?.focus();
+    const timer = window.setTimeout(() => setLit(false), 2500);
+    return () => window.clearTimeout(timer);
+  }, [lit, asked]);
+  return [ref, lit];
+}
+
+/** Settings › Privacy and data: one line on presentation mode, and a link to the top bar's button, its one home. */
+export function PresentationLine() {
   const view = usePresentation();
   return (
     <Card>
@@ -235,28 +284,18 @@ export function PresentationCard() {
           Presentation mode
           <HelpTip topic="presentationMode" />
         </CardTitle>
-        <CardDescription>For screen shares: host names, IP addresses and user names show as stand-ins.</CardDescription>
-      </CardHeader>
-      <CardContent className="grid gap-3">
-        <div className="flex items-center gap-3">
-          <Switch
-            id="presenting"
-            checked={view.presenting}
-            onCheckedChange={(on) => (on ? void startPresenting() : requestStopPresenting())}
-          />
-          <Label htmlFor="presenting">Present</Label>
-        </div>
-        <div className="flex items-center gap-3">
-          <Switch id="read-only-lock" checked={view.readOnly} onCheckedChange={(on) => requestReadOnlyLock(on)} />
-          <Label htmlFor="read-only-lock">Read-only lock while presenting</Label>
+        {/* The Presenting menu is a modal dropdown, which a help popover inside it would close: its "?"s live here. */}
+        <CardDescription className="flex flex-wrap items-center gap-x-1">
+          {view.presenting ? "On now." : "For screen shares."} The top bar&apos;s Present masks host names, IP addresses
+          and user names; its menu has the read-only lock
           <HelpTip topic="readOnlyLock" />
-        </div>
-        <div className="flex items-center gap-3">
-          <Switch id="hide-terminals" checked={view.hideTerminals} onCheckedChange={(on) => setHideTerminals(on)} />
-          <Label htmlFor="hide-terminals">Hide terminal output while presenting</Label>
+          and hides terminal output
           <HelpTip topic="hideTerminals" />
-        </div>
-      </CardContent>
+          <Button variant="link" className="h-auto p-0" onClick={pointAtPresentButton}>
+            Show it
+          </Button>
+        </CardDescription>
+      </CardHeader>
     </Card>
   );
 }
@@ -312,7 +351,12 @@ export const READ_ONLY_PAGES: Record<string, { blocked: string; still?: string }
     blocked: "Adding, replacing, renaming and deleting secrets, the vault password, SSH keys and trusted host keys",
     still: "Locking and unlocking the vault, and trusting a new host's key when you connect, still work.",
   },
-  activity: { blocked: "Retrying and starting jobs", still: "Reading and exporting the audit log still work." },
+  // UX-18 (0.9.0 H3): what Activity offers, bulk jobs' grouped results included.
+  activity: {
+    blocked: "Retries of a job's failed hosts and the go-ahead for the rest of a run after its first host",
+    still:
+      "Reading jobs, their grouped results and diffs, cancelling a job, and exporting results, reports and the audit log still work.",
+  },
   settings: {
     blocked: "Changes to settings and the approval rules",
     still: "Presentation mode itself can still be changed here.",

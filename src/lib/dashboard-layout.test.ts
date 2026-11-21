@@ -52,7 +52,6 @@ test("widgets are added at the end, once for the ones a dashboard shows once", (
     key: null,
     name: null,
     metric: "cpu",
-    range: "live",
   });
   assert.equal(newWidgetId(charts, "thisPcMemory"), "this-pc-memory-2");
   const services = addWidget(layout, "services").widgets[4];
@@ -65,7 +64,6 @@ test("widgets are added at the end, once for the ones a dashboard shows once", (
       h: 1,
       kind: "chart" as const,
       metric: "cpu" as const,
-      range: "live" as const,
     })),
   };
   assert.match(cannotAdd(full, "chart") ?? "", /at most/);
@@ -109,7 +107,6 @@ test("a widget's settings change, never its id or kind", () => {
     key: "s1",
     name: "db01",
     metric: "load",
-    range: "24h",
   });
   const chart = changed.widgets[4];
   assert.equal(chart.kind, "chart");

@@ -44,8 +44,8 @@ export type AppLink =
   | { kind: "alerts"; rules?: boolean }
   /** FD-14: the update banner, or Settings' Updates card when nothing is offered. */
   | { kind: "update" }
-  /** SS-04: the Vault page. */
-  | { kind: "vault" }
+  /** SS-04: the Vault page; UX-22 (0.9.0): on its Unlocking card (Settings' search for unlocking points there). */
+  | { kind: "vault"; card?: "unlocking" }
   /** QL-21: the topology map. */
   | { kind: "map" }
   /** VM-14, VM-27: a schedule's runs on the Schedules page. */
@@ -162,7 +162,7 @@ export function linkLabel(link: AppLink): string {
     case "update":
       return "Show the update";
     case "vault":
-      return "Open the vault";
+      return link.card === "unlocking" ? "Show how it unlocks" : "Open the vault";
     case "map":
       return "Open the map";
     case "schedule":

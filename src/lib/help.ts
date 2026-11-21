@@ -32,7 +32,7 @@ export const HELP = {
     title: "Templates",
     body: [
       "Describe VMs once, then deploy them. A size sets CPU, memory and disks; an image is where the OS comes from; an install config lets an ISO install itself; a launch template puts them together with the network, SSH key and names.",
-      "A stack deploys several launch templates in boot order, as one. Disk images reads and converts other hypervisors' disk files.",
+      "A stack deploys several launch templates in boot order, as one. Other hypervisors' disk files are the Toolbox's Disk images.",
     ],
   },
   "installConfig.placeholders": {
@@ -52,8 +52,8 @@ export const HELP = {
   "addressPool.free": {
     title: "Which addresses a pool hands out",
     body: [
-      "A deploy gives each VM the next address of the range that no VM holds and nothing answers a ping on, checked again just before the VM is made. The gateway and the DNS servers are never handed out.",
-      "An address stays its VM's until Remotely deletes the VM. A host that drops pings looks free, so keep the range apart from addresses set by hand.",
+      "A deploy gives each VM the next address of the range that no VM holds and nothing answers on, checked by a ping and an ARP request from this PC, and again just before the VM is made. The gateway and the DNS servers are never handed out.",
+      "An address stays its VM's until Remotely deletes the VM. A host that drops pings still answers ARP, but one that is off looks free, so keep the range apart from addresses set by hand.",
     ],
   },
   "page.diskImages": {
@@ -94,7 +94,7 @@ export const HELP = {
   "page.toolbox": {
     title: "Toolbox",
     body: [
-      "Ping, trace route, DNS lookups, port checks, certificates, a subnet calculator, Wake-on-LAN and a file server, run from this PC. Only Wake up and the file server change something, so only they go through the approval rules.",
+      "Ping, trace route, DNS lookups, port checks, certificates, a subnet calculator, Wake-on-LAN, a file server and disk images, run from this PC. Only Wake up, the file server and a disk conversion change something, so only they go through the approval rules.",
       "A session behind a jump host has its ports and certificate checked from the jump host. Ping and trace route can't go that way.",
     ],
   },
@@ -178,7 +178,8 @@ export const HELP = {
   "page.activity": {
     title: "Activity",
     body: [
-      "Every job, newest first, with each target's result and output, and the audit log of everything that changed.",
+      "Every job, newest first, with each target's result and output, and the audit log of everything that changed. Reports in the menu make the handover pack, the inventory workbook and the audit log's CSV file.",
+      "A command run on many hosts, a push or fetch, or an SSH key push opens grouped by output, as in Compare hosts: its failed hosts can be retried (asked for again) and its results compared and exported. A support bundle shows what each host gave, with Show folder.",
     ],
     link: { label: "Job output retention", to: setting("retention") },
   },
@@ -215,9 +216,10 @@ export const HELP = {
   vaultIdleLock: {
     title: "When the vault locks",
     body: [
-      "The vault locks itself after a set time without you typing or clicking in Remotely; background reads don't count. You can also lock it yourself from the Vault page or the palette.",
+      "The vault locks itself after 1 to 60 minutes without you typing or clicking in Remotely, 15 unless you change it; background reads don't count. You can also lock it yourself from the Vault page or the palette.",
+      "The time is kept for this PC, whatever workspace is open. A change applies at once and the countdown starts again from it.",
     ],
-    link: { label: "Vault settings", to: setting("vault") },
+    link: { label: "Lock the vault after", to: setting("vault-lock") },
   },
   vaultReauth: {
     title: "Why the vault password is asked again",
@@ -238,9 +240,8 @@ export const HELP = {
     title: "Presentation mode",
     body: [
       "For screen shares: host names, IP addresses, user names and your Windows user name are replaced on screen by stand-ins such as host-3 or ip-5.",
-      "Copies, saved output, session logs and exports keep the real text. Printing is masked, since its preview is on screen; Windows file dialogs show real paths.",
+      "Copies, saved output, session logs and exports keep the real text. Printing is masked, since its preview is on screen; Windows file dialogs show real paths. Present is in the top bar, and in the palette.",
     ],
-    link: { label: "Presentation settings", to: setting("presentation") },
   },
   hideTerminals: {
     title: "Hide terminal output",
@@ -252,9 +253,8 @@ export const HELP = {
     title: "Read-only lock",
     body: [
       "While you present, it blocks every change: power actions, snapshots, commands, uploads, tunnels, imports and edits.",
-      "Reading, downloads and typing into a single terminal still work.",
+      "Reading, downloads and typing into a single terminal still work. Turn it on or off in the top bar's Presenting menu.",
     ],
-    link: { label: "Presentation settings", to: setting("presentation") },
   },
   promptHook: {
     title: "Prompt hook",
@@ -283,8 +283,8 @@ export const HELP = {
   compareHosts: {
     title: "Compare hosts",
     body: [
-      "Runs one command once on each picked host, in its own login shell (PowerShell on a Windows host) rather than in your terminals, and groups the hosts whose output is the same. Each host is rated by its own rules: the shell's or PowerShell's.",
-      "The hosts start as the picked tabs and the sessions Ctrl+clicked in the tree (with nothing picked, the current tab); Change… adds sessions, VMs, tags, saved filters and saved groups. Its second view compares the lines you typed in all tabs, with what each terminal answered.",
+      "Runs a command once on each picked host in its own login shell (PowerShell on a Windows host), not in your terminals, and groups the hosts whose output is the same, each rated by its own rules. The hosts start as the picked tabs and the tree's Ctrl+clicks; Change… adds sessions, VMs, tags, saved filters and groups.",
+      "Its results list, newest first, holds its runs, pushes and fetches to many hosts, and the lines you typed in all tabs with what each terminal answered. Only runs, pushes and fetches can be retried; a typed line goes when Type in all tabs is turned off.",
     ],
   },
   "reports.inventory": {
@@ -318,7 +318,7 @@ export const HELP = {
   supportBundle: {
     title: "Support bundle",
     body: [
-      "Runs the same commands on each host and reads the chosen files as the session's user (never with sudo), into one zip with a folder per host and a manifest. Linux hosts are reached over SSH, Windows hosts over WinRM, each with presets that only read. Remote desktop, VNC, Telnet and serial sessions can't be hosts.",
+      "Runs the same commands on each host, with sudo if you tick it, and reads the chosen files as the session's user, never with sudo: one zip, a folder per host and a manifest. Linux hosts over SSH, Windows hosts over WinRM, with presets that only read. Remote desktop, VNC, Telnet and serial sessions can't be hosts.",
       "What looks like a password, token or private key is redacted in every file, but look through the zip before you share it. Each file keeps up to 10 MB, each host 100 MB and the bundle 1 GB; what is cut or left out is in the manifest.",
     ],
   },
@@ -526,7 +526,7 @@ export const HELP = {
   qemuImg: {
     title: "Converting with qemu-img",
     body: [
-      "Converting to or from qcow2 and VHDX needs qemu-img from QEMU for Windows, which Remotely doesn't ship. Install QEMU, or set qemu-img.exe's path in Settings.",
+      "Converting to or from qcow2 and VHDX needs qemu-img from QEMU for Windows. Remotely never ships it (it is GPL-licensed): install QEMU from its own download page and Remotely finds it, or set qemu-img.exe's path in Settings.",
       "Workstation's and VirtualBox's own tools handle the other formats.",
     ],
     link: { label: "Conversion tools", to: setting("qemu-img") },
@@ -639,7 +639,7 @@ export const HELP = {
     title: "Audit log",
     body: [
       "Every change is written to the audit log when it starts and when it ends, each entry chained to the one before, so a missing or edited entry shows.",
-      "Activity shows it, and you can export it as a CSV file.",
+      "Activity shows it, and its Reports menu exports it as a CSV file.",
     ],
     link: { label: "Open Activity", to: { kind: "page", page: "activity" } },
   },
@@ -706,7 +706,7 @@ export const HELP = {
     title: "Changing files",
     body: [
       "Renames, moves, copies, deletes, new folders and permission changes go through the approval rules, like uploads: a new folder or a rename is done at once; replacing, copying, changing permissions or deleting asks first; deleting a folder with what is in it asks for the full approval.",
-      "Up to four transfers run at a time on a host; the rest wait. A paused upload goes on from where it stopped if the file on the host is still what was sent; a paused download comes down again from the start. Replace if newer goes by the host's clock. A folder comes down without Git's data (.git) and links to folders.",
+      "Up to four transfers run at once on a host; the rest wait. A paused upload goes on if the host's file is still what was sent; a paused download comes down again from the start. Replace if newer compares modified times, each by its own side's clock. A folder comes down without Git's data (.git) and links to folders.",
     ],
   },
 } as const satisfies Record<string, HelpEntry>;

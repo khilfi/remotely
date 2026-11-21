@@ -67,14 +67,14 @@ test("page shortcuts follow the sidebar's order, Settings keeps Ctrl+,", () => {
 
 test("the 0.5.0 shortcuts no page took still open what they opened", () => {
   assert.deepEqual(shortcutTarget("0"), { page: "dashboard", tab: "map" });
-  assert.deepEqual(shortcutTarget(";"), { page: "templates", tab: "disks" });
+  assert.deepEqual(shortcutTarget(";"), { page: "toolbox", tab: "disks" });
   assert.deepEqual(shortcutTarget("."), { page: "schedules" });
   assert.equal(shortcutTarget("-"), null);
   assert.equal(shortcutTarget("toString"), null, "only the tables' own keys");
 });
 
 test("the pages that became tabs are reached by their old ids", () => {
-  assert.deepEqual(navTarget("images"), { page: "templates", tab: "disks" });
+  assert.deepEqual(navTarget("images"), { page: "toolbox", tab: "disks" });
   assert.deepEqual(navTarget("map"), { page: "dashboard", tab: "map" });
   assert.deepEqual(navTarget("knownHosts"), { page: "vault", tab: "knownHosts" });
   assert.deepEqual(navTarget("snapshots"), { page: "vms", tab: "snapshots" });
@@ -87,7 +87,7 @@ test("the pages that became tabs are reached by their old ids", () => {
 
 test("each moved page names its home, and only Disk images and the Map keep a shortcut", () => {
   assert.deepEqual(movedPageEntries(), [
-    { id: "images", label: "Templates › Disk images", shortcut: "Ctrl+;" },
+    { id: "images", label: "Toolbox › Disk images", shortcut: "Ctrl+;" },
     { id: "map", label: "Dashboard › Map", shortcut: "Ctrl+0" },
     { id: "knownHosts", label: "Vault › Known hosts", shortcut: undefined },
   ]);

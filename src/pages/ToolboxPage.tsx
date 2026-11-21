@@ -1,16 +1,18 @@
 // FD-09: the Toolbox, in the sidebar's Remote group. A tab per tool: Ping, Trace route, DNS lookup, Check ports,
-// Certificate, Subnet calculator, Wake up and File server. Session and VM row menus open a tool with their target
-// filled in, through a `toolbox` link (lib/links.ts); the palette opens the page. UX-15 (0.9.0 H1): the Files page's This
-// PC rows open the file server with what they serve filled in (a pick the core keeps).
+// Certificate, Subnet calculator, Wake up, File server and (UX-22, 0.9.0: from the Templates page) Disk images. Session
+// and VM row menus open a tool with their target filled in, through a `toolbox` link (lib/links.ts); the palette opens
+// each tab. UX-15 (0.9.0 H1): the Files page's This PC rows open the file server with what they serve filled in (a pick
+// the core keeps).
 //
-// Every tool but Wake up and File server only reads (no tier, not audited, allowed while presenting with the read-only
-// lock). Each tab keeps its last 20 inputs in the window's local storage (lib/toolbox.ts); the file server keeps its
+// Every tool but Wake up, File server and Disk images' Convert only reads (no tier, not audited, allowed while
+// presenting with the read-only lock). Each tab keeps its last 20 inputs in the window's local storage (lib/toolbox.ts); the file server keeps its
 // last choices in the core, per workspace.
 
 import { useEffect, useState } from "react";
 import {
   ActivityIcon,
   CalculatorIcon,
+  FileCogIcon,
   FolderUpIcon,
   GlobeIcon,
   NetworkIcon,
@@ -26,6 +28,7 @@ import { FileServerTool } from "@/components/toolbox/FileServerTool";
 import { DnsTool, PingTool, PortsTool, TraceTool, type Incoming } from "@/components/toolbox/ProbeTools";
 import { SubnetTool } from "@/components/toolbox/SubnetTool";
 import { WakeTool } from "@/components/toolbox/WakeTool";
+import { ImageToolsPage } from "@/pages/ImageToolsPage";
 import type { SubmitOutcome } from "@/lib/api";
 import {
   recentScope,
@@ -55,6 +58,7 @@ const ICONS: Record<ToolboxTool, LucideIcon> = {
   subnet: CalculatorIcon,
   wake: PowerIcon,
   fileServer: FolderUpIcon,
+  disks: FileCogIcon,
 };
 
 /** A target from a link only when it is one (links can come back from the notification centre as plain JSON). */
@@ -89,9 +93,13 @@ interface Props {
   active: boolean;
   request: ToolboxRequest | null;
   onSubmitted: (outcome: SubmitOutcome) => void;
+  /** UX-22: Disk images' Import as a VM (CV-01), on a file when one is given. */
+  onImport: (path?: string) => void;
+  /** UX-22: Disk images' link to Settings, for qemu-img's path. */
+  onOpenSettings: () => void;
 }
 
-export function ToolboxPage({ active, request, onSubmitted }: Props) {
+export function ToolboxPage({ active, request, onSubmitted, onImport, onOpenSettings }: Props) {
   // FD-02: the recent inputs are the shown workspace's; it is read once the page first shows (the window loads again
   // after a switch).
   useEffect(() => {
@@ -164,6 +172,15 @@ export function ToolboxPage({ active, request, onSubmitted }: Props) {
         </TabsContent>
         <TabsContent value="fileServer" forceMount className="data-[state=inactive]:hidden">
           <FileServerTool shown={active && tab === "fileServer"} serve={serve} onSubmitted={onSubmitted} />
+        </TabsContent>
+        {/* UX-22: Disk images (CV-03), the Templates page's tab until 0.9.0; Ctrl+; and its old id open it. */}
+        <TabsContent value="disks" forceMount className="data-[state=inactive]:hidden">
+          <ImageToolsPage
+            active={active && tab === "disks"}
+            onSubmitted={onSubmitted}
+            onImport={onImport}
+            onOpenSettings={onOpenSettings}
+          />
         </TabsContent>
       </Tabs>
     </div>

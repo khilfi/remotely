@@ -74,8 +74,19 @@ export async function withReauth<T>(call: (vaultPassword?: string) => Promise<T>
 
 /** SS-04: how often the window tells the core the user is active, so the vault's idle lock starts again. */
 export const ACTIVITY_PING_MS = 20_000;
+/** SS-04 (0.9.0): never more often than this, however short the idle lock. */
+export const MIN_ACTIVITY_PING_MS = 5_000;
+
+/**
+ * SS-04 (0.9.0): how often activity reaches the core for an idle lock of `idleLockMinutes` (this PC's setting, 1 to
+ * 60): every 20 seconds, or a quarter of a shorter lock, never under 5 seconds. Unknown: every 20 seconds.
+ */
+export function activityPingMs(idleLockMinutes: number | null | undefined): number {
+  if (!idleLockMinutes || idleLockMinutes <= 0) return ACTIVITY_PING_MS;
+  return Math.max(MIN_ACTIVITY_PING_MS, Math.min(ACTIVITY_PING_MS, (idleLockMinutes * 60_000) / 4));
+}
 
 /** Whether input at `now` should tell the core, given the last time it did. */
-export function shouldPingActivity(last: number | null, now: number): boolean {
-  return last === null || now - last >= ACTIVITY_PING_MS;
+export function shouldPingActivity(last: number | null, now: number, everyMs = ACTIVITY_PING_MS): boolean {
+  return last === null || now - last >= everyMs;
 }

@@ -14,8 +14,10 @@
 
 use futures_util::{Stream, StreamExt, TryStreamExt};
 use serde::Serialize;
+use std::sync::Arc;
+
 use sha2::{Digest, Sha256};
-use sqlx::Row;
+use sqlx::{Row, SqliteConnection};
 use uuid::Uuid;
 
 use super::Store;
@@ -96,16 +98,16 @@ pub struct ChainCheck {
 impl Store {
     /// FD-02: what a workspace's next entry links to: its last entry's hash, or, before its first entry since
     /// workspaces (migration 0029), its chain's start ([`chain_start`]).
-    async fn chain_head(&self, ctx: &Context) -> Result<String> {
+    async fn chain_head(conn: &mut SqliteConnection, ctx: &Context) -> Result<String> {
         let legacy_until: i64 = sqlx::query_scalar("SELECT audit_legacy_until FROM workspaces WHERE id = ?")
             .bind(ctx.workspace_id.to_string())
-            .fetch_optional(&self.pool)
+            .fetch_optional(&mut *conn)
             .await?
             .unwrap_or(0);
         let last: Option<(i64, String)> =
             sqlx::query_as("SELECT seq, hash FROM audit_log WHERE workspace_id = ? ORDER BY seq DESC LIMIT 1")
                 .bind(ctx.workspace_id.to_string())
-                .fetch_optional(&self.pool)
+                .fetch_optional(&mut *conn)
                 .await?;
         Ok(match last {
             Some((seq, hash)) if seq > legacy_until => hash,
@@ -118,7 +120,24 @@ impl Store {
 
     pub async fn append_audit(&self, ctx: &Context, e: NewAuditEntry<'_>) -> Result<AuditEntry> {
         let _chain = self.audit_lock.lock().await;
-        let prev_hash = self.chain_head(ctx).await?;
+        let mut conn = self.pool.acquire().await?;
+        Self::append_audit_on(&mut conn, ctx, e).await
+    }
+
+    /// The audit lock (one chain writer at a time), for a change written with its entry in one transaction
+    /// ([`Self::append_audit_on`]).
+    pub(crate) async fn lock_audit_chain(&self) -> tokio::sync::OwnedMutexGuard<()> {
+        Arc::clone(&self.audit_lock).lock_owned().await
+    }
+
+    /// [`Self::append_audit`] on `conn` (a transaction's, so the entry commits with the change it records). The caller
+    /// holds [`Self::lock_audit_chain`].
+    pub(crate) async fn append_audit_on(
+        conn: &mut SqliteConnection,
+        ctx: &Context,
+        e: NewAuditEntry<'_>,
+    ) -> Result<AuditEntry> {
+        let prev_hash = Self::chain_head(&mut *conn, ctx).await?;
 
         // AP-05: kept for good, so no secret typed into a command or a reason stays in it.
         let clean = |text: &str| redact_secrets(text).0;
@@ -161,7 +180,7 @@ impl Store {
         .bind(&entry.detail)
         .bind(&entry.prev_hash)
         .bind(&entry.hash)
-        .fetch_one(&self.pool)
+        .fetch_one(&mut *conn)
         .await?;
         entry.seq = seq;
         Ok(entry)

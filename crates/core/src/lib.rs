@@ -539,6 +539,10 @@ impl Core {
         if let Err(err) = core.address_pools.release_stale_claims_everywhere(ctx.user_id).await {
             tracing::warn!(error = %err, "address claims left by earlier deploys could not be released");
         }
+        // UX-20 (0.9.0): command stars left from 0.8.x move into each workspace's favourites, once.
+        if let Err(err) = core.snippets.move_command_stars_everywhere(ctx.user_id).await {
+            tracing::warn!(error = %err, "command stars could not move into the favourites yet");
+        }
         Ok(core)
     }
 
@@ -954,6 +958,8 @@ impl Core {
             virtualbox,
             bindings,
         };
+        // SS-04 (0.9.0): the idle lock this PC's setting keeps.
+        core.vault.load_idle_lock(&ctx).await?;
         core.spawn_lock_watch(vault_status);
         Ok(core)
     }

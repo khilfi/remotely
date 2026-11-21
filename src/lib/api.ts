@@ -770,6 +770,8 @@ export type JobEvent =
       name: string;
       status: TargetStatus;
       message: string | null;
+      /** Why it failed or what its cancel kept, as a stable code (`JobTarget.errorCode`); absent when none. */
+      errorCode?: string | null;
       /** BX-02: a remote command's exit code. */
       exitCode: number | null;
       durationMs: number;
@@ -982,6 +984,12 @@ export interface JobSummary {
   commandRedacted: boolean;
   /** AP-08: the ticket or change number its approval was given with. */
   changeId: string | null;
+  /**
+   * UX-18 (0.9.0 H3): the command's type as the journal names it (`remoteExec`, `bulkFiles`, `supportBundle`,
+   * `pushSshKey`...), so Activity opens a bulk job in the grouped results view. Empty for a job journaled before
+   * types were named.
+   */
+  commandType: string;
 }
 
 /** One target of a job and how it went. */
@@ -1244,6 +1252,9 @@ export interface Settings {
 /** SS-04. */
 export type VaultStatus = "notSetUp" | "locked" | "unlocked";
 
+/** SS-04 (0.9.0): the minutes "Lock the vault after" takes, as the core checks them (`vault::IDLE_LOCK_MINUTES`). */
+export const IDLE_LOCK_MINUTES = { min: 1, max: 60 } as const;
+
 /** SS-04: what the UI may know about the vault. Never a secret. */
 export interface VaultInfo {
   status: VaultStatus;
@@ -1251,7 +1262,7 @@ export interface VaultInfo {
   windowsLogin: boolean;
   /** This PC can protect the vault key with the Windows login (DPAPI). */
   windowsLoginAvailable: boolean;
-  /** The vault locks itself after this many minutes without use. */
+  /** The vault locks itself after this many minutes without use (SS-04, 0.9.0: this PC's setting). */
   idleLockMinutes: number;
   /** QL-22: seconds until it does, while unlocked (moves on with each activity ping). */
   locksInSecs: number | null;
@@ -1874,6 +1885,12 @@ export interface Favourite {
   risk: CommandRisk;
   createdAt: string;
   updatedAt: string;
+}
+
+/** UX-20: what "Add to favourites" did: `added` false when a favourite held the command already. */
+export interface AddedFavourite {
+  favourite: Favourite;
+  added: boolean;
 }
 
 export interface FavouriteInput {
@@ -3899,6 +3916,8 @@ export const api = {
   /** SS-04: the user typed or clicked; the idle lock counts from now (background reads never count). QL-22: the
    * answer carries the new countdown. */
   vaultActivity: () => invoke<VaultInfo>("vault_activity"),
+  /** SS-04 (0.9.0): Lock the vault after, this PC's setting (IDLE_LOCK_MINUTES); audited, refused by the read-only lock. */
+  vaultSetIdleLock: (minutes: number) => invoke<VaultInfo>("vault_set_idle_lock", { minutes }),
   /** SS-04, FD-07: scores a candidate vault password or export passphrase for the meter. Never logged. */
   passwordStrength: (text: string) => invoke<PasswordStrength>("password_strength", { text }),
   /** SS-04, FD-07: six random words joined by "-", for the Generate button. */
@@ -4175,11 +4194,10 @@ export const api = {
   setTerminalSettings: (settings: TerminalSettings) => invoke<TerminalSettings>("terminal_set_settings", { settings }),
   /** SS-05: trusted host keys; removing one is audited and the next connection asks again. */
   knownHosts: () => invoke<KnownHost[]>("known_hosts_list"),
-  /** QL-02 history of quick connections that were not saved, and Recent sessions. */
+  /** QL-02 history of quick connections that were not saved (UX-22: Recent sessions are QL-26's recents). */
   quickConnectHistory: () => invoke<QuickConnectEntry[]>("quick_connect_history"),
   /** Without an id, clears the whole history. Audited. */
   quickConnectForget: (id: string | null) => invoke<void>("quick_connect_forget", { id }),
-  recentSessions: (limit?: number) => invoke<SessionRecord[]>("sessions_recent", { limit: limit ?? null }),
   /** QL-04: the Terminal page's session tree. */
   sessionTree: (grouping: TreeGrouping, filter?: SessionFilter) =>
     invoke<SessionTree>("session_tree", { grouping, filter: filter ?? null }),
@@ -4217,6 +4235,8 @@ export const api = {
   addFavourite: (input: FavouriteInput) => invoke<Favourite>("favourite_add", { input }),
   updateFavourite: (id: string, input: FavouriteInput) => invoke<Favourite>("favourite_update", { id, input }),
   deleteFavourite: (id: string) => invoke<void>("favourite_delete", { id }),
+  /** UX-20: a library command into the Starred folder, or the favourite holding its command already. Audited. */
+  addFavouriteFromLibrary: (id: string) => invoke<AddedFavourite>("favourite_add_from_library", { id }),
   /** One folder's favourites in a new order; `folder` null for the top level. */
   reorderFavourites: (folder: string | null, ids: string[]) =>
     invoke<Favourite[]>("favourites_reorder", { folder, ids }),

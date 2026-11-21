@@ -63,6 +63,7 @@ function job(id: string, summary: string, createdAt: string, more: Partial<JobSu
     bodiesRemoved: false,
     commandRedacted: false,
     changeId: null,
+    commandType: "remoteExec",
     ...more,
   };
 }

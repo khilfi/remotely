@@ -4,6 +4,7 @@
 // alert events feed it.
 
 import type { JobEvent, JobStatus, JobSummary, UpdateCheck, VaultInfo } from "./api.ts";
+import type { AppLink } from "./links.ts";
 import type { OpenTunnel } from "./open-tunnels.ts";
 import { tunnelStateText } from "./tunnels.ts";
 
@@ -18,6 +19,11 @@ export interface StatusText {
 
 /** Under this many seconds the countdown turns amber. */
 export const LOCK_WARNING_SECS = 60;
+
+/** SS-04 (0.9.0): the amber part of a countdown for an idle lock of `minutes`: the last minute, or a quarter of it. */
+export function lockWarningSecs(minutes: number): number {
+  return Math.min(LOCK_WARNING_SECS, Math.max(1, (minutes * 60) / 4));
+}
 
 /** `14:05`, `0:42`; an hour or more as `1:02:03`. */
 export function formatCountdown(secs: number): string {
@@ -69,8 +75,9 @@ export function vaultText(info: VaultInfo | null, secsLeft: number | null): Stat
         return { label: "Vault unlocked", title: "The vault is unlocked. Open the Vault page.", tone: "good" };
       return {
         label: `Vault locks in ${formatCountdown(secsLeft)}`,
-        title: `Locks after ${minutes} minutes without typing or clicking in Remotely. Open the Vault page.`,
-        tone: secsLeft <= LOCK_WARNING_SECS ? "warning" : "good",
+        // SS-04 (0.9.0): this PC's setting, 1 to 60 minutes.
+        title: `Locks after ${minutes === 1 ? "1 minute" : `${minutes} minutes`} without typing or clicking in Remotely. Open the Vault page.`,
+        tone: secsLeft <= lockWarningSecs(minutes) ? "warning" : "good",
       };
     }
     case "locked":
@@ -122,6 +129,19 @@ export class OpenJobs {
   get summaries(): string[] {
     return [...this.open.values()];
   }
+
+  /** The open job when it is the only one, else null. */
+  get only(): string | null {
+    return this.open.size === 1 ? ([...this.open.keys()][0] ?? null) : null;
+  }
+}
+
+/**
+ * UX-18 (0.9.0 H3): where the jobs item leads: the one open job's results in Activity (a bulk job in the grouped
+ * results view), or Activity's list while several are open.
+ */
+export function jobsLink(only: string | null): AppLink {
+  return only ? { kind: "job", jobId: only } : { kind: "page", page: "activity" };
 }
 
 export function jobsText(count: number, summaries: readonly string[]): StatusText | null {
@@ -130,7 +150,11 @@ export function jobsText(count: number, summaries: readonly string[]): StatusTex
   const more = summaries.length > 5 ? `\nand ${summaries.length - 5} more` : "";
   return {
     label: count === 1 ? "1 job running" : `${count} jobs running`,
-    title: `${shown}${more}\nOpen Activity to follow or cancel them.`,
+    // UX-18: one job opens its results there (jobsLink).
+    title:
+      count === 1
+        ? `${shown}\nOpen its results in Activity to follow or cancel it.`
+        : `${shown}${more}\nOpen Activity to follow or cancel them.`,
     tone: "normal",
   };
 }

@@ -33,6 +33,7 @@ use remotely_core::jobs::JobStatus;
 use remotely_core::known_hosts::HostKey;
 use remotely_core::login_guard::{self, ParkReason, ParkScope, Parked};
 use remotely_core::policy::{ActionKind, ApprovalStep, Tier};
+use remotely_core::presentation::Presentation;
 use remotely_core::sessions::{SessionAuth, SessionInput};
 use remotely_core::terminal::file_ops::FileChange;
 use remotely_core::terminal::files::{
@@ -732,6 +733,58 @@ async fn a_refused_sudo_password_parks_root_browsing_until_asked_to_retry() {
         .unwrap()
         .iter()
         .any(|e| e.event == "files_root_refused"));
+}
+
+#[tokio::test]
+async fn the_read_only_lock_refuses_starting_root_browsing_before_anything_reaches_the_host() {
+    // FD-03: the core refuses it, not only the window's disabled item; stopping stays possible.
+    let pw = password();
+    let server = TestSshServer::start()
+        .await
+        .with_password("alice", &pw)
+        .with_sudo(SudoMode::Password(pw.clone()));
+    let (core, t) = pane(&server, &pw, Environment::Lab).await;
+    let ctx = core.ctx();
+    let presenting = |read_only| Presentation {
+        enabled: true,
+        read_only,
+    };
+    let execs = |log: &[String]| {
+        log.iter()
+            .filter(|l| l.starts_with("exec ") || l.starts_with("sudo"))
+            .count()
+    };
+    core.presentation.set(presenting(true)).await.unwrap();
+    let before = execs(&server.log());
+    let err = core
+        .terminals
+        .browse_as_root(&ctx, t, RootRequest::default())
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), "read_only_lock", "{err}");
+    assert!(err.to_string().contains("Browse files as root"), "{err}");
+    assert_eq!(
+        execs(&server.log()),
+        before,
+        "no probe and no sudo on the host: {:?}",
+        server.log()
+    );
+    assert!(core.terminals.root_browsing(t).is_none());
+    let audit = core.store.recent_audit(&ctx, 50).await.unwrap();
+    assert!(
+        !audit.iter().any(|e| e.event.starts_with("files_root_")),
+        "nothing started"
+    );
+
+    // Presenting without the lock, it starts; with the lock on again, it can still be stopped.
+    core.presentation.set(presenting(false)).await.unwrap();
+    core.terminals
+        .browse_as_root(&ctx, t, RootRequest::default())
+        .await
+        .unwrap();
+    core.presentation.set(presenting(true)).await.unwrap();
+    assert!(core.terminals.stop_root(&ctx, t).await.unwrap());
+    assert!(core.terminals.root_browsing(t).is_none());
 }
 
 #[tokio::test]
