@@ -78,7 +78,7 @@ zip = { version = "9.2", default-features = false, features = ["deflate-flate2-z
 flate2 = { version = "1.1", default-features = false, features = ["zlib-rs"] }
 # FD-05: the inventory as an Excel file (and inside FD-08's handover pack). Written only; every text cell goes in as a
 # string, never a formula. It writes its xlsx with the zip crate above.
-rust_xlsxwriter = { version = "0.102", default-features = false }
+rust_xlsxwriter = { version = "0.103", default-features = false }
 # FD-09: the certificate viewer's TLS handshake (rustls, above) over a TCP connection or a jump host's channel,
 # and a certificate's SHA-1 fingerprint beside its SHA-256 one. The versions reqwest and russh already pull in.
 tokio-rustls = { version = "0.26", default-features = false, features = ["tls12"] }
